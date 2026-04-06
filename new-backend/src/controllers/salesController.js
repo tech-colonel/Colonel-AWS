@@ -13,6 +13,9 @@ const XLSX_STYLE = require('xlsx-js-style'); // Using style version for writing 
 const { v4: uuidv4 } = require('uuid');
 const { QueryTypes } = require('sequelize');
 
+// Pending generation store for two-phase commit
+const { setPending, getPending, deletePending, computeSummary } = require('../services/pendingGenerationsStore');
+
 const OUTPUT_DIR = path.join(__dirname, '../../outputs');
 
 /**
@@ -451,6 +454,179 @@ const flipkart = {
     } catch (error) {
       next(error);
     }
+  },
+
+  // ==========================================================================
+  // 🔍 PHASE 1 — generatePreview
+  // ==========================================================================
+  generatePreview: async (req, res, next) => {
+    try {
+      const brand = await Brand.findByPk(req.params.brandId);
+      const agent = await Agent.findByPk(req.params.agentId);
+
+      if (!brand || !agent) {
+        return res.status(404).json({ error: 'Brand or Agent not found' });
+      }
+
+      const brandDb = getBrandConnection(brand.db_name);
+      const tableName = agent.name.replace(/[^a-zA-Z0-9]/g, '_').toLowerCase();
+      const Model = getDynamicModel(brandDb, tableName, agent.columns);
+
+      const useInventory = req.body.inventory_type === 'With';
+
+      const masterData = await salesService.getMasterData(req.params.brandId, req.params.agentId);
+
+      const processedData = await flipkartProcessor(
+        req.file.buffer,
+        masterData.sku_master,
+        masterData.ledger_master,
+        brand.name,
+        new Date().toISOString(),
+        useInventory
+      );
+
+      if (!processedData || !processedData.workingFileData) {
+        return res.status(400).json({ error: 'Processor Error: No data returned' });
+      }
+
+      const taskId = uuidv4();
+      const fileName = `flipkart_${brand.name}_${taskId}.xlsx`;
+      const processPath = path.join(OUTPUT_DIR, fileName);
+
+      const monthNameToNumber = {
+        'January': 1, 'February': 2, 'March': 3, 'April': 4,
+        'May': 5, 'June': 6, 'July': 7, 'August': 8,
+        'September': 9, 'October': 10, 'November': 11, 'December': 12
+      };
+      const monthNum = monthNameToNumber[req.body.month] || parseInt(req.body.month) || null;
+      const yearNum = parseInt(req.body.year) || null;
+
+      const finalData = processedData.workingFileData.map(row => ({
+        month: monthNum,
+        year: yearNum,
+        inventory_type: req.body.inventory_type,
+        filename: fileName,
+        date: row.order_date ? new Date(row.order_date) : null,
+        seller_gstin: row.seller_gstin,
+        seller_state: row.seller_state,
+        order_id: row.order_id,
+        order_item_id: row.order_item_id,
+        order_type: row.order_type,
+        event_type: row.event_type,
+        event_sub_type: row.event_sub_type,
+        order_date: row.order_date ? new Date(row.order_date) : null,
+        order_approval_date: row.order_approval_date ? new Date(row.order_approval_date) : null,
+        sku: row.sku,
+        fg: row.fg || null,
+        fsn: row.fsn,
+        item_description: row.product_title,
+        hsn_code: row.hsn_code,
+        quantity: Math.abs(parseInt(row.item_quantity)) || 0,
+        fulfilment_type: row.fulfilment_type,
+        warehouse_id: row.warehouse_id,
+        ship_from_state: row.order_shipped_from_state,
+        price_before_discount: row.price_before_discount,
+        total_discount: row.total_discount,
+        price_after_discount: row.price_after_discount,
+        shipping_charges: row.shipping_charges,
+        final_taxable_sales_value: row.final_taxable_sales_value,
+        final_shipping_taxable_value: row.final_shipping_taxable_value,
+        final_invoice_amount: row.final_invoice_amount,
+        gst_rate: row.final_gst_rate,
+        cgst_rate: row.cgst_rate,
+        sgst_rate: row.sgst_rate,
+        igst_rate: row.igst_rate,
+        cgst_amount: row.cgst_amount,
+        sgst_amount: row.sgst_amount,
+        igst_amount: row.igst_amount,
+        final_cgst_tax: row.final_cgst_taxable,
+        final_sgst_tax: row.final_sgst_taxable,
+        final_igst_tax: row.final_igst_taxable,
+        shipping_cgst_tax: row.final_cgst_shipping,
+        shipping_sgst_tax: row.final_sgst_shipping,
+        shipping_igst_tax: row.final_igst_shipping,
+        tcs_igst_amount: row.tcs_igst_amount,
+        tcs_cgst_amount: row.tcs_cgst_amount,
+        tcs_sgst_amount: row.tcs_sgst_amount,
+        total_tcs: row.total_tcs_deducted,
+        tds_rate: row.tds_rate,
+        tds_amount: row.tds_amount,
+        buyer_invoice_id: row.buyer_invoice_id,
+        buyer_invoice_date: row.buyer_invoice_date ? new Date(row.buyer_invoice_date) : null,
+        buyer_invoice_amount: row.buyer_invoice_amount,
+        final_invoice_number: row.final_invoice_no,
+        billing_state: row.customer_billing_state,
+        billing_pincode: row.customer_billing_pincode,
+        shipping_state: row.customer_delivery_state,
+        shipping_pincode: row.customer_delivery_pincode,
+        business_name: row.business_name,
+        business_gstin: row.business_gst_number,
+        is_shopsy_order: row.is_shopsy_order || false,
+        tally_ledger: row.tally_ledgers,
+        imei: row.imei
+      }));
+
+      const summary = computeSummary(finalData);
+
+      setPending(taskId, {
+        agentType: 'flipkart',
+        workbook: processedData.outputWorkbook,
+        finalData,
+        processFile: fileName,
+        processPath,
+        Model
+      });
+
+      res.json({
+        success: true,
+        taskId,
+        rowCount: finalData.length,
+        summary: { workingFile: summary }
+      });
+
+    } catch (error) {
+      next(error);
+    }
+  },
+
+  // ==========================================================================
+  // ✅ PHASE 2a — generateCommit
+  // ==========================================================================
+  generateCommit: async (req, res, next) => {
+    try {
+      const { taskId } = req.body;
+      if (!taskId) return res.status(400).json({ error: 'taskId is required' });
+
+      const pending = getPending(taskId);
+      if (!pending) return res.status(404).json({
+        error: 'No pending generation found. It may have expired (30 min limit). Please regenerate.'
+      });
+
+      const { workbook, finalData, processFile, processPath, Model } = pending;
+
+      await fs.ensureDir(OUTPUT_DIR);
+      await Model.sync({ alter: true });
+      await Model.bulkCreate(finalData, { returning: true });
+      
+      // Flipkart uses XLSX_STYLE.writeFile
+      XLSX_STYLE.writeFile(workbook, processPath);
+
+      deletePending(taskId);
+      res.json({ success: true, message: 'File generated and saved successfully', data: { processFile, count: finalData.length } });
+
+    } catch (error) { next(error); }
+  },
+
+  // ==========================================================================
+  // ❌ PHASE 2b — generateDiscard
+  // ==========================================================================
+  generateDiscard: async (req, res, next) => {
+    try {
+      const { taskId } = req.body;
+      if (!taskId) return res.status(400).json({ error: 'taskId is required' });
+      deletePending(taskId);
+      res.json({ success: true, message: 'Generation discarded successfully' });
+    } catch (error) { next(error); }
   }
 };
 
