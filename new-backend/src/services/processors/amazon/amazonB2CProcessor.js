@@ -8,7 +8,9 @@ async function amazonB2CProcessor(
   date,
   sourceSheetData,
   stateConfigData,
-  useInventory
+  useInventory,
+  formMonth,
+  formYear
 ) {
   try {
     if (!rawFileBuffer) {
@@ -172,13 +174,23 @@ async function amazonB2CProcessor(
     }
 
     // ================================
-    // GET MONTH NUMBER FROM DATE
+    // GET MONTH NUMBER FROM DATE OR FORM
     // ================================
 
+    const monthMapping = {
+      "January": "01", "February": "02", "March": "03", "April": "04",
+      "May": "05", "June": "06", "July": "07", "August": "08",
+      "September": "09", "October": "10", "November": "11", "December": "12"
+    };
+
     const monthNumber = (() => {
+      if (formMonth) {
+        const mapped = monthMapping[formMonth] || formMonth;
+        return String(mapped).padStart(2, '0'); // 01,02,03...
+      }
       const d = new Date(date);
       const m = d.getMonth() + 1;
-      return String(m).padStart(2, '0'); // 01,02,03...
+      return String(m).padStart(2, '0');
     })();
 
     // ================================
@@ -201,13 +213,6 @@ async function amazonB2CProcessor(
           };
         }
       });
-
-      // Extract month number from input date
-      const monthNumber = (() => {
-        const d = new Date(date);
-        const m = d.getMonth() + 1;
-        return String(m).padStart(2, '0');
-      })();
 
       // Map each row
       filteredRows.forEach(row => {
@@ -557,8 +562,16 @@ async function amazonB2CProcessor(
     // ==================================
     const tallySheet = workbook.addWorksheet('amazon-b2c-tally-ready');
     function getLastDateOfMonth(dateString) {
-      const dateObj = new Date(dateString);
-      const lastDay = new Date(dateObj.getFullYear(), dateObj.getMonth() + 1, 0);
+      let dYear, dMonth;
+      if (formMonth && formYear) {
+        dYear = parseInt(formYear);
+        dMonth = parseInt(monthMapping[formMonth] || formMonth);
+      } else {
+        const dateObj = new Date(dateString);
+        dYear = dateObj.getFullYear();
+        dMonth = dateObj.getMonth() + 1;
+      }
+      const lastDay = new Date(dYear, dMonth, 0);
       const dd = String(lastDay.getDate()).padStart(2, '0');
       const mm = String(lastDay.getMonth() + 1).padStart(2, '0');
       const yy = String(lastDay.getFullYear()).slice(-2);
