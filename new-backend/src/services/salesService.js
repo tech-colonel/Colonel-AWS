@@ -10,6 +10,14 @@ const { Brand, Agent } = require('../models/master');
 const { processMacros: processAmazonB2C } = require('./processors/macrosProcessorB2C');
 const { processMacrosB2B: processAmazonB2B } = require('./processors/macrosProcessorB2B');
 
+const MONTH_NAME_TO_NUM = {
+  'January': 1, 'February': 2, 'March': 3, 'April': 4,
+  'May': 5, 'June': 6, 'July': 7, 'August': 8,
+  'September': 9, 'October': 10, 'November': 11, 'December': 12
+};
+const toMonthNum = (m) => MONTH_NAME_TO_NUM[m] || parseInt(m) || null;
+const toYearNum = (y) => parseInt(y) || null;
+
 /**
  * Upload SKU or Ledger master for a brand-agent
  */
@@ -121,8 +129,8 @@ const generateAmazonWorkingFile = async (brandId, agentId, options, fileBuffer) 
   const WorkingFileModel = getDynamicModel(brandDb, tableName, agent.columns);
 
   const workingFile = await WorkingFileModel.create({
-    month,
-    year,
+    month: toMonthNum(month),
+    year: toYearNum(year),
     file_type,
     inventory_type,
     filename
@@ -135,84 +143,8 @@ const generateAmazonWorkingFile = async (brandId, agentId, options, fileBuffer) 
   };
 };
 
-/**
- * Generate working file for Flipkart
- */
-const generateFlipkartWorkingFile = async (brandId, agentId, options, fileBuffer) => {
-  const { month, year, inventory_type } = options;
-  
-  const brand = await Brand.findByPk(brandId);
-  const agent = await Agent.findByPk(agentId);
-  if (!brand || !agent) throw new Error('Brand or Agent not found');
-
-  const workbook = xlsx.read(fileBuffer, { type: 'buffer' });
-  const sheetName = workbook.SheetNames[0];
-  const salesData = xlsx.utils.sheet_to_json(workbook.Sheets[sheetName]);
-
-  const brandDb = getBrandConnection(brand.db_name);
-  const BrandAgentModel = getBrandAgentModel(brandDb);
-
-  const [brandAgent] = await BrandAgentModel.findOrCreate({
-    where: { brand_id: brandId, agent_id: agentId }
-  });
-
-  if (!brandAgent.sku_master || !brandAgent.ledger_master) {
-    throw new Error('Master data (SKU/Ledger) missing. Please upload them first.');
-  }
-
-  // Simple mapping logic for Flipkart
-  const processedData = salesData.map(row => {
-    const skuMatch = brandAgent.sku_master.find(
-      sku => (sku['Sales Portal SKU'] || sku['SKU']) === row['SKU']
-    );
-    
-    const ledgerMatch = brandAgent.ledger_master.find(
-      ledger => ledger['State'] === row['State']
-    );
-
-    return {
-      ...row,
-      'Tally New SKU': skuMatch ? (skuMatch['Tally New SKU'] || skuMatch['Tally SKU']) : '',
-      'Ledger': ledgerMatch ? ledgerMatch['Ledger'] : '',
-      'Invoice No': ledgerMatch ? (ledgerMatch['Invoice No.'] || ledgerMatch['Invoice No']) : ''
-    };
-  });
-
-  // Create workbook and write to file
-  const worksheet = xlsx.utils.json_to_sheet(processedData);
-  const outputWorkbook = xlsx.utils.book_new();
-  xlsx.utils.book_append_sheet(outputWorkbook, worksheet, 'Processed');
-
-  const outputBuffer = xlsx.write(outputWorkbook, { type: 'buffer', bookType: 'xlsx' });
-
-  const timestamp = Date.now();
-  const filename = `${brand.name}_Flipkart_${month}_${year}_${timestamp}.xlsx`;
-  const outputPath = path.join(__dirname, '../../outputs', filename);
-
-  await fs.ensureDir(path.dirname(outputPath));
-  await fs.writeFile(outputPath, outputBuffer);
-
-  // Record in dynamic table
-  const tableName = agent.name.replace(/[^a-zA-Z0-9]/g, '_').toLowerCase();
-  const WorkingFileModel = getDynamicModel(brandDb, tableName, agent.columns);
-
-  const workingFile = await WorkingFileModel.create({
-    month,
-    year,
-    inventory_type,
-    filename
-  });
-
-  return {
-    fileId: workingFile.id,
-    filename,
-    recordCount: processedData.length
-  };
-};
-
 module.exports = {
   uploadMasterData,
   getMasterData,
-  generateAmazonWorkingFile,
-  generateFlipkartWorkingFile
+  generateAmazonWorkingFile
 };

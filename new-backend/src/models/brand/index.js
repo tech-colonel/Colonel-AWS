@@ -52,8 +52,8 @@ const getDynamicModel = (sequelize, tableName, columns) => {
       defaultValue: DataTypes.UUIDV4,
       primaryKey: true
     },
-    month: DataTypes.STRING,
-    year: DataTypes.STRING,
+    month: DataTypes.INTEGER,
+    year: DataTypes.INTEGER,
     file_type: DataTypes.STRING,
     inventory_type: DataTypes.STRING,
     filename: DataTypes.STRING,

@@ -13,6 +13,11 @@ import api from '../../lib/api';
 import { toast } from 'sonner';
 import { format } from 'date-fns';
 
+const MONTH_NAMES = [
+  '', 'January', 'February', 'March', 'April', 'May', 'June',
+  'July', 'August', 'September', 'October', 'November', 'December'
+];
+
 const AgentWorkspace = () => {
   const { brandId, agentId } = useParams();
   const navigate = useNavigate();
@@ -58,8 +63,8 @@ const AgentWorkspace = () => {
       const agentType = await detectAgentType();
       const [agentRes, masterRes, filesRes] = await Promise.all([
         api.get(`/api/agents`),
-        api.get(`/api/brands/${brandId}/agents/${agentId}/${agentType}/master-data`),
-        api.get(`/api/brands/${brandId}/agents/${agentId}/${agentType}/files`)
+        api.get(`/api/brands/${brandId}/agents/${agentId}/${agentType}/master`),
+        api.get(`/api/brands/${brandId}/agents/${agentId}/working-files`)
       ]);
 
       const currentAgent = agentRes.data.find(a => a.id === agentId);
@@ -67,21 +72,11 @@ const AgentWorkspace = () => {
       setAgent(currentAgent);
       setMasterData(masterRes.data);
 
-      const monthOrder = {
-        'January': 1, 'February': 2, 'March': 3, 'April': 4,
-        'May': 5, 'June': 6, 'July': 7, 'August': 8,
-        'September': 9, 'October': 10, 'November': 11, 'December': 12
-      };
-
       const sortedFiles = filesRes.data.sort((a, b) => {
         const yearA = parseInt(a.year) || 0;
         const yearB = parseInt(b.year) || 0;
-        if (yearA !== yearB) {
-          return yearB - yearA;
-        }
-        const monthA = monthOrder[a.month] || 0;
-        const monthB = monthOrder[b.month] || 0;
-        return monthB - monthA;
+        if (yearA !== yearB) return yearB - yearA;
+        return (parseInt(b.month) || 0) - (parseInt(a.month) || 0);
       });
 
       setFiles(sortedFiles);
@@ -118,7 +113,7 @@ const AgentWorkspace = () => {
 
     try {
       const agentType = await detectAgentType();
-      await api.post(`/api/brands/${brandId}/agents/${agentId}/${agentType}/sku-master`, formData, {
+      await api.post(`/api/brands/${brandId}/agents/${agentId}/${agentType}/master/sku`, formData, {
         headers: { 'Content-Type': 'multipart/form-data' }
       });
       toast.success('SKU Master uploaded successfully');
@@ -141,7 +136,7 @@ const AgentWorkspace = () => {
 
     try {
       const agentType = await detectAgentType();
-      await api.post(`/api/brands/${brandId}/agents/${agentId}/${agentType}/ledger-master`, formData, {
+      await api.post(`/api/brands/${brandId}/agents/${agentId}/${agentType}/master/ledger`, formData, {
         headers: { 'Content-Type': 'multipart/form-data' }
       });
       toast.success('Ledger Master uploaded successfully');
@@ -198,7 +193,7 @@ const AgentWorkspace = () => {
     try {
       const agentType = await detectAgentType();
       const response = await api.get(
-        `/api/brands/${brandId}/agents/${agentId}/${agentType}/files/${fileId}/download`,
+        `/api/brands/${brandId}/agents/${agentId}/working-files/${fileId}/download`,
         { responseType: 'blob' }
       );
 
@@ -220,7 +215,7 @@ const AgentWorkspace = () => {
 
     try {
       const agentType = await detectAgentType();
-      await api.delete(`/api/brands/${brandId}/agents/${agentId}/${agentType}/files/${fileId}`);
+      await api.delete(`/api/brands/${brandId}/agents/${agentId}/working-files/${fileId}`);
       toast.success('File deleted');
       fetchData();
     } catch (error) {
@@ -357,7 +352,7 @@ const AgentWorkspace = () => {
                   <TableBody>
                     {files.map((file) => (
                       <TableRow key={file.id} data-testid={`file-row-${file.id}`}>
-                        <TableCell className="font-medium">{file.month}</TableCell>
+                        <TableCell className="font-medium">{MONTH_NAMES[file.month] || file.month}</TableCell>
                         <TableCell>{file.year}</TableCell>
                         {!isFlipkart && !isBlinkit && !isFirstcry && <TableCell><Badge variant="secondary">{file.file_type}</Badge></TableCell>}
                         <TableCell>{file.inventory_type}</TableCell>

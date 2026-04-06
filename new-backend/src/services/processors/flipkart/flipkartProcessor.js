@@ -122,16 +122,19 @@ function safeNumber(value) {
 /**
  * Clean SKU - remove quotes and SKU: prefix
  */
-function cleanSKU(sku) {
+/**
+ * Standard Normalize SKU (From Amazon Processor)
+ */
+function normalizeSKU(sku) {
   if (!sku) return '';
-  let cleaned = String(sku).trim();
-  // Remove leading/trailing quotes
-  cleaned = cleaned.replace(/^["']+|["']+$/g, '');
-  // Remove "SKU:" prefix
-  cleaned = cleaned.replace(/^SKU:/i, '');
-  return cleaned.trim();
-}
 
+  return sku
+    .toString()
+    .replace(/"/g, '')   // remove double quotes
+    .replace(/'/g, '')   // remove single quotes (just in case)
+    .trim()
+    .toLowerCase();
+}
 /**
  * Get state name from GSTIN (first 2 chars = state code)
  */
@@ -559,7 +562,7 @@ async function flipkartProcessor(rawFileBuffer, skuData, stateConfigData, brandN
   console.log('=== FLIPKART MACROS PROCESSING ===');
   console.log(`Brand: ${brandName}, Date: ${date}`, "withInventory", withInventory);
 
-
+  console.log("SKU", skuData);
   // ==========================
   // Get Month Number from date
   // ==========================
@@ -577,22 +580,24 @@ async function flipkartProcessor(rawFileBuffer, skuData, stateConfigData, brandN
   console.log('Month suffix for invoice:', monthSuffix);
 
   // Build SKU lookup map
-
   const skuMap = {};
 
   if (withInventory) {
-    console.log("skuData", skuData);
     if (skuData && Array.isArray(skuData)) {
       for (const item of skuData) {
-        let sku = String(item.SKU || item.salesPortalSku || '').trim();
-        sku = cleanSKU(sku); // Make sure it matches the cleanedSku used later
-        const fg = item.FG || item.tallyNewSku || '';
-        if (sku) {
-          skuMap[sku] = fg;
+        console.log("item", item);
+        // Handle various possible column names from different SKU master versions
+        const rawSkuKey = item['Sales Portal SKU'] || item['sales portal sku'] || item['salesPortalSku'] || '';
+        const normalizedKey = normalizeSKU(rawSkuKey);
+        // console.log("raw skuy", rawSkuKey);
+        const fg = item['Tally New SKU'] || item['Tally SKU'] || item['FG'] || item['tallyNewSku'] || '';
+        // console.log("MAP ENTRY:", normalizedKey, "=>", fg);
+        if (normalizedKey) {
+          skuMap[normalizedKey] = String(fg).trim();
         }
       }
     }
-    console.log(`SKU map loaded with ${Object.keys(skuMap).length} entries`);
+    console.log(`[Flipkart] SKU map loaded with ${Object.keys(skuMap).length} entries`);
   }
 
   // Build state config lookup map (by normalized state name)
@@ -647,6 +652,25 @@ async function flipkartProcessor(rawFileBuffer, skuData, stateConfigData, brandN
     throw new Error('Uploaded file has no data rows');
   }
 
+  // ==========================
+  // DETECT SKU COLUMN IN RAW DATA (Adopted from Amazon Logic)
+  // ==========================
+  const possibleSkuCols = ['SKU', 'Sku', 'sku', 'Seller SKU', 'seller sku', 'Item SKU', 'Seller-Sku', 'Seller-SKU'];
+  let detectedSkuCol = null;
+
+  const firstRowKeys = Object.keys(rawData[0] || {});
+  for (const col of possibleSkuCols) {
+    if (firstRowKeys.includes(col)) {
+      detectedSkuCol = col;
+      break;
+    }
+  }
+
+  // Fallback to 'SKU' if not found
+  if (!detectedSkuCol) {
+    detectedSkuCol = 'SKU';
+  }
+
 
   // Track missing SKUs
   const missingSKUs = new Set();
@@ -679,17 +703,39 @@ async function flipkartProcessor(rawFileBuffer, skuData, stateConfigData, brandN
     const isReturn = eventSubType === 'return' || eventSubType === 'return';
 
 
-    // Clean SKU
-    const rawSku = row['SKU'] || '';
-    const cleanedSku = cleanSKU(rawSku);
+    // Get SKU and Normalize (Amazon logic)
+    const rawSku = row[detectedSkuCol] || '';
+    const cleanedSku = normalizeSKU(rawSku);
+
+    // console.log("RAW SKU:", rawSku);
+    // console.log("CLEANED SKU:", cleanedSku);
+    // console.log("FG FOUND:", skuMap[cleanedSku]);
 
     // Lookup FG from SKU map
-    const fg = skuMap[cleanedSku];
-    if (withInventory) {
-      if (!fg && cleanedSku) {
-        missingSKUs.add(cleanedSku);
+    let fg = skuMap[cleanedSku];
+
+    // STRICT FAIL LOG
+    if (!fg) {
+      console.log("❌ SKU NOT FOUND:", cleanedSku);
+    }
+
+    // 🔥 SMART MATCHING
+    if (!fg && cleanedSku) {
+      for (const key in skuMap) {
+        const normalizedKey = normalizeSKU(key);
+
+        if (
+          cleanedSku === normalizedKey ||
+          cleanedSku.includes(normalizedKey) ||
+          normalizedKey.includes(cleanedSku)
+        ) {
+          fg = skuMap[key];
+          console.log("✅ MATCHED VIA FALLBACK:", cleanedSku, "=>", key);
+          break;
+        }
       }
     }
+
     // Get Seller State from GSTIN
     const sellerGstin = String(row['Seller GSTIN'] || '').trim();
     const sellerState = getStateFromGSTIN(sellerGstin);
@@ -1110,6 +1156,13 @@ async function flipkartProcessor(rawFileBuffer, skuData, stateConfigData, brandN
       'Product Title': row.product_title,
       'FSN': row.fsn,
       'SKU': row.sku,
+    };
+
+    if (withInventory) {
+      sheetRow['FG'] = row.fg || '';
+    }
+
+    Object.assign(sheetRow, {
       'HSN Code': row.hsn_code,
       'Event Type': row.event_type,
       'Event Sub Type': row.event_sub_type,
@@ -1172,11 +1225,7 @@ async function flipkartProcessor(rawFileBuffer, skuData, stateConfigData, brandN
       'Business GST Number': row.business_gst_number,
       'Beneficiary Name': row.beneficiary_name,
       'IMEI': row.imei
-    };
-
-    if (withInventory) {
-      sheetRow['FG'] = row.fg;
-    }
+    });
 
     return sheetRow;
   });
@@ -1292,7 +1341,7 @@ async function flipkartProcessor(rawFileBuffer, skuData, stateConfigData, brandN
     XLSX.utils.json_to_sheet(
       (stateConfigData || []).map(item => ({
         'States': item.States || item.states || '',
-        'Flipkart Pay Ledger': item['Amazon Pay Ledger'] || item['amazon pay ledger'] || '',
+        'Flipkart Pay Ledger': item['Ledger'] || item['ledger'] || '',
         'Invoice No.': item['Invoice No.'] || item['Invoice No'] || ''
       }))
     ),

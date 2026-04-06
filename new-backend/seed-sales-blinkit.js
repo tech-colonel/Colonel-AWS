@@ -23,7 +23,6 @@ const seedSalesBlinkit = async () => {
                     { name: 'month', type: 'INTEGER' },
                     { name: 'filename', type: 'STRING' },
                     { name: 'created_at', type: 'DATE', defaultValue: 'NOW' },
-                    { name: 'date', type: 'DATE' },
 
                     // Core order info
                     { name: 'order_id', type: 'STRING' },

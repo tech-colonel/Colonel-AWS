@@ -12,7 +12,6 @@ const { v4: uuidv4 } = require('uuid');
 const { flipkartProcessor } = require('../../../services/processors/flipkart/flipkartProcessor');
 
 const OUTPUT_DIR = path.join(__dirname, '../../../../outputs');
-const { getMonthNumber } = require('../../../utils/dateUtils');
 
 /**
  * Ensure output directory exists
@@ -152,103 +151,12 @@ const generate = async (req, res, next) => {
         // =====================================================
         // ✅ PREPARE DATA FOR DB
         // =====================================================
-        const monthInt = getMonthNumber(month);
-        const dateObj = new Date(year, monthInt - 1, 1);
-
         const finalData = processedData.workingFileData.map(row => ({
-            // meta
-            month: monthInt,
-            year: parseInt(year),
+            ...row,
+            month,
+            year,
             inventory_type,
-            filename: fileName,
-            date: dateObj,
-
-            // seller info
-            seller_gstin: row.seller_gstin,
-            seller_state: row.seller_state,
-
-            // order info
-            order_id: row.order_id,
-            order_item_id: row.order_item_id,
-            order_type: row.order_type,
-            event_type: row.event_type,
-            event_sub_type: row.event_sub_type,
-            order_date: row.order_date,
-            order_approval_date: row.order_approval_date,
-
-            // product
-            sku: row.sku,
-            fg: row.fg,
-            fsn: row.fsn,
-            item_description: row.product_title,
-            hsn_code: row.hsn_code,
-            quantity: row.item_quantity,
-
-            // fulfillment
-            fulfilment_type: row.fulfilment_type,
-            warehouse_id: row.warehouse_id,
-            ship_from_state: row.order_shipped_from_state,
-
-            // pricing
-            price_before_discount: row.price_before_discount,
-            total_discount: row.total_discount,
-            price_after_discount: row.price_after_discount,
-            shipping_charges: row.shipping_charges,
-
-            // final values
-            final_taxable_sales_value: row.final_taxable_sales_value,
-            final_shipping_taxable_value: row.final_shipping_taxable_value,
-            final_invoice_amount: row.final_invoice_amount,
-
-            // GST
-            gst_rate: row.final_gst_rate,
-            cgst_rate: row.cgst_rate,
-            sgst_rate: row.sgst_rate,
-            igst_rate: row.igst_rate,
-            cgst_amount: row.cgst_amount,
-            sgst_amount: row.sgst_amount,
-            igst_amount: row.igst_amount,
-
-            // final GST
-            final_cgst_tax: row.final_cgst_taxable,
-            final_sgst_tax: row.final_sgst_taxable,
-            final_igst_tax: row.final_igst_taxable,
-
-            // shipping tax
-            shipping_cgst_tax: row.final_cgst_shipping,
-            shipping_sgst_tax: row.final_sgst_shipping,
-            shipping_igst_tax: row.final_igst_shipping,
-
-            // TCS
-            tcs_igst_amount: row.tcs_igst_amount,
-            tcs_cgst_amount: row.tcs_cgst_amount,
-            tcs_sgst_amount: row.tcs_sgst_amount,
-            total_tcs: row.total_tcs_deducted,
-
-            // TDS
-            tds_rate: row.tds_rate,
-            tds_amount: row.tds_amount,
-
-            // invoice
-            buyer_invoice_id: row.buyer_invoice_id,
-            buyer_invoice_date: row.buyer_invoice_date,
-            buyer_invoice_amount: row.buyer_invoice_amount,
-            final_invoice_number: row.final_invoice_no,
-
-            // customer
-            billing_state: row.customer_billing_state,
-            billing_pincode: row.customer_billing_pincode,
-            shipping_state: row.customer_delivery_state,
-            shipping_pincode: row.customer_delivery_pincode,
-
-            // business
-            business_name: row.business_name,
-            business_gstin: row.business_gst_number,
-
-            // extra
-            is_shopsy_order: row.is_shopsy_order,
-            tally_ledger: row.tally_ledgers,
-            imei: row.imei
+            filename: fileName
         }));
 
         // =====================================================

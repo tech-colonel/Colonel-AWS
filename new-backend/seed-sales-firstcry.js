@@ -23,7 +23,6 @@ const seedSalesFirstcry = async () => {
                     { name: 'month', type: 'INTEGER' },
                     { name: 'filename', type: 'STRING' },
                     { name: 'created_at', type: 'DATE', defaultValue: 'NOW' },
-                    { name: 'date', type: 'DATE' },
 
                     // Core order info
                     { name: 'fc_ref_no', type: 'STRING' },

@@ -11,7 +11,6 @@ const path = require('path');
 const fs = require('fs-extra');
 const { v4: uuidv4 } = require('uuid');
 const XLSX = require('xlsx');
-const { getMonthNumber } = require('../../../utils/dateUtils');
 
 const OUTPUT_DIR = path.join(__dirname, '../../../../outputs');
 
@@ -384,8 +383,12 @@ const generate = async (req, res, next) => {
         // ==================================
         // ✅ SAVE DB
         // ==================================
-        const dbMonth = getMonthNumber(month);
-        const dateObj = new Date(year, dbMonth - 1, 1);
+        const monthMapping = {
+            "January": 1, "February": 2, "March": 3, "April": 4,
+            "May": 5, "June": 6, "July": 7, "August": 8,
+            "September": 9, "October": 10, "November": 11, "December": 12
+        };
+        const dbMonth = monthMapping[month] || (isNaN(parseInt(month)) ? 0 : parseInt(month));
 
         const finalData = processedData.process1Json.map(row => ({
             ...mapRowToAmazonSchema(row, fileType, useInventory),
@@ -394,8 +397,7 @@ const generate = async (req, res, next) => {
             year,
             file_type: fileType,
             inventory_type: useInventory ? 'With' : 'Without',
-            filename: processFile,
-            date: dateObj
+            filename: processFile
         }));
 
         await Model.sync();

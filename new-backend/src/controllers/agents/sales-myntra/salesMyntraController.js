@@ -7,8 +7,6 @@ const { myntraProcessor } = require('../../../services/processors/myntra/myntraP
 const path = require('path');
 const fs = require('fs-extra');
 const { v4: uuidv4 } = require('uuid');
-const { getMonthNumber } = require('../../../utils/dateUtils');
-const XLSX = require('xlsx-js-style');
 
 const OUTPUT_DIR = path.join(__dirname, '../../../../outputs');
 
@@ -18,6 +16,17 @@ const OUTPUT_DIR = path.join(__dirname, '../../../../outputs');
 async function ensureDir() {
     await fs.ensureDir(OUTPUT_DIR);
 }
+
+/**
+ * Convert month name to number
+ */
+const monthToNumber = (monthName) => {
+    const months = {
+        'January': 1, 'February': 2, 'March': 3, 'April': 4, 'May': 5, 'June': 6,
+        'July': 7, 'August': 8, 'September': 9, 'October': 10, 'November': 11, 'December': 12
+    };
+    return months[monthName] || parseInt(monthName) || 0;
+};
 
 /**
  * Upload SKU Master
@@ -71,29 +80,29 @@ const getMasterData = async (req, res, next) => {
 /**
  * Map Processor Row to Myntra Database Schema
  */
-const mapRowToMyntraSchema = (row, monthInt, year, filename, dateObj) => ({
+const mapRowToMyntraSchema = (row, month, year, filename) => ({
     year: parseInt(year),
     filename: filename,
-    month: monthInt,
-    date: dateObj,
-    
+    month: monthToNumber(month),
+    date: row.date_column ? new Date(row.date_column) : null,
+
     seller_gstin: row.seller_gstin,
     invoice_number: row.final_invoice_no,
     debtor_ledger: row.ship_to_state_tally_ledger,
-    
+
     sku: row.sku,
     quantity: row.quantity,
-    
+
     shipping: row.shipping_case,
     gst_rate: row.gst_rate,
-    
+
     base_value: row.base_value,
     file_type: row.report_type,
-    
+
     igst_amount: row.igst_amount,
     cgst_amount: row.cgst_amount,
     sgst_amount: row.sgst_amount,
-    
+
     invoice_amount: row.invoice_amount
 });
 
@@ -120,7 +129,7 @@ const generate = async (req, res, next) => {
             fileBuffers.rtoFile = req.files.rtoFile ? req.files.rtoFile[0].buffer : null;
             fileBuffers.packedFile = req.files.packedFile ? req.files.packedFile[0].buffer : null;
             fileBuffers.rtFile = req.files.rtFile ? req.files.rtFile[0].buffer : null;
-            
+
             // Fallback for single file upload via 'file' field
             if (!fileBuffers.packedFile && req.files.file) {
                 fileBuffers.packedFile = req.files.file[0].buffer;
@@ -165,11 +174,8 @@ const generate = async (req, res, next) => {
         const filename = `myntra_${brand.name}_${month}_${year}_${id}.xlsx`;
         const filepath = path.join(OUTPUT_DIR, filename);
 
-        const monthInt = getMonthNumber(month);
-        const dateObj = new Date(year, monthInt - 1, 1);
-
-        const dbRows = processedData.workingFileData.map(row => 
-            mapRowToMyntraSchema(row, monthInt, year, filename, dateObj)
+        const dbRows = processedData.workingFileData.map(row =>
+            mapRowToMyntraSchema(row, month, year, filename)
         );
 
         await Model.sync();

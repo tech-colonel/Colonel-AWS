@@ -23,7 +23,6 @@ const seedSalesJiomart = async () => {
                     { name: 'month', type: 'INTEGER' },
                     { name: 'filename', type: 'STRING' },
                     { name: 'created_at', type: 'DATE', defaultValue: 'NOW' },
-                    { name: 'date', type: 'DATE' },
 
                     // Seller & order info
                     { name: 'seller_gstin', type: 'STRING' },

@@ -221,49 +221,31 @@ async function amazonB2BProcessor(
       // Map each row
       filteredRows.forEach(row => {
 
-        const shipState = row['Ship To State'];
+        const shipFrom = (row["Ship From State"] || "")
+          .toString()
+          .trim()
+          .toLowerCase();
 
-        if (shipState) {
+        const shipTo = (row["Ship To State"] || "")
+          .toString()
+          .trim()
+          .toLowerCase();
 
-          const lookupKey = shipState.toString().trim().toLowerCase();
+        // ❌ Missing values
+        if (!shipFrom || !shipTo) {
+          row["Ship To State Tally Ledger"] = null;
+          row["Final Invoice No."] = null;
+          return;
+        }
 
-          if (stateMap[lookupKey]) {
+        const isIntraState = shipFrom === shipTo;
 
-            row['Ship To State Tally Ledger'] = stateMap[lookupKey].ledger;
-
-            const shipFrom = (row["Ship From State"] || "")
-              .toString()
-              .trim()
-              .toLowerCase();
-
-            const shipTo = (row["Ship To State"] || "")
-              .toString()
-              .trim()
-              .toLowerCase();
-
-            if (shipFrom && shipTo) {
-              const isIntraState = shipFrom === shipTo;
-              if (isIntraState) {
-                row['Final Invoice No.'] = `AMZ-INTRA-${monthNumber}`;
-              } else {
-                row['Final Invoice No.'] = `AMZ-INTER-${monthNumber}`;
-              }
-            } else {
-              row['Final Invoice No.'] = null;
-            }
-
-          } else {
-
-            row['Ship To State Tally Ledger'] = null;
-            row['Final Invoice No.'] = null;
-
-          }
-
+        if (isIntraState) {
+          row["Ship To State Tally Ledger"] = "Amazon B2B Intra-State";
+          row["Final Invoice No."] = `AMZ-INTRA-${monthNumber}`;
         } else {
-
-          row['Ship To State Tally Ledger'] = null;
-          row['Final Invoice No.'] = null;
-
+          row["Ship To State Tally Ledger"] = "Amazon B2B Inter-State";
+          row["Final Invoice No."] = `AMZ-INTER-${monthNumber}`;
         }
 
       });
