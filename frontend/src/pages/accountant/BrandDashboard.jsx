@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import DashboardLayout from '../../components/layout/DashboardLayout';
-import { LayoutDashboard, Bot } from 'lucide-react';
+import { LayoutDashboard, Bot, BarChart3 } from 'lucide-react';
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../../components/ui/modal';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../../components/ui/card';
 import { Button } from '../../components/ui/button';
 import api from '../../lib/api';
@@ -13,6 +14,7 @@ const BrandDashboard = () => {
   const [brand, setBrand] = useState(null);
   const [agents, setAgents] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [showAgentPicker, setShowAgentPicker] = useState(false);
 
   const sidebarItems = [
     { path: `/brands/${brandId}/dashboard`, label: 'Dashboard', icon: LayoutDashboard, testId: 'nav-dashboard' },
@@ -49,18 +51,37 @@ const BrandDashboard = () => {
   return (
     <DashboardLayout sidebarItems={sidebarItems}>
       <div className="p-6" data-testid="brand-dashboard">
-        <div className="mb-8">
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={() => navigate('/brands')}
-            className="mb-4"
-            data-testid="back-to-brands"
-          >
-            ← Back to Brands
-          </Button>
-          <h1 className="text-3xl font-bold text-slate-900 tracking-tight">{brand?.name}</h1>
-          <p className="text-slate-600 mt-1">{brand?.description}</p>
+        <div className="mb-8 flex justify-between items-start">
+          <div>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => navigate('/brands')}
+              className="mb-4"
+              data-testid="back-to-brands"
+            >
+              ← Back to Brands
+            </Button>
+            <h1 className="text-3xl font-bold text-slate-900 tracking-tight">{brand?.name}</h1>
+            <p className="text-slate-600 mt-1">{brand?.description}</p>
+          </div>
+          
+          <div>
+            <Button
+              onClick={() => {
+                if (agents.length === 0) {
+                  toast.error("No agents available for analytics");
+                  return;
+                }
+                setShowAgentPicker(true);
+              }}
+              variant="default"
+              disabled={agents.length === 0}
+            >
+              <BarChart3 className="mr-2 h-4 w-4" />
+              📊 Global CFO Dashboard
+            </Button>
+          </div>
         </div>
 
         <div className="mb-8">
@@ -96,6 +117,40 @@ const BrandDashboard = () => {
           )}
         </div>
       </div>
+
+      <Dialog open={showAgentPicker} onOpenChange={setShowAgentPicker}>
+        <DialogContent className="max-w-4xl max-h-[80vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle className="text-2xl text-center font-bold text-slate-900">Select Analytics Agent</DialogTitle>
+            <p className="text-center text-slate-500 mt-2">
+              Choose an agent to view its corresponding CFO Revenue Dashboard.
+            </p>
+          </DialogHeader>
+          
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 p-4 mt-4">
+            {agents.map((agent) => (
+              <Card 
+                key={agent.id} 
+                className="cursor-pointer hover:shadow-xl transition-all border-2 border-transparent hover:border-slate-800 bg-gradient-to-br from-slate-50 to-white"
+                onClick={() => {
+                  setShowAgentPicker(false);
+                  navigate(`/brands/${brandId}/agents/${agent.id}`, { state: { openCfo: true } });
+                }}
+              >
+                <CardHeader className="text-center pb-2">
+                    <div className="w-14 h-14 rounded-full bg-slate-200 flex items-center justify-center mx-auto mb-3 shadow-inner">
+                      <BarChart3 className="text-slate-700 w-7 h-7" />
+                    </div>
+                    <CardTitle className="text-lg">{agent.name}</CardTitle>
+                </CardHeader>
+                <CardContent className="text-center text-sm text-slate-500">
+                    <p className="line-clamp-2">{agent.description || 'View financial analytics for this portal.'}</p>
+                </CardContent>
+              </Card>
+            ))}
+          </div>
+        </DialogContent>
+      </Dialog>
     </DashboardLayout>
   );
 };
