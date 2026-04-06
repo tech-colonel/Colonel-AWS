@@ -6,6 +6,9 @@ const { getDynamicModel } = require('../../../models/brand');
 const { amazonB2BProcessor } = require('../../../services/processors/amazon/amazonB2BProcessor');
 const { amazonB2CProcessor } = require('../../../services/processors/amazon/amazonB2CProcessor');
 
+// 📦 Shared agent-agnostic store (also used by Flipkart, Myntra, etc. controllers)
+const { setPending, getPending, deletePending, computeSummary } = require('../../../services/pendingGenerationsStore');
+
 const ExcelJS = require('exceljs');
 const path = require('path');
 const fs = require('fs-extra');
@@ -13,6 +16,13 @@ const { v4: uuidv4 } = require('uuid');
 const XLSX = require('xlsx');
 
 const OUTPUT_DIR = path.join(__dirname, '../../../../outputs');
+
+// ── In-memory store for pending (unconfirmed) generations ─────────────────────
+// key: taskId (uuid)  value: { workbook, finalData, processFile, processPath, summary }
+const pendingGenerations = new Map();
+
+// Auto-cleanup after 30 minutes so RAM doesn't pile up
+const PENDING_TTL_MS = 30 * 60 * 1000;
 
 /**
  * Ensure output directory exists
@@ -341,7 +351,9 @@ const generate = async (req, res, next) => {
                     new Date().toISOString(),
                     sourceSheetData,
                     stateConfigData,
-                    useInventory
+                    useInventory,
+                    month,
+                    year
                 );
             } else if (fileType === 'b2c') {
                 processedData = await amazonB2CProcessor(
@@ -351,7 +363,9 @@ const generate = async (req, res, next) => {
                     new Date().toISOString(),
                     sourceSheetData,
                     stateConfigData,
-                    useInventory
+                    useInventory,
+                    month,
+                    year
                 );
             } else {
                 return res.status(400).json({ error: 'Invalid file_type' });
@@ -429,9 +443,157 @@ const generate = async (req, res, next) => {
     }
 };
 
+
+// ==========================================================================
+// 🔍 PHASE 1 — generatePreview
+//    Run full processor, compute summary, store pending — do NOT save yet.
+// ==========================================================================
+const generatePreview = async (req, res, next) => {
+    try {
+        const { brandId, agentId } = req.params;
+        const month    = req.body.month;
+        const year     = parseInt(req.body.year);
+        const fileType = String(req.body.file_type || '').toLowerCase().trim();
+        let useInventory = true;
+        if (req.body.inventory_type) {
+            const val = String(req.body.inventory_type).toLowerCase().trim();
+            if (val === 'without' || val === 'false' || val === '0' || val === 'no') useInventory = false;
+        }
+
+        if (!req.file?.buffer)            return res.status(400).json({ error: 'File is required' });
+        if (!month || !year || !fileType) return res.status(400).json({ error: 'month, year, file_type required' });
+
+        const brand = await Brand.findByPk(brandId);
+        const agent = await Agent.findByPk(agentId);
+        if (!brand || !agent) return res.status(404).json({ error: 'Brand or Agent not found' });
+
+        const brandDb    = getBrandConnection(brand.db_name);
+        const tableName  = agent.name.replace(/[^a-zA-Z0-9]/g, '_').toLowerCase();
+        const Model      = getDynamicModel(brandDb, tableName, agent.columns);
+        const masterData = await salesService.getMasterData(brandId, agentId);
+
+        // Build SKU buffer
+        let skuFileBuffer, sourceSheetData = [];
+        if (!useInventory) {
+            const wb = XLSX.utils.book_new();
+            XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet([]), 'Source');
+            skuFileBuffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+        } else {
+            if (!masterData.sku_master?.length) return res.status(400).json({ error: 'No SKUs found' });
+            sourceSheetData = masterData.sku_master.map(sku => ({
+                SKU: sku['Sales portal SKU'] || sku['SKU'] || sku.salesPortalSku || sku.sku,
+                FG:  sku['Tally new SKU']    || sku['Tally SKU'] || sku.tallyNewSku || sku.fg || sku.FG
+            }));
+            const wb = XLSX.utils.book_new();
+            XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(sourceSheetData), 'Source');
+            skuFileBuffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+        }
+
+        // Run processor — no DB write, no file write
+        let processedData;
+        try {
+            const processorArgs = [
+                req.file.buffer, skuFileBuffer, brand.name,
+                new Date().toISOString(), sourceSheetData,
+                masterData.ledger_master || null, useInventory, month, year
+            ];
+            if (fileType === 'b2b')      processedData = await amazonB2BProcessor(...processorArgs);
+            else if (fileType === 'b2c') processedData = await amazonB2CProcessor(...processorArgs);
+            else return res.status(400).json({ error: 'Invalid file_type' });
+        } catch (err) {
+            if (err.missingSKUs) return res.status(400).json({ error: 'Missing SKUs', missingSKUs: err.missingSKUs });
+            throw err;
+        }
+
+        if (!processedData?.process1Json) return res.status(400).json({ error: 'Invalid processor output' });
+
+        // Prepare finalData (will be used on commit)
+        const monthMapping = { "January":1,"February":2,"March":3,"April":4,"May":5,"June":6,"July":7,"August":8,"September":9,"October":10,"November":11,"December":12 };
+        const dbMonth     = monthMapping[month] || (isNaN(parseInt(month)) ? 0 : parseInt(month));
+        const taskId      = uuidv4();
+        const processFile = `amazon_${fileType}_${brand.name}_${taskId}.xlsx`;
+        const processPath = path.join(OUTPUT_DIR, processFile);
+
+        const finalData = processedData.process1Json.map(row => ({
+            ...mapRowToAmazonSchema(row, fileType, useInventory),
+            month: dbMonth, year, file_type: fileType,
+            inventory_type: useInventory ? 'With' : 'Without',
+            filename: processFile
+        }));
+
+        // Compute summary totals using shared utility
+        const workingFileSummary = computeSummary(processedData.process1Json);
+        const pivotFileSummary   = computeSummary(processedData.pivotData || []);
+
+        // Store in the shared agent-agnostic pending store
+        setPending(taskId, {
+            agentType: 'amazon',
+            workbook:    processedData.workbook,
+            finalData,
+            processFile,
+            processPath,
+            Model
+        });
+
+        res.json({
+            success:  true,
+            taskId,
+            rowCount: finalData.length,
+            summary:  { workingFile: workingFileSummary, pivotFile: pivotFileSummary }
+        });
+
+    } catch (error) { next(error); }
+};
+
+// ==========================================================================
+// ✅ PHASE 2a — generateCommit
+//    Retrieve pending task, save to DB + disk, clean up store.
+//    Agent-agnostic: any agent controller can use the same commit handler
+//    because the Model, workbook, and finalData are already stored.
+// ==========================================================================
+const generateCommit = async (req, res, next) => {
+    try {
+        const { taskId } = req.body;
+        if (!taskId) return res.status(400).json({ error: 'taskId is required' });
+
+        const pending = getPending(taskId);
+        if (!pending) return res.status(404).json({
+            error: 'No pending generation found. It may have expired (30 min limit). Please regenerate.'
+        });
+
+        const { workbook, finalData, processFile, processPath, Model } = pending;
+
+        await ensureDir();
+        await Model.sync({ alter: true });
+        await Model.bulkCreate(finalData, { returning: true });
+        await workbook.xlsx.writeFile(processPath);
+
+        deletePending(taskId);
+
+        res.json({ success: true, message: 'File generated and saved successfully', data: { processFile, count: finalData.length } });
+
+    } catch (error) { next(error); }
+};
+
+// ==========================================================================
+// ❌ PHASE 2b — generateDiscard
+//    Clean up without saving anything. Also agent-agnostic.
+// ==========================================================================
+const generateDiscard = async (req, res, next) => {
+    try {
+        const { taskId } = req.body;
+        if (!taskId) return res.status(400).json({ error: 'taskId is required' });
+        deletePending(taskId);
+        res.json({ success: true, message: 'Generation discarded successfully' });
+    } catch (error) { next(error); }
+};
+
 module.exports = {
     uploadSkuMaster,
     uploadLedgerMaster,
     getMasterData,
-    generate
+    generate,
+    generatePreview,
+    generateCommit,
+    generateDiscard
 };

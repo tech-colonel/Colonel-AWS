@@ -587,10 +587,10 @@ async function flipkartProcessor(rawFileBuffer, skuData, stateConfigData, brandN
       for (const item of skuData) {
         console.log("item", item);
         // Handle various possible column names from different SKU master versions
-        const rawSkuKey = item['Sales Portal SKU'] || item['sales portal sku'] || item['salesPortalSku'] || '';
+        const rawSkuKey = item['Sales portal SKU'] || item['Sales Portal SKU'] || item['sales portal sku'] || item['salesPortalSku'] || item['SKU'] || item['sku'] || '';
         const normalizedKey = normalizeSKU(rawSkuKey);
         // console.log("raw skuy", rawSkuKey);
-        const fg = item['Tally New SKU'] || item['Tally SKU'] || item['FG'] || item['tallyNewSku'] || '';
+        const fg = item['Tally new SKU'] || item['Tally New SKU'] || item['Tally SKU'] || item['FG'] || item['tallyNewSku'] || item['fg'] || '';
         // console.log("MAP ENTRY:", normalizedKey, "=>", fg);
         if (normalizedKey) {
           skuMap[normalizedKey] = String(fg).trim();
