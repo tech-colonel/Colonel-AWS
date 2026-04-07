@@ -3,6 +3,7 @@ const { Brand, Agent } = require('../../../models/master');
 const { getBrandConnection } = require('../../../config/database');
 const { getDynamicModel } = require('../../../models/brand');
 const { firstcryProcessor } = require('../../../services/processors/firstcry/firstcryProcessor');
+const { setPending, getPending, deletePending } = require('../../../services/pendingGenerationsStore');
 
 const path = require('path');
 const fs = require('fs-extra');
@@ -226,9 +227,145 @@ const generate = async (req, res, next) => {
     }
 };
 
+// ─── Phase 1: generatePreview ──────────────────────────────────────────────────
+const generatePreview = async (req, res, next) => {
+    try {
+        const { brandId, agentId } = req.params;
+        const { month, year, inventory_type } = req.body;
+        const useInventory = inventory_type !== 'Without';
+
+        const brand = await Brand.findByPk(brandId);
+        const agent = await Agent.findByPk(agentId);
+        if (!brand || !agent) return res.status(404).json({ error: 'Brand or Agent not found' });
+
+        const masterData = await salesService.getMasterData(brandId, agentId);
+
+        if (!req.file && (!req.files || !req.files.file)) {
+            return res.status(400).json({ error: 'FirstCry raw report file is required' });
+        }
+        const fileBuffer = req.file ? req.file.buffer : req.files.file[0].buffer;
+
+        const processedData = await firstcryProcessor(
+            fileBuffer,
+            masterData.sku_master,
+            masterData.ledger_master,
+            brand.name,
+            `${month}-${year}`,
+            useInventory
+        );
+
+        if (!processedData || !processedData.processedData) {
+            return res.status(400).json({ error: 'Processor Error: No data returned' });
+        }
+
+        const brandDb = getBrandConnection(brand.db_name);
+        const tableName = agent.name.replace(/[^a-zA-Z0-9]/g, '_').toLowerCase();
+        const Model = getDynamicModel(brandDb, tableName, agent.columns);
+
+        const taskId = uuidv4();
+        const filename = `firstcry_${brand.name}_${month}_${year}_${taskId}.xlsx`;
+        const processPath = path.join(OUTPUT_DIR, filename);
+
+        const dbRows = processedData.processedData.map(row =>
+            mapRowToFirstcrySchema(row, month, year, filename)
+        );
+
+        const computeFirstcrySummary = (rows) => {
+            let qty = 0, taxable = 0, cgst = 0, sgst = 0, igst = 0;
+            rows.forEach(row => {
+                qty     += Number(row.Quantity || row.quantity || row.Qty || 0);
+                taxable += Number(row['Taxable value'] || row.taxable_value || row['Gross Amount'] || 0);
+                cgst    += Number(row['CGST Amount'] || row.cgst_amount || 0);
+                sgst    += Number(row['SGST Amount'] || row.sgst_amount || 0);
+                igst    += Number(row['IGST Amount'] || row.igst_amount || 0); // Note: Firstcry raw might not have IGST explicit, but workingSheetData does
+            });
+            return {
+                quantity: Math.round(qty),
+                taxableValue: Number(taxable.toFixed(2)),
+                cgst: Number(cgst.toFixed(2)),
+                sgst: Number(sgst.toFixed(2)),
+                igst: Number(igst.toFixed(2))
+            };
+        };
+
+        const workingSummary = computeFirstcrySummary(processedData.workingSheetData || processedData.processedData);
+
+        setPending(taskId, {
+            agentType: 'firstcry',
+            workbook: processedData.outputWorkbook,
+            finalData: dbRows,
+            processFile: filename,
+            processPath,
+            Model
+        });
+
+        res.json({
+            success: true,
+            taskId,
+            rowCount: dbRows.length,
+            summary: { 
+                workingFile: workingSummary,
+                pivotFile: null // FirstCry might not have a pivot file
+            }
+        });
+    } catch (error) {
+        console.error('FirstCry Preview Error:', error);
+        next(error);
+    }
+};
+
+// ─── Phase 2a: generateCommit ────────────────────────────────────────────────
+const generateCommit = async (req, res, next) => {
+    try {
+        const { taskId } = req.body;
+        if (!taskId) return res.status(400).json({ error: 'taskId is required' });
+
+        const pending = getPending(taskId);
+        if (!pending) return res.status(404).json({
+            error: 'No pending generation found. It may have expired. Please regenerate.'
+        });
+
+        const { workbook, finalData, processFile, processPath, Model } = pending;
+
+        await ensureDir();
+        await Model.sync();
+        await Model.bulkCreate(finalData);
+
+        const outputBuffer = XLSX.write(workbook, { type: 'buffer', bookType: 'xlsx' });
+        await fs.writeFile(processPath, outputBuffer);
+        
+        deletePending(taskId);
+
+        res.json({
+            success: true,
+            message: 'FirstCry file generated and saved successfully',
+            data: { filename: processFile, count: finalData.length }
+        });
+    } catch (error) {
+        console.error('FirstCry Commit Error:', error);
+        next(error);
+    }
+};
+
+// ─── Phase 2b: generateDiscard ───────────────────────────────────────────────
+const generateDiscard = async (req, res, next) => {
+    try {
+        const { taskId } = req.body;
+        if (!taskId) return res.status(400).json({ error: 'taskId is required' });
+        deletePending(taskId);
+        res.json({ success: true, message: 'Generation discarded successfully' });
+    } catch (error) {
+        console.error('FirstCry Discard Error:', error);
+        next(error);
+    }
+};
+
 module.exports = {
     uploadSkuMaster,
     uploadLedgerMaster,
     getMasterData,
-    generate
+    generate,
+    generatePreview,
+    generateCommit,
+    generateDiscard
 };

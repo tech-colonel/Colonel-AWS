@@ -95,7 +95,10 @@ const deleteWorkingFile = async (req, res, next) => {
       if (await fs.exists(filePath)) {
         await fs.unlink(filePath);
       }
-      await file.destroy();
+      // Delete ALL records associated with this filename
+      await WorkingFileModel.destroy({
+        where: { filename: file.filename }
+      });
     }
 
     res.json({ message: 'File deleted successfully' });

@@ -207,11 +207,18 @@ const AgentWorkspace = () => {
   const fetchLedgerPreview = async () => {
     try {
       setLedgerPreviewLoading(true);
+      // First try to use already-loaded masterData (avoids redundant API call that could fail)
+      if (masterData?.ledger_master?.length > 0) {
+        setLedgerPreviewData(masterData.ledger_master);
+        return;
+      }
+      // Fallback: fetch fresh from API
       const agentType = await detectAgentType();
       const res = await api.get(`/api/brands/${brandId}/agents/${agentId}/${agentType}/master`);
       setLedgerPreviewData(res.data?.ledger_master || []);
     } catch {
-      setLedgerPreviewData([]);
+      // If API fails but we have masterData, still use it
+      setLedgerPreviewData(masterData?.ledger_master || []);
     } finally {
       setLedgerPreviewLoading(false);
     }
@@ -368,6 +375,7 @@ const AgentWorkspace = () => {
   const isMyntra = agent?.name?.toLowerCase().includes('myntra');
   const isBlinkit = agent?.name?.toLowerCase().includes('blinkit');
   const isFirstcry = agent?.name?.toLowerCase().includes('firstcry');
+  const isAmazon = agent?.name?.toLowerCase().includes('amazon');
 
   return (
     <DashboardLayout sidebarItems={sidebarItems}>
@@ -499,7 +507,7 @@ const AgentWorkspace = () => {
                         <TableRow>
                           <TableHead>Month</TableHead>
                           <TableHead>Year</TableHead>
-                          {!isFlipkart && !isBlinkit && !isFirstcry && <TableHead>Type</TableHead>}
+                          {isAmazon && <TableHead>Type</TableHead>}
                           <TableHead>Inventory</TableHead>
                           <TableHead>Created</TableHead>
                           <TableHead className="text-right">Actions</TableHead>
@@ -510,7 +518,7 @@ const AgentWorkspace = () => {
                           <TableRow key={file.id} data-testid={`file-row-${file.id}`}>
                             <TableCell className="font-medium">{file.month}</TableCell>
                             <TableCell>{file.year}</TableCell>
-                            {!isFlipkart && !isBlinkit && !isFirstcry && <TableCell><Badge variant="secondary">{file.file_type}</Badge></TableCell>}
+                            {isAmazon && <TableCell><Badge variant="secondary">{file.file_type}</Badge></TableCell>}
                             <TableCell>{file.inventory_type}</TableCell>
                             <TableCell className="text-sm text-slate-600">
                               {file.created_at ? format(new Date(file.created_at), 'dd MMM yyyy') : 'N/A'}
@@ -729,7 +737,7 @@ const AgentWorkspace = () => {
                   </div>
                 </div>
 
-                {!isFlipkart && !isBlinkit && !isFirstcry && (
+                {isAmazon && (
                   <div>
                     <Label htmlFor="file-type">File Type *</Label>
                     <select
@@ -944,13 +952,29 @@ const AgentWorkspace = () => {
                   const fmtQ = (n) => n?.toLocaleString('en-IN');
                   const match = (a, b) => Math.abs((a || 0) - (b || 0)) < 0.01;
 
-                  const rows = [
+                  let wfTitle = 'Working File';
+                  let pfTitle = 'Pivot File';
+
+                  if (isMyntra) {
+                      wfTitle = 'Accounting Sheet';
+                      pfTitle = 'Pivot Table';
+                  } else if (isBlinkit) {
+                      wfTitle = 'Sales Report';
+                      pfTitle = 'GT Report';
+                  }
+
+                  let rows = [
                     { label: 'Total Quantity',    wf: fmtQ(wf.quantity),          pf: hasPivot ? fmtQ(pf.quantity) : null,          ok: hasPivot ? match(wf.quantity,     pf.quantity) : true },
-                    { label: 'Taxable Value',     wf: `₹${fmt(wf.taxableValue)}`, pf: hasPivot ? `₹${fmt(pf.taxableValue)}` : null, ok: hasPivot ? match(wf.taxableValue, pf.taxableValue) : true },
-                    { label: 'Final CGST',        wf: `₹${fmt(wf.cgst)}`,        pf: hasPivot ? `₹${fmt(pf.cgst)}` : null,        ok: hasPivot ? match(wf.cgst,         pf.cgst) : true },
-                    { label: 'Final SGST',        wf: `₹${fmt(wf.sgst)}`,        pf: hasPivot ? `₹${fmt(pf.sgst)}` : null,        ok: hasPivot ? match(wf.sgst,         pf.sgst) : true },
-                    { label: 'Final IGST',        wf: `₹${fmt(wf.igst)}`,        pf: hasPivot ? `₹${fmt(pf.igst)}` : null,        ok: hasPivot ? match(wf.igst,         pf.igst) : true },
+                    { label: isMyntra ? 'Base Value' : isBlinkit ? 'Sum of Taxable Value' : 'Taxable Value',     wf: `₹${fmt(wf.taxableValue)}`, pf: hasPivot ? `₹${fmt(pf.taxableValue)}` : null, ok: hasPivot ? match(wf.taxableValue, pf.taxableValue) : true },
+                    { label: isMyntra ? 'CGST Amount' : isBlinkit ? 'Sum of CGST Value' : 'Final CGST',        wf: `₹${fmt(wf.cgst)}`,        pf: hasPivot ? `₹${fmt(pf.cgst)}` : null,        ok: hasPivot ? match(wf.cgst,         pf.cgst) : true },
+                    { label: isMyntra ? 'SGST Amount' : isBlinkit ? 'Sum of SGST Value' : 'Final SGST',        wf: `₹${fmt(wf.sgst)}`,        pf: hasPivot ? `₹${fmt(pf.sgst)}` : null,        ok: hasPivot ? match(wf.sgst,         pf.sgst) : true },
+                    { label: isMyntra ? 'IGST Amount' : isBlinkit ? 'Sum of IGST Value' : 'Final IGST',        wf: `₹${fmt(wf.igst)}`,        pf: hasPivot ? `₹${fmt(pf.igst)}` : null,        ok: hasPivot ? match(wf.igst,         pf.igst) : true },
                   ];
+
+                  if (isMyntra || isBlinkit) {
+                    rows = rows.filter(r => r.label !== 'Total Quantity');
+                  }
+
                   const allMatch = rows.every(r => r.ok);
 
                   return (
@@ -959,7 +983,7 @@ const AgentWorkspace = () => {
                         allMatch ? (
                           <div className="flex items-center gap-2 bg-green-50 border border-green-200 rounded-lg px-4 py-2">
                             <span className="text-green-600 text-lg">✅</span>
-                            <p className="text-green-800 text-sm font-medium">All totals match between Working File and Pivot File.</p>
+                            <p className="text-green-800 text-sm font-medium">All totals match between {wfTitle} and {pfTitle}.</p>
                           </div>
                         ) : (
                           <div className="flex items-center gap-2 bg-red-50 border border-red-200 rounded-lg px-4 py-2">
@@ -974,8 +998,8 @@ const AgentWorkspace = () => {
                           <thead>
                             <tr className="bg-slate-50 border-b">
                               <th className="p-3 text-left font-semibold text-slate-700">Metric</th>
-                              <th className="p-3 text-right font-semibold text-slate-700">Working File</th>
-                              {hasPivot && <th className="p-3 text-right font-semibold text-slate-700">Pivot File</th>}
+                              <th className="p-3 text-right font-semibold text-slate-700">{wfTitle}</th>
+                              {hasPivot && <th className="p-3 text-right font-semibold text-slate-700">{pfTitle}</th>}
                               {hasPivot && <th className="p-3 text-center font-semibold text-slate-700">Match</th>}
                             </tr>
                           </thead>

@@ -7,6 +7,8 @@ const { myntraProcessor } = require('../../../services/processors/myntra/myntraP
 const path = require('path');
 const fs = require('fs-extra');
 const { v4: uuidv4 } = require('uuid');
+const { setPending, getPending, deletePending, computeSummary } = require('../../../services/pendingGenerationsStore');
+const XLSX_STYLE = require('xlsx-js-style');
 
 const OUTPUT_DIR = path.join(__dirname, '../../../../outputs');
 
@@ -107,7 +109,7 @@ const mapRowToMyntraSchema = (row, month, year, filename) => ({
 });
 
 /**
- * Generate Myntra Working File
+ * Generate Myntra Working File (direct save — legacy single-phase)
  */
 const generate = async (req, res, next) => {
     try {
@@ -115,35 +117,27 @@ const generate = async (req, res, next) => {
         const { month, year, inventory_type } = req.body;
         const useInventory = inventory_type !== 'Without';
 
-        // 1. Fetch Master Data
         const brand = await Brand.findByPk(brandId);
         const agent = await Agent.findByPk(agentId);
         if (!brand || !agent) return res.status(404).json({ error: 'Brand or Agent not found' });
 
         const masterData = await salesService.getMasterData(brandId, agentId);
 
-        // 2. Prepare File Buffers
-        // Support both single file and multiple files
         let fileBuffers = {};
         if (req.files) {
             fileBuffers.rtoFile = req.files.rtoFile ? req.files.rtoFile[0].buffer : null;
             fileBuffers.packedFile = req.files.packedFile ? req.files.packedFile[0].buffer : null;
             fileBuffers.rtFile = req.files.rtFile ? req.files.rtFile[0].buffer : null;
-
-            // Fallback for single file upload via 'file' field
             if (!fileBuffers.packedFile && req.files.file) {
                 fileBuffers.packedFile = req.files.file[0].buffer;
             }
         } else if (req.file) {
-            // Fallback for single file upload via 'upload.single'
             fileBuffers.packedFile = req.file.buffer;
         }
 
         if (!fileBuffers.packedFile && !fileBuffers.rtoFile && !fileBuffers.rtFile) {
             return res.status(400).json({ error: 'At least one Myntra report (Packed, RTO, or RT) is required' });
         }
-
-        // 3. Call Processor
 
         let sourceSheetData = [];
         if (useInventory && masterData.sku_master) {
@@ -164,7 +158,6 @@ const generate = async (req, res, next) => {
             useInventory
         );
 
-        // 4. Save to Database
         const brandDb = getBrandConnection(brand.db_name);
         const tableName = agent.name.replace(/[^a-zA-Z0-9]/g, '_').toLowerCase();
         const Model = getDynamicModel(brandDb, tableName, agent.columns);
@@ -181,10 +174,8 @@ const generate = async (req, res, next) => {
         await Model.sync();
         await Model.bulkCreate(dbRows);
 
-        // 5. Save Excel File
         if (processedData.outputWorkbook) {
-            const XLSX = require('xlsx-js-style');
-            XLSX.writeFile(processedData.outputWorkbook, filepath);
+            XLSX_STYLE.writeFile(processedData.outputWorkbook, filepath);
         }
 
         res.json({
@@ -198,9 +189,178 @@ const generate = async (req, res, next) => {
     }
 };
 
+/**
+ * PHASE 1 — generatePreview
+ */
+const generatePreview = async (req, res, next) => {
+    try {
+        const { brandId, agentId } = req.params;
+        const { month, year, inventory_type } = req.body;
+        const useInventory = inventory_type !== 'Without';
+
+        // 1. Fetch Master Data
+        const brand = await Brand.findByPk(brandId);
+        const agent = await Agent.findByPk(agentId);
+        if (!brand || !agent) return res.status(404).json({ error: 'Brand or Agent not found' });
+
+        const masterData = await salesService.getMasterData(brandId, agentId);
+
+        // 2. Prepare File Buffers
+        let fileBuffers = {};
+        if (req.files) {
+            fileBuffers.rtoFile = req.files.rtoFile ? req.files.rtoFile[0].buffer : null;
+            fileBuffers.packedFile = req.files.packedFile ? req.files.packedFile[0].buffer : null;
+            fileBuffers.rtFile = req.files.rtFile ? req.files.rtFile[0].buffer : null;
+
+            if (!fileBuffers.packedFile && req.files.file) {
+                fileBuffers.packedFile = req.files.file[0].buffer;
+            }
+        } else if (req.file) {
+            fileBuffers.packedFile = req.file.buffer;
+        }
+
+        if (!fileBuffers.packedFile && !fileBuffers.rtoFile && !fileBuffers.rtFile) {
+            return res.status(400).json({ error: 'At least one Myntra report (Packed, RTO, or RT) is required' });
+        }
+
+        // 3. Call Processor
+        let sourceSheetData = [];
+        if (useInventory && masterData.sku_master) {
+            sourceSheetData = masterData.sku_master.map(sku => ({
+                SKU: sku['Sales portal SKU'] || sku['Sales Portal SKU'] || sku['SKU'] || sku.salesPortalSku || sku.sku,
+                FG: sku['Tally new SKU'] || sku['Tally New SKU'] || sku['Tally SKU'] || sku.tallyNewSku || sku.fg || sku.FG
+            }));
+        } else {
+            sourceSheetData = masterData.sku_master;
+        }
+
+        const processedData = await myntraProcessor(
+            fileBuffers,
+            sourceSheetData,
+            masterData.ledger_master,
+            brand.name,
+            `${month}-${year}`,
+            useInventory
+        );
+
+        if (!processedData || !processedData.workingFileData) {
+            return res.status(400).json({ error: 'Processor Error: No data returned' });
+        }
+
+        // 4. Prepare for Pending Store
+        const brandDb = getBrandConnection(brand.db_name);
+        const tableName = agent.name.replace(/[^a-zA-Z0-9]/g, '_').toLowerCase();
+        const Model = getDynamicModel(brandDb, tableName, agent.columns);
+
+        const taskId = uuidv4();
+        const filename = `myntra_${brand.name}_${month}_${year}_${taskId}.xlsx`;
+        const processPath = path.join(OUTPUT_DIR, filename);
+
+        const dbRows = processedData.workingFileData.map(row =>
+            mapRowToMyntraSchema(row, month, year, filename)
+        );
+
+        // Custom Myntra Summary to handle its specific schema
+        const computeMyntraSummary = (rows) => {
+            let qty = 0, taxable = 0, cgst = 0, sgst = 0, igst = 0;
+            rows.forEach(row => {
+                qty     += Number(row.quantity || row.sum_of_quantity || row.Qty || 0);
+                taxable += Number(row.base_Value || row.base_value || row.sum_of_base_value || row['Base Value'] || 0);
+                cgst    += Number(row.cgst_amount || row.sum_of_cgst_amount || row['CGST Tax'] || 0);
+                sgst    += Number(row.sgst_amount || row.sum_of_sgst_amount || row['SGST Tax'] || 0);
+                igst    += Number(row.igst_amount || row.sum_of_igst_amount || row['Tax IGST'] || 0);
+            });
+            return {
+                quantity: Math.round(qty),
+                taxableValue: Number(taxable.toFixed(2)),
+                cgst: Number(cgst.toFixed(2)),
+                sgst: Number(sgst.toFixed(2)),
+                igst: Number(igst.toFixed(2))
+            };
+        };
+
+        const workingSummary = computeMyntraSummary(processedData.workingFileData);
+        const pivotSummary = computeMyntraSummary(processedData.pivotData);
+
+        // Store pending request
+        setPending(taskId, {
+            agentType: 'myntra',
+            workbook: processedData.outputWorkbook,
+            finalData: dbRows,
+            processFile: filename,
+            processPath,
+            Model
+        });
+
+        res.json({
+            success: true,
+            taskId,
+            rowCount: dbRows.length,
+            summary: { 
+                workingFile: workingSummary,
+                pivotFile: pivotSummary
+            }
+        });
+
+    } catch (error) {
+        next(error);
+    }
+};
+
+/**
+ * PHASE 2a — generateCommit
+ */
+const generateCommit = async (req, res, next) => {
+    try {
+        const { taskId } = req.body;
+        if (!taskId) return res.status(400).json({ error: 'taskId is required' });
+
+        const pending = getPending(taskId);
+        if (!pending) return res.status(404).json({
+            error: 'No pending generation found. It may have expired. Please regenerate.'
+        });
+
+        const { workbook, finalData, processFile, processPath, Model } = pending;
+
+        await ensureDir();
+        await Model.sync();
+        await Model.bulkCreate(finalData);
+
+        XLSX_STYLE.writeFile(workbook, processPath);
+
+        deletePending(taskId);
+
+        res.json({
+            success: true,
+            message: 'Myntra file generated and saved successfully',
+            data: { filename: processFile, count: finalData.length }
+        });
+
+    } catch (error) {
+        next(error);
+    }
+};
+
+/**
+ * PHASE 2b — generateDiscard
+ */
+const generateDiscard = async (req, res, next) => {
+    try {
+        const { taskId } = req.body;
+        if (!taskId) return res.status(400).json({ error: 'taskId is required' });
+        deletePending(taskId);
+        res.json({ success: true, message: 'Generation discarded successfully' });
+    } catch (error) {
+        next(error);
+    }
+};
+
 module.exports = {
     uploadSkuMaster,
     uploadLedgerMaster,
     getMasterData,
-    generate
+    generate,
+    generatePreview,
+    generateCommit,
+    generateDiscard
 };
