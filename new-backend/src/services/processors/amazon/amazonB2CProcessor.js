@@ -305,12 +305,40 @@ async function amazonB2CProcessor(
       });
 
       // Map FG
+      let mappedCount = 0;
+      let unmappedCount = 0;
+
       filteredRows.forEach(row => {
         const rawSKU = row[detectedSkuColumn];
         const lookupKey = normalizeSKU(rawSKU);
 
-        row['FG'] = skuMap[lookupKey] || null;
+        let fg = skuMap[lookupKey];
+
+        // Fallback partial matching if strict match fails
+        if (!fg && lookupKey) {
+          for (const key in skuMap) {
+            if (
+              lookupKey === key ||
+              lookupKey.includes(key) ||
+              key.includes(lookupKey)
+            ) {
+              fg = skuMap[key];
+              console.log(`[Amazon B2C] ✅ MATCHED VIA FALLBACK: raw='${rawSKU}' normalized='${lookupKey}' => matched_key='${key}' FG='${fg}'`);
+              break;
+            }
+          }
+        }
+
+        if (fg) {
+          mappedCount++;
+        } else {
+          unmappedCount++;
+        }
+
+        row['FG'] = fg || null;
       });
+
+      console.log(`[Amazon B2C] FG Mapping Complete: ${mappedCount} rows mapped, ${unmappedCount} rows unmapped.`);
 
     }
 

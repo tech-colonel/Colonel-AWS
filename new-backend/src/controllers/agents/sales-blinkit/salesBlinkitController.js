@@ -3,6 +3,7 @@ const { Brand, Agent } = require('../../../models/master');
 const { getBrandConnection } = require('../../../config/database');
 const { getDynamicModel } = require('../../../models/brand');
 const { blinkitProcessor } = require('../../../services/processors/blinkit/blinkitProcessor');
+const { setPending, getPending, deletePending } = require('../../../services/pendingGenerationsStore');
 
 const path = require('path');
 const fs = require('fs-extra');
@@ -215,9 +216,164 @@ const generate = async (req, res, next) => {
     }
 };
 
+// ─── Phase 1: generatePreview ──────────────────────────────────────────────────
+const generatePreview = async (req, res, next) => {
+    try {
+        const { brandId, agentId } = req.params;
+        const { month, year, inventory_type } = req.body;
+        const useInventory = inventory_type !== 'Without';
+
+        const brand = await Brand.findByPk(brandId);
+        const agent = await Agent.findByPk(agentId);
+        if (!brand || !agent) return res.status(404).json({ error: 'Brand or Agent not found' });
+
+        const masterData = await salesService.getMasterData(brandId, agentId);
+
+        if (!req.file && (!req.files || !req.files.file)) {
+            return res.status(400).json({ error: 'Blinkit raw report file is required' });
+        }
+        const fileBuffer = req.file ? req.file.buffer : req.files.file[0].buffer;
+
+        const processedData = await blinkitProcessor(
+            fileBuffer,
+            masterData.sku_master,
+            masterData.ledger_master,
+            brand.name,
+            `${month}-${year}`,
+            useInventory
+        );
+
+        if (!processedData || !processedData.salesReportData) {
+            return res.status(400).json({ error: 'Processor Error: No data returned' });
+        }
+
+        const brandDb = getBrandConnection(brand.db_name);
+        const tableName = agent.name.replace(/[^a-zA-Z0-9]/g, '_').toLowerCase();
+        const Model = getDynamicModel(brandDb, tableName, agent.columns);
+
+        const taskId = uuidv4();
+        const filename = `blinkit_${brand.name}_${month}_${year}_${taskId}.xlsx`;
+        const processPath = path.join(OUTPUT_DIR, filename);
+
+        const dbRows = processedData.salesReportData.map(row =>
+            mapRowToBlinkitSchema(row, month, year, filename)
+        );
+
+        const computeBlinkitSummary = (rows) => {
+            let qty = 0, taxable = 0, cgst = 0, sgst = 0, igst = 0;
+            rows.forEach(row => {
+                qty     += Number(row.Quantity || row.quantity || 0);
+                taxable += Number(row['Taxable value'] || row.taxable_value || 0);
+                cgst    += Number(row['CGST Value'] || row.cgst_value || 0);
+                sgst    += Number(row['SGST Value'] || row.sgst_value || 0);
+                igst    += Number(row['IGST Value'] || row.igst_value || 0);
+            });
+            return {
+                quantity: Math.round(qty),
+                taxableValue: Number(taxable.toFixed(2)),
+                cgst: Number(cgst.toFixed(2)),
+                sgst: Number(sgst.toFixed(2)),
+                igst: Number(igst.toFixed(2))
+            };
+        };
+
+        const computeBlinkitPivotSummary = (rows) => {
+            let taxable = 0, cgst = 0, sgst = 0, igst = 0;
+            rows.forEach(row => {
+                taxable += Number(row['Sum of Taxable Value'] || 0);
+                cgst    += Number(row['Sum of CGST Value'] || 0);
+                sgst    += Number(row['Sum of SGST Value'] || 0);
+                igst    += Number(row['Sum of IGST Value'] || 0);
+            });
+            return {
+                quantity: 0, // Pivot doesn't natively support quantity in the same way
+                taxableValue: Number(taxable.toFixed(2)),
+                cgst: Number(cgst.toFixed(2)),
+                sgst: Number(sgst.toFixed(2)),
+                igst: Number(igst.toFixed(2))
+            };
+        };
+
+        const workingSummary = computeBlinkitSummary(processedData.salesReportData);
+        let pivotSummary = null;
+        if (processedData.gtReportData) {
+            pivotSummary = computeBlinkitPivotSummary(processedData.gtReportData);
+        }
+
+        setPending(taskId, {
+            agentType: 'blinkit',
+            workbook: processedData.outputWorkbook,
+            finalData: dbRows,
+            processFile: filename,
+            processPath,
+            Model
+        });
+
+        res.json({
+            success: true,
+            taskId,
+            rowCount: dbRows.length,
+            summary: { 
+                workingFile: workingSummary,
+                pivotFile: pivotSummary
+            }
+        });
+    } catch (error) {
+        console.error('Blinkit Preview Error:', error);
+        next(error);
+    }
+};
+
+// ─── Phase 2a: generateCommit ────────────────────────────────────────────────
+const generateCommit = async (req, res, next) => {
+    try {
+        const { taskId } = req.body;
+        if (!taskId) return res.status(400).json({ error: 'taskId is required' });
+
+        const pending = getPending(taskId);
+        if (!pending) return res.status(404).json({
+            error: 'No pending generation found. It may have expired. Please regenerate.'
+        });
+
+        const { workbook, finalData, processFile, processPath, Model } = pending;
+
+        await ensureDir();
+        await Model.sync();
+        await Model.bulkCreate(finalData);
+
+        XLSX.writeFile(workbook, processPath);
+        deletePending(taskId);
+
+        res.json({
+            success: true,
+            message: 'Blinkit file generated and saved successfully',
+            data: { filename: processFile, count: finalData.length }
+        });
+    } catch (error) {
+        console.error('Blinkit Commit Error:', error);
+        next(error);
+    }
+};
+
+// ─── Phase 2b: generateDiscard ───────────────────────────────────────────────
+const generateDiscard = async (req, res, next) => {
+    try {
+        const { taskId } = req.body;
+        if (!taskId) return res.status(400).json({ error: 'taskId is required' });
+        deletePending(taskId);
+        res.json({ success: true, message: 'Generation discarded successfully' });
+    } catch (error) {
+        console.error('Blinkit Discard Error:', error);
+        next(error);
+    }
+};
+
 module.exports = {
     uploadSkuMaster,
     uploadLedgerMaster,
     getMasterData,
-    generate
+    generate,
+    generatePreview,
+    generateCommit,
+    generateDiscard
 };

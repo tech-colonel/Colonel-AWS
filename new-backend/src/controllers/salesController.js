@@ -95,7 +95,10 @@ const deleteWorkingFile = async (req, res, next) => {
       if (await fs.exists(filePath)) {
         await fs.unlink(filePath);
       }
-      await file.destroy();
+      // Delete ALL records associated with this filename
+      await WorkingFileModel.destroy({
+        where: { filename: file.filename }
+      });
     }
 
     res.json({ message: 'File deleted successfully' });
@@ -605,9 +608,9 @@ const flipkart = {
       const { workbook, finalData, processFile, processPath, Model } = pending;
 
       await fs.ensureDir(OUTPUT_DIR);
-      await Model.sync({ alter: true });
+      await Model.sync({ alter: false });
       await Model.bulkCreate(finalData, { returning: true });
-      
+
       // Flipkart uses XLSX_STYLE.writeFile
       XLSX_STYLE.writeFile(workbook, processPath);
 
