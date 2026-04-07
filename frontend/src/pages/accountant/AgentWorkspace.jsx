@@ -135,6 +135,7 @@ const AgentWorkspace = () => {
       if (currentAgent?.name?.toLowerCase().includes('myntra')) return 'myntra';
       if (currentAgent?.name?.toLowerCase().includes('blinkit')) return 'blinkit';
       if (currentAgent?.name?.toLowerCase().includes('firstcry')) return 'firstcry';
+      if (currentAgent?.name?.toLowerCase().includes('jiomart')) return 'jiomart';
       return 'amazon';
     } catch (error) {
       return 'amazon';
@@ -376,6 +377,7 @@ const AgentWorkspace = () => {
   const isBlinkit = agent?.name?.toLowerCase().includes('blinkit');
   const isFirstcry = agent?.name?.toLowerCase().includes('firstcry');
   const isAmazon = agent?.name?.toLowerCase().includes('amazon');
+  const isJiomart = agent?.name?.toLowerCase().includes('jiomart');
 
   return (
     <DashboardLayout sidebarItems={sidebarItems}>
@@ -947,13 +949,17 @@ const AgentWorkspace = () => {
                 {verificationData?.summary && (() => {
                   const wf = verificationData.summary.workingFile;
                   const pf = verificationData.summary.pivotFile;
+                  const pf2 = verificationData.summary.gstrHSNFile;
                   const hasPivot = !!pf;
+                  const hasPivot2 = !!pf2;
                   const fmt  = (n) => n?.toLocaleString('en-IN', { minimumFractionDigits: 2 });
                   const fmtQ = (n) => n?.toLocaleString('en-IN');
                   const match = (a, b) => Math.abs((a || 0) - (b || 0)) < 0.01;
+                  const match3 = (a, b, c) => match(a, b) && match(b, c);
 
                   let wfTitle = 'Working File';
                   let pfTitle = 'Pivot File';
+                  let pf2Title = '';
 
                   if (isMyntra) {
                       wfTitle = 'Accounting Sheet';
@@ -961,18 +967,33 @@ const AgentWorkspace = () => {
                   } else if (isBlinkit) {
                       wfTitle = 'Sales Report';
                       pfTitle = 'GT Report';
+                  } else if (isJiomart) {
+                      wfTitle = 'Working';
+                      pfTitle = 'GSTR B2C';
+                      pf2Title = 'GSTR HSN';
                   }
 
-                  let rows = [
-                    { label: 'Total Quantity',    wf: fmtQ(wf.quantity),          pf: hasPivot ? fmtQ(pf.quantity) : null,          ok: hasPivot ? match(wf.quantity,     pf.quantity) : true },
-                    { label: isMyntra ? 'Base Value' : isBlinkit ? 'Sum of Taxable Value' : 'Taxable Value',     wf: `₹${fmt(wf.taxableValue)}`, pf: hasPivot ? `₹${fmt(pf.taxableValue)}` : null, ok: hasPivot ? match(wf.taxableValue, pf.taxableValue) : true },
-                    { label: isMyntra ? 'CGST Amount' : isBlinkit ? 'Sum of CGST Value' : 'Final CGST',        wf: `₹${fmt(wf.cgst)}`,        pf: hasPivot ? `₹${fmt(pf.cgst)}` : null,        ok: hasPivot ? match(wf.cgst,         pf.cgst) : true },
-                    { label: isMyntra ? 'SGST Amount' : isBlinkit ? 'Sum of SGST Value' : 'Final SGST',        wf: `₹${fmt(wf.sgst)}`,        pf: hasPivot ? `₹${fmt(pf.sgst)}` : null,        ok: hasPivot ? match(wf.sgst,         pf.sgst) : true },
-                    { label: isMyntra ? 'IGST Amount' : isBlinkit ? 'Sum of IGST Value' : 'Final IGST',        wf: `₹${fmt(wf.igst)}`,        pf: hasPivot ? `₹${fmt(pf.igst)}` : null,        ok: hasPivot ? match(wf.igst,         pf.igst) : true },
-                  ];
+                  let rows = [];
 
-                  if (isMyntra || isBlinkit) {
-                    rows = rows.filter(r => r.label !== 'Total Quantity');
+                  if (isJiomart) {
+                      rows = [
+                        { label: 'Total Quantity',    wf: fmtQ(wf.quantity),          pf: hasPivot ? fmtQ(pf.quantity) : null,          pf2: hasPivot2 ? fmtQ(pf2.quantity) : null,          ok: (hasPivot && hasPivot2) ? match3(wf.quantity, pf.quantity, pf2.quantity) : true },
+                        { label: 'Taxable Value',     wf: `₹${fmt(wf.taxableValue)}`, pf: hasPivot ? `₹${fmt(pf.taxableValue)}` : null, pf2: hasPivot2 ? `₹${fmt(pf2.taxableValue)}` : null, ok: (hasPivot && hasPivot2) ? match3(wf.taxableValue, pf.taxableValue, pf2.taxableValue) : true },
+                        { label: 'IGST Amount',       wf: `₹${fmt(wf.igst)}`,         pf: hasPivot ? `₹${fmt(pf.igst)}` : null,         pf2: hasPivot2 ? `₹${fmt(pf2.igst)}` : null,         ok: (hasPivot && hasPivot2) ? match3(wf.igst, pf.igst, pf2.igst) : true },
+                        { label: 'CGST Amount',       wf: `₹${fmt(wf.cgst)}`,         pf: hasPivot ? `₹${fmt(pf.cgst)}` : null,         pf2: hasPivot2 ? `₹${fmt(pf2.cgst)}` : null,         ok: (hasPivot && hasPivot2) ? match3(wf.cgst, pf.cgst, pf2.cgst) : true },
+                        { label: 'SGST Amount',       wf: `₹${fmt(wf.sgst)}`,         pf: hasPivot ? `₹${fmt(pf.sgst)}` : null,         pf2: hasPivot2 ? `₹${fmt(pf2.sgst)}` : null,         ok: (hasPivot && hasPivot2) ? match3(wf.sgst, pf.sgst, pf2.sgst) : true },
+                      ];
+                  } else {
+                      rows = [
+                        { label: 'Total Quantity',    wf: fmtQ(wf.quantity),          pf: hasPivot ? fmtQ(pf.quantity) : null,          ok: hasPivot ? match(wf.quantity,     pf.quantity) : true },
+                        { label: isMyntra ? 'Base Value' : isBlinkit ? 'Sum of Taxable Value' : 'Taxable Value',     wf: `₹${fmt(wf.taxableValue)}`, pf: hasPivot ? `₹${fmt(pf.taxableValue)}` : null, ok: hasPivot ? match(wf.taxableValue, pf.taxableValue) : true },
+                        { label: isMyntra ? 'CGST Amount' : isBlinkit ? 'Sum of CGST Value' : 'Final CGST',        wf: `₹${fmt(wf.cgst)}`,        pf: hasPivot ? `₹${fmt(pf.cgst)}` : null,        ok: hasPivot ? match(wf.cgst,         pf.cgst) : true },
+                        { label: isMyntra ? 'SGST Amount' : isBlinkit ? 'Sum of SGST Value' : 'Final SGST',        wf: `₹${fmt(wf.sgst)}`,        pf: hasPivot ? `₹${fmt(pf.sgst)}` : null,        ok: hasPivot ? match(wf.sgst,         pf.sgst) : true },
+                        { label: isMyntra ? 'IGST Amount' : isBlinkit ? 'Sum of IGST Value' : 'Final IGST',        wf: `₹${fmt(wf.igst)}`,        pf: hasPivot ? `₹${fmt(pf.igst)}` : null,        ok: hasPivot ? match(wf.igst,         pf.igst) : true },
+                      ];
+                      if (isMyntra || isBlinkit) {
+                        rows = rows.filter(r => r.label !== 'Total Quantity');
+                      }
                   }
 
                   const allMatch = rows.every(r => r.ok);
@@ -983,7 +1004,7 @@ const AgentWorkspace = () => {
                         allMatch ? (
                           <div className="flex items-center gap-2 bg-green-50 border border-green-200 rounded-lg px-4 py-2">
                             <span className="text-green-600 text-lg">✅</span>
-                            <p className="text-green-800 text-sm font-medium">All totals match between {wfTitle} and {pfTitle}.</p>
+                            <p className="text-green-800 text-sm font-medium">All totals match between {wfTitle}, {pfTitle}{hasPivot2 ? `, and ${pf2Title}` : ''}.</p>
                           </div>
                         ) : (
                           <div className="flex items-center gap-2 bg-red-50 border border-red-200 rounded-lg px-4 py-2">
@@ -1000,6 +1021,7 @@ const AgentWorkspace = () => {
                               <th className="p-3 text-left font-semibold text-slate-700">Metric</th>
                               <th className="p-3 text-right font-semibold text-slate-700">{wfTitle}</th>
                               {hasPivot && <th className="p-3 text-right font-semibold text-slate-700">{pfTitle}</th>}
+                              {hasPivot2 && <th className="p-3 text-right font-semibold text-slate-700">{pf2Title}</th>}
                               {hasPivot && <th className="p-3 text-center font-semibold text-slate-700">Match</th>}
                             </tr>
                           </thead>
@@ -1009,6 +1031,7 @@ const AgentWorkspace = () => {
                                 <td className="p-3 font-medium text-slate-700">{row.label}</td>
                                 <td className="p-3 text-right font-mono text-slate-800">{row.wf}</td>
                                 {hasPivot && <td className="p-3 text-right font-mono text-slate-800">{row.pf}</td>}
+                                {hasPivot2 && <td className="p-3 text-right font-mono text-slate-800">{row.pf2}</td>}
                                 {hasPivot && (
                                   <td className="p-3 text-center text-lg">
                                     {row.ok ? <span className="text-green-600">✔</span> : <span className="text-red-600">✘</span>}

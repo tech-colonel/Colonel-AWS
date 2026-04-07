@@ -121,6 +121,7 @@ async function jiomartProcessor(
 
     'Final GST Rate': r['Final GST Rate'],
     'Customer\'s Delivery State': r["Customer's Delivery State"],
+    'Item Quantity': num(r['Item Quantity']),
     'Taxable Value (Final Invoice Amount -Taxes)': num(r['Taxable Value (Final Invoice Amount -Taxes)']),
     'IGST Amount': num(r['IGST Amount']),
     'CGST Amount': num(r['CGST Amount']),
@@ -170,6 +171,8 @@ async function jiomartProcessor(
     outputWorkbook: wb,
     processedData: working,
     workingSheetData: working,
+    gstrB2C: gstrB2C,
+    gstrHSN: gstrHSN,
     uniqueProductIds: []
 
   };
