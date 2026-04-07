@@ -608,9 +608,9 @@ const flipkart = {
       const { workbook, finalData, processFile, processPath, Model } = pending;
 
       await fs.ensureDir(OUTPUT_DIR);
-      await Model.sync({ alter: true });
+      await Model.sync({ alter: false });
       await Model.bulkCreate(finalData, { returning: true });
-      
+
       // Flipkart uses XLSX_STYLE.writeFile
       XLSX_STYLE.writeFile(workbook, processPath);
 
