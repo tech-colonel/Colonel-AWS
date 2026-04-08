@@ -143,8 +143,57 @@ const generateAmazonWorkingFile = async (brandId, agentId, options, fileBuffer) 
   };
 };
 
+const addSkuMasterSingle = async (brandId, agentId, skuData) => {
+  const brand = await Brand.findByPk(brandId);
+  if (!brand) throw new Error('Brand not found');
+
+  const brandDb = getBrandConnection(brand.db_name);
+  const BrandAgentModel = getBrandAgentModel(brandDb);
+
+  const [brandAgent] = await BrandAgentModel.findOrCreate({
+    where: { brand_id: brandId, agent_id: agentId }
+  });
+
+  const currentSkuMaster = brandAgent.sku_master || [];
+  // Ensure we append the new SKU matching the format. The upload uses whatever is in Excel.
+  // The processor uses 'Sales portal SKU' and 'Tally new SKU'.
+  const updatedSkuMaster = [...currentSkuMaster, {
+    'Sales portal SKU': skuData.salesPortalSku,
+    'Tally new SKU': skuData.tallyNewSku
+  }];
+
+  await brandAgent.update({ sku_master: updatedSkuMaster });
+  return { success: true, count: updatedSkuMaster.length };
+};
+
+const deleteSkuMasterSingle = async (brandId, agentId, tallySku) => {
+  const brand = await Brand.findByPk(brandId);
+  if (!brand) throw new Error('Brand not found');
+
+  const brandDb = getBrandConnection(brand.db_name);
+  const BrandAgentModel = getBrandAgentModel(brandDb);
+
+  const [brandAgent] = await BrandAgentModel.findOrCreate({
+    where: { brand_id: brandId, agent_id: agentId }
+  });
+
+  const currentSkuMaster = brandAgent.sku_master || [];
+  
+  // Filter out the matching Tally SKU
+  // We check different variations since it comes from excel ('Tally new SKU', 'Tally SKU', etc.)
+  const updatedSkuMaster = currentSkuMaster.filter(sku => {
+    const currentTallySku = sku['Tally new SKU'] || sku['Tally SKU'] || sku.tallyNewSku || sku.fg || sku.FG;
+    return currentTallySku !== tallySku;
+  });
+
+  await brandAgent.update({ sku_master: updatedSkuMaster });
+  return { success: true, count: updatedSkuMaster.length };
+};
+
 module.exports = {
   uploadMasterData,
   getMasterData,
-  generateAmazonWorkingFile
+  generateAmazonWorkingFile,
+  addSkuMasterSingle,
+  deleteSkuMasterSingle
 };

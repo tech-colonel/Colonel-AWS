@@ -134,6 +134,38 @@ async function ensureDir() {
   await fs.mkdir(OUTPUT_DIR, { recursive: true });
 }
 ensureDir();
+
+const addSkuMasterSingle = async (req, res, next) => {
+  try {
+    const { brandId, agentId } = req.params;
+    const { salesPortalSku, tallyNewSku } = req.body;
+    
+    if (!salesPortalSku || !tallyNewSku) {
+      return res.status(400).json({ error: 'Both Sales portal SKU and Tally new SKU are required' });
+    }
+
+    const result = await salesService.addSkuMasterSingle(brandId, agentId, { salesPortalSku, tallyNewSku });
+    res.json({ message: 'SKU mapping added successfully', ...result });
+  } catch (error) {
+    next(error);
+  }
+};
+
+const deleteSkuMasterSingle = async (req, res, next) => {
+  try {
+    const { brandId, agentId } = req.params;
+    const { tallySku } = req.query;
+    
+    if (!tallySku) {
+      return res.status(400).json({ error: 'Tally SKU is required' });
+    }
+
+    const result = await salesService.deleteSkuMasterSingle(brandId, agentId, tallySku);
+    res.json({ message: 'SKU mapping deleted successfully', ...result });
+  } catch (error) {
+    next(error);
+  }
+};
 const amazon = {
   uploadSkuMaster: async (req, res, next) => {
     try {
@@ -638,5 +670,7 @@ module.exports = {
   flipkart,
   getWorkingFiles,
   deleteWorkingFile,
-  downloadWorkingFile
+  downloadWorkingFile,
+  addSkuMasterSingle,
+  deleteSkuMasterSingle
 };

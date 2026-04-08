@@ -8,6 +8,7 @@ import AdminDashboard from './pages/admin/AdminDashboard';
 import BrandsPage from './pages/admin/BrandsPage';
 import AgentsPage from './pages/admin/AgentsPage';
 import AssignmentsPage from './pages/admin/AssignmentsPage';
+import BrandOverviewPage from './pages/admin/BrandOverviewPage';
 import BrandSelection from './pages/accountant/BrandSelection';
 import BrandDashboard from './pages/accountant/BrandDashboard';
 import BrandAgentsInventory from './pages/accountant/BrandAgentsInventory';
@@ -29,6 +30,7 @@ function App() {
                 <Routes>
                   <Route path="/" element={<AdminDashboard />} />
                   <Route path="/brands" element={<BrandsPage />} />
+                  <Route path="/brands/:id" element={<BrandOverviewPage />} />
                   <Route path="/agents" element={<AgentsPage />} />
                   <Route path="/users" element={<AdminDashboard />} />
                   <Route path="/assignments" element={<AssignmentsPage />} />

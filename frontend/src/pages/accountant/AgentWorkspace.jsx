@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useParams, useNavigate, useLocation } from 'react-router-dom';
 import DashboardLayout from '../../components/layout/DashboardLayout';
-import { LayoutDashboard, Bot, Upload, FileText, Download, Trash2, Eye, Plus, Loader2, BarChart3 } from 'lucide-react';
+import { LayoutDashboard, Bot, Upload, FileText, Download, Trash2, Eye, Plus, Loader2, BarChart3, Search, X } from 'lucide-react';
 import CFODashboardLauncher from '../cfo/CFODashboardLauncher';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../../components/ui/card';
 import { Button } from '../../components/ui/button';
@@ -64,6 +64,13 @@ const AgentWorkspace = () => {
 
   const [skuFile, setSkuFile] = useState(null);
   const [ledgerFile, setLedgerFile] = useState(null);
+
+  // SKU Modal extra state
+  const [skuSearch, setSkuSearch] = useState('');
+  const [newSkuSalesPortal, setNewSkuSalesPortal] = useState('');
+  const [newSkuTallyNew, setNewSkuTallyNew] = useState('');
+  const [isAddingSku, setIsAddingSku] = useState(false);
+  const [deletingSkuKey, setDeletingSkuKey] = useState(null);
 
   const [formData, setFormData] = useState({
     month: '',
@@ -135,6 +142,7 @@ const AgentWorkspace = () => {
       if (currentAgent?.name?.toLowerCase().includes('myntra')) return 'myntra';
       if (currentAgent?.name?.toLowerCase().includes('blinkit')) return 'blinkit';
       if (currentAgent?.name?.toLowerCase().includes('firstcry')) return 'firstcry';
+      if (currentAgent?.name?.toLowerCase().includes('jiomart')) return 'jiomart';
       return 'amazon';
     } catch (error) {
       return 'amazon';
@@ -184,6 +192,44 @@ const AgentWorkspace = () => {
       fetchData();
     } catch (error) {
       toast.error('Upload failed');
+    }
+  };
+
+  const handleAddSingleSku = async () => {
+    if (!newSkuSalesPortal.trim() || !newSkuTallyNew.trim()) {
+      toast.error('Both Sales Portal SKU and Tally New SKU are required');
+      return;
+    }
+    setIsAddingSku(true);
+    try {
+      await api.post(`/api/brands/${brandId}/agents/${agentId}/master/sku/add`, {
+        salesPortalSku: newSkuSalesPortal.trim(),
+        tallyNewSku: newSkuTallyNew.trim()
+      });
+      toast.success('SKU added successfully');
+      setNewSkuSalesPortal('');
+      setNewSkuTallyNew('');
+      fetchData();
+    } catch (error) {
+      toast.error(error.response?.data?.error || 'Failed to add SKU');
+    } finally {
+      setIsAddingSku(false);
+    }
+  };
+
+  const handleDeleteSingleSku = async (tallySku) => {
+    if (!window.confirm(`Delete SKU "${tallySku}"? This cannot be undone.`)) return;
+    setDeletingSkuKey(tallySku);
+    try {
+      await api.delete(`/api/brands/${brandId}/agents/${agentId}/master/sku/delete`, {
+        params: { tallySku }
+      });
+      toast.success('SKU deleted successfully');
+      fetchData();
+    } catch (error) {
+      toast.error(error.response?.data?.error || 'Failed to delete SKU');
+    } finally {
+      setDeletingSkuKey(null);
     }
   };
 
@@ -376,6 +422,7 @@ const AgentWorkspace = () => {
   const isBlinkit = agent?.name?.toLowerCase().includes('blinkit');
   const isFirstcry = agent?.name?.toLowerCase().includes('firstcry');
   const isAmazon = agent?.name?.toLowerCase().includes('amazon');
+  const isJiomart = agent?.name?.toLowerCase().includes('jiomart');
 
   return (
     <DashboardLayout sidebarItems={sidebarItems}>
@@ -620,42 +667,138 @@ const AgentWorkspace = () => {
           </Dialog>
 
           {/* View SKU Master Modal */}
-          <Dialog open={showViewSkuModal} onOpenChange={setShowViewSkuModal}>
-            <DialogContent onClose={() => setShowViewSkuModal(false)} className="max-w-4xl max-h-[80vh] overflow-auto">
+          <Dialog open={showViewSkuModal} onOpenChange={(open) => { setShowViewSkuModal(open); if (!open) { setSkuSearch(''); setNewSkuSalesPortal(''); setNewSkuTallyNew(''); } }}>
+            <DialogContent onClose={() => { setShowViewSkuModal(false); setSkuSearch(''); setNewSkuSalesPortal(''); setNewSkuTallyNew(''); }} className="max-w-4xl max-h-[90vh] flex flex-col overflow-hidden">
               <DialogHeader>
                 <DialogTitle>SKU Master Data ({masterData.sku_master?.length || 0} records)</DialogTitle>
               </DialogHeader>
-              <div>
-                {masterData.sku_master?.length > 0 ? (
-                  <div className="border rounded-lg overflow-auto max-h-[500px]">
+
+              {/* Add New SKU Section */}
+              <div className="border border-slate-200 rounded-lg p-4 bg-slate-50 space-y-3">
+                <p className="text-xs font-semibold text-slate-700 uppercase tracking-wide">Add New SKU Manually</p>
+                <div className="flex gap-2 items-end">
+                  <div className="flex-1">
+                    <Label htmlFor="new-tally-sku" className="text-xs text-slate-600">Tally New SKU *</Label>
+                    <Input
+                      id="new-tally-sku"
+                      placeholder="e.g. PROD-001-FG"
+                      value={newSkuTallyNew}
+                      onChange={(e) => setNewSkuTallyNew(e.target.value)}
+                      className="mt-1 h-8 text-sm"
+                    />
+                  </div>
+                  <div className="flex-1">
+                    <Label htmlFor="new-sales-portal-sku" className="text-xs text-slate-600">Sales Portal SKU *</Label>
+                    <Input
+                      id="new-sales-portal-sku"
+                      placeholder="e.g. B08XYZ123"
+                      value={newSkuSalesPortal}
+                      onChange={(e) => setNewSkuSalesPortal(e.target.value)}
+                      className="mt-1 h-8 text-sm"
+                    />
+                  </div>
+                  <Button
+                    onClick={handleAddSingleSku}
+                    disabled={isAddingSku}
+                    size="sm"
+                    className="h-8 px-4 shrink-0"
+                  >
+                    {isAddingSku ? <Loader2 className="h-3 w-3 animate-spin" /> : <Plus className="h-3 w-3 mr-1" />}
+                    {isAddingSku ? 'Adding...' : 'Add SKU'}
+                  </Button>
+                </div>
+              </div>
+
+              {/* Search Bar */}
+              <div className="relative">
+                <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-400" />
+                <Input
+                  placeholder="Search by Tally New SKU or Sales Portal SKU..."
+                  value={skuSearch}
+                  onChange={(e) => setSkuSearch(e.target.value)}
+                  className="pl-9 h-9 text-sm"
+                />
+                {skuSearch && (
+                  <button
+                    onClick={() => setSkuSearch('')}
+                    className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
+                  >
+                    <X className="h-4 w-4" />
+                  </button>
+                )}
+              </div>
+
+              {/* SKU Table */}
+              <div className="flex-1 overflow-auto border rounded-lg">
+                {masterData.sku_master?.length > 0 ? (() => {
+                  const filtered = masterData.sku_master.filter(row => {
+                    if (!skuSearch.trim()) return true;
+                    const q = skuSearch.toLowerCase();
+                    const tally = (row['Tally new SKU'] || row['Tally SKU'] || row.tallyNewSku || row.fg || row.FG || '').toString().toLowerCase();
+                    const portal = (row['Sales portal SKU'] || row['SKU'] || row.salesPortalSku || row.sku || '').toString().toLowerCase();
+                    return tally.includes(q) || portal.includes(q);
+                  });
+
+                  return filtered.length > 0 ? (
                     <Table>
                       <TableHeader>
                         <TableRow>
-                          {Object.keys(masterData.sku_master[0]).map(key => (
-                            <TableHead key={key}>{key}</TableHead>
-                          ))}
+                          <TableHead className="text-xs">Tally New SKU</TableHead>
+                          <TableHead className="text-xs">Sales Portal SKU</TableHead>
+                          <TableHead className="text-right text-xs">Action</TableHead>
                         </TableRow>
                       </TableHeader>
                       <TableBody>
-                        {masterData.sku_master.slice(0, 50).map((row, idx) => (
-                          <TableRow key={idx}>
-                            {Object.values(row).map((val, i) => (
-                              <TableCell key={i} className="text-xs">{val}</TableCell>
-                            ))}
-                          </TableRow>
-                        ))}
+                        {filtered.map((row, idx) => {
+                          const tallySku = row['Tally new SKU'] || row['Tally SKU'] || row.tallyNewSku || row.fg || row.FG || '';
+                          const portalSku = row['Sales portal SKU'] || row['SKU'] || row.salesPortalSku || row.sku || '';
+                          return (
+                            <TableRow key={idx}>
+                              <TableCell className="text-xs font-medium">{tallySku || <span className="text-slate-400 italic">—</span>}</TableCell>
+                              <TableCell className="text-xs">{portalSku || <span className="text-slate-400 italic">—</span>}</TableCell>
+                              <TableCell className="text-right">
+                                <Button
+                                  size="sm"
+                                  variant="ghost"
+                                  className="h-7 w-7 p-0 text-red-500 hover:text-red-700 hover:bg-red-50"
+                                  onClick={() => handleDeleteSingleSku(tallySku)}
+                                  disabled={deletingSkuKey === tallySku}
+                                  title="Delete this SKU"
+                                >
+                                  {deletingSkuKey === tallySku
+                                    ? <Loader2 className="h-3 w-3 animate-spin" />
+                                    : <Trash2 className="h-3 w-3" />}
+                                </Button>
+                              </TableCell>
+                            </TableRow>
+                          );
+                        })}
                       </TableBody>
                     </Table>
-                    {masterData.sku_master.length > 50 && (
-                      <p className="text-xs text-slate-500 p-3 text-center border-t">
-                        Showing 50 of {masterData.sku_master.length} records
-                      </p>
-                    )}
-                  </div>
-                ) : (
+                  ) : (
+                    <div className="py-12 text-center text-slate-500 text-sm">
+                      <Search className="h-8 w-8 mx-auto mb-2 text-slate-300" />
+                      No SKUs found for "{skuSearch}"
+                    </div>
+                  );
+                })() : (
                   <p className="text-sm text-slate-600 py-8 text-center">No SKU master data uploaded</p>
                 )}
               </div>
+
+              {/* Footer with count info */}
+              {masterData.sku_master?.length > 0 && skuSearch && (
+                <p className="text-xs text-slate-500 text-center">
+                  Showing{' '}
+                  {masterData.sku_master.filter(row => {
+                    const q = skuSearch.toLowerCase();
+                    const tally = (row['Tally new SKU'] || row['Tally SKU'] || row.tallyNewSku || row.fg || row.FG || '').toString().toLowerCase();
+                    const portal = (row['Sales portal SKU'] || row['SKU'] || row.salesPortalSku || row.sku || '').toString().toLowerCase();
+                    return tally.includes(q) || portal.includes(q);
+                  }).length}{' '}
+                  of {masterData.sku_master.length} records
+                </p>
+              )}
             </DialogContent>
           </Dialog>
 
@@ -947,13 +1090,17 @@ const AgentWorkspace = () => {
                 {verificationData?.summary && (() => {
                   const wf = verificationData.summary.workingFile;
                   const pf = verificationData.summary.pivotFile;
+                  const pf2 = verificationData.summary.gstrHSNFile;
                   const hasPivot = !!pf;
+                  const hasPivot2 = !!pf2;
                   const fmt  = (n) => n?.toLocaleString('en-IN', { minimumFractionDigits: 2 });
                   const fmtQ = (n) => n?.toLocaleString('en-IN');
                   const match = (a, b) => Math.abs((a || 0) - (b || 0)) < 0.01;
+                  const match3 = (a, b, c) => match(a, b) && match(b, c);
 
                   let wfTitle = 'Working File';
                   let pfTitle = 'Pivot File';
+                  let pf2Title = '';
 
                   if (isMyntra) {
                       wfTitle = 'Accounting Sheet';
@@ -961,18 +1108,33 @@ const AgentWorkspace = () => {
                   } else if (isBlinkit) {
                       wfTitle = 'Sales Report';
                       pfTitle = 'GT Report';
+                  } else if (isJiomart) {
+                      wfTitle = 'Working';
+                      pfTitle = 'GSTR B2C';
+                      pf2Title = 'GSTR HSN';
                   }
 
-                  let rows = [
-                    { label: 'Total Quantity',    wf: fmtQ(wf.quantity),          pf: hasPivot ? fmtQ(pf.quantity) : null,          ok: hasPivot ? match(wf.quantity,     pf.quantity) : true },
-                    { label: isMyntra ? 'Base Value' : isBlinkit ? 'Sum of Taxable Value' : 'Taxable Value',     wf: `₹${fmt(wf.taxableValue)}`, pf: hasPivot ? `₹${fmt(pf.taxableValue)}` : null, ok: hasPivot ? match(wf.taxableValue, pf.taxableValue) : true },
-                    { label: isMyntra ? 'CGST Amount' : isBlinkit ? 'Sum of CGST Value' : 'Final CGST',        wf: `₹${fmt(wf.cgst)}`,        pf: hasPivot ? `₹${fmt(pf.cgst)}` : null,        ok: hasPivot ? match(wf.cgst,         pf.cgst) : true },
-                    { label: isMyntra ? 'SGST Amount' : isBlinkit ? 'Sum of SGST Value' : 'Final SGST',        wf: `₹${fmt(wf.sgst)}`,        pf: hasPivot ? `₹${fmt(pf.sgst)}` : null,        ok: hasPivot ? match(wf.sgst,         pf.sgst) : true },
-                    { label: isMyntra ? 'IGST Amount' : isBlinkit ? 'Sum of IGST Value' : 'Final IGST',        wf: `₹${fmt(wf.igst)}`,        pf: hasPivot ? `₹${fmt(pf.igst)}` : null,        ok: hasPivot ? match(wf.igst,         pf.igst) : true },
-                  ];
+                  let rows = [];
 
-                  if (isMyntra || isBlinkit) {
-                    rows = rows.filter(r => r.label !== 'Total Quantity');
+                  if (isJiomart) {
+                      rows = [
+                        { label: 'Total Quantity',    wf: fmtQ(wf.quantity),          pf: hasPivot ? fmtQ(pf.quantity) : null,          pf2: hasPivot2 ? fmtQ(pf2.quantity) : null,          ok: (hasPivot && hasPivot2) ? match3(wf.quantity, pf.quantity, pf2.quantity) : true },
+                        { label: 'Taxable Value',     wf: `₹${fmt(wf.taxableValue)}`, pf: hasPivot ? `₹${fmt(pf.taxableValue)}` : null, pf2: hasPivot2 ? `₹${fmt(pf2.taxableValue)}` : null, ok: (hasPivot && hasPivot2) ? match3(wf.taxableValue, pf.taxableValue, pf2.taxableValue) : true },
+                        { label: 'IGST Amount',       wf: `₹${fmt(wf.igst)}`,         pf: hasPivot ? `₹${fmt(pf.igst)}` : null,         pf2: hasPivot2 ? `₹${fmt(pf2.igst)}` : null,         ok: (hasPivot && hasPivot2) ? match3(wf.igst, pf.igst, pf2.igst) : true },
+                        { label: 'CGST Amount',       wf: `₹${fmt(wf.cgst)}`,         pf: hasPivot ? `₹${fmt(pf.cgst)}` : null,         pf2: hasPivot2 ? `₹${fmt(pf2.cgst)}` : null,         ok: (hasPivot && hasPivot2) ? match3(wf.cgst, pf.cgst, pf2.cgst) : true },
+                        { label: 'SGST Amount',       wf: `₹${fmt(wf.sgst)}`,         pf: hasPivot ? `₹${fmt(pf.sgst)}` : null,         pf2: hasPivot2 ? `₹${fmt(pf2.sgst)}` : null,         ok: (hasPivot && hasPivot2) ? match3(wf.sgst, pf.sgst, pf2.sgst) : true },
+                      ];
+                  } else {
+                      rows = [
+                        { label: 'Total Quantity',    wf: fmtQ(wf.quantity),          pf: hasPivot ? fmtQ(pf.quantity) : null,          ok: hasPivot ? match(wf.quantity,     pf.quantity) : true },
+                        { label: isMyntra ? 'Base Value' : isBlinkit ? 'Sum of Taxable Value' : 'Taxable Value',     wf: `₹${fmt(wf.taxableValue)}`, pf: hasPivot ? `₹${fmt(pf.taxableValue)}` : null, ok: hasPivot ? match(wf.taxableValue, pf.taxableValue) : true },
+                        { label: isMyntra ? 'CGST Amount' : isBlinkit ? 'Sum of CGST Value' : 'Final CGST',        wf: `₹${fmt(wf.cgst)}`,        pf: hasPivot ? `₹${fmt(pf.cgst)}` : null,        ok: hasPivot ? match(wf.cgst,         pf.cgst) : true },
+                        { label: isMyntra ? 'SGST Amount' : isBlinkit ? 'Sum of SGST Value' : 'Final SGST',        wf: `₹${fmt(wf.sgst)}`,        pf: hasPivot ? `₹${fmt(pf.sgst)}` : null,        ok: hasPivot ? match(wf.sgst,         pf.sgst) : true },
+                        { label: isMyntra ? 'IGST Amount' : isBlinkit ? 'Sum of IGST Value' : 'Final IGST',        wf: `₹${fmt(wf.igst)}`,        pf: hasPivot ? `₹${fmt(pf.igst)}` : null,        ok: hasPivot ? match(wf.igst,         pf.igst) : true },
+                      ];
+                      if (isMyntra || isBlinkit) {
+                        rows = rows.filter(r => r.label !== 'Total Quantity');
+                      }
                   }
 
                   const allMatch = rows.every(r => r.ok);
@@ -983,7 +1145,7 @@ const AgentWorkspace = () => {
                         allMatch ? (
                           <div className="flex items-center gap-2 bg-green-50 border border-green-200 rounded-lg px-4 py-2">
                             <span className="text-green-600 text-lg">✅</span>
-                            <p className="text-green-800 text-sm font-medium">All totals match between {wfTitle} and {pfTitle}.</p>
+                            <p className="text-green-800 text-sm font-medium">All totals match between {wfTitle}, {pfTitle}{hasPivot2 ? `, and ${pf2Title}` : ''}.</p>
                           </div>
                         ) : (
                           <div className="flex items-center gap-2 bg-red-50 border border-red-200 rounded-lg px-4 py-2">
@@ -1000,6 +1162,7 @@ const AgentWorkspace = () => {
                               <th className="p-3 text-left font-semibold text-slate-700">Metric</th>
                               <th className="p-3 text-right font-semibold text-slate-700">{wfTitle}</th>
                               {hasPivot && <th className="p-3 text-right font-semibold text-slate-700">{pfTitle}</th>}
+                              {hasPivot2 && <th className="p-3 text-right font-semibold text-slate-700">{pf2Title}</th>}
                               {hasPivot && <th className="p-3 text-center font-semibold text-slate-700">Match</th>}
                             </tr>
                           </thead>
@@ -1009,6 +1172,7 @@ const AgentWorkspace = () => {
                                 <td className="p-3 font-medium text-slate-700">{row.label}</td>
                                 <td className="p-3 text-right font-mono text-slate-800">{row.wf}</td>
                                 {hasPivot && <td className="p-3 text-right font-mono text-slate-800">{row.pf}</td>}
+                                {hasPivot2 && <td className="p-3 text-right font-mono text-slate-800">{row.pf2}</td>}
                                 {hasPivot && (
                                   <td className="p-3 text-center text-lg">
                                     {row.ok ? <span className="text-green-600">✔</span> : <span className="text-red-600">✘</span>}

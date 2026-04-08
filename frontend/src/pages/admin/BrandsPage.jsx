@@ -12,6 +12,8 @@ import api from '../../lib/api';
 import { toast } from 'sonner';
 import { format } from 'date-fns';
 
+import { useNavigate } from 'react-router-dom';
+
 const sidebarItems = [
   { path: '/admin', label: 'Dashboard', icon: LayoutDashboard, testId: 'nav-dashboard' },
   { path: '/admin/brands', label: 'Brands', icon: Building2, testId: 'nav-brands' },
@@ -21,6 +23,7 @@ const sidebarItems = [
 ];
 
 const BrandsPage = () => {
+  const navigate = useNavigate();
   const [brands, setBrands] = useState([]);
   const [showModal, setShowModal] = useState(false);
   const [formData, setFormData] = useState({ name: '', description: '', image_url: '' });
@@ -36,6 +39,10 @@ const BrandsPage = () => {
     } catch (error) {
       toast.error('Failed to load brands');
     }
+  };
+
+  const handleBrandClick = (brand) => {
+    navigate(`/admin/brands/${brand.id}`);
   };
 
   const handleSubmit = async (e) => {
@@ -77,33 +84,37 @@ const BrandsPage = () => {
                 No brands created yet
               </div>
             ) : (
-              <div className="border border-slate-200 rounded-lg">
-                <Table>
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead>Name</TableHead>
-                      <TableHead>Description</TableHead>
-                      <TableHead>Database</TableHead>
-                      <TableHead>Created</TableHead>
-                      <TableHead>Status</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {brands.map((brand) => (
-                      <TableRow key={brand.id} data-testid={`brand-row-${brand.id}`}>
-                        <TableCell className="font-medium">{brand.name}</TableCell>
-                        <TableCell className="max-w-xs truncate">{brand.description || 'N/A'}</TableCell>
-                        <TableCell className="font-mono text-xs">{brand.db_name}</TableCell>
-                        <TableCell className="text-sm">
-                          {brand.createdAt ? format(new Date(brand.createdAt), 'dd MMM yyyy') : 'N/A'}
-                        </TableCell>
-                        <TableCell>
-                          <Badge variant="success">Active</Badge>
-                        </TableCell>
-                      </TableRow>
-                    ))}
-                  </TableBody>
-                </Table>
+              <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">
+                {brands.map((brand) => (
+                  <Card 
+                    key={brand.id} 
+                    className="cursor-pointer hover:border-blue-500 transition-colors shadow-sm"
+                    onClick={() => handleBrandClick(brand)}
+                    data-testid={`brand-card-${brand.id}`}
+                  >
+                    <CardHeader className="flex flex-row items-center gap-4 pb-2">
+                      <div className="w-12 h-12 bg-slate-100 rounded-lg flex items-center justify-center overflow-hidden shrink-0">
+                        {brand.image_url ? (
+                          <img src={brand.image_url} alt={brand.name} className="w-full h-full object-cover" />
+                        ) : (
+                          <Building2 className="w-6 h-6 text-slate-400" />
+                        )}
+                      </div>
+                      <div className="flex-1 overflow-hidden">
+                        <CardTitle className="text-lg truncate">{brand.name}</CardTitle>
+                        <Badge variant="success" className="mt-1">Active</Badge>
+                      </div>
+                    </CardHeader>
+                    <CardContent>
+                      <p className="text-sm text-slate-600 line-clamp-2 h-10 mb-4">
+                        {brand.description || 'No description provided'}
+                      </p>
+                      <div className="text-xs text-slate-500 font-mono bg-slate-50 p-2 rounded truncate">
+                        DB: {brand.db_name}
+                      </div>
+                    </CardContent>
+                  </Card>
+                ))}
               </div>
             )}
           </CardContent>

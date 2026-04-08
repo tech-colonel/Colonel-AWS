@@ -11,5 +11,6 @@ router.get('/brands/:id', authenticateToken, brandController.getBrandById);
 router.post('/brands', authenticateToken, authorize('admin'), brandController.createBrand);
 router.post('/brands/assign-user', authenticateToken, authorize('admin'), brandController.assignUserToBrand);
 router.get('/brands/:brandId/users', authenticateToken, authorize('admin'), brandController.getBrandUsers);
+router.get('/brands/:id/status', authenticateToken, authorize('admin'), brandController.getBrandStatus);
 
 module.exports = router;
