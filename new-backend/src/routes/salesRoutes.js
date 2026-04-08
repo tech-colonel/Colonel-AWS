@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const multer = require('multer');
-const { flipkart, getWorkingFiles, deleteWorkingFile, downloadWorkingFile } = require('../controllers/salesController');
+const { flipkart, getWorkingFiles, deleteWorkingFile, downloadWorkingFile, addSkuMasterSingle, deleteSkuMasterSingle } = require('../controllers/salesController');
 const salesAmazonController = require('../controllers/agents/sales-amazon/salesAmazonController');
 const salesMyntraController = require('../controllers/agents/sales-myntra/salesMyntraController');
 const { authenticateToken } = require('../middleware/authMiddleware');
@@ -12,6 +12,10 @@ const upload = multer({ storage: multer.memoryStorage() });
 router.get('/brands/:brandId/agents/:agentId/working-files', authenticateToken, getWorkingFiles);
 router.delete('/brands/:brandId/agents/:agentId/working-files/:fileId', authenticateToken, deleteWorkingFile);
 router.get('/brands/:brandId/agents/:agentId/working-files/:fileId/download', authenticateToken, downloadWorkingFile);
+
+// ─── Shared SKU Single Entry Routes (agent-agnostic) ──────────────────────────
+router.post('/brands/:brandId/agents/:agentId/master/sku/add', authenticateToken, addSkuMasterSingle);
+router.delete('/brands/:brandId/agents/:agentId/master/sku/delete', authenticateToken, deleteSkuMasterSingle);
 
 // ─── Amazon Routes ─────────────────────────────────────────────────────────────
 router.get('/brands/:brandId/agents/:agentId/amazon/master', authenticateToken, salesAmazonController.getMasterData);

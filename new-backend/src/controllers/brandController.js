@@ -1,6 +1,10 @@
 const { Brand, BrandUser, User, Agent } = require('../models/master');
 const { getBrandConnection, createBrandDatabase } = require('../config/database');
-const { getBrandAgentModel } = require('../models/brand');
+const { getBrandAgentModel, getDynamicModel } = require('../models/brand');
+const path = require('path');
+const fs = require('fs-extra');
+
+const OUTPUT_DIR = path.join(__dirname, '../../outputs');
 
 /**
  * Create a new brand and its dedicated database
@@ -120,10 +124,112 @@ const getBrandUsers = async (req, res, next) => {
   }
 };
 
+const getBrandStatus = async (req, res, next) => {
+  try {
+    const brand = await Brand.findByPk(req.params.id, {
+      include: [{ model: Agent }]
+    });
+
+    if (!brand) return res.status(404).json({ error: 'Brand not found' });
+
+    const brandDb = getBrandConnection(brand.db_name);
+    const agentsProgress = [];
+
+    const numToMonth = {
+      1: "January", 2: "February", 3: "March", 4: "April",
+      5: "May", 6: "June", 7: "July", 8: "August",
+      9: "September", 10: "October", 11: "November", 12: "December"
+    };
+
+    // Make sure we have tables ready before trying to query
+    let allTables = [];
+    try {
+      allTables = await brandDb.getQueryInterface().showAllTables();
+    } catch (e) {
+      console.warn("Failed to fetch tables for brand", brand.name);
+    }
+
+    const BrandAgentModel = getBrandAgentModel(brandDb);
+    const brandAgentsData = await BrandAgentModel.findAll();
+    
+    const masterDataMap = {};
+    for (const ba of brandAgentsData) {
+      masterDataMap[ba.agent_id] = {
+        hasSkuMaster: Array.isArray(ba.sku_master) && ba.sku_master.length > 0,
+        hasLedgerMaster: Array.isArray(ba.ledger_master) && ba.ledger_master.length > 0,
+        skuMasterCount: Array.isArray(ba.sku_master) ? ba.sku_master.length : 0,
+        ledgerMasterCount: Array.isArray(ba.ledger_master) ? ba.ledger_master.length : 0
+      };
+    }
+
+    for (const agent of brand.Agents) {
+      const tableName = agent.name.replace(/[^a-zA-Z0-9]/g, '_').toLowerCase();
+      let generatedFiles = [];
+
+      if (allTables.includes(tableName)) {
+        try {
+          const Model = getDynamicModel(brandDb, tableName, agent.columns);
+          
+          const rows = await Model.findAll({
+            attributes: ['id', 'month', 'year', 'filename', 'file_type', 'created_at'],
+            order: [['created_at', 'DESC']],
+            raw: true
+          });
+
+          const uniqueFilesMap = new Map();
+          for (const row of rows) {
+            if (row.filename && !uniqueFilesMap.has(row.filename)) {
+              uniqueFilesMap.set(row.filename, row);
+            }
+          }
+
+          const distinctMonths = Array.from(uniqueFilesMap.values());
+
+          generatedFiles = distinctMonths.map(row => {
+            const filePath = row.filename ? path.join(OUTPUT_DIR, row.filename) : null;
+            const fileExists = filePath ? fs.existsSync(filePath) : false;
+
+            return {
+              month: numToMonth[row.month] || row.month,
+              year: row.year,
+              filename: row.filename,
+              fileType: row.file_type,
+              fileId: row.id,
+              fileExists
+            };
+          });
+        } catch (err) {
+          console.error(`Query failed for agent ${agent.name} on table ${tableName}`, err);
+        }
+      }
+
+      const masterStatus = masterDataMap[agent.id] || { 
+        hasSkuMaster: false, hasLedgerMaster: false, skuMasterCount: 0, ledgerMasterCount: 0 
+      };
+
+      agentsProgress.push({
+        agentId: agent.id,
+        agentName: agent.name,
+        generatedFiles,
+        masterStatus
+      });
+    }
+
+    res.json({
+      brandId: brand.id,
+      brandName: brand.name,
+      agents: agentsProgress
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
 module.exports = {
   createBrand,
   getAllBrands,
   getBrandById,
   assignUserToBrand,
-  getBrandUsers
+  getBrandUsers,
+  getBrandStatus
 };
