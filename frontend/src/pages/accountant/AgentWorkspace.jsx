@@ -13,6 +13,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../../componen
 import api from '../../lib/api';
 import { toast } from 'sonner';
 import { format } from 'date-fns';
+import InvoiceAgentWorkspace from './InvoiceAgentWorkspace';
 
 const AgentWorkspace = () => {
   const { brandId, agentId } = useParams();
@@ -423,6 +424,7 @@ const AgentWorkspace = () => {
   const isFirstcry = agent?.name?.toLowerCase().includes('firstcry');
   const isAmazon = agent?.name?.toLowerCase().includes('amazon');
   const isJiomart = agent?.name?.toLowerCase().includes('jiomart');
+  const isInvoice = agent?.name?.toLowerCase().includes('invoice');
 
   return (
     <DashboardLayout sidebarItems={sidebarItems}>
@@ -435,6 +437,25 @@ const AgentWorkspace = () => {
           cfoConfig={cfoConfig}
           setCfoConfig={setCfoConfig}
         />
+      ) : isInvoice ? (
+        <div className="p-6" data-testid="invoice-agent-workspace">
+          <div className="mb-8 flex justify-between items-start">
+            <div>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => navigate(`/brands/${brandId}/dashboard`)}
+                className="mb-4"
+                data-testid="back-button"
+              >
+                ← Back to Dashboard
+              </Button>
+              <h1 className="text-3xl font-bold text-slate-900 tracking-tight">{agent?.name}</h1>
+              <p className="text-slate-600 mt-1">{agent?.description}</p>
+            </div>
+          </div>
+          <InvoiceAgentWorkspace agent={agent} />
+        </div>
       ) : (
         <>
           <div className="p-6" data-testid="agent-workspace">

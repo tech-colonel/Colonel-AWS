@@ -4,6 +4,7 @@ const multer = require('multer');
 const { flipkart, getWorkingFiles, deleteWorkingFile, downloadWorkingFile, addSkuMasterSingle, deleteSkuMasterSingle } = require('../controllers/salesController');
 const salesAmazonController = require('../controllers/agents/sales-amazon/salesAmazonController');
 const salesMyntraController = require('../controllers/agents/sales-myntra/salesMyntraController');
+const salesShopifyController = require('../controllers/agents/sales-shopify/salesShopifyController');
 const { authenticateToken } = require('../middleware/authMiddleware');
 
 const upload = multer({ storage: multer.memoryStorage() });
@@ -95,5 +96,15 @@ router.post('/brands/:brandId/agents/:agentId/jiomart/generate', authenticateTok
 router.post('/brands/:brandId/agents/:agentId/jiomart/generate/preview', authenticateToken, upload.single('file'), salesJiomartController.generatePreview);
 router.post('/brands/:brandId/agents/:agentId/jiomart/generate/commit', authenticateToken, salesJiomartController.generateCommit);
 router.post('/brands/:brandId/agents/:agentId/jiomart/generate/discard', authenticateToken, salesJiomartController.generateDiscard);
+
+// ─── Shopify Routes ───────────────────────────────────────────────────────────
+router.get('/brands/:brandId/agents/:agentId/shopify/master', authenticateToken, salesShopifyController.getMasterData);
+router.post('/brands/:brandId/agents/:agentId/shopify/master/sku', authenticateToken, upload.single('file'), salesShopifyController.uploadSkuMaster);
+router.post('/brands/:brandId/agents/:agentId/shopify/master/ledger', authenticateToken, upload.single('file'), salesShopifyController.uploadLedgerMaster);
+router.post('/brands/:brandId/agents/:agentId/shopify/generate', authenticateToken, upload.single('file'), salesShopifyController.generate);
+
+router.post('/brands/:brandId/agents/:agentId/shopify/generate/preview', authenticateToken, upload.single('file'), salesShopifyController.generatePreview);
+router.post('/brands/:brandId/agents/:agentId/shopify/generate/commit', authenticateToken, salesShopifyController.generateCommit);
+router.post('/brands/:brandId/agents/:agentId/shopify/generate/discard', authenticateToken, salesShopifyController.generateDiscard);
 
 module.exports = router;

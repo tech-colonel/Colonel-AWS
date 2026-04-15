@@ -103,9 +103,47 @@ const getBrandAgents = async (req, res, next) => {
   }
 };
 
+/**
+ * Proxy webhook request to avoid CORS issues from frontend
+ */
+const proxyWebhook = async (req, res, next) => {
+  try {
+    const { webhookUrl, payload } = req.body;
+    if (!webhookUrl) {
+      return res.status(400).json({ error: 'Webhook URL is required' });
+    }
+
+    const response = await fetch(webhookUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json'
+      },
+      body: JSON.stringify(payload || {})
+    });
+
+    if (!response.ok) {
+      return res.status(response.status).json({ error: `Webhook returned status ${response.status}` });
+    }
+
+    let responseData;
+    const contentType = response.headers.get('content-type');
+    if (contentType && contentType.includes('application/json')) {
+      responseData = await response.json();
+    } else {
+      responseData = { message: 'Webhook triggered successfully (non-JSON response)' };
+    }
+
+    res.json(responseData);
+  } catch (error) {
+    res.status(500).json({ error: error.message || 'Failed to trigger webhook' });
+  }
+};
+
 module.exports = {
   createAgent,
   getAllAgents,
   assignAgentToBrand,
-  getBrandAgents
+  getBrandAgents,
+  proxyWebhook
 };
