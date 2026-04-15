@@ -6,6 +6,7 @@ const { authenticateToken, authorize } = require('../middleware/authMiddleware')
 // Public/Authenticated routes
 router.get('/agents', authenticateToken, agentController.getAllAgents);
 router.get('/brands/:brandId/agents', authenticateToken, agentController.getBrandAgents);
+router.post('/agents/proxy-webhook', authenticateToken, agentController.proxyWebhook);
 
 // Admin only routes
 router.post('/agents', authenticateToken, authorize('admin'), agentController.createAgent);
