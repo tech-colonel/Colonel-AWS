@@ -134,7 +134,10 @@ const InvoiceAgentWorkspace = ({ agent }) => {
   const handleTriggerWorkflow = async () => {
     setIsTriggering(true);
     try {
-      const response = await api.post(`/api/brands/${brandId}/agents/${agentId}/invoice/process`);
+      const response = await api.post(`/api/brands/${brandId}/agents/${agentId}/invoice/process`, {
+        brandId,
+        agentId
+      });
       const data = response.data;
 
       // Calculate valid vs corrupt from returned data

@@ -1,6 +1,6 @@
-const { Brand, Agent } = require('../models/master');
-const { getBrandConnection } = require('../config/database');
-const { getDynamicModel } = require('../models/brand');
+const { Brand, Agent } = require('../../../models/master');
+const { getBrandConnection } = require('../../../config/database');
+const { getDynamicModel } = require('../../../models/brand');
 
 // ─── Helper: parse dates in DD/MM/YYYY or DD-MM-YYYY format ─────────────────
 const parseDate = (dString) => {
@@ -16,7 +16,8 @@ const parseDate = (dString) => {
 // ─── POST /api/brands/:brandId/agents/:agentId/invoice/process ───────────────
 const processInvoice = async (req, res, next) => {
   try {
-    const { brandId, agentId } = req.params;
+    const brandId = req.body.brandId || req.params.brandId;
+    const agentId = req.body.agentId || req.params.agentId;
 
     const brand = await Brand.findByPk(brandId);
     const agent = await Agent.findByPk(agentId);
