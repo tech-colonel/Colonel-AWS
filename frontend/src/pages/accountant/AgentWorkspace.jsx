@@ -14,6 +14,7 @@ import api from '../../lib/api';
 import { toast } from 'sonner';
 import { format } from 'date-fns';
 import InvoiceAgentWorkspace from './InvoiceAgentWorkspace';
+import OrderCycleShopifyWorkspace from './OrderCycleShopifyWorkspace';
 
 const AgentWorkspace = () => {
   const { brandId, agentId } = useParams();
@@ -144,6 +145,7 @@ const AgentWorkspace = () => {
       if (currentAgent?.name?.toLowerCase().includes('blinkit')) return 'blinkit';
       if (currentAgent?.name?.toLowerCase().includes('firstcry')) return 'firstcry';
       if (currentAgent?.name?.toLowerCase().includes('jiomart')) return 'jiomart';
+      if (currentAgent?.name?.toLowerCase().includes('shopify')) return 'shopify';
       return 'amazon';
     } catch (error) {
       return 'amazon';
@@ -311,15 +313,15 @@ const AgentWorkspace = () => {
   const confirmAndGenerate = async () => {
     const data = new FormData();
     if (isMyntra) {
-      if (formData.rtoFile)    data.append('rtoFile',    formData.rtoFile);
+      if (formData.rtoFile) data.append('rtoFile', formData.rtoFile);
       if (formData.packedFile) data.append('packedFile', formData.packedFile);
-      if (formData.rtFile)     data.append('rtFile',     formData.rtFile);
+      if (formData.rtFile) data.append('rtFile', formData.rtFile);
     } else {
       data.append('file', formData.salesFile);
     }
-    data.append('month',          formData.month);
-    data.append('year',           formData.year);
-    data.append('file_type',      formData.file_type);
+    data.append('month', formData.month);
+    data.append('year', formData.year);
+    data.append('file_type', formData.file_type);
     data.append('inventory_type', formData.inventory_type);
 
     setIsGenerating(true);
@@ -425,6 +427,10 @@ const AgentWorkspace = () => {
   const isAmazon = agent?.name?.toLowerCase().includes('amazon');
   const isJiomart = agent?.name?.toLowerCase().includes('jiomart');
   const isInvoice = agent?.name?.toLowerCase().includes('invoice');
+  const isShopify = agent?.name?.toLowerCase().includes('shopify');
+  const isOrderCycleShopify =
+    agent?.name?.toLowerCase().includes('order-cycle') ||
+    agent?.name?.toLowerCase().includes('order cycle');
 
   return (
     <DashboardLayout sidebarItems={sidebarItems}>
@@ -455,6 +461,25 @@ const AgentWorkspace = () => {
             </div>
           </div>
           <InvoiceAgentWorkspace agent={agent} />
+        </div>
+      ) : isOrderCycleShopify ? (
+        <div className="p-6" data-testid="order-cycle-shopify-workspace">
+          <div className="mb-8 flex justify-between items-start">
+            <div>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => navigate(`/brands/${brandId}/dashboard`)}
+                className="mb-4"
+                data-testid="back-button"
+              >
+                ← Back to Dashboard
+              </Button>
+              <h1 className="text-3xl font-bold text-slate-900 tracking-tight">{agent?.name}</h1>
+              <p className="text-slate-600 mt-1">{agent?.description}</p>
+            </div>
+          </div>
+          <OrderCycleShopifyWorkspace agent={agent} />
         </div>
       ) : (
         <>
@@ -755,8 +780,8 @@ const AgentWorkspace = () => {
                   const filtered = masterData.sku_master.filter(row => {
                     if (!skuSearch.trim()) return true;
                     const q = skuSearch.toLowerCase();
-                    const tally = (row['Tally new SKU'] || row['Tally SKU'] || row.tallyNewSku || row.fg || row.FG || '').toString().toLowerCase();
-                    const portal = (row['Sales portal SKU'] || row['SKU'] || row.salesPortalSku || row.sku || '').toString().toLowerCase();
+                    const tally = (row['Tally new SKU'] || row['Tally New SKU'] || row.tallyNewSku || row.fg || row.FG || '').toString().toLowerCase();
+                    const portal = (row['Sales portal SKU'] || row['Sales Portal SKU'] || row.salesPortalSku || row.sku || '').toString().toLowerCase();
                     return tally.includes(q) || portal.includes(q);
                   });
 
@@ -766,17 +791,20 @@ const AgentWorkspace = () => {
                         <TableRow>
                           <TableHead className="text-xs">Tally New SKU</TableHead>
                           <TableHead className="text-xs">Sales Portal SKU</TableHead>
+                          {isShopify && <TableHead className="text-xs">GST Rate</TableHead>}
                           <TableHead className="text-right text-xs">Action</TableHead>
                         </TableRow>
                       </TableHeader>
                       <TableBody>
                         {filtered.map((row, idx) => {
-                          const tallySku = row['Tally new SKU'] || row['Tally SKU'] || row.tallyNewSku || row.fg || row.FG || '';
-                          const portalSku = row['Sales portal SKU'] || row['SKU'] || row.salesPortalSku || row.sku || '';
+                          const tallySku = row['Tally new SKU'] || row['Tally New SKU'] || row.tallyNewSku || row.fg || row.FG || '';
+                          const portalSku = row['Sales portal SKU'] || row['Sales Portal SKU'] || row.salesPortalSku || row.sku || '';
+                          const gstRate = row['gst'] || row['gst '] || row['GST Rate'] || row.gst || '';
                           return (
                             <TableRow key={idx}>
                               <TableCell className="text-xs font-medium">{tallySku || <span className="text-slate-400 italic">—</span>}</TableCell>
                               <TableCell className="text-xs">{portalSku || <span className="text-slate-400 italic">—</span>}</TableCell>
+                              {isShopify && <TableCell className="text-xs">{gstRate || '0'}</TableCell>}
                               <TableCell className="text-right">
                                 <Button
                                   size="sm"
@@ -835,19 +863,24 @@ const AgentWorkspace = () => {
                     <Table>
                       <TableHeader>
                         <TableRow>
-                          {Object.keys(masterData.ledger_master[0]).map(key => (
-                            <TableHead key={key}>{key}</TableHead>
-                          ))}
+                          <TableHead className="text-xs font-semibold">States</TableHead>
+                          <TableHead className="text-xs font-semibold">Ledger</TableHead>
+                          <TableHead className="text-xs font-semibold">Invoice No.</TableHead>
                         </TableRow>
                       </TableHeader>
                       <TableBody>
-                        {masterData.ledger_master.slice(0, 50).map((row, idx) => (
-                          <TableRow key={idx}>
-                            {Object.values(row).map((val, i) => (
-                              <TableCell key={i} className="text-xs">{val}</TableCell>
-                            ))}
-                          </TableRow>
-                        ))}
+                        {masterData.ledger_master.slice(0, 50).map((row, idx) => {
+                          const state = row['States'] || row['State'] || row.states || row.state || '';
+                          const ledger = row['Ledger'] || row.ledger || '';
+                          const invoiceNo = row['Invoice No.'] || row['Invoice Number'] || row['Invoice No'] || row.invoiceNo || '';
+                          return (
+                            <TableRow key={idx}>
+                              <TableCell className="text-xs">{state || <span className="text-slate-400 italic">—</span>}</TableCell>
+                              <TableCell className="text-xs">{ledger || <span className="text-slate-400 italic">—</span>}</TableCell>
+                              <TableCell className="text-xs">{invoiceNo || <span className="text-slate-400 italic">—</span>}</TableCell>
+                            </TableRow>
+                          );
+                        })}
                       </TableBody>
                     </Table>
                     {masterData.ledger_master.length > 50 && (
@@ -1114,7 +1147,7 @@ const AgentWorkspace = () => {
                   const pf2 = verificationData.summary.gstrHSNFile;
                   const hasPivot = !!pf;
                   const hasPivot2 = !!pf2;
-                  const fmt  = (n) => n?.toLocaleString('en-IN', { minimumFractionDigits: 2 });
+                  const fmt = (n) => n?.toLocaleString('en-IN', { minimumFractionDigits: 2 });
                   const fmtQ = (n) => n?.toLocaleString('en-IN');
                   const match = (a, b) => Math.abs((a || 0) - (b || 0)) < 0.01;
                   const match3 = (a, b, c) => match(a, b) && match(b, c);
@@ -1124,38 +1157,38 @@ const AgentWorkspace = () => {
                   let pf2Title = '';
 
                   if (isMyntra) {
-                      wfTitle = 'Accounting Sheet';
-                      pfTitle = 'Pivot Table';
+                    wfTitle = 'Accounting Sheet';
+                    pfTitle = 'Pivot Table';
                   } else if (isBlinkit) {
-                      wfTitle = 'Sales Report';
-                      pfTitle = 'GT Report';
+                    wfTitle = 'Sales Report';
+                    pfTitle = 'GT Report';
                   } else if (isJiomart) {
-                      wfTitle = 'Working';
-                      pfTitle = 'GSTR B2C';
-                      pf2Title = 'GSTR HSN';
+                    wfTitle = 'Working';
+                    pfTitle = 'GSTR B2C';
+                    pf2Title = 'GSTR HSN';
                   }
 
                   let rows = [];
 
                   if (isJiomart) {
-                      rows = [
-                        { label: 'Total Quantity',    wf: fmtQ(wf.quantity),          pf: hasPivot ? fmtQ(pf.quantity) : null,          pf2: hasPivot2 ? fmtQ(pf2.quantity) : null,          ok: (hasPivot && hasPivot2) ? match3(wf.quantity, pf.quantity, pf2.quantity) : true },
-                        { label: 'Taxable Value',     wf: `₹${fmt(wf.taxableValue)}`, pf: hasPivot ? `₹${fmt(pf.taxableValue)}` : null, pf2: hasPivot2 ? `₹${fmt(pf2.taxableValue)}` : null, ok: (hasPivot && hasPivot2) ? match3(wf.taxableValue, pf.taxableValue, pf2.taxableValue) : true },
-                        { label: 'IGST Amount',       wf: `₹${fmt(wf.igst)}`,         pf: hasPivot ? `₹${fmt(pf.igst)}` : null,         pf2: hasPivot2 ? `₹${fmt(pf2.igst)}` : null,         ok: (hasPivot && hasPivot2) ? match3(wf.igst, pf.igst, pf2.igst) : true },
-                        { label: 'CGST Amount',       wf: `₹${fmt(wf.cgst)}`,         pf: hasPivot ? `₹${fmt(pf.cgst)}` : null,         pf2: hasPivot2 ? `₹${fmt(pf2.cgst)}` : null,         ok: (hasPivot && hasPivot2) ? match3(wf.cgst, pf.cgst, pf2.cgst) : true },
-                        { label: 'SGST Amount',       wf: `₹${fmt(wf.sgst)}`,         pf: hasPivot ? `₹${fmt(pf.sgst)}` : null,         pf2: hasPivot2 ? `₹${fmt(pf2.sgst)}` : null,         ok: (hasPivot && hasPivot2) ? match3(wf.sgst, pf.sgst, pf2.sgst) : true },
-                      ];
+                    rows = [
+                      { label: 'Total Quantity', wf: fmtQ(wf.quantity), pf: hasPivot ? fmtQ(pf.quantity) : null, pf2: hasPivot2 ? fmtQ(pf2.quantity) : null, ok: (hasPivot && hasPivot2) ? match3(wf.quantity, pf.quantity, pf2.quantity) : true },
+                      { label: 'Taxable Value', wf: `₹${fmt(wf.taxableValue)}`, pf: hasPivot ? `₹${fmt(pf.taxableValue)}` : null, pf2: hasPivot2 ? `₹${fmt(pf2.taxableValue)}` : null, ok: (hasPivot && hasPivot2) ? match3(wf.taxableValue, pf.taxableValue, pf2.taxableValue) : true },
+                      { label: 'IGST Amount', wf: `₹${fmt(wf.igst)}`, pf: hasPivot ? `₹${fmt(pf.igst)}` : null, pf2: hasPivot2 ? `₹${fmt(pf2.igst)}` : null, ok: (hasPivot && hasPivot2) ? match3(wf.igst, pf.igst, pf2.igst) : true },
+                      { label: 'CGST Amount', wf: `₹${fmt(wf.cgst)}`, pf: hasPivot ? `₹${fmt(pf.cgst)}` : null, pf2: hasPivot2 ? `₹${fmt(pf2.cgst)}` : null, ok: (hasPivot && hasPivot2) ? match3(wf.cgst, pf.cgst, pf2.cgst) : true },
+                      { label: 'SGST Amount', wf: `₹${fmt(wf.sgst)}`, pf: hasPivot ? `₹${fmt(pf.sgst)}` : null, pf2: hasPivot2 ? `₹${fmt(pf2.sgst)}` : null, ok: (hasPivot && hasPivot2) ? match3(wf.sgst, pf.sgst, pf2.sgst) : true },
+                    ];
                   } else {
-                      rows = [
-                        { label: 'Total Quantity',    wf: fmtQ(wf.quantity),          pf: hasPivot ? fmtQ(pf.quantity) : null,          ok: hasPivot ? match(wf.quantity,     pf.quantity) : true },
-                        { label: isMyntra ? 'Base Value' : isBlinkit ? 'Sum of Taxable Value' : 'Taxable Value',     wf: `₹${fmt(wf.taxableValue)}`, pf: hasPivot ? `₹${fmt(pf.taxableValue)}` : null, ok: hasPivot ? match(wf.taxableValue, pf.taxableValue) : true },
-                        { label: isMyntra ? 'CGST Amount' : isBlinkit ? 'Sum of CGST Value' : 'Final CGST',        wf: `₹${fmt(wf.cgst)}`,        pf: hasPivot ? `₹${fmt(pf.cgst)}` : null,        ok: hasPivot ? match(wf.cgst,         pf.cgst) : true },
-                        { label: isMyntra ? 'SGST Amount' : isBlinkit ? 'Sum of SGST Value' : 'Final SGST',        wf: `₹${fmt(wf.sgst)}`,        pf: hasPivot ? `₹${fmt(pf.sgst)}` : null,        ok: hasPivot ? match(wf.sgst,         pf.sgst) : true },
-                        { label: isMyntra ? 'IGST Amount' : isBlinkit ? 'Sum of IGST Value' : 'Final IGST',        wf: `₹${fmt(wf.igst)}`,        pf: hasPivot ? `₹${fmt(pf.igst)}` : null,        ok: hasPivot ? match(wf.igst,         pf.igst) : true },
-                      ];
-                      if (isMyntra || isBlinkit) {
-                        rows = rows.filter(r => r.label !== 'Total Quantity');
-                      }
+                    rows = [
+                      { label: 'Total Quantity', wf: fmtQ(wf.quantity), pf: hasPivot ? fmtQ(pf.quantity) : null, ok: hasPivot ? match(wf.quantity, pf.quantity) : true },
+                      { label: isMyntra ? 'Base Value' : isBlinkit ? 'Sum of Taxable Value' : 'Taxable Value', wf: `₹${fmt(wf.taxableValue)}`, pf: hasPivot ? `₹${fmt(pf.taxableValue)}` : null, ok: hasPivot ? match(wf.taxableValue, pf.taxableValue) : true },
+                      { label: isMyntra ? 'CGST Amount' : isBlinkit ? 'Sum of CGST Value' : 'Final CGST', wf: `₹${fmt(wf.cgst)}`, pf: hasPivot ? `₹${fmt(pf.cgst)}` : null, ok: hasPivot ? match(wf.cgst, pf.cgst) : true },
+                      { label: isMyntra ? 'SGST Amount' : isBlinkit ? 'Sum of SGST Value' : 'Final SGST', wf: `₹${fmt(wf.sgst)}`, pf: hasPivot ? `₹${fmt(pf.sgst)}` : null, ok: hasPivot ? match(wf.sgst, pf.sgst) : true },
+                      { label: isMyntra ? 'IGST Amount' : isBlinkit ? 'Sum of IGST Value' : 'Final IGST', wf: `₹${fmt(wf.igst)}`, pf: hasPivot ? `₹${fmt(pf.igst)}` : null, ok: hasPivot ? match(wf.igst, pf.igst) : true },
+                    ];
+                    if (isMyntra || isBlinkit) {
+                      rows = rows.filter(r => r.label !== 'Total Quantity');
+                    }
                   }
 
                   const allMatch = rows.every(r => r.ok);
