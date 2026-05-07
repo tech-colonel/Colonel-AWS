@@ -60,9 +60,10 @@ async function parseExcelBuffer(buffer, label = 'file') {
 /**
  * Main processor function
  *
- * @param {Buffer}  shopifyBuffer         - The Shopify export file buffer
- * @param {Array}   paymentGatewayFiles   - [{ name: 'Razorpay', buffer: Buffer }, ...]
- * @param {Array}   logisticsFiles        - [{ name: 'Delhivery', buffer: Buffer }, ...]
+ * @param {Array}   unicommerceJson       - Parsed Unicommerce rows (Array of objects)
+ * @param {Array}   salesOrderJson        - Parsed Sales Order Report rows (Array of objects)
+ * @param {Object}  gatewayData           - Parsed Gateway rows { 'Razorpay': [...], ... }
+ * @param {Object}  logisticsData         - Parsed Logistics rows { 'Delhivery': [...], ... }
  * @param {string}  brandName             - Brand name for logging / filename
  * @param {string}  period                - 'Month-Year' string e.g. 'April-2026'
  *
@@ -74,42 +75,29 @@ async function parseExcelBuffer(buffer, label = 'file') {
  * }>}
  */
 async function orderCycleShopifyProcessor(
-    shopifyBuffer,
-    paymentGatewayFiles = [],
-    logisticsFiles = [],
+    unicommerceJson = [],
+    salesOrderJson = [],
+    gatewayData = {},
+    logisticsData = {},
     brandName = '',
     period = ''
 ) {
     console.log(`\n[OrderCycleProcessor] ── Starting for brand="${brandName}", period="${period}" ──`);
-    console.log(`  Payment Gateways : ${paymentGatewayFiles.map(f => f.name).join(', ') || '(none)'}`);
-    console.log(`  Logistics        : ${logisticsFiles.map(f => f.name).join(', ') || '(none)'}`);
-
-    // ─── 1. Parse Shopify file ────────────────────────────────────────────────
-    const shopifyRows = await parseExcelBuffer(shopifyBuffer, 'Shopify Export');
-
-    // ─── 2. Parse payment gateway files ──────────────────────────────────────
-    const gatewayData = {};
-    for (const gw of paymentGatewayFiles) {
-        gatewayData[gw.name] = await parseExcelBuffer(gw.buffer, `Payment Gateway: ${gw.name}`);
-    }
-
-    // ─── 3. Parse logistics partner files ────────────────────────────────────
-    const logisticsData = {};
-    for (const lp of logisticsFiles) {
-        logisticsData[lp.name] = await parseExcelBuffer(lp.buffer, `Logistics: ${lp.name}`);
-    }
+    console.log(`  Gateways : ${Object.keys(gatewayData).join(', ') || '(none)'}`);
+    console.log(`  Logistics: ${Object.keys(logisticsData).join(', ') || '(none)'}`);
 
     // ─── Parse Stats (for UI preview summary) ────────────────────────────────
     const parseStats = {
-        shopify: shopifyRows.length,
+        unicommerce: unicommerceJson.length,
+        salesOrder: salesOrderJson.length,
         gateways: {},
         logistics: {}
     };
-    paymentGatewayFiles.forEach(gw => {
-        parseStats.gateways[gw.name] = gatewayData[gw.name]?.length || 0;
+    Object.entries(gatewayData).forEach(([name, rows]) => {
+        parseStats.gateways[name] = rows.length;
     });
-    logisticsFiles.forEach(lp => {
-        parseStats.logistics[lp.name] = logisticsData[lp.name]?.length || 0;
+    Object.entries(logisticsData).forEach(([name, rows]) => {
+        parseStats.logistics[name] = rows.length;
     });
 
     // ─── 4. TODO: Your Business Logic ────────────────────────────────────────
@@ -155,10 +143,10 @@ async function orderCycleShopifyProcessor(
     // ─────────────────────────────────────────────────────────────────────────
 
     // STUB: placeholder output rows — replace with real outputRows above
-    const outputRows = shopifyRows.map((order, idx) => ({
+    const outputRows = unicommerceJson.map((order, idx) => ({
         row_index: idx + 1,
         sale_order_number: order['Order ID'] || order['Name'] || order['Sale Order Number'] || '',
-        platform: 'Shopify',
+        platform: 'Unicommerce',
         invoice_number: order['Invoice Number'] || order['invoice_number'] || '',
         awb_number: order['AWB'] || order['Tracking Number'] || '',
         shipping_partner: '',
@@ -194,12 +182,20 @@ async function orderCycleShopifyProcessor(
         mainSheet.addRow(['No data — implement business logic in orderCycleShopifyProcessor.js']);
     }
 
-    // Sheet 2 — Shopify Raw (for reference)
-    const shopifySheet = outputWorkbook.addWorksheet('Shopify Raw');
-    if (shopifyRows.length > 0) {
-        shopifySheet.addRow(Object.keys(shopifyRows[0]));
-        shopifyRows.forEach(r => shopifySheet.addRow(Object.values(r)));
-        shopifySheet.getRow(1).font = { bold: true };
+    // Sheet 2 — Unicommerce Raw (for reference)
+    const unicommerceSheet = outputWorkbook.addWorksheet('Unicommerce Raw');
+    if (unicommerceJson.length > 0) {
+        unicommerceSheet.addRow(Object.keys(unicommerceJson[0]));
+        unicommerceJson.forEach(r => unicommerceSheet.addRow(Object.values(r)));
+        unicommerceSheet.getRow(1).font = { bold: true };
+    }
+
+    // Sheet 3 — Sales Order Raw (for reference)
+    const salesOrderSheet = outputWorkbook.addWorksheet('Sales Order Raw');
+    if (salesOrderJson.length > 0) {
+        salesOrderSheet.addRow(Object.keys(salesOrderJson[0]));
+        salesOrderJson.forEach(r => salesOrderSheet.addRow(Object.values(r)));
+        salesOrderSheet.getRow(1).font = { bold: true };
     }
 
     // Sheet per payment gateway
@@ -232,4 +228,4 @@ async function orderCycleShopifyProcessor(
     };
 }
 
-module.exports = { orderCycleShopifyProcessor };
+module.exports = { orderCycleShopifyProcessor, parseExcelBuffer };

@@ -13,8 +13,11 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../../componen
 import api from '../../lib/api';
 import { toast } from 'sonner';
 import { format } from 'date-fns';
+import * as XLSX from 'xlsx';
 import InvoiceAgentWorkspace from './InvoiceAgentWorkspace';
 import OrderCycleShopifyWorkspace from './OrderCycleShopifyWorkspace';
+import SettlementAmazonWorkspace from './SettlementAmazonWorkspace';
+import TotalSalesAnalyzerModal from './TotalSalesAnalyzerModal';
 
 const AgentWorkspace = () => {
   const { brandId, agentId } = useParams();
@@ -63,6 +66,15 @@ const AgentWorkspace = () => {
   const [showViewLedgerModal, setShowViewLedgerModal] = useState(false);
   const [showGenerateModal, setShowGenerateModal] = useState(false);
   const [showInvoicePreviewModal, setShowInvoicePreviewModal] = useState(false);
+  const [showTotalSalesAnalyzer, setShowTotalSalesAnalyzer] = useState(false);
+
+  // MIS Modal States
+  const [showConfigMISModal, setShowConfigMISModal] = useState(false);
+  const [showMISResultModal, setShowMISResultModal] = useState(false);
+  const [misConfig, setMisConfig] = useState({ startMonth: '', endMonth: '', startYear: new Date().getFullYear().toString(), endYear: new Date().getFullYear().toString() });
+  const [misData, setMisData] = useState({ columns: [], data: [] });
+  const [isGeneratingMIS, setIsGeneratingMIS] = useState(false);
+  const [misFilterType, setMisFilterType] = useState('combine');
 
   const [skuFile, setSkuFile] = useState(null);
   const [ledgerFile, setLedgerFile] = useState(null);
@@ -146,6 +158,7 @@ const AgentWorkspace = () => {
       if (currentAgent?.name?.toLowerCase().includes('firstcry')) return 'firstcry';
       if (currentAgent?.name?.toLowerCase().includes('jiomart')) return 'jiomart';
       if (currentAgent?.name?.toLowerCase().includes('shopify')) return 'shopify';
+      if (currentAgent?.name?.toLowerCase().includes('total-sales')) return 'total-sales-analyzer';
       return 'amazon';
     } catch (error) {
       return 'amazon';
@@ -299,10 +312,17 @@ const AgentWorkspace = () => {
         return;
       }
     }
-    if (!formData.month) {
+    if (!isTotalSalesAnalyzer && !formData.month) {
       toast.error('Please select a month');
       return;
     }
+
+    if (isTotalSalesAnalyzer) {
+      setShowGenerateModal(false);
+      confirmAndGenerate();
+      return;
+    }
+
     // Show invoice preview confirmation
     setShowGenerateModal(false);
     await fetchLedgerPreview();
@@ -412,6 +432,56 @@ const AgentWorkspace = () => {
     }
   };
 
+  const handleGenerateMIS = async (e, overrideFilter) => {
+    if (e) e.preventDefault();
+    if (!misConfig.startMonth || !misConfig.endMonth || !misConfig.startYear || !misConfig.endYear) {
+      toast.error('Please select start and end month/year');
+      return;
+    }
+    const activeFilter = overrideFilter || misFilterType;
+    setIsGeneratingMIS(true);
+    try {
+      const res = await api.post(`/api/brands/${brandId}/agents/${agentId}/amazon/mis`, {
+        ...misConfig,
+        filterType: activeFilter
+      });
+      setMisData(res.data);
+      setShowConfigMISModal(false);
+      setShowMISResultModal(true);
+      toast.success('MIS Generated Successfully');
+    } catch (error) {
+      toast.error('Failed to generate MIS');
+    } finally {
+      setIsGeneratingMIS(false);
+    }
+  };
+
+  const handleMISFilterChange = (newFilter) => {
+    setMisFilterType(newFilter);
+    handleGenerateMIS(null, newFilter);
+  };
+
+  const handleExportMIS = () => {
+    if (!misData.data || misData.data.length === 0) {
+      toast.error('No data to export');
+      return;
+    }
+    
+    // Map with dynamic columns
+    const exportData = misData.data.map(row => {
+      let r = {};
+      misData.columns.forEach(col => {
+        r[col.title] = row[col.key];
+      });
+      return r;
+    });
+
+    const ws = XLSX.utils.json_to_sheet(exportData);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "MIS");
+    XLSX.writeFile(wb, `MIS_Amazon_${misConfig.startMonth}_${misConfig.endMonth}.xlsx`);
+  };
+
   if (loading) {
     return (
       <div className="min-h-screen flex items-center justify-center">
@@ -431,6 +501,8 @@ const AgentWorkspace = () => {
   const isOrderCycleShopify =
     agent?.name?.toLowerCase().includes('order-cycle') ||
     agent?.name?.toLowerCase().includes('order cycle');
+  const isSettlement = agent?.name?.toLowerCase().includes('settlement');
+  const isTotalSalesAnalyzer = agent?.name?.toLowerCase().includes('total-sales');
 
   return (
     <DashboardLayout sidebarItems={sidebarItems}>
@@ -481,6 +553,25 @@ const AgentWorkspace = () => {
           </div>
           <OrderCycleShopifyWorkspace agent={agent} />
         </div>
+      ) : isSettlement ? (
+        <div className="p-6" data-testid="settlement-amazon-workspace">
+          <div className="mb-8 flex justify-between items-start">
+            <div>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => navigate(`/brands/${brandId}/dashboard`)}
+                className="mb-4"
+                data-testid="back-button"
+              >
+                ← Back to Dashboard
+              </Button>
+              <h1 className="text-3xl font-bold text-slate-900 tracking-tight">{agent?.name}</h1>
+              <p className="text-slate-600 mt-1">{agent?.description}</p>
+            </div>
+          </div>
+          <SettlementAmazonWorkspace agent={agent} />
+        </div>
       ) : (
         <>
           <div className="p-6" data-testid="agent-workspace">
@@ -498,7 +589,27 @@ const AgentWorkspace = () => {
                 <h1 className="text-3xl font-bold text-slate-900 tracking-tight">{agent?.name}</h1>
                 <p className="text-slate-600 mt-1">{agent?.description}</p>
               </div>
-              <div>
+              <div className="flex items-center gap-2">
+                {isAmazon && (
+                  <Button
+                    onClick={() => setShowConfigMISModal(true)}
+                    variant="default"
+                    className="bg-slate-700 hover:bg-slate-800"
+                  >
+                    <BarChart3 className="mr-2 h-4 w-4" />
+                    MIS Dashboard
+                  </Button>
+                )}
+                {isTotalSalesAnalyzer && (
+                  <Button
+                    onClick={() => setShowTotalSalesAnalyzer(true)}
+                    variant="default"
+                    className="bg-indigo-600 hover:bg-indigo-700"
+                  >
+                    <BarChart3 className="mr-2 h-4 w-4" />
+                    Total Sales Analyzer
+                  </Button>
+                )}
                 <Button
                   onClick={() => setCfoConfig(prev => ({ ...prev, isOpen: true }))}
                   variant="default"
@@ -510,6 +621,7 @@ const AgentWorkspace = () => {
             </div>
 
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
+              {!isTotalSalesAnalyzer && (
               <Card>
                 <CardHeader>
                   <CardTitle>Master Data Management</CardTitle>
@@ -562,6 +674,7 @@ const AgentWorkspace = () => {
                   </div>
                 </CardContent>
               </Card>
+              )}
 
               <Card>
                 <CardHeader>
@@ -903,6 +1016,24 @@ const AgentWorkspace = () => {
                 <DialogTitle>Generate Working File</DialogTitle>
               </DialogHeader>
               <form onSubmit={handleGenerateFile} className="space-y-4">
+                {isTotalSalesAnalyzer ? (
+                  <div>
+                    <Label htmlFor="sales-file">Total Sales File *</Label>
+                    <Input
+                      id="sales-file"
+                      type="file"
+                      accept=".xlsx,.xls"
+                      onChange={(e) => setFormData({ ...formData, salesFile: e.target.files[0] })}
+                      required
+                      data-testid="sales-file-upload"
+                      className="mt-2"
+                    />
+                    <p className="text-xs text-slate-500 mt-2">
+                      Upload Total Sales Excel file
+                    </p>
+                  </div>
+                ) : (
+                  <>
                 <div className="grid grid-cols-2 gap-4">
                   <div>
                     <Label htmlFor="month">Month *</Label>
@@ -1010,6 +1141,8 @@ const AgentWorkspace = () => {
                       Upload sales Excel file to be processed
                     </p>
                   </div>
+                )}
+                </>
                 )}
 
                 <div className="flex gap-3 pt-4">
@@ -1137,7 +1270,7 @@ const AgentWorkspace = () => {
                 <p className="text-sm text-slate-600">
                   The file has been processed. Please verify the totals below before saving.
                   <span className="block mt-1 font-medium text-slate-800">
-                    {verificationData?.rowCount?.toLocaleString()} rows &bull; {formData.month} {formData.year}
+                    {verificationData?.rowCount?.toLocaleString()} rows {isTotalSalesAnalyzer ? '' : <>&bull; {formData.month} {formData.year}</>}
                   </span>
                 </p>
 
@@ -1266,6 +1399,167 @@ const AgentWorkspace = () => {
               </div>
             </DialogContent>
           </Dialog>
+
+          {/* Config MIS Modal */}
+          <Dialog open={showConfigMISModal} onOpenChange={setShowConfigMISModal}>
+            <DialogContent onClose={() => setShowConfigMISModal(false)}>
+              <DialogHeader>
+                <DialogTitle>Generate MIS</DialogTitle>
+              </DialogHeader>
+              <form onSubmit={handleGenerateMIS} className="space-y-4">
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <Label htmlFor="start-month">Start Month *</Label>
+                    <select
+                      id="start-month"
+                      value={misConfig.startMonth}
+                      onChange={(e) => setMisConfig({ ...misConfig, startMonth: e.target.value })}
+                      required
+                      className="flex h-9 w-full rounded-md border border-slate-200 bg-transparent px-3 py-2 text-sm mt-2"
+                    >
+                      <option value="">Select</option>
+                      {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12].map(m => (
+                        <option key={m} value={m}>{m}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <Label htmlFor="start-year">Start Year *</Label>
+                    <Input
+                      id="start-year"
+                      type="number"
+                      value={misConfig.startYear}
+                      onChange={(e) => setMisConfig({ ...misConfig, startYear: e.target.value })}
+                      required
+                      className="mt-2"
+                    />
+                  </div>
+                </div>
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <Label htmlFor="end-month">End Month *</Label>
+                    <select
+                      id="end-month"
+                      value={misConfig.endMonth}
+                      onChange={(e) => setMisConfig({ ...misConfig, endMonth: e.target.value })}
+                      required
+                      className="flex h-9 w-full rounded-md border border-slate-200 bg-transparent px-3 py-2 text-sm mt-2"
+                    >
+                      <option value="">Select</option>
+                      {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12].map(m => (
+                        <option key={m} value={m}>{m}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <Label htmlFor="end-year">End Year *</Label>
+                    <Input
+                      id="end-year"
+                      type="number"
+                      value={misConfig.endYear}
+                      onChange={(e) => setMisConfig({ ...misConfig, endYear: e.target.value })}
+                      required
+                      className="mt-2"
+                    />
+                  </div>
+                </div>
+                <div className="flex gap-3 pt-4">
+                  <Button type="button" variant="secondary" onClick={() => setShowConfigMISModal(false)} className="flex-1" disabled={isGeneratingMIS}>
+                    Cancel
+                  </Button>
+                  <Button type="submit" className="flex-1" disabled={isGeneratingMIS}>
+                    {isGeneratingMIS ? (
+                      <><Loader2 className="mr-2 h-4 w-4 animate-spin" /> Generating...</>
+                    ) : (
+                      'Generate MIS'
+                    )}
+                  </Button>
+                </div>
+              </form>
+            </DialogContent>
+          </Dialog>
+
+          {/* MIS Result Modal */}
+          <Dialog open={showMISResultModal} onOpenChange={setShowMISResultModal}>
+            <DialogContent onClose={() => setShowMISResultModal(false)} className="max-w-[90vw] max-h-[90vh] flex flex-col overflow-hidden">
+              <DialogHeader className="flex flex-row items-center justify-between pb-2 border-b">
+                <DialogTitle>MIS Report ({misData.data.length} records)</DialogTitle>
+                <div className="flex items-center gap-4">
+                  <Button onClick={handleExportMIS} size="sm" variant="outline" className="text-green-700 border-green-300 hover:bg-green-50 mr-4">
+                    <Download className="mr-2 h-4 w-4" /> Export to Excel
+                  </Button>
+                </div>
+              </DialogHeader>
+
+              {/* B2B / B2C / Combine Filter Tabs */}
+              <div className="flex items-center gap-2 pt-2 pb-1">
+                {['combine', 'b2b', 'b2c'].map((ft) => (
+                  <Button
+                    key={ft}
+                    size="sm"
+                    variant={misFilterType === ft ? 'default' : 'outline'}
+                    className={misFilterType === ft ? 'bg-slate-800 text-white hover:bg-slate-900' : ''}
+                    disabled={isGeneratingMIS}
+                    onClick={() => handleMISFilterChange(ft)}
+                  >
+                    {ft === 'combine' ? 'Combine' : ft.toUpperCase()}
+                  </Button>
+                ))}
+                {isGeneratingMIS && <Loader2 className="h-4 w-4 animate-spin text-slate-500 ml-2" />}
+              </div>
+              
+              <div className="flex-1 overflow-auto bg-white pt-2">
+                {misData.data.length > 0 ? (
+                  <Table className="relative">
+                    <TableHeader className="bg-slate-50 sticky top-0 z-10 shadow-sm">
+                      <TableRow>
+                        {misData.columns.map((col, idx) => (
+                           <TableHead key={idx} className="text-xs whitespace-nowrap p-3">{col.title}</TableHead>
+                        ))}
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {misData.data.map((row, rIdx) => {
+                        const unitMetrics = ['Gross Units Sold', 'Units Refund', 'Net Units Sold'];
+                        const percentMetrics = ['Return Rate'];
+                        const isUnit = unitMetrics.includes(row.metric);
+                        const isPercent = percentMetrics.includes(row.metric);
+                        return (
+                          <TableRow key={rIdx}>
+                            {misData.columns.map((col, cIdx) => (
+                              <TableCell key={cIdx} className="text-xs whitespace-nowrap p-3">
+                                {col.key === 'metric'
+                                  ? row[col.key]
+                                  : isPercent
+                                    ? row[col.key]
+                                    : typeof row[col.key] === 'number'
+                                      ? isUnit
+                                        ? row[col.key].toLocaleString('en-IN')
+                                        : `₹${row[col.key].toLocaleString('en-IN', { maximumFractionDigits: 2 })}`
+                                      : row[col.key]}
+                              </TableCell>
+                            ))}
+                          </TableRow>
+                        );
+                      })}
+                    </TableBody>
+                  </Table>
+                ) : (
+                  <div className="py-12 text-center text-slate-500">No matching records found.</div>
+                )}
+              </div>
+            </DialogContent>
+          </Dialog>
+
+          {/* Total Sales Analyzer Modal */}
+          {isTotalSalesAnalyzer && (
+            <TotalSalesAnalyzerModal
+              isOpen={showTotalSalesAnalyzer}
+              onClose={() => setShowTotalSalesAnalyzer(false)}
+              brandId={brandId}
+              agentId={agentId}
+            />
+          )}
         </>
       )}
     </DashboardLayout>

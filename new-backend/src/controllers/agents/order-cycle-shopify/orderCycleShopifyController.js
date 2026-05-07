@@ -15,7 +15,7 @@
 const { Brand, Agent } = require('../../../models/master');
 const { getBrandConnection } = require('../../../config/database');
 const { getDynamicModel } = require('../../../models/brand');
-const { orderCycleShopifyProcessor } = require('../../../services/processors/orderCycleShopifyProcessor');
+const { orderCycleShopifyProcessor, parseExcelBuffer } = require('../../../services/processors/orderCycleShopifyProcessor');
 const { setPending, getPending, deletePending } = require('../../../services/pendingGenerationsStore');
 
 const path = require('path');
@@ -131,12 +131,17 @@ const generatePreview = async (req, res, next) => {
         const month = req.body.month || '';
         const year = req.body.year || new Date().getFullYear().toString();
 
-        // Validate Shopify file
-        const shopifyFileArr = req.files?.shopifyFile;
-        if (!shopifyFileArr || !shopifyFileArr[0]) {
-            return res.status(400).json({ error: 'Shopify file is required (field: shopifyFile)' });
+        // Validate Unicommerce + Sales Order files
+        const unicommerceArr = req.files?.unicommerceFile;
+        const salesOrderArr = req.files?.salesOrderReportFile;
+        if (!unicommerceArr || !unicommerceArr[0]) {
+            return res.status(400).json({ error: 'Unicommerce file is required (field: unicommerceFile)' });
         }
-        const shopifyBuffer = shopifyFileArr[0].buffer;
+        if (!salesOrderArr || !salesOrderArr[0]) {
+            return res.status(400).json({ error: 'Sales Order Report file is required (field: salesOrderReportFile)' });
+        }
+        const unicommerceBuffer = unicommerceArr[0].buffer;
+        const salesOrderBuffer = salesOrderArr[0].buffer;
 
         // Validate Brand + Agent
         const brand = await Brand.findByPk(brandId);
@@ -155,11 +160,24 @@ const generatePreview = async (req, res, next) => {
             return res.status(400).json({ error: err.message });
         }
 
+        // Parse all files to JSON
+        const unicommerceJson = await parseExcelBuffer(unicommerceBuffer, 'Unicommerce File');
+        const salesOrderJson = await parseExcelBuffer(salesOrderBuffer, 'Sales Order Report');
+        const gatewayDataJson = {};
+        for (const gw of paymentGatewayFiles) {
+            gatewayDataJson[gw.name] = await parseExcelBuffer(gw.buffer, `Payment Gateway: ${gw.name}`);
+        }
+        const logisticsDataJson = {};
+        for (const lp of logisticsFiles) {
+            logisticsDataJson[lp.name] = await parseExcelBuffer(lp.buffer, `Logistics: ${lp.name}`);
+        }
+
         // Run processor
         const result = await orderCycleShopifyProcessor(
-            shopifyBuffer,
-            paymentGatewayFiles,
-            logisticsFiles,
+            unicommerceJson,
+            salesOrderJson,
+            gatewayDataJson,
+            logisticsDataJson,
             brand.name,
             `${month}-${year}`
         );
@@ -195,7 +213,8 @@ const generatePreview = async (req, res, next) => {
             rowCount: result.rowCount,
             parseStats: result.parseStats,
             summary: {
-                shopifyRows: result.parseStats.shopify,
+                unicommerceRows: result.parseStats.unicommerce,
+                salesOrderRows: result.parseStats.salesOrder,
                 gateways: result.parseStats.gateways,
                 logistics: result.parseStats.logistics,
             }

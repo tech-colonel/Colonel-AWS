@@ -84,29 +84,29 @@ const processInvoice = async (req, res, next) => {
 
     // Map webhook response fields → DB columns
     const finalData = invoices.map(row => ({
-      processed_on:  new Date(),
-      company:       row.company,
+      processed_on: new Date(),
+      company: row.company,
       invoice_number: row.invoice_number,
-      invoice_date:  parseDate(row.invoice_date),
-      due_date:      parseDate(row.due_date),
-      seller_gstin:  row.seller_gstin,
-      buyer_gstin:   row.buyer_gstin,
-      category:      row.category,
-      product_name:  row.product_name,
-      hsn_code:      row.hsn_code,
-      quantity:      parseInt(row.quantity) || 0,
-      unit:          row.unit,
-      rate:          parseFloat(row.rate) || 0,
-      cgst_rate:     parseFloat(row.cgst_rate) || 0,
-      sgst_rate:     parseFloat(row.sgst_rate) || 0,
-      igst_rate:     parseFloat(row.igst_rate) || 0,
-      cgst_amount:   parseFloat(row.cgst_amount) || 0,
-      sgst_amount:   parseFloat(row.sgst_amount) || 0,
-      igst_amount:   parseFloat(row.igst_amount) || 0,
-      gst_amount:    parseFloat(row.GST_AMOUNT || row.gst_amount) || 0,
+      invoice_date: parseDate(row.invoice_date),
+      due_date: parseDate(row.due_date),
+      seller_gstin: row.seller_gstin,
+      buyer_gstin: row.buyer_gstin,
+      category: row.category,
+      product_name: row.product_name,
+      hsn_code: row.hsn_code,
+      quantity: parseInt(row.quantity) || 0,
+      unit: row.unit,
+      rate: parseFloat(row.rate) || 0,
+      cgst_rate: parseFloat(row.cgst_rate) || 0,
+      sgst_rate: parseFloat(row.sgst_rate) || 0,
+      igst_rate: parseFloat(row.igst_rate) || 0,
+      cgst_amount: parseFloat(row.cgst_amount) || 0,
+      sgst_amount: parseFloat(row.sgst_amount) || 0,
+      igst_amount: parseFloat(row.igst_amount) || 0,
+      gst_amount: parseFloat(row.GST_AMOUNT || row.gst_amount) || 0,
       taxable_value: parseFloat(row['taxable value'] || row.taxable_value) || 0,
-      invoice_link:  row.Invoice_link || row.invoice_link || null,
-      status:        'Processed'
+      invoice_link: row.Invoice_link || row.invoice_link || null,
+      status: 'Processed'
     }));
 
     // Bulk insert
@@ -141,7 +141,7 @@ const getInvoices = async (req, res, next) => {
     const InvoiceModel = getDynamicModel(brandDb, tableName, agent.columns);
 
     // Ensure table exists silently before querying
-    await InvoiceModel.sync({ alter: false }).catch(() => {});
+    await InvoiceModel.sync({ alter: false }).catch(() => { });
 
     try {
       const invoices = await InvoiceModel.findAll({
