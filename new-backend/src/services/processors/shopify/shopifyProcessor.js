@@ -58,9 +58,13 @@ const shopifyProcessor = async (
         // SKU MAP
         // =========================
         const skuMap = {};
+
         (skuMaster || []).forEach(item => {
             const sku = normalizeSKU(
-                item['Sales portal SKU'] ||
+                item['Tally New SKU'] ||
+                item['Tally new SKU'] ||
+                item['tally new sku'] ||
+                item['FG'] ||
                 item['SKU'] ||
                 item['sku']
             );
@@ -68,10 +72,20 @@ const shopifyProcessor = async (
             if (!sku) return;
 
             skuMap[sku] = {
-                fg: item['Tally new SKU'] || item['FG'] || '',
-                gst: safeNumber(item['GST Rate'] || item['gst'] || 0)
+                fg: item['Sales Portal SKU'] || item['Sales portal SKU'] || item['sales portal sku'] || '',
+                gst: safeNumber(
+                    item['gst'] ||
+                    item['gst '] ||   // trailing space — common in uploaded Excels
+                    item['GST'] ||
+                    item['GST Rate'] ||
+                    item['GST rate'] ||
+                    item['gst_rate'] ||
+                    0
+                )
             };
         });
+
+
 
         // =========================
         // STATE MAP
@@ -84,7 +98,7 @@ const shopifyProcessor = async (
 
             stateMap[state] = {
                 ledger: item['Ledger'] || '',
-                invoice: item['Invoice No.'] || ''
+                invoice: item['Invoice No.'] || item['Invoice Number'] || ''
             };
         });
 
@@ -101,7 +115,33 @@ const shopifyProcessor = async (
             headers[colNumber] = cell.value;
         });
 
+
+        const outputHeaders = [...headers].filter(Boolean);
+
+        const insertAfter = (colName, newCols) => {
+            const index = outputHeaders.indexOf(colName);
+            if (index !== -1) {
+                // Remove if they already exist to prevent duplicates
+                newCols.forEach(col => {
+                    const idx = outputHeaders.indexOf(col);
+                    if (idx !== -1) outputHeaders.splice(idx, 1);
+                });
+                outputHeaders.splice(outputHeaders.indexOf(colName) + 1, 0, ...newCols);
+            } else {
+                newCols.forEach(col => {
+                    if (!outputHeaders.includes(col)) outputHeaders.push(col);
+                });
+            }
+        };
+
+        insertAfter('Product Variant SKU', ['FG', 'gst rate']);
+        insertAfter('Product variant SKU', ['FG', 'gst rate']); // older export format
+        insertAfter('Billing region', ['Tally Ledger', 'Sales ledger', 'Invoice Number']);
+
+        insertAfter('Quantity ordered per order', ['Final Qty', 'taxable value', 'igst', 'cgst', 'sgst']);
+
         const salesReportData = [];
+        const workingSheetData = [];
 
         // =========================
         // PROCESS ROWS
@@ -111,32 +151,67 @@ const shopifyProcessor = async (
 
             const rowObj = {};
             row.eachCell((cell, colNumber) => {
-                rowObj[headers[colNumber]] = cell.value;
+                const header = headers[colNumber];
+                if (header) {
+                    rowObj[header] = cell.value;
+                }
             });
 
             // -------------------------
-            // SKU + FG
+            // SKU + FG LooKUP
             // -------------------------
-            const rawSku = rowObj['Product variant SKU'] || '';
-            const sku = normalizeSKU(rawSku);
+            const rawSku =
+                rowObj['Product Variant SKU'] ||
+                rowObj['Product variant SKU'] ||
+                rowObj['Variant SKU'] ||
+                rowObj['variant sku'] ||
+                '';
 
-            let fg = '';
-            let gstRate = 0;
+            const rawTitle = rowObj['Product title'] || rowObj['Product Title'] || '';
+            const rawVarTitle = rowObj['Product variant title'] || rowObj['Product Variant Title'] || '';
+            const rawVarId = rowObj['Product variant ID'] || rowObj['Product Variant ID'] || '';
 
-            if (skuMap[sku]) {
-                fg = skuMap[sku].fg;
-                gstRate = skuMap[sku].gst;
-            } else {
-                fg = "11. Shipping Charges (Sales) Haryana";
+            // Since the provided SKU Master sometimes maps Product Titles instead of actual SKUs,
+            // we check an array of possible identifiers against the skuMap.
+            const lookupKeys = [
+                normalizeSKU(rawSku),
+                normalizeSKU(rawTitle),
+                normalizeSKU(rawVarTitle),
+                normalizeSKU(rawTitle && rawVarTitle ? `${rawTitle} - ${rawVarTitle}` : ''),
+                normalizeSKU(rawVarId)
+            ].filter(Boolean);
+
+            let finalFg = '';
+            let finalGst = 0;
+            let matched = false;
+
+            for (const key of lookupKeys) {
+                if (skuMap[key]) {
+                    finalFg = skuMap[key].fg;
+                    finalGst = skuMap[key].gst;
+                    matched = true;
+                    break;
+                }
+            }
+
+            const shippingState = rowObj['shipping states'] || rowObj['Shipping states'];
+
+            if (matched) {
+                // Keep the matched values
+            } else if (!rawSku) {
+                // If it's empty in Shopify (no SKU), it's a shipping row
+                finalFg = `11. Shipping Charges (Sales) ${shippingState}`.trim();
+                finalGst = 5;
             }
 
             // -------------------------
             // STATE
             // -------------------------
             const billingRegion = rowObj['Billing region'] || '';
-            const normState = normalizeState(billingRegion);
+            const normBillingState = normalizeState(billingRegion);
+            const normShippingState = normalizeState(shippingState);
 
-            const stateObj = stateMap[normState] || {};
+            const stateObj = stateMap[normBillingState] || {};
 
             const tallyLedger = stateObj.ledger || '';
             const invoiceNumber = stateObj.invoice || '';
@@ -144,14 +219,11 @@ const shopifyProcessor = async (
             // -------------------------
             // SALES LEDGER
             // -------------------------
-            const salesType = (rowObj['Sales'] || '').toString().toLowerCase();
-
             let salesLedger = '';
-
-            if (salesType === 'sales') {
-                salesLedger = `${billingRegion} Shopify`;
-            } else if (salesType === 'shipping') {
-                salesLedger = `${billingRegion} 11. Shipping Charges (Sales)`;
+            if (rawSku) {
+                salesLedger = 'Sales Shopify';
+            } else {
+                salesLedger = `11. Shipping Charges (Sales) ${shippingState}`.trim();
             }
 
             // -------------------------
@@ -159,7 +231,7 @@ const shopifyProcessor = async (
             // -------------------------
             const qtyOrdered = safeNumber(rowObj['Quantity ordered']);
             const qtyReturned = safeNumber(rowObj['Quantity returned']);
-            const totalSales = safeNumber(rowObj['Total sales']);
+            const totalSales = safeNumber(rowObj['Total sales'] || rowObj['Total Sales'] || 0);
 
             const finalQty = qtyOrdered - qtyReturned;
 
@@ -167,20 +239,37 @@ const shopifyProcessor = async (
             // TAX CALCULATION
             // -------------------------
             let taxableValue = 0;
-            if (gstRate > 0) {
-                taxableValue = totalSales / (1 + gstRate / 100);
+            if (finalGst > 0) {
+                taxableValue = totalSales / (1 + (finalGst / 100));
+            } else {
+                taxableValue = totalSales;
             }
 
             let cgst = 0, sgst = 0, igst = 0;
 
-            const sellerState = 'haryana'; // TODO: make dynamic if needed
-
-            if (normalizeState(sellerState) === normState) {
-                cgst = taxableValue * (gstRate / 2 / 100);
-                sgst = taxableValue * (gstRate / 2 / 100);
+            if (normShippingState !== normBillingState) {
+                igst = taxableValue * (finalGst / 100);
             } else {
-                igst = taxableValue * (gstRate / 100);
+                cgst = taxableValue * (finalGst / 2 / 100);
+                sgst = taxableValue * (finalGst / 2 / 100);
             }
+
+            // =========================
+            // FINAL OBJECT FOR EXCEL
+            // =========================
+            const finalRowObj = { ...rowObj };
+            finalRowObj['FG'] = finalFg;
+            finalRowObj['gst rate'] = finalGst;
+            finalRowObj['Tally Ledger'] = tallyLedger;
+            finalRowObj['Sales ledger'] = salesLedger;
+            finalRowObj['Invoice Number'] = invoiceNumber;
+            finalRowObj['Final Qty'] = finalQty;
+            finalRowObj['taxable value'] = taxableValue;
+            finalRowObj['igst'] = igst;
+            finalRowObj['cgst'] = cgst;
+            finalRowObj['sgst'] = sgst;
+
+            workingSheetData.push(finalRowObj);
 
             // =========================
             // FINAL OBJECT (DB FORMAT)
@@ -194,13 +283,13 @@ const shopifyProcessor = async (
                 day: rowObj['Day'],
                 sales: rowObj['Sales'],
 
-                product_variant_sku: sku,
-                fg: fg,
+                product_variant_sku: rawSku || '',
+                fg: finalFg,
 
                 product_variant_id: rowObj['Product variant ID'],
                 product_variant_title: rowObj['Product variant title'],
 
-                shipping_region: rowObj['Shipping region'],
+                shipping_region: shippingState,
                 billing_region: billingRegion,
 
                 tally_ledger: tallyLedger,
@@ -232,7 +321,7 @@ const shopifyProcessor = async (
                 quantity_ordered_per_order: safeNumber(rowObj['Quantity ordered per order']),
                 final_qty: finalQty,
 
-                gst_rate: gstRate,
+                gst_rate: finalGst,
                 taxable_value: Math.round(taxableValue),
 
                 igst,
@@ -249,16 +338,42 @@ const shopifyProcessor = async (
         // CREATE OUTPUT WORKBOOK
         // =========================
         const outputWorkbook = new ExcelJS.Workbook();
+
+        // 1. Working Sheet
         const sheet = outputWorkbook.addWorksheet('working-file');
-
-        if (salesReportData.length > 0) {
-            sheet.columns = Object.keys(salesReportData[0]).map(key => ({
-                header: key,
-                key: key
+        if (workingSheetData.length > 0) {
+            sheet.columns = outputHeaders.map(hdr => ({
+                header: hdr,
+                key: hdr
             }));
-
-            salesReportData.forEach(row => {
+            workingSheetData.forEach(row => {
                 sheet.addRow(row);
+            });
+        }
+
+        // 2. Pivot Sheet
+        const pivotSheet = outputWorkbook.addWorksheet('pivot');
+        const pivotHeaders = ['Invoice Number', 'Tally Ledger', 'Sales ledger', 'FG', 'Final Qty', 'taxable value', 'igst', 'cgst', 'sgst'];
+        pivotSheet.columns = pivotHeaders.map(hdr => ({ header: hdr, key: hdr }));
+
+        // 3. After Pivot Sheet
+        const afterPivotSheet = outputWorkbook.addWorksheet('after pivot');
+        afterPivotSheet.columns = pivotHeaders.map(hdr => ({ header: hdr, key: hdr }));
+
+        if (workingSheetData.length > 0) {
+            workingSheetData.forEach(row => {
+                const pivotRow = {};
+                pivotHeaders.forEach(hdr => {
+                    pivotRow[hdr] = row[hdr] || 0;
+                });
+                // Ensure strings for text columns
+                pivotRow['Invoice Number'] = row['Invoice Number'] || '';
+                pivotRow['Tally Ledger'] = row['Tally Ledger'] || '';
+                pivotRow['Sales ledger'] = row['Sales ledger'] || '';
+                pivotRow['FG'] = row['FG'] || '';
+
+                pivotSheet.addRow(pivotRow);
+                afterPivotSheet.addRow(pivotRow);
             });
         }
 

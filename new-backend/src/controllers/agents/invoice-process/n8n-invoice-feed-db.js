@@ -8,7 +8,7 @@ const parseDate = (dString) => {
   if (parts.length === 3 && parts[2].length === 4) {
     return new Date(`${parts[2]}-${parts[1]}-${parts[0]}`);
   }
-  return new Date(dString); 
+  return new Date(dString);
 };
 
 // ─── POST /api/n8n/invoice/feed ───────────────
