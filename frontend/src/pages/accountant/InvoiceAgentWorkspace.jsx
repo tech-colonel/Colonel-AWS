@@ -220,6 +220,10 @@ const InvoiceAgentWorkspace = ({ agent }) => {
                   setProcessingStatus('done');
                   setProcessedCount(payload.count || 0);
                   setIsTriggering(false);
+                  
+                  // Show a popup notification
+                  toast.success(`Invoices are processed successfully! (${payload.count || 0} invoices)`);
+                  
                   // Refresh invoice list
                   await fetchInvoices();
                   // Close SSE — we got what we needed
@@ -256,12 +260,12 @@ const InvoiceAgentWorkspace = ({ agent }) => {
     startSseConnection();
 
     try {
+      toast.info('Started processing invoices in the background...');
       await api.post(`/api/brands/${brandId}/agents/${agentId}/invoice/process`, {
         brandId,
         agentId
       });
-      // If the webhook returned quickly (small batch), SSE will have already set status to 'done'.
-      // If it timed out (large batch), the banner stays 'processing' until n8n calls /api/n8n/feed.
+      // The SSE connection will handle the 'done' state when n8n-invoice-feed-db is executed
     } catch (error) {
       setIsTriggering(false);
       setProcessingStatus('idle');
