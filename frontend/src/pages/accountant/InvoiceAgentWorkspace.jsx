@@ -368,13 +368,15 @@ const InvoiceAgentWorkspace = ({ agent }) => {
             <FileText className="h-5 w-5" />
             Processed Invoices
             {!invoicesLoading && (
-              <Badge variant="secondary" className="ml-1">{invoices.length}</Badge>
+              <Badge variant="secondary" className="ml-1 bg-blue-100 text-blue-800 hover:bg-blue-200 border-blue-200">
+                Total Saved: {invoices.length}
+              </Badge>
             )}
             {!invoicesLoading && validCount > 0 && (
-              <Badge className="ml-1 bg-green-600 text-white">{validCount} valid</Badge>
+              <Badge className="ml-1 bg-green-600 text-white hover:bg-green-700">{validCount} valid</Badge>
             )}
             {!invoicesLoading && corruptCount > 0 && (
-              <Badge variant="destructive" className="ml-1">{corruptCount} corrupt</Badge>
+              <Badge variant="destructive" className="ml-1 hover:bg-red-600">{corruptCount} corrupt</Badge>
             )}
           </CardTitle>
           <CardDescription>
