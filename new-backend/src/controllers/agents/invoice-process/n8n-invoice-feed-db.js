@@ -1,6 +1,7 @@
 const { Brand, Agent } = require('../../../models/master');
 const { getBrandConnection } = require('../../../config/database');
 const { getDynamicModel } = require('../../../models/brand');
+const { markDone } = require('../../../utils/invoiceEvents');
 
 // ─── Helper: Parse Date ───────────────────────
 const parseDate = (dString) => {
@@ -25,16 +26,23 @@ const feedInvoicesFromN8n = async (req, res, next) => {
     try {
         // ✅ Handle BOTH naming formats (important for n8n)
         const brandId =
+            req.query.brandId ||
             req.body.brandId ||
             req.body.brandid ||
-            req.body.processed_invoices?.[0]?.brand_id;
+            (Array.isArray(req.body) ? req.body[0]?.brand_id : req.body.processed_invoices?.[0]?.brand_id);
 
         const agentId =
+            req.query.agentId ||
             req.body.agentId ||
             req.body.agentid ||
-            req.body.processed_invoices?.[0]?.agent_id;
+            (Array.isArray(req.body) ? req.body[0]?.agent_id : req.body.processed_invoices?.[0]?.agent_id);
 
-        const processed_invoices = req.body.processed_invoices;
+        let processed_invoices = [];
+        if (Array.isArray(req.body)) {
+            processed_invoices = req.body;
+        } else if (req.body && Array.isArray(req.body.processed_invoices)) {
+            processed_invoices = req.body.processed_invoices;
+        }
 
         // ─── Validations ───────────────────────────
         if (!brandId || !agentId) {
@@ -45,11 +53,14 @@ const feedInvoicesFromN8n = async (req, res, next) => {
 
         if (!processed_invoices || !Array.isArray(processed_invoices)) {
             return res.status(400).json({
-                error: 'Invalid payload. Expected { "processed_invoices": [...] }'
+                error: 'Invalid payload. Expected an array or { "processed_invoices": [...] }'
             });
         }
 
         if (processed_invoices.length === 0) {
+            // Notify SSE clients that processing is complete with 0 count
+            markDone(brandId, agentId, 0);
+
             return res.json({
                 success: true,
                 message: 'No invoices to process',
@@ -87,15 +98,7 @@ const feedInvoicesFromN8n = async (req, res, next) => {
         const finalData = processed_invoices.map((row) => ({
             processed_on: new Date(),
 
-            company: row.company || null,
-            invoice_number: row.invoice_number || null,
-
-            invoice_date: parseDate(row.invoice_date),
-            due_date: parseDate(row.due_date),
-
-            seller_gstin: row.seller_gstin || null,
             buyer_gstin: row.buyer_gstin || null,
-
             category: row.category || null,
             product_name: row.product_name || null,
             hsn_code: row.hsn_code || null,
@@ -129,6 +132,9 @@ const feedInvoicesFromN8n = async (req, res, next) => {
         const resultRows = await InvoiceModel.bulkCreate(finalData, {
             returning: true
         });
+
+        // ─── Notify SSE clients (large-batch path via n8n push) ────────
+        markDone(brandId, agentId, resultRows.length);
 
         // ─── Response ──────────────────────────────
         res.json({

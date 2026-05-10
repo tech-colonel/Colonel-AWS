@@ -57,3 +57,137 @@ code, .mono {
     text-wrap: balance;
   }
 }
+
+/* ─── Invoice Processing Status Banner ────────────────────────────────────── */
+@keyframes invoice-banner-in {
+  from { opacity: 0; transform: translateY(-8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes invoice-pulse-ring {
+  0%   { transform: scale(1);   opacity: 0.6; }
+  70%  { transform: scale(1.8); opacity: 0; }
+  100% { transform: scale(1.8); opacity: 0; }
+}
+
+@keyframes invoice-spin {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+
+.invoice-processing-banner {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 14px 18px;
+  border-radius: 12px;
+  border: 1px solid transparent;
+  animation: invoice-banner-in 0.3s ease both;
+  overflow: hidden;
+}
+
+/* Processing state — amber/blue gradient */
+.invoice-processing-banner--active {
+  background: linear-gradient(135deg, #eff6ff 0%, #fefce8 100%);
+  border-color: #bfdbfe;
+}
+
+/* Done state — green */
+.invoice-processing-banner--done {
+  background: linear-gradient(135deg, #f0fdf4 0%, #dcfce7 100%);
+  border-color: #86efac;
+}
+
+/* Icon wrapper */
+.invoice-processing-banner__icon-wrap {
+  flex-shrink: 0;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.invoice-processing-banner__icon-wrap--spin {
+  background: #dbeafe;
+  color: #2563eb;
+  position: relative;
+}
+
+.invoice-processing-banner__icon-wrap--done {
+  background: #bbf7d0;
+  color: #16a34a;
+}
+
+.invoice-processing-banner__icon {
+  width: 20px;
+  height: 20px;
+}
+
+/* Spinning icon */
+.invoice-processing-banner__icon-wrap--spin .invoice-processing-banner__icon {
+  animation: invoice-spin 1s linear infinite;
+}
+
+/* Pulsing ring behind spinner */
+.invoice-processing-banner__pulse {
+  position: absolute;
+  left: 18px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  background: #93c5fd;
+  animation: invoice-pulse-ring 1.8s ease-out infinite;
+  pointer-events: none;
+}
+
+/* Text */
+.invoice-processing-banner__body {
+  flex: 1;
+  min-width: 0;
+}
+
+.invoice-processing-banner__title {
+  font-family: 'Manrope', sans-serif;
+  font-size: 0.9rem;
+  font-weight: 700;
+  color: #1e293b;
+  margin-bottom: 2px;
+}
+
+.invoice-processing-banner--active .invoice-processing-banner__title {
+  color: #1d4ed8;
+}
+
+.invoice-processing-banner--done .invoice-processing-banner__title {
+  color: #15803d;
+}
+
+.invoice-processing-banner__sub {
+  font-size: 0.8rem;
+  color: #64748b;
+  line-height: 1.4;
+}
+
+/* Close button (done state) */
+.invoice-processing-banner__close {
+  flex-shrink: 0;
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 4px;
+  border-radius: 6px;
+  color: #64748b;
+  display: flex;
+  align-items: center;
+  transition: background 0.15s, color 0.15s;
+}
+
+.invoice-processing-banner__close:hover {
+  background: #dcfce7;
+  color: #15803d;
+}

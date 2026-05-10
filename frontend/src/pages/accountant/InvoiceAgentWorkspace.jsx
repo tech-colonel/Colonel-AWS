@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useParams } from 'react-router-dom';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../../components/ui/card';
 import { Button } from '../../components/ui/button';
@@ -9,11 +9,13 @@ import { Badge } from '../../components/ui/badge';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '../../components/ui/modal';
 import {
   Loader2, Play, ExternalLink, FileText, RefreshCw,
-  CheckCircle2, Pencil, Save, X, AlertTriangle, Sheet
+  CheckCircle2, Pencil, Save, X, AlertTriangle, Sheet, Zap, Clock
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { format } from 'date-fns';
 import api from '../../lib/api';
+
+const API_URL = process.env.REACT_APP_BACKEND_URL || 'http://localhost:8001';
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 const formatDate = (dateStr) => {
@@ -31,18 +33,8 @@ const toInputDate = (dateStr) => {
 // ─── All editable fields with labels and types ────────────────────────────────
 const INVOICE_FIELDS = [
   {
-    section: 'Company Info',
-    fields: [
-      { key: 'company', label: 'Company', type: 'text' },
-      { key: 'invoice_number', label: 'Invoice Number', type: 'text' },
-      { key: 'invoice_date', label: 'Invoice Date', type: 'date' },
-      { key: 'due_date', label: 'Due Date', type: 'date' },
-    ]
-  },
-  {
     section: 'GST Details',
     fields: [
-      { key: 'seller_gstin', label: 'Seller GSTIN', type: 'text' },
       { key: 'buyer_gstin', label: 'Buyer GSTIN', type: 'text' },
     ]
   },
@@ -84,6 +76,51 @@ const INVOICE_FIELDS = [
   },
 ];
 
+// ─── Processing Status Banner ─────────────────────────────────────────────────
+const ProcessingBanner = ({ status, count, onDismiss }) => {
+  if (status === 'idle') return null;
+
+  if (status === 'processing') {
+    return (
+      <div className="invoice-processing-banner invoice-processing-banner--active">
+        <div className="invoice-processing-banner__icon-wrap invoice-processing-banner__icon-wrap--spin">
+          <Loader2 className="invoice-processing-banner__icon" />
+        </div>
+        <div className="invoice-processing-banner__body">
+          <p className="invoice-processing-banner__title">Invoices are being processed</p>
+          <p className="invoice-processing-banner__sub">
+            n8n is extracting and parsing your invoices. This may take a minute for large batches — we'll notify you when done.
+          </p>
+        </div>
+        <div className="invoice-processing-banner__pulse" />
+      </div>
+    );
+  }
+
+  if (status === 'done') {
+    return (
+      <div className="invoice-processing-banner invoice-processing-banner--done">
+        <div className="invoice-processing-banner__icon-wrap invoice-processing-banner__icon-wrap--done">
+          <CheckCircle2 className="invoice-processing-banner__icon" />
+        </div>
+        <div className="invoice-processing-banner__body">
+          <p className="invoice-processing-banner__title">
+            Invoices processed successfully!
+          </p>
+          <p className="invoice-processing-banner__sub">
+            <strong>{count}</strong> invoice{count !== 1 ? 's' : ''} have been saved to the database and the list below has been updated.
+          </p>
+        </div>
+        <button className="invoice-processing-banner__close" onClick={onDismiss} aria-label="Dismiss">
+          <X size={16} />
+        </button>
+      </div>
+    );
+  }
+
+  return null;
+};
+
 // ─── Main Component ───────────────────────────────────────────────────────────
 const InvoiceAgentWorkspace = ({ agent }) => {
   const { brandId, agentId } = useParams();
@@ -93,8 +130,12 @@ const InvoiceAgentWorkspace = ({ agent }) => {
   const [invoicesLoading, setInvoicesLoading] = useState(true);
   const [sheetUrl, setSheetUrl] = useState(null);
 
-  // Processing summary popup state
-  const [summaryModal, setSummaryModal] = useState({ open: false, total: 0, valid: 0, corrupt: 0 });
+  // Live processing status
+  const [processingStatus, setProcessingStatus] = useState('idle'); // 'idle' | 'processing' | 'done'
+  const [processedCount, setProcessedCount] = useState(0);
+
+  // SSE abort controller ref so we can cancel the stream
+  const sseAbortRef = useRef(null);
 
   // Edit modal state
   const [editingInvoice, setEditingInvoice] = useState(null);
@@ -130,36 +171,107 @@ const InvoiceAgentWorkspace = ({ agent }) => {
     fetchSheetUrl();
   }, [fetchInvoices, fetchSheetUrl]);
 
+  // ─── SSE connection (fetch-based, supports Authorization header) ───────────
+  const startSseConnection = useCallback(() => {
+    // Cancel any existing SSE connection
+    if (sseAbortRef.current) {
+      sseAbortRef.current.abort();
+    }
+
+    const abortController = new AbortController();
+    sseAbortRef.current = abortController;
+
+    const token = localStorage.getItem('token');
+    const sseUrl = `${API_URL}/api/brands/${brandId}/agents/${agentId}/invoice/status`;
+
+    (async () => {
+      try {
+        const response = await fetch(sseUrl, {
+          headers: {
+            Authorization: `Bearer ${token}`,
+            Accept: 'text/event-stream',
+          },
+          signal: abortController.signal,
+        });
+
+        if (!response.ok || !response.body) return;
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n');
+          buffer = lines.pop(); // keep incomplete last line
+
+          for (const line of lines) {
+            if (line.startsWith('data: ')) {
+              try {
+                const payload = JSON.parse(line.slice(6));
+
+                if (payload.status === 'processing') {
+                  setProcessingStatus('processing');
+                  setIsTriggering(true);
+                } else if (payload.status === 'done') {
+                  setProcessingStatus('done');
+                  setProcessedCount(payload.count || 0);
+                  setIsTriggering(false);
+                  // Refresh invoice list
+                  await fetchInvoices();
+                  // Close SSE — we got what we needed
+                  abortController.abort();
+                  break;
+                }
+                // 'idle' — do nothing, initial state
+              } catch (_) { /* ignore parse errors */ }
+            }
+          }
+        }
+      } catch (err) {
+        if (err.name !== 'AbortError') {
+          console.error('[SSE] Connection error:', err);
+        }
+      }
+    })();
+  }, [brandId, agentId, fetchInvoices]);
+
+  // Cleanup SSE on unmount
+  useEffect(() => {
+    return () => {
+      if (sseAbortRef.current) sseAbortRef.current.abort();
+    };
+  }, []);
+
   // ─── Process invoices ──────────────────────────────────────────────────────
   const handleTriggerWorkflow = async () => {
     setIsTriggering(true);
+    setProcessingStatus('processing');
+    setProcessedCount(0);
+
+    // Start listening for SSE updates first
+    startSseConnection();
+
     try {
-      const response = await api.post(`/api/brands/${brandId}/agents/${agentId}/invoice/process`, {
+      await api.post(`/api/brands/${brandId}/agents/${agentId}/invoice/process`, {
         brandId,
         agentId
       });
-      const data = response.data;
-
-      // Calculate valid vs corrupt from returned data
-      const allSaved = data.data || [];
-      const corruptCount = allSaved.filter(inv => !inv.company || inv.company.trim() === '').length;
-      const validCount = allSaved.length - corruptCount;
-
-      // Show summary popup
-      setSummaryModal({
-        open: true,
-        total: data.count || allSaved.length,
-        valid: validCount,
-        corrupt: corruptCount
-      });
-
-      // Refresh list
-      await fetchInvoices();
+      // If the webhook returned quickly (small batch), SSE will have already set status to 'done'.
+      // If it timed out (large batch), the banner stays 'processing' until n8n calls /api/n8n/feed.
     } catch (error) {
-      toast.error(error.response?.data?.error || error.message || 'Failed to trigger invoice processing');
-    } finally {
       setIsTriggering(false);
+      setProcessingStatus('idle');
+      if (sseAbortRef.current) sseAbortRef.current.abort();
+      toast.error(error.response?.data?.error || error.message || 'Failed to trigger invoice processing');
     }
+  };
+
+  const dismissBanner = () => {
+    setProcessingStatus('idle');
   };
 
   // ─── Edit modal ────────────────────────────────────────────────────────────
@@ -197,6 +309,10 @@ const InvoiceAgentWorkspace = ({ agent }) => {
     }
   };
 
+  // ─── Derived stats ─────────────────────────────────────────────────────────
+  const corruptCount = invoices.filter(i => !i.product_name || i.product_name.trim() === '').length;
+  const validCount = invoices.length - corruptCount;
+
   // ─── Render ────────────────────────────────────────────────────────────────
   return (
     <div className="space-y-6">
@@ -219,7 +335,6 @@ const InvoiceAgentWorkspace = ({ agent }) => {
           Refresh
         </Button>
 
-        {/* Invoice Sheet button — only shown when URL is configured */}
         {sheetUrl ? (
           <Button
             variant="outline"
@@ -235,6 +350,13 @@ const InvoiceAgentWorkspace = ({ agent }) => {
         ) : null}
       </div>
 
+      {/* ─── Live Processing Status Banner ──────────────────────────────── */}
+      <ProcessingBanner
+        status={processingStatus}
+        count={processedCount}
+        onDismiss={dismissBanner}
+      />
+
       {/* Invoices Table */}
       <Card>
         <CardHeader>
@@ -244,15 +366,15 @@ const InvoiceAgentWorkspace = ({ agent }) => {
             {!invoicesLoading && (
               <Badge variant="secondary" className="ml-1">{invoices.length}</Badge>
             )}
-            {/* Show corrupt count badge if any */}
-            {!invoicesLoading && invoices.filter(i => !i.company || i.company.trim() === '').length > 0 && (
-              <Badge variant="destructive" className="ml-1">
-                {invoices.filter(i => !i.company || i.company.trim() === '').length} corrupt
-              </Badge>
+            {!invoicesLoading && validCount > 0 && (
+              <Badge className="ml-1 bg-green-600 text-white">{validCount} valid</Badge>
+            )}
+            {!invoicesLoading && corruptCount > 0 && (
+              <Badge variant="destructive" className="ml-1">{corruptCount} corrupt</Badge>
             )}
           </CardTitle>
           <CardDescription>
-            All invoices processed and stored for {agent?.name}. Rows highlighted in red have a missing company name.
+            All invoices processed and stored for {agent?.name}. Rows highlighted in red have a missing product name.
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -274,16 +396,16 @@ const InvoiceAgentWorkspace = ({ agent }) => {
               <Table>
                 <TableHeader>
                   <TableRow className="bg-slate-50">
-                    <TableHead className="font-semibold text-slate-700">Company</TableHead>
-                    <TableHead className="font-semibold text-slate-700">Invoice Number</TableHead>
-                    <TableHead className="font-semibold text-slate-700">Invoice Date</TableHead>
-                    <TableHead className="font-semibold text-slate-700">Due Date</TableHead>
+                    <TableHead className="font-semibold text-slate-700">Product Name</TableHead>
+                    <TableHead className="font-semibold text-slate-700">Category</TableHead>
+                    <TableHead className="font-semibold text-slate-700">Buyer GSTIN</TableHead>
+                    <TableHead className="font-semibold text-slate-700">GST Amount</TableHead>
                     <TableHead className="font-semibold text-slate-700 text-right">Actions</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
                   {invoices.map((invoice) => {
-                    const missingCompany = !invoice.company || invoice.company.trim() === '';
+                    const missingCompany = !invoice.product_name || invoice.product_name.trim() === '';
                     return (
                       <TableRow
                         key={invoice.id}
@@ -294,22 +416,22 @@ const InvoiceAgentWorkspace = ({ agent }) => {
                         }
                         data-testid={`invoice-row-${invoice.id}`}
                       >
-                        <TableCell className="font-medium text-slate-900 max-w-[200px] truncate" title={invoice.company}>
-                          {invoice.company || (
+                        <TableCell className="font-medium text-slate-900 max-w-[200px] truncate" title={invoice.product_name}>
+                          {invoice.product_name || (
                             <span className="flex items-center gap-1 text-red-500 text-xs font-medium">
                               <AlertTriangle className="h-3.5 w-3.5" />
                               Missing
                             </span>
                           )}
                         </TableCell>
-                        <TableCell className="text-slate-700 font-mono text-sm">
-                          {invoice.invoice_number || '—'}
+                        <TableCell className="text-slate-700 text-sm">
+                          {invoice.category || '—'}
                         </TableCell>
                         <TableCell className="text-slate-600 text-sm">
-                          {formatDate(invoice.invoice_date)}
+                          {invoice.buyer_gstin || '—'}
                         </TableCell>
-                        <TableCell className="text-slate-600 text-sm">
-                          {formatDate(invoice.due_date)}
+                        <TableCell className="text-slate-600 text-sm font-medium">
+                          ₹{invoice.gst_amount || 0}
                         </TableCell>
                         <TableCell className="text-right">
                           <div className="flex items-center justify-end gap-2">
@@ -350,63 +472,6 @@ const InvoiceAgentWorkspace = ({ agent }) => {
         </CardContent>
       </Card>
 
-      {/* ─── Processing Summary Modal ──────────────────────────────────────── */}
-      <Dialog open={summaryModal.open} onOpenChange={(open) => { if (!open) setSummaryModal(prev => ({ ...prev, open: false })); }}>
-        <DialogContent
-          onClose={() => setSummaryModal(prev => ({ ...prev, open: false }))}
-          className="max-w-sm"
-        >
-          <DialogHeader>
-            <DialogTitle>Processing Complete</DialogTitle>
-            <DialogDescription>Summary of the invoice run</DialogDescription>
-          </DialogHeader>
-
-          <div className="space-y-4 py-2">
-            {/* Total */}
-            <div className="flex items-center justify-between px-4 py-3 bg-slate-50 rounded-lg border border-slate-200">
-              <span className="text-sm font-medium text-slate-600">Total Saved</span>
-              <Badge variant="secondary" className="text-base font-bold px-3 py-1">
-                {summaryModal.total}
-              </Badge>
-            </div>
-
-            {/* Valid */}
-            <div className="flex items-center justify-between px-4 py-3 bg-green-50 rounded-lg border border-green-200">
-              <span className="text-sm font-medium text-green-700 flex items-center gap-1.5">
-                <CheckCircle2 className="h-4 w-4" />
-                Valid Invoices
-              </span>
-              <Badge className="bg-green-600 text-white text-base font-bold px-3 py-1">
-                {summaryModal.valid}
-              </Badge>
-            </div>
-
-            {/* Corrupt */}
-            <div className="flex items-center justify-between px-4 py-3 bg-red-50 rounded-lg border border-red-200">
-              <span className="text-sm font-medium text-red-700 flex items-center gap-1.5">
-                <AlertTriangle className="h-4 w-4" />
-                Corrupt (missing company)
-              </span>
-              <Badge className="bg-red-500 text-white text-base font-bold px-3 py-1">
-                {summaryModal.corrupt}
-              </Badge>
-            </div>
-
-            {summaryModal.corrupt > 0 && (
-              <p className="text-xs text-slate-500 text-center">
-                Corrupt entries are highlighted in red in the table. Use the <strong>Edit</strong> button to fix them.
-              </p>
-            )}
-          </div>
-
-          <div className="flex justify-end pt-2">
-            <Button onClick={() => setSummaryModal(prev => ({ ...prev, open: false }))}>
-              Got it
-            </Button>
-          </div>
-        </DialogContent>
-      </Dialog>
-
       {/* ─── Edit Invoice Modal ────────────────────────────────────────────── */}
       <Dialog open={!!editingInvoice} onOpenChange={(open) => { if (!open) closeEditModal(); }}>
         <DialogContent
@@ -416,8 +481,8 @@ const InvoiceAgentWorkspace = ({ agent }) => {
           <DialogHeader>
             <DialogTitle>Edit Invoice</DialogTitle>
             <DialogDescription>
-              {editingInvoice?.invoice_number
-                ? `Editing: ${editingInvoice.invoice_number} — ${editingInvoice.company || 'No company'}`
+              {editingInvoice?.product_name
+                ? `Editing: ${editingInvoice.product_name}`
                 : 'Update invoice details below'}
             </DialogDescription>
           </DialogHeader>
