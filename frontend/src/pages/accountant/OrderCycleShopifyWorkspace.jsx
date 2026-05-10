@@ -56,7 +56,8 @@ const initModal = () => ({
     year: String(currentYear),
     selectedGateways:  [],   // array of ids
     selectedLogistics: [],   // array of ids
-    shopifyFile: null,
+    unicommerceFile: null,
+    salesOrderReportFile: null,
     gatewayFiles:  {},    // { [id]: File }
     logisticsFiles: {},   // { [id]: File }
 });
@@ -154,8 +155,11 @@ const OrderCycleShopifyWorkspace = ({ agent }) => {
     };
 
     const validateStep2 = () => {
-        if (!modal.shopifyFile) {
-            toast.error('Please upload the Shopify file'); return false;
+        if (!modal.unicommerceFile) {
+            toast.error('Please upload the Unicommerce file'); return false;
+        }
+        if (!modal.salesOrderReportFile) {
+            toast.error('Please upload the Sales Order Report file'); return false;
         }
         for (const id of modal.selectedGateways) {
             if (!modal.gatewayFiles[id]) {
@@ -200,7 +204,8 @@ const OrderCycleShopifyWorkspace = ({ agent }) => {
         formData.append('year',  modal.year);
         formData.append('gatewayNames',  JSON.stringify(gwNames));
         formData.append('logisticsNames', JSON.stringify(lpNames));
-        formData.append('shopifyFile', modal.shopifyFile);
+        formData.append('unicommerceFile', modal.unicommerceFile);
+        formData.append('salesOrderReportFile', modal.salesOrderReportFile);
 
         modal.selectedGateways.forEach((id, i) => {
             if (modal.gatewayFiles[id])
@@ -598,25 +603,48 @@ const OrderCycleShopifyWorkspace = ({ agent }) => {
                     {modal.step === STEP_UPLOAD && (
                         <div className="flex-1 overflow-y-auto space-y-4 py-2 pr-1">
 
-                            {/* Shopify File */}
+                            {/* Unicommerce File */}
                             <div className="border-2 border-slate-200 rounded-xl p-4">
                                 <div className="flex items-center gap-2 mb-3">
                                     <ShoppingBag className="h-5 w-5 text-slate-600" />
                                     <p className="font-semibold text-slate-800 text-sm">
-                                        Shopify Export File *
+                                        Upload Unicommerce File *
                                     </p>
-                                    {modal.shopifyFile && (
+                                    {modal.unicommerceFile && (
                                         <Badge className="ml-auto bg-green-100 text-green-700 border border-green-300 text-xs">
                                             <CheckCircle2 className="h-3 w-3 mr-1 inline" />
-                                            {modal.shopifyFile.name}
+                                            {modal.unicommerceFile.name}
                                         </Badge>
                                     )}
                                 </div>
                                 <Input
-                                    id="oc-shopify-file"
+                                    id="oc-unicommerce-file"
                                     type="file"
                                     accept=".xlsx,.xls,.csv"
-                                    onChange={e => setField('shopifyFile', e.target.files[0] || null)}
+                                    onChange={e => setField('unicommerceFile', e.target.files[0] || null)}
+                                    className="h-9 text-sm"
+                                />
+                            </div>
+
+                            {/* Sales Order Report File */}
+                            <div className="border-2 border-slate-200 rounded-xl p-4 mt-4">
+                                <div className="flex items-center gap-2 mb-3">
+                                    <FileText className="h-5 w-5 text-slate-600" />
+                                    <p className="font-semibold text-slate-800 text-sm">
+                                        Upload Sales Order Report *
+                                    </p>
+                                    {modal.salesOrderReportFile && (
+                                        <Badge className="ml-auto bg-green-100 text-green-700 border border-green-300 text-xs">
+                                            <CheckCircle2 className="h-3 w-3 mr-1 inline" />
+                                            {modal.salesOrderReportFile.name}
+                                        </Badge>
+                                    )}
+                                </div>
+                                <Input
+                                    id="oc-sales-order-file"
+                                    type="file"
+                                    accept=".xlsx,.xls,.csv"
+                                    onChange={e => setField('salesOrderReportFile', e.target.files[0] || null)}
                                     className="h-9 text-sm"
                                 />
                             </div>
@@ -734,14 +762,25 @@ const OrderCycleShopifyWorkspace = ({ agent }) => {
                                 </div>
                             ) : previewData ? (
                                 <>
-                                    {/* Shopify rows */}
+                                    {/* Unicommerce rows */}
                                     <div className="flex items-center justify-between px-4 py-3 bg-slate-50 rounded-lg border border-slate-200">
                                         <span className="flex items-center gap-2 text-sm font-medium text-slate-700">
                                             <ShoppingBag className="h-4 w-4 text-slate-500" />
-                                            Shopify Rows Parsed
+                                            Unicommerce Rows Parsed
                                         </span>
                                         <Badge variant="secondary" className="text-base font-bold px-3 py-1">
-                                            {previewData.summary?.shopifyRows ?? previewData.rowCount ?? '—'}
+                                            {previewData.summary?.unicommerceRows ?? '—'}
+                                        </Badge>
+                                    </div>
+
+                                    {/* Sales Order Report rows */}
+                                    <div className="flex items-center justify-between px-4 py-3 bg-slate-50 rounded-lg border border-slate-200 mt-2">
+                                        <span className="flex items-center gap-2 text-sm font-medium text-slate-700">
+                                            <FileText className="h-4 w-4 text-slate-500" />
+                                            Sales Order Rows Parsed
+                                        </span>
+                                        <Badge variant="secondary" className="text-base font-bold px-3 py-1">
+                                            {previewData.summary?.salesOrderRows ?? '—'}
                                         </Badge>
                                     </div>
 

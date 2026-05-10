@@ -24,10 +24,14 @@ router.post('/brands/:brandId/agents/:agentId/amazon/master/sku', authenticateTo
 router.post('/brands/:brandId/agents/:agentId/amazon/master/ledger', authenticateToken, upload.single('file'), salesAmazonController.uploadLedgerMaster);
 router.post('/brands/:brandId/agents/:agentId/amazon/generate', authenticateToken, upload.single('file'), salesAmazonController.generate);
 
+const misController = require('../controllers/agents/common/misController');
+
 // Two-phase generation: preview → verify → commit/discard
 router.post('/brands/:brandId/agents/:agentId/amazon/generate/preview', authenticateToken, upload.single('file'), salesAmazonController.generatePreview);
 router.post('/brands/:brandId/agents/:agentId/amazon/generate/commit',  authenticateToken, salesAmazonController.generateCommit);
 router.post('/brands/:brandId/agents/:agentId/amazon/generate/discard', authenticateToken, salesAmazonController.generateDiscard);
+
+router.post('/brands/:brandId/agents/:agentId/amazon/mis', authenticateToken, misController.generateAmazonMIS);
 
 
 // ─── Flipkart Routes ───────────────────────────────────────────────────────────
@@ -106,5 +110,18 @@ router.post('/brands/:brandId/agents/:agentId/shopify/generate', authenticateTok
 router.post('/brands/:brandId/agents/:agentId/shopify/generate/preview', authenticateToken, upload.single('file'), salesShopifyController.generatePreview);
 router.post('/brands/:brandId/agents/:agentId/shopify/generate/commit', authenticateToken, salesShopifyController.generateCommit);
 router.post('/brands/:brandId/agents/:agentId/shopify/generate/discard', authenticateToken, salesShopifyController.generateDiscard);
+
+const totalSalesController = require('../controllers/agents/total-sales/totalSalesController');
+
+// ─── Total Sales Routes ────────────────────────────────────────────────────────
+router.get('/brands/:brandId/agents/:agentId/total-sales-analyzer/master', authenticateToken, totalSalesController.getMasterData);
+router.post('/brands/:brandId/agents/:agentId/total-sales-analyzer/master/sku', authenticateToken, upload.single('file'), totalSalesController.uploadSkuMaster);
+router.post('/brands/:brandId/agents/:agentId/total-sales-analyzer/master/ledger', authenticateToken, upload.single('file'), totalSalesController.uploadLedgerMaster);
+router.post('/brands/:brandId/agents/:agentId/total-sales-analyzer/generate', authenticateToken, upload.single('file'), totalSalesController.generatePreview); // Use generatePreview for standard generate as well
+
+router.post('/brands/:brandId/agents/:agentId/total-sales-analyzer/generate/preview', authenticateToken, upload.single('file'), totalSalesController.generatePreview);
+router.post('/brands/:brandId/agents/:agentId/total-sales-analyzer/generate/commit', authenticateToken, totalSalesController.generateCommit);
+router.post('/brands/:brandId/agents/:agentId/total-sales-analyzer/generate/discard', authenticateToken, totalSalesController.generateDiscard);
+router.post('/brands/:brandId/agents/:agentId/total-sales-analyzer/dashboard', authenticateToken, totalSalesController.getDashboardData);
 
 module.exports = router;

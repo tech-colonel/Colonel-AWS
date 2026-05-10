@@ -12,12 +12,14 @@ const { authenticateToken } = require('../middleware/authMiddleware');
 const ctrl = require('../controllers/agents/order-cycle-shopify/orderCycleShopifyController');
 
 // Build the multer fields array:
-//  - shopifyFile (1)
+//  - unicommerceFile (1)
+//  - salesOrderReportFile (1)
 //  - paymentGateway_0 … paymentGateway_9  (up to 10 gateways)
 //  - logistics_0 … logistics_9            (up to 10 logistics partners)
 const PARTNER_SLOTS = 10;
 const uploadFields = [
-    { name: 'shopifyFile', maxCount: 1 },
+    { name: 'unicommerceFile', maxCount: 1 },
+    { name: 'salesOrderReportFile', maxCount: 1 },
     ...Array.from({ length: PARTNER_SLOTS }, (_, i) => ({ name: `paymentGateway_${i}`, maxCount: 1 })),
     ...Array.from({ length: PARTNER_SLOTS }, (_, i) => ({ name: `logistics_${i}`, maxCount: 1 })),
 ];

@@ -41,17 +41,20 @@ const getWorkingFiles = async (req, res, next) => {
       agent.columns
     );
 
+    const attributes = [
+      'id',
+      'filename',
+      'month',
+      'year',
+      'created_at'
+    ];
+
+    if (WorkingFileModel.rawAttributes.file_type) attributes.push('file_type');
+    if (WorkingFileModel.rawAttributes.inventory_type) attributes.push('inventory_type');
+
     // ✅ Fetch all rows sorted (latest first)
     const rows = await WorkingFileModel.findAll({
-      attributes: [
-        'id',
-        'filename',
-        'month',
-        'year',
-        'file_type',
-        'inventory_type',
-        'created_at'
-      ],
+      attributes: attributes,
       order: [
         ['filename', 'ASC'],
         ['created_at', 'DESC']

@@ -1,6 +1,7 @@
 const { Brand, Agent } = require('../../../models/master');
 const { getBrandConnection } = require('../../../config/database');
 const { getDynamicModel } = require('../../../models/brand');
+const { markProcessing, markDone } = require('../../../utils/invoiceEvents');
 
 // ─── Helper: parse dates in DD/MM/YYYY or DD-MM-YYYY format ─────────────────
 const parseDate = (dString) => {
@@ -39,8 +40,10 @@ const processInvoice = async (req, res, next) => {
       });
     }
 
+    // Signal to SSE clients that processing has started
+    markProcessing(brandId, agentId);
+
     // Call the n8n webhook using native fetch
-    let responseData;
     try {
       const response = await fetch(webhookUrl, {
         method: 'POST',
@@ -50,74 +53,26 @@ const processInvoice = async (req, res, next) => {
           brandName: brand.name,
           agentId: agent.id,
           timestamp: new Date().toISOString()
-        })
+        }),
+        signal: AbortSignal.timeout(30000) // 30s timeout
       });
 
       if (!response.ok) {
         throw new Error(`HTTP ${response.status}`);
       }
-      responseData = await response.json();
+      
+      // We rely ENTIRELY on n8n calling the /n8n/feed endpoint to store data and call markDone()
+      return res.json({ success: true, message: 'Processing started. Invoices will appear once n8n finishes.', pending: true });
+
     } catch (apiError) {
+      if (apiError.name === 'TimeoutError' || apiError.name === 'AbortError') {
+        // Webhook took too long — but we are relying on /api/n8n/feed anyway.
+        console.log('[Invoice] n8n webhook timed out — waiting for n8n to push via /api/n8n/feed');
+        return res.json({ success: true, message: 'Processing started. Invoices will appear once n8n finishes.', pending: true });
+      }
       console.error('[Invoice] n8n webhook error:', apiError.message);
       return res.status(502).json({ error: 'Failed to communicate with invoice processing webhook.' });
     }
-
-    // Validate response shape
-    if (!responseData || !Array.isArray(responseData.processed_invoices)) {
-      return res.status(400).json({
-        error: 'Invalid response from webhook. Expected { "processed_invoices": [...] }'
-      });
-    }
-
-    const invoices = responseData.processed_invoices;
-    if (invoices.length === 0) {
-      return res.json({ message: 'No new invoices found to process.', count: 0, data: [] });
-    }
-
-    // Get brand DB and dynamic model
-    const brandDb = getBrandConnection(brand.db_name);
-    const tableName = agent.name.replace(/[^a-zA-Z0-9]/g, '_').toLowerCase();
-    const InvoiceModel = getDynamicModel(brandDb, tableName, agent.columns);
-
-    // Ensure table exists
-    await InvoiceModel.sync({ alter: false });
-
-    // Map webhook response fields → DB columns
-    const finalData = invoices.map(row => ({
-      processed_on:  new Date(),
-      company:       row.company,
-      invoice_number: row.invoice_number,
-      invoice_date:  parseDate(row.invoice_date),
-      due_date:      parseDate(row.due_date),
-      seller_gstin:  row.seller_gstin,
-      buyer_gstin:   row.buyer_gstin,
-      category:      row.category,
-      product_name:  row.product_name,
-      hsn_code:      row.hsn_code,
-      quantity:      parseInt(row.quantity) || 0,
-      unit:          row.unit,
-      rate:          parseFloat(row.rate) || 0,
-      cgst_rate:     parseFloat(row.cgst_rate) || 0,
-      sgst_rate:     parseFloat(row.sgst_rate) || 0,
-      igst_rate:     parseFloat(row.igst_rate) || 0,
-      cgst_amount:   parseFloat(row.cgst_amount) || 0,
-      sgst_amount:   parseFloat(row.sgst_amount) || 0,
-      igst_amount:   parseFloat(row.igst_amount) || 0,
-      gst_amount:    parseFloat(row.GST_AMOUNT || row.gst_amount) || 0,
-      taxable_value: parseFloat(row['taxable value'] || row.taxable_value) || 0,
-      invoice_link:  row.Invoice_link || row.invoice_link || null,
-      status:        'Processed'
-    }));
-
-    // Bulk insert
-    const resultRows = await InvoiceModel.bulkCreate(finalData, { returning: true });
-
-    res.json({
-      success: true,
-      message: 'Invoices processed and stored successfully',
-      count: resultRows.length,
-      data: finalData
-    });
 
   } catch (error) {
     next(error);
@@ -141,7 +96,7 @@ const getInvoices = async (req, res, next) => {
     const InvoiceModel = getDynamicModel(brandDb, tableName, agent.columns);
 
     // Ensure table exists silently before querying
-    await InvoiceModel.sync({ alter: false }).catch(() => {});
+    await InvoiceModel.sync({ alter: false }).catch(() => { });
 
     try {
       const invoices = await InvoiceModel.findAll({
@@ -204,8 +159,7 @@ const updateInvoice = async (req, res, next) => {
 
     // Whitelist of updatable fields
     const allowed = [
-      'company', 'invoice_number', 'invoice_date', 'due_date',
-      'seller_gstin', 'buyer_gstin', 'category', 'product_name',
+      'buyer_gstin', 'category', 'product_name',
       'hsn_code', 'quantity', 'unit', 'rate',
       'cgst_rate', 'sgst_rate', 'igst_rate',
       'cgst_amount', 'sgst_amount', 'igst_amount',
