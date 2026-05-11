@@ -1,7 +1,9 @@
+const path = require('path');
 const { Sequelize } = require('sequelize');
 const dotenv = require('dotenv');
 
-dotenv.config();
+// Resolve .env from new-backend root regardless of where the script is run from
+dotenv.config({ path: path.resolve(__dirname, '../../.env') });
 
 /**
  * Master Database Connection

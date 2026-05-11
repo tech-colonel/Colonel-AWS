@@ -23,7 +23,7 @@ const sidebarItems = [
 const AgentsPage = () => {
   const [agents, setAgents] = useState([]);
   const [showModal, setShowModal] = useState(false);
-  const [formData, setFormData] = useState({ name: '', description: '' });
+  const [formData, setFormData] = useState({ name: '', description: '', useBasicColumns: true });
 
   useEffect(() => {
     fetchAgents();
@@ -41,20 +41,33 @@ const AgentsPage = () => {
   const handleSubmit = async (e) => {
     e.preventDefault();
     try {
+      const basicColumns = [
+        { name: 'id', type: 'UUID', primaryKey: true, defaultValue: 'UUIDV4' },
+        { name: 'month', type: 'INTEGER' },
+        { name: 'year', type: 'INTEGER' },
+        { name: 'inventory_type', type: 'STRING' },
+        { name: 'filename', type: 'STRING' },
+        { name: 'created_at', type: 'DATE', defaultValue: 'NOW' },
+        { name: 'date', type: 'DATE' }
+      ];
+
+      const defaultColumns = [
+        { name: 'SKU', type: 'STRING' },
+        { name: 'Product_Name', type: 'STRING' },
+        { name: 'Quantity', type: 'INTEGER' },
+        { name: 'Amount', type: 'DECIMAL' },
+        { name: 'State', type: 'STRING' }
+      ];
+
       const payload = {
-        ...formData,
-        columns: [
-          { name: 'SKU', type: 'STRING' },
-          { name: 'Product_Name', type: 'STRING' },
-          { name: 'Quantity', type: 'INTEGER' },
-          { name: 'Amount', type: 'DECIMAL' },
-          { name: 'State', type: 'STRING' }
-        ]
+        name: formData.name,
+        description: formData.description,
+        columns: formData.useBasicColumns ? basicColumns : defaultColumns
       };
       await api.post('/api/agents', payload);
       toast.success('Agent created successfully');
       setShowModal(false);
-      setFormData({ name: '', description: '' });
+      setFormData({ name: '', description: '', useBasicColumns: true });
       fetchAgents();
     } catch (error) {
       toast.error(error.response?.data?.error || 'Failed to create agent');
@@ -144,6 +157,18 @@ const AgentsPage = () => {
                 placeholder="Enter agent description"
                 data-testid="agent-description-input"
               />
+            </div>
+            <div className="flex items-center space-x-2 pt-2">
+              <input
+                type="checkbox"
+                id="useBasicColumns"
+                checked={formData.useBasicColumns}
+                onChange={(e) => setFormData({ ...formData, useBasicColumns: e.target.checked })}
+                className="rounded border-slate-300 text-indigo-600 shadow-sm focus:border-indigo-300 focus:ring focus:ring-indigo-200 focus:ring-opacity-50 h-4 w-4"
+              />
+              <Label htmlFor="useBasicColumns" className="font-normal cursor-pointer text-slate-700">
+                Include basic columns (id, month, year, etc.)
+              </Label>
             </div>
             <div className="flex gap-3 pt-4">
               <Button type="button" variant="secondary" onClick={() => setShowModal(false)} className="flex-1">
