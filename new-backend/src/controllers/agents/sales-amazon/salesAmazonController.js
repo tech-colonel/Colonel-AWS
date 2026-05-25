@@ -588,6 +588,190 @@ const generateDiscard = async (req, res, next) => {
     } catch (error) { next(error); }
 };
 
+const generateBulk = async (req, res, next) => {
+    try {
+        console.log('=== AMAZON BULK GENERATE REQUEST ===');
+        console.log('Body:', req.body);
+        console.log('Params:', req.params);
+        console.log('Files count:', req.files?.length);
+
+        const { brandId, agentId } = req.params;
+        const fileType = String(req.body.file_type || '').toLowerCase().trim();
+
+        let useInventory = true;
+        if (req.body.inventory_type) {
+            const val = String(req.body.inventory_type).toLowerCase().trim();
+            if (val === 'without' || val === 'false' || val === '0' || val === 'no') {
+                useInventory = false;
+            }
+        }
+
+        console.log('Normalized:', { fileType, useInventory });
+
+        if (!req.files || !Array.isArray(req.files) || req.files.length === 0) {
+            return res.status(400).json({ error: 'At least one file is required for bulk upload' });
+        }
+
+        if (!fileType) {
+            return res.status(400).json({ error: 'file_type required' });
+        }
+
+        let metadata = [];
+        if (req.body.metadata) {
+            try {
+                metadata = JSON.parse(req.body.metadata);
+            } catch (e) {
+                return res.status(400).json({ error: 'Invalid metadata format' });
+            }
+        }
+
+        if (!metadata || metadata.length !== req.files.length) {
+            return res.status(400).json({ error: 'Metadata array length must match number of files' });
+        }
+
+        const brand = await Brand.findByPk(brandId);
+        const agent = await Agent.findByPk(agentId);
+
+        if (!brand || !agent) {
+            return res.status(404).json({ error: 'Brand or Agent not found' });
+        }
+
+        const brandDb = getBrandConnection(brand.db_name);
+        const tableName = agent.name.replace(/[^a-zA-Z0-9]/g, '_').toLowerCase();
+        const Model = getDynamicModel(brandDb, tableName, agent.columns);
+        const masterData = await salesService.getMasterData(brandId, agentId);
+
+        let skuFileBuffer;
+        let sourceSheetData = [];
+
+        if (!useInventory) {
+            console.log('WITHOUT INVENTORY MODE');
+            const wb = XLSX.utils.book_new();
+            const ws = XLSX.utils.json_to_sheet([]);
+            XLSX.utils.book_append_sheet(wb, ws, 'Source');
+            skuFileBuffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+        } else {
+            console.log('WITH INVENTORY MODE');
+            if (!masterData.sku_master || masterData.sku_master.length === 0) {
+                return res.status(400).json({ error: 'No SKUs found' });
+            }
+
+            sourceSheetData = masterData.sku_master.map(sku => ({
+                SKU: sku['Sales portal SKU'] || sku['SKU'] || sku.salesPortalSku || sku.sku,
+                FG: sku['Tally new SKU'] || sku['Tally SKU'] || sku.tallyNewSku || sku.fg || sku.FG
+            }));
+
+            const wb = XLSX.utils.book_new();
+            const ws = XLSX.utils.json_to_sheet(sourceSheetData);
+            XLSX.utils.book_append_sheet(wb, ws, 'Source');
+            skuFileBuffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+        }
+
+        let stateConfigData = masterData.ledger_master || null;
+
+        await ensureDir();
+
+        const monthMapping = {
+            "January": 1, "February": 2, "March": 3, "April": 4,
+            "May": 5, "June": 6, "July": 7, "August": 8,
+            "September": 9, "October": 10, "November": 11, "December": 12
+        };
+
+        const allFinalRows = [];
+
+        for (let idx = 0; idx < req.files.length; idx++) {
+            const file = req.files[idx];
+            const fileMeta = metadata[idx] || {};
+            const month = fileMeta.month;
+            const year = parseInt(fileMeta.year);
+
+            if (!month || !year) {
+                return res.status(400).json({ error: `Month and year are required for file ${file.originalname}` });
+            }
+
+            const dbMonth = monthMapping[month] || (isNaN(parseInt(month)) ? 0 : parseInt(month));
+
+            console.log(`Processing file: ${file.originalname} for ${month} ${year}`);
+            let processedData;
+            try {
+                if (fileType === 'b2b') {
+                    processedData = await amazonB2BProcessor(
+                        file.buffer,
+                        skuFileBuffer,
+                        brand.name,
+                        new Date().toISOString(),
+                        sourceSheetData,
+                        stateConfigData,
+                        useInventory,
+                        month,
+                        year
+                    );
+                } else if (fileType === 'b2c') {
+                    processedData = await amazonB2CProcessor(
+                        file.buffer,
+                        skuFileBuffer,
+                        brand.name,
+                        new Date().toISOString(),
+                        sourceSheetData,
+                        stateConfigData,
+                        useInventory,
+                        month,
+                        year
+                    );
+                } else {
+                    return res.status(400).json({ error: 'Invalid file_type' });
+                }
+            } catch (error) {
+                if (error.missingSKUs) {
+                    return res.status(400).json({
+                        error: `File "${file.originalname}" has missing SKUs`,
+                        missingSKUs: error.missingSKUs
+                    });
+                }
+                throw error;
+            }
+
+            if (!processedData || !processedData.process1Json) {
+                return res.status(400).json({ error: `Invalid processor output for file ${file.originalname}` });
+            }
+
+            const id = uuidv4();
+            const cleanOriginalName = file.originalname.replace(/[^a-zA-Z0-9]/g, '_').toLowerCase();
+            const processFile = `amazon_bulk_${fileType}_${brand.name}_${cleanOriginalName}_${id}.xlsx`;
+            const processPath = path.join(OUTPUT_DIR, processFile);
+
+            const fileRows = processedData.process1Json.map(row => ({
+                ...mapRowToAmazonSchema(row, fileType, useInventory),
+                month: dbMonth,
+                year,
+                file_type: fileType,
+                inventory_type: useInventory ? 'With' : 'Without',
+                filename: processFile
+            }));
+
+            allFinalRows.push(...fileRows);
+
+            if (processedData.workbook) {
+                await processedData.workbook.xlsx.writeFile(processPath);
+            } else {
+                throw new Error(`Processor did not return workbook for file ${file.originalname}`);
+            }
+        }
+
+        await Model.sync({ alter: true });
+        await Model.bulkCreate(allFinalRows, { returning: true });
+
+        res.json({
+            success: true,
+            message: `Successfully processed ${req.files.length} files and saved ${allFinalRows.length} records.`,
+            count: allFinalRows.length
+        });
+
+    } catch (error) {
+        next(error);
+    }
+};
+
 module.exports = {
     uploadSkuMaster,
     uploadLedgerMaster,
@@ -595,5 +779,6 @@ module.exports = {
     generate,
     generatePreview,
     generateCommit,
-    generateDiscard
+    generateDiscard,
+    generateBulk
 };
