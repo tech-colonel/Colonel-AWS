@@ -97,6 +97,29 @@ const AgentWorkspace = () => {
     packedFile: null
   });
 
+  const [showBulkUploadModal, setShowBulkUploadModal] = useState(false);
+  const [isBulkUploading, setIsBulkUploading] = useState(false);
+  const [bulkCommon, setBulkCommon] = useState({
+    file_type: 'B2B',
+    inventory_type: 'With'
+  });
+  const [bulkFiles, setBulkFiles] = useState([]);
+  const [bulkTemp, setBulkTemp] = useState({
+    month: '',
+    year: new Date().getFullYear().toString(),
+    file: null
+  });
+
+  const [showMergeModal, setShowMergeModal] = useState(false);
+  const [isMerging, setIsMerging] = useState(false);
+  const [mergedFileName, setMergedFileName] = useState('');
+  const [mergeConfig, setMergeConfig] = useState({
+    startMonth: '',
+    startYear: new Date().getFullYear().toString(),
+    endMonth: '',
+    endYear: new Date().getFullYear().toString()
+  });
+
   const sidebarItems = [
     { path: `/brands/${brandId}/dashboard`, label: 'Agent Workspace', icon: LayoutDashboard, testId: 'nav-dashboard' },
     { path: `/brands/${brandId}/agents`, label: 'Agents', icon: Bot, testId: 'nav-agents' },
@@ -419,6 +442,92 @@ const AgentWorkspace = () => {
     }
   };
 
+  const handleBulkUpload = async (e) => {
+    e.preventDefault();
+    if (bulkFiles.length === 0) {
+      toast.error('Please add at least one file to the batch');
+      return;
+    }
+
+    const data = new FormData();
+    const metadata = [];
+
+    bulkFiles.forEach(item => {
+      data.append('files', item.file);
+      metadata.push({ month: item.month, year: item.year });
+    });
+
+    data.append('metadata', JSON.stringify(metadata));
+    data.append('file_type', bulkCommon.file_type);
+    data.append('inventory_type', bulkCommon.inventory_type);
+
+    setIsBulkUploading(true);
+    try {
+      const res = await api.post(
+        `/api/brands/${brandId}/agents/${agentId}/amazon/generate/bulk`,
+        data,
+        { headers: { 'Content-Type': 'multipart/form-data' } }
+      );
+      toast.success(res.data.message || 'Bulk upload processed successfully ✅');
+      setShowBulkUploadModal(false);
+      setBulkFiles([]);
+      setBulkTemp({
+        month: '',
+        year: new Date().getFullYear().toString(),
+        file: null
+      });
+      fetchData();
+    } catch (error) {
+      toast.error(error.response?.data?.error || 'Failed to process bulk upload');
+    } finally {
+      setIsBulkUploading(false);
+    }
+  };
+
+  const handleMergeFiles = async (e) => {
+    if (e) e.preventDefault();
+    if (!mergeConfig.startMonth || !mergeConfig.endMonth || !mergeConfig.startYear || !mergeConfig.endYear) {
+      toast.error('Please select start and end month/year');
+      return;
+    }
+    setIsMerging(true);
+    setMergedFileName('');
+    try {
+      const res = await api.post(`/api/brands/${brandId}/agents/${agentId}/working-files/merge`, mergeConfig);
+      if (res.data.success) {
+        setMergedFileName(res.data.filename);
+        toast.success('Merged file generated successfully!');
+      } else {
+        toast.error('Failed to merge files');
+      }
+    } catch (error) {
+      toast.error(error.response?.data?.error || 'Failed to merge files');
+    } finally {
+      setIsMerging(false);
+    }
+  };
+
+  const handleDownloadMerged = async () => {
+    if (!mergedFileName) return;
+    try {
+      const response = await api.get(
+        `/api/brands/${brandId}/agents/${agentId}/working-files/download-temp?filename=${encodeURIComponent(mergedFileName)}`,
+        { responseType: 'blob' }
+      );
+
+      const url = window.URL.createObjectURL(new Blob([response.data]));
+      const link = document.createElement('a');
+      link.href = url;
+      link.setAttribute('download', mergedFileName);
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      toast.success('Merged file downloaded successfully');
+    } catch (error) {
+      toast.error('Download failed');
+    }
+  };
+
   const handleDelete = async (fileId) => {
     if (!window.confirm('Are you sure you want to delete this file?')) return;
 
@@ -466,7 +575,7 @@ const AgentWorkspace = () => {
       toast.error('No data to export');
       return;
     }
-    
+
     // Map with dynamic columns
     const exportData = misData.data.map(row => {
       let r = {};
@@ -622,58 +731,58 @@ const AgentWorkspace = () => {
 
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
               {!isTotalSalesAnalyzer && (
-              <Card>
-                <CardHeader>
-                  <CardTitle>Master Data Management</CardTitle>
-                  <CardDescription>Upload and view SKU and Ledger master data</CardDescription>
-                </CardHeader>
-                <CardContent className="space-y-3">
-                  <div className="grid grid-cols-2 gap-3">
-                    <Button
-                      variant="outline"
-                      onClick={() => setShowUploadSkuModal(true)}
-                      data-testid="upload-sku-button"
-                      className="w-full"
-                    >
-                      <Upload className="mr-2 h-4 w-4" />
-                      Upload SKU
-                    </Button>
-                    <Button
-                      variant="outline"
-                      onClick={() => setShowViewSkuModal(true)}
-                      data-testid="view-sku-button"
-                      className="w-full"
-                    >
-                      <Eye className="mr-2 h-4 w-4" />
-                      View SKU
-                    </Button>
-                  </div>
-                  <div className="grid grid-cols-2 gap-3">
-                    <Button
-                      variant="outline"
-                      onClick={() => setShowUploadLedgerModal(true)}
-                      data-testid="upload-ledger-button"
-                      className="w-full"
-                    >
-                      <Upload className="mr-2 h-4 w-4" />
-                      Upload Ledger
-                    </Button>
-                    <Button
-                      variant="outline"
-                      onClick={() => setShowViewLedgerModal(true)}
-                      data-testid="view-ledger-button"
-                      className="w-full"
-                    >
-                      <Eye className="mr-2 h-4 w-4" />
-                      View Ledger
-                    </Button>
-                  </div>
-                  <div className="pt-2 text-xs text-slate-500 space-y-1">
-                    <p>SKU Master: {masterData.sku_master?.length || 0} records</p>
-                    <p>Ledger Master: {masterData.ledger_master?.length || 0} records</p>
-                  </div>
-                </CardContent>
-              </Card>
+                <Card>
+                  <CardHeader>
+                    <CardTitle>Master Data Management</CardTitle>
+                    <CardDescription>Upload and view SKU and Ledger master data</CardDescription>
+                  </CardHeader>
+                  <CardContent className="space-y-3">
+                    <div className="grid grid-cols-2 gap-3">
+                      <Button
+                        variant="outline"
+                        onClick={() => setShowUploadSkuModal(true)}
+                        data-testid="upload-sku-button"
+                        className="w-full"
+                      >
+                        <Upload className="mr-2 h-4 w-4" />
+                        Upload SKU
+                      </Button>
+                      <Button
+                        variant="outline"
+                        onClick={() => setShowViewSkuModal(true)}
+                        data-testid="view-sku-button"
+                        className="w-full"
+                      >
+                        <Eye className="mr-2 h-4 w-4" />
+                        View SKU
+                      </Button>
+                    </div>
+                    <div className="grid grid-cols-2 gap-3">
+                      <Button
+                        variant="outline"
+                        onClick={() => setShowUploadLedgerModal(true)}
+                        data-testid="upload-ledger-button"
+                        className="w-full"
+                      >
+                        <Upload className="mr-2 h-4 w-4" />
+                        Upload Ledger
+                      </Button>
+                      <Button
+                        variant="outline"
+                        onClick={() => setShowViewLedgerModal(true)}
+                        data-testid="view-ledger-button"
+                        className="w-full"
+                      >
+                        <Eye className="mr-2 h-4 w-4" />
+                        View Ledger
+                      </Button>
+                    </div>
+                    <div className="pt-2 text-xs text-slate-500 space-y-1">
+                      <p>SKU Master: {masterData.sku_master?.length || 0} records</p>
+                      <p>Ledger Master: {masterData.ledger_master?.length || 0} records</p>
+                    </div>
+                  </CardContent>
+                </Card>
               )}
 
               <Card>
@@ -681,7 +790,7 @@ const AgentWorkspace = () => {
                   <CardTitle>Working File Generation</CardTitle>
                   <CardDescription>Process sales data with master information</CardDescription>
                 </CardHeader>
-                <CardContent>
+                <CardContent className="space-y-3">
                   <Button
                     onClick={() => setShowGenerateModal(true)}
                     className="w-full"
@@ -689,6 +798,27 @@ const AgentWorkspace = () => {
                   >
                     <Plus className="mr-2 h-4 w-4" />
                     Create New File
+                  </Button>
+                  {isAmazon && (
+                    <Button
+                      onClick={() => setShowBulkUploadModal(true)}
+                      className="w-full bg-slate-800 hover:bg-slate-900 text-white"
+                      data-testid="bulk-upload-button"
+                    >
+                      <Upload className="mr-2 h-4 w-4" />
+                      Bulk Upload Files
+                    </Button>
+                  )}
+                  <Button
+                    onClick={() => {
+                      setMergedFileName('');
+                      setShowMergeModal(true);
+                    }}
+                    className="w-full bg-indigo-600 hover:bg-indigo-700 text-white"
+                    data-testid="merge-files-button"
+                  >
+                    <Download className="mr-2 h-4 w-4" />
+                    Merge Files
                   </Button>
                 </CardContent>
               </Card>
@@ -1034,115 +1164,115 @@ const AgentWorkspace = () => {
                   </div>
                 ) : (
                   <>
-                <div className="grid grid-cols-2 gap-4">
-                  <div>
-                    <Label htmlFor="month">Month *</Label>
-                    <select
-                      id="month"
-                      value={formData.month}
-                      onChange={(e) => setFormData({ ...formData, month: e.target.value })}
-                      required
-                      data-testid="month-select"
-                      className="flex h-9 w-full rounded-md border border-slate-200 bg-transparent px-3 py-2 text-sm mt-2"
-                    >
-                      <option value="">Select</option>
-                      {['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'].map(m => (
-                        <option key={m} value={m}>{m}</option>
-                      ))}
-                    </select>
-                  </div>
-                  <div>
-                    <Label htmlFor="year">Year *</Label>
-                    <Input
-                      id="year"
-                      type="number"
-                      value={formData.year}
-                      onChange={(e) => setFormData({ ...formData, year: e.target.value })}
-                      required
-                      data-testid="year-input"
-                      className="mt-2"
-                    />
-                  </div>
-                </div>
-
-                {isAmazon && (
-                  <div>
-                    <Label htmlFor="file-type">File Type *</Label>
-                    <select
-                      id="file-type"
-                      value={formData.file_type}
-                      onChange={(e) => setFormData({ ...formData, file_type: e.target.value })}
-                      data-testid="file-type-select"
-                      className="flex h-9 w-full rounded-md border border-slate-200 bg-transparent px-3 py-2 text-sm mt-2"
-                    >
-                      <option value="B2B">B2B</option>
-                      <option value="B2C">B2C</option>
-                    </select>
-                  </div>
-                )}
-
-                <div>
-                  <Label htmlFor="inventory-type">Inventory *</Label>
-                  <select
-                    id="inventory-type"
-                    value={formData.inventory_type}
-                    onChange={(e) => setFormData({ ...formData, inventory_type: e.target.value })}
-                    data-testid="inventory-select"
-                    className="flex h-9 w-full rounded-md border border-slate-200 bg-transparent px-3 py-2 text-sm mt-2"
-                  >
-                    <option value="With">With Inventory</option>
-                    <option value="Without">Without Inventory</option>
-                  </select>
-                </div>
-
-                {isMyntra ? (
-                  <div className="space-y-4">
-                    <div>
-                      <Label htmlFor="packed-file">Packed File (Sales) *</Label>
-                      <Input
-                        id="packed-file"
-                        type="file"
-                        onChange={(e) => setFormData({ ...formData, packedFile: e.target.files[0] })}
-                        className="mt-2"
-                      />
+                    <div className="grid grid-cols-2 gap-4">
+                      <div>
+                        <Label htmlFor="month">Month *</Label>
+                        <select
+                          id="month"
+                          value={formData.month}
+                          onChange={(e) => setFormData({ ...formData, month: e.target.value })}
+                          required
+                          data-testid="month-select"
+                          className="flex h-9 w-full rounded-md border border-slate-200 bg-transparent px-3 py-2 text-sm mt-2"
+                        >
+                          <option value="">Select</option>
+                          {['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'].map(m => (
+                            <option key={m} value={m}>{m}</option>
+                          ))}
+                        </select>
+                      </div>
+                      <div>
+                        <Label htmlFor="year">Year *</Label>
+                        <Input
+                          id="year"
+                          type="number"
+                          value={formData.year}
+                          onChange={(e) => setFormData({ ...formData, year: e.target.value })}
+                          required
+                          data-testid="year-input"
+                          className="mt-2"
+                        />
+                      </div>
                     </div>
+
+                    {isAmazon && (
+                      <div>
+                        <Label htmlFor="file-type">File Type *</Label>
+                        <select
+                          id="file-type"
+                          value={formData.file_type}
+                          onChange={(e) => setFormData({ ...formData, file_type: e.target.value })}
+                          data-testid="file-type-select"
+                          className="flex h-9 w-full rounded-md border border-slate-200 bg-transparent px-3 py-2 text-sm mt-2"
+                        >
+                          <option value="B2B">B2B</option>
+                          <option value="B2C">B2C</option>
+                        </select>
+                      </div>
+                    )}
+
                     <div>
-                      <Label htmlFor="rto-file">RTO File</Label>
-                      <Input
-                        id="rto-file"
-                        type="file"
-                        onChange={(e) => setFormData({ ...formData, rtoFile: e.target.files[0] })}
-                        className="mt-2"
-                      />
+                      <Label htmlFor="inventory-type">Inventory *</Label>
+                      <select
+                        id="inventory-type"
+                        value={formData.inventory_type}
+                        onChange={(e) => setFormData({ ...formData, inventory_type: e.target.value })}
+                        data-testid="inventory-select"
+                        className="flex h-9 w-full rounded-md border border-slate-200 bg-transparent px-3 py-2 text-sm mt-2"
+                      >
+                        <option value="With">With Inventory</option>
+                        <option value="Without">Without Inventory</option>
+                      </select>
                     </div>
-                    <div>
-                      <Label htmlFor="rt-file">RT File (Returns)</Label>
-                      <Input
-                        id="rt-file"
-                        type="file"
-                        onChange={(e) => setFormData({ ...formData, rtFile: e.target.files[0] })}
-                        className="mt-2"
-                      />
-                    </div>
-                  </div>
-                ) : (
-                  <div>
-                    <Label htmlFor="sales-file">Sales File *</Label>
-                    <Input
-                      id="sales-file"
-                      type="file"
-                      accept=".xlsx,.xls"
-                      onChange={(e) => setFormData({ ...formData, salesFile: e.target.files[0] })}
-                      required
-                      data-testid="sales-file-upload"
-                      className="mt-2"
-                    />
-                    <p className="text-xs text-slate-500 mt-2">
-                      Upload sales Excel file to be processed
-                    </p>
-                  </div>
-                )}
-                </>
+
+                    {isMyntra ? (
+                      <div className="space-y-4">
+                        <div>
+                          <Label htmlFor="packed-file">Packed File (Sales) *</Label>
+                          <Input
+                            id="packed-file"
+                            type="file"
+                            onChange={(e) => setFormData({ ...formData, packedFile: e.target.files[0] })}
+                            className="mt-2"
+                          />
+                        </div>
+                        <div>
+                          <Label htmlFor="rto-file">RTO File</Label>
+                          <Input
+                            id="rto-file"
+                            type="file"
+                            onChange={(e) => setFormData({ ...formData, rtoFile: e.target.files[0] })}
+                            className="mt-2"
+                          />
+                        </div>
+                        <div>
+                          <Label htmlFor="rt-file">RT File (Returns)</Label>
+                          <Input
+                            id="rt-file"
+                            type="file"
+                            onChange={(e) => setFormData({ ...formData, rtFile: e.target.files[0] })}
+                            className="mt-2"
+                          />
+                        </div>
+                      </div>
+                    ) : (
+                      <div>
+                        <Label htmlFor="sales-file">Sales File *</Label>
+                        <Input
+                          id="sales-file"
+                          type="file"
+                          accept=".xlsx,.xls"
+                          onChange={(e) => setFormData({ ...formData, salesFile: e.target.files[0] })}
+                          required
+                          data-testid="sales-file-upload"
+                          className="mt-2"
+                        />
+                        <p className="text-xs text-slate-500 mt-2">
+                          Upload sales Excel file to be processed
+                        </p>
+                      </div>
+                    )}
+                  </>
                 )}
 
                 <div className="flex gap-3 pt-4">
@@ -1161,6 +1291,206 @@ const AgentWorkspace = () => {
                   </Button>
                 </div>
               </form>
+            </DialogContent>
+          </Dialog>
+
+          {/* Bulk Upload Files Modal */}
+          <Dialog open={showBulkUploadModal} onOpenChange={setShowBulkUploadModal}>
+            <DialogContent onClose={() => setShowBulkUploadModal(false)} className="max-w-3xl max-h-[90vh] overflow-y-auto">
+              <DialogHeader>
+                <DialogTitle>Bulk Upload &amp; Process Files</DialogTitle>
+              </DialogHeader>
+              <div className="space-y-6">
+                {/* Section 1: Common Configurations */}
+                <div className="bg-slate-50 p-4 rounded-lg border border-slate-100 grid grid-cols-2 gap-4">
+                  <div>
+                    <Label htmlFor="bulk-file-type">File Type (Common) *</Label>
+                    <select
+                      id="bulk-file-type"
+                      value={bulkCommon.file_type}
+                      onChange={(e) => setBulkCommon({ ...bulkCommon, file_type: e.target.value })}
+                      className="flex h-9 w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm mt-2"
+                    >
+                      <option value="B2B">B2B</option>
+                      <option value="B2C">B2C</option>
+                    </select>
+                  </div>
+                  <div>
+                    <Label htmlFor="bulk-inventory-type">Inventory (Common) *</Label>
+                    <select
+                      id="bulk-inventory-type"
+                      value={bulkCommon.inventory_type}
+                      onChange={(e) => setBulkCommon({ ...bulkCommon, inventory_type: e.target.value })}
+                      className="flex h-9 w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm mt-2"
+                    >
+                      <option value="With">With Inventory</option>
+                      <option value="Without">Without Inventory</option>
+                    </select>
+                  </div>
+                </div>
+
+                {/* Section 2: Add File to Batch */}
+                <div className="border border-slate-200 rounded-lg p-4 space-y-4">
+                  <h3 className="text-sm font-semibold text-slate-800">Add File to Batch</h3>
+                  <div className="grid grid-cols-3 gap-3">
+                    <div>
+                      <Label htmlFor="temp-month" className="text-xs">Month *</Label>
+                      <select
+                        id="temp-month"
+                        value={bulkTemp.month}
+                        onChange={(e) => setBulkTemp({ ...bulkTemp, month: e.target.value })}
+                        className="flex h-8 w-full rounded-md border border-slate-200 bg-white px-2 py-1 text-xs mt-1"
+                      >
+                        <option value="">Select</option>
+                        {['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'].map(m => (
+                          <option key={m} value={m}>{m}</option>
+                        ))}
+                      </select>
+                    </div>
+                    <div>
+                      <Label htmlFor="temp-year" className="text-xs">Year *</Label>
+                      <Input
+                        id="temp-year"
+                        type="number"
+                        value={bulkTemp.year}
+                        onChange={(e) => setBulkTemp({ ...bulkTemp, year: e.target.value })}
+                        className="mt-1 h-8 text-xs px-2"
+                      />
+                    </div>
+                    <div>
+                      <Label htmlFor="temp-file" className="text-xs">Select File *</Label>
+                      <Input
+                        id="temp-file"
+                        type="file"
+                        accept=".xlsx,.xls"
+                        onChange={(e) => setBulkTemp({ ...bulkTemp, file: e.target.files[0] })}
+                        className="mt-1 h-8 text-xs px-2"
+                        key={bulkTemp.file ? bulkTemp.file.name : 'empty'}
+                      />
+                    </div>
+                  </div>
+                  <div className="flex justify-end pt-1">
+                    <Button
+                      type="button"
+                      size="sm"
+                      onClick={() => {
+                        if (!bulkTemp.month || !bulkTemp.year || !bulkTemp.file) {
+                          toast.error('Please specify month, year, and file');
+                          return;
+                        }
+                        const exists = bulkFiles.some(f => f.file.name === bulkTemp.file.name);
+                        if (exists) {
+                          toast.error('A file with this name is already in the batch');
+                          return;
+                        }
+                        setBulkFiles([
+                          ...bulkFiles,
+                          {
+                            id: Math.random().toString(36).substring(2, 9),
+                            file: bulkTemp.file,
+                            month: bulkTemp.month,
+                            year: bulkTemp.year
+                          }
+                        ]);
+                        setBulkTemp({
+                          ...bulkTemp,
+                          file: null
+                        });
+                      }}
+                      className="bg-indigo-600 hover:bg-indigo-700 text-white text-xs h-8 px-4"
+                    >
+                      <Plus className="h-3 w-3 mr-1" /> Add to Batch
+                    </Button>
+                  </div>
+                </div>
+
+                {/* Section 3: Batch List */}
+                <div className="space-y-2">
+                  <h3 className="text-sm font-semibold text-slate-800 flex justify-between items-center">
+                    <span>Batch Files ({bulkFiles.length})</span>
+                    {bulkFiles.length > 0 && (
+                      <button
+                        onClick={() => setBulkFiles([])}
+                        className="text-xs text-red-500 hover:text-red-700 font-normal"
+                      >
+                        Clear All
+                      </button>
+                    )}
+                  </h3>
+                  {bulkFiles.length === 0 ? (
+                    <div className="border border-dashed border-slate-200 rounded-lg p-6 text-center text-slate-400 text-sm">
+                      No files added to the batch yet. Use the form above to add files.
+                    </div>
+                  ) : (
+                    <div className="border border-slate-200 rounded-lg overflow-hidden max-h-48 overflow-y-auto">
+                      <table className="w-full text-xs text-slate-700">
+                        <thead className="bg-slate-50 sticky top-0 border-b">
+                          <tr>
+                            <th className="p-2 text-left font-semibold text-slate-600">File Name</th>
+                            <th className="p-2 text-left font-semibold text-slate-600 w-24">Month</th>
+                            <th className="p-2 text-left font-semibold text-slate-600 w-20">Year</th>
+                            <th className="p-2 text-right font-semibold text-slate-600 w-16">Action</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y bg-white">
+                          {bulkFiles.map((item) => (
+                            <tr key={item.id} className="hover:bg-slate-50">
+                              <td className="p-2 font-medium truncate max-w-[200px]" title={item.file.name}>{item.file.name}</td>
+                              <td className="p-2">{item.month}</td>
+                              <td className="p-2">{item.year}</td>
+                              <td className="p-2 text-right">
+                                <button
+                                  type="button"
+                                  onClick={() => setBulkFiles(bulkFiles.filter(f => f.id !== item.id))}
+                                  className="text-red-500 hover:text-red-700"
+                                >
+                                  Remove
+                                </button>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+
+                {/* Section 4: Actions */}
+                <div className="flex gap-3 pt-2 border-t">
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    onClick={() => {
+                      setShowBulkUploadModal(false);
+                      setBulkFiles([]);
+                      setBulkTemp({
+                        month: '',
+                        year: new Date().getFullYear().toString(),
+                        file: null
+                      });
+                    }}
+                    className="flex-1"
+                    disabled={isBulkUploading}
+                  >
+                    Cancel
+                  </Button>
+                  <Button
+                    type="button"
+                    onClick={handleBulkUpload}
+                    className="flex-1 bg-slate-800 hover:bg-slate-900 text-white animate-none"
+                    disabled={isBulkUploading || bulkFiles.length === 0}
+                  >
+                    {isBulkUploading ? (
+                      <>
+                        <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                        Processing Batch...
+                      </>
+                    ) : (
+                      `✓ Bulk Upload (${bulkFiles.length} files)`
+                    )}
+                  </Button>
+                </div>
+              </div>
             </DialogContent>
           </Dialog>
 
@@ -1479,6 +1809,134 @@ const AgentWorkspace = () => {
             </DialogContent>
           </Dialog>
 
+          {/* Merge Files Modal */}
+          <Dialog open={showMergeModal} onOpenChange={setShowMergeModal}>
+            <DialogContent onClose={() => setShowMergeModal(false)}>
+              <DialogHeader>
+                <DialogTitle>Merge Files by Range</DialogTitle>
+              </DialogHeader>
+              <form onSubmit={handleMergeFiles} className="space-y-4">
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <Label htmlFor="merge-start-month">Start Month *</Label>
+                    <select
+                      id="merge-start-month"
+                      value={mergeConfig.startMonth}
+                      onChange={(e) => setMergeConfig({ ...mergeConfig, startMonth: e.target.value })}
+                      required
+                      className="flex h-9 w-full rounded-md border border-slate-200 bg-transparent px-3 py-2 text-sm mt-2"
+                    >
+                      <option value="">Select</option>
+                      {[
+                        { val: 1, name: 'January' },
+                        { val: 2, name: 'February' },
+                        { val: 3, name: 'March' },
+                        { val: 4, name: 'April' },
+                        { val: 5, name: 'May' },
+                        { val: 6, name: 'June' },
+                        { val: 7, name: 'July' },
+                        { val: 8, name: 'August' },
+                        { val: 9, name: 'September' },
+                        { val: 10, name: 'October' },
+                        { val: 11, name: 'November' },
+                        { val: 12, name: 'December' }
+                      ].map(m => (
+                        <option key={m.val} value={m.val}>{m.name}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <Label htmlFor="merge-start-year">Start Year *</Label>
+                    <Input
+                      id="merge-start-year"
+                      type="number"
+                      value={mergeConfig.startYear}
+                      onChange={(e) => setMergeConfig({ ...mergeConfig, startYear: e.target.value })}
+                      required
+                      className="mt-2"
+                    />
+                  </div>
+                </div>
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <Label htmlFor="merge-end-month">End Month *</Label>
+                    <select
+                      id="merge-end-month"
+                      value={mergeConfig.endMonth}
+                      onChange={(e) => setMergeConfig({ ...mergeConfig, endMonth: e.target.value })}
+                      required
+                      className="flex h-9 w-full rounded-md border border-slate-200 bg-transparent px-3 py-2 text-sm mt-2"
+                    >
+                      <option value="">Select</option>
+                      {[
+                        { val: 1, name: 'January' },
+                        { val: 2, name: 'February' },
+                        { val: 3, name: 'March' },
+                        { val: 4, name: 'April' },
+                        { val: 5, name: 'May' },
+                        { val: 6, name: 'June' },
+                        { val: 7, name: 'July' },
+                        { val: 8, name: 'August' },
+                        { val: 9, name: 'September' },
+                        { val: 10, name: 'October' },
+                        { val: 11, name: 'November' },
+                        { val: 12, name: 'December' }
+                      ].map(m => (
+                        <option key={m.val} value={m.val}>{m.name}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <Label htmlFor="merge-end-year">End Year *</Label>
+                    <Input
+                      id="merge-end-year"
+                      type="number"
+                      value={mergeConfig.endYear}
+                      onChange={(e) => setMergeConfig({ ...mergeConfig, endYear: e.target.value })}
+                      required
+                      className="mt-2"
+                    />
+                  </div>
+                </div>
+
+                {mergedFileName && (
+                  <div className="bg-green-50 border border-green-200 p-4 rounded-lg flex flex-col items-center gap-3">
+                    <p className="text-green-800 text-sm font-medium">Merged file generated successfully!</p>
+                    <Button
+                      type="button"
+                      onClick={handleDownloadMerged}
+                      className="bg-green-600 hover:bg-green-750 text-white flex items-center gap-2 w-full justify-center"
+                    >
+                      <Download className="h-4 w-4" /> Download Merged File
+                    </Button>
+                  </div>
+                )}
+
+                <div className="flex gap-3 pt-4">
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    onClick={() => {
+                      setShowMergeModal(false);
+                      setMergedFileName('');
+                    }}
+                    className="flex-1"
+                    disabled={isMerging}
+                  >
+                    Close
+                  </Button>
+                  <Button type="submit" className="flex-1 bg-indigo-700 hover:bg-indigo-700 text-white" disabled={isMerging}>
+                    {isMerging ? (
+                      <><Loader2 className="mr-2 h-4 w-4 animate-spin" /> Merging...</>
+                    ) : (
+                      'Merge & Generate'
+                    )}
+                  </Button>
+                </div>
+              </form>
+            </DialogContent>
+          </Dialog>
+
           {/* MIS Result Modal */}
           <Dialog open={showMISResultModal} onOpenChange={setShowMISResultModal}>
             <DialogContent onClose={() => setShowMISResultModal(false)} className="max-w-[90vw] max-h-[90vh] flex flex-col overflow-hidden">
@@ -1507,14 +1965,14 @@ const AgentWorkspace = () => {
                 ))}
                 {isGeneratingMIS && <Loader2 className="h-4 w-4 animate-spin text-slate-500 ml-2" />}
               </div>
-              
+
               <div className="flex-1 overflow-auto bg-white pt-2">
                 {misData.data.length > 0 ? (
                   <Table className="relative">
                     <TableHeader className="bg-slate-50 sticky top-0 z-10 shadow-sm">
                       <TableRow>
                         {misData.columns.map((col, idx) => (
-                           <TableHead key={idx} className="text-xs whitespace-nowrap p-3">{col.title}</TableHead>
+                          <TableHead key={idx} className="text-xs whitespace-nowrap p-3">{col.title}</TableHead>
                         ))}
                       </TableRow>
                     </TableHeader>
