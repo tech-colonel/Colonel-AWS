@@ -11,7 +11,7 @@ const XLSX = require('xlsx');
 const ExcelJS = require('exceljs');
 const XLSX_STYLE = require('xlsx-js-style'); // Using style version for writing if needed
 const { v4: uuidv4 } = require('uuid');
-const { QueryTypes, Op, Sequelize } = require('sequelize');
+const { QueryTypes } = require('sequelize');
 
 // Pending generation store for two-phase commit
 const { setPending, getPending, deletePending, computeSummary } = require('../services/pendingGenerationsStore');
@@ -668,128 +668,6 @@ const flipkart = {
   }
 };
 
-const mergeWorkingFiles = async (req, res, next) => {
-  try {
-    const { brandId, agentId } = req.params;
-    let { startMonth, startYear, endMonth, endYear } = req.body;
-
-    startMonth = parseInt(startMonth);
-    startYear = parseInt(startYear);
-    endMonth = parseInt(endMonth);
-    endYear = parseInt(endYear);
-
-    if (!startMonth || !endMonth || !startYear || !endYear) {
-      return res.status(400).json({ error: 'Start/End month and year are required' });
-    }
-
-    const brand = await Brand.findByPk(brandId);
-    const agent = await Agent.findByPk(agentId);
-
-    if (!brand || !agent) {
-      return res.status(404).json({ error: 'Brand or Agent not found' });
-    }
-
-    const brandDb = getBrandConnection(brand.db_name);
-    const tableName = agent.name.replace(/[^a-zA-Z0-9]/g, '_').toLowerCase();
-    const WorkingFileModel = getDynamicModel(brandDb, tableName, agent.columns);
-
-    const yyyyMmStart = startYear * 100 + startMonth;
-    const yyyyMmEnd = endYear * 100 + endMonth;
-
-    const allRows = await WorkingFileModel.findAll({
-      where: {
-        [Op.and]: [
-          Sequelize.where(
-            Sequelize.literal('("year" * 100 + "month")'),
-            '>=',
-            yyyyMmStart
-          ),
-          Sequelize.where(
-            Sequelize.literal('("year" * 100 + "month")'),
-            '<=',
-            yyyyMmEnd
-          )
-        ]
-      },
-      raw: true
-    });
-
-    if (!allRows || allRows.length === 0) {
-      return res.status(404).json({ error: 'No data found in the selected range' });
-    }
-
-    // Generate Excel file using ExcelJS
-    const workbook = new ExcelJS.Workbook();
-    const sheet = workbook.addWorksheet('Merged Data');
-
-    // Get all column keys from the dynamic model
-    let headers = [];
-    if (agent.columns && Array.isArray(agent.columns)) {
-      headers = agent.columns.map(c => c.name);
-    } else {
-      headers = Object.keys(allRows[0]);
-    }
-
-    // Filter out internal fields like id, but keep month, year, file_type, inventory_type, filename, created_at
-    headers = headers.filter(h => h !== 'id');
-    
-    // Ensure metadata columns are included at the start/end or present
-    const metaCols = ['month', 'year', 'file_type', 'inventory_type', 'filename', 'created_at'];
-    metaCols.forEach(col => {
-      if (!headers.includes(col)) {
-        headers.push(col);
-      }
-    });
-
-    // Add headers to sheet
-    sheet.addRow(headers);
-
-    // Add rows
-    allRows.forEach(row => {
-      sheet.addRow(headers.map(h => row[h]));
-    });
-
-    const fileId = uuidv4();
-    const cleanAgentName = agent.name.replace(/[^a-zA-Z0-9]/g, '_').toLowerCase();
-    const mergedFileName = `merged_${cleanAgentName}_${startYear}_${startMonth}_to_${endYear}_${endMonth}_${fileId}.xlsx`;
-    const mergedFilePath = path.join(OUTPUT_DIR, mergedFileName);
-
-    await fs.ensureDir(OUTPUT_DIR);
-    await workbook.xlsx.writeFile(mergedFilePath);
-
-    res.json({
-      success: true,
-      message: 'Files merged successfully',
-      filename: mergedFileName,
-      count: allRows.length
-    });
-
-  } catch (error) {
-    next(error);
-  }
-};
-
-const downloadFileByName = async (req, res, next) => {
-  try {
-    const { filename } = req.query;
-    if (!filename) {
-      return res.status(400).json({ error: 'Filename is required' });
-    }
-
-    // Basic security check to prevent directory traversal
-    const cleanFilename = path.basename(filename);
-    const filePath = path.join(OUTPUT_DIR, cleanFilename);
-
-    if (!(await fs.pathExists(filePath))) {
-      return res.status(404).json({ error: 'File not found on disk' });
-    }
-
-    res.download(filePath, cleanFilename);
-  } catch (error) {
-    next(error);
-  }
-};
-
 module.exports = {
   amazon,
   flipkart,
@@ -797,7 +675,5 @@ module.exports = {
   deleteWorkingFile,
   downloadWorkingFile,
   addSkuMasterSingle,
-  deleteSkuMasterSingle,
-  mergeWorkingFiles,
-  downloadFileByName
+  deleteSkuMasterSingle
 };
