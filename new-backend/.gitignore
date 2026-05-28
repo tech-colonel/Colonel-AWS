@@ -27,3 +27,17 @@ test-file.js
 test-options.js
 test-proxy.js
 test-query.js
+
+.agents/
+.cursor/
+.github/
+.jetro
+.mcp.json           
+.windsurfrules
+AGENT.md
+data/
+projects/
+new-backend/src/utils/test-db.js
+new-backend/backend-structure.md
+new-backend/test-data/
+new-backend/test-zepto-working.js

@@ -157,10 +157,14 @@ const addSkuMasterSingle = async (brandId, agentId, skuData) => {
   const currentSkuMaster = brandAgent.sku_master || [];
   // Ensure we append the new SKU matching the format. The upload uses whatever is in Excel.
   // The processor uses 'Sales portal SKU' and 'Tally new SKU'.
-  const updatedSkuMaster = [...currentSkuMaster, {
+  const newEntry = {
     'Sales portal SKU': skuData.salesPortalSku,
     'Tally new SKU': skuData.tallyNewSku
-  }];
+  };
+  if (skuData.rate !== undefined && skuData.rate !== '') {
+    newEntry['Rate'] = skuData.rate;
+  }
+  const updatedSkuMaster = [...currentSkuMaster, newEntry];
 
   await brandAgent.update({ sku_master: updatedSkuMaster });
   return { success: true, count: updatedSkuMaster.length };

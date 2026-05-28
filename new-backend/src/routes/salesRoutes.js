@@ -111,6 +111,18 @@ router.post('/brands/:brandId/agents/:agentId/shopify/generate/preview', authent
 router.post('/brands/:brandId/agents/:agentId/shopify/generate/commit', authenticateToken, salesShopifyController.generateCommit);
 router.post('/brands/:brandId/agents/:agentId/shopify/generate/discard', authenticateToken, salesShopifyController.generateDiscard);
 
+const salesZeptoController = require('../controllers/agents/sales-zepto/salesZeptoController');
+
+// ─── Zepto Routes ─────────────────────────────────────────────────────────────
+router.get('/brands/:brandId/agents/:agentId/zepto/master', authenticateToken, salesZeptoController.getMasterData);
+router.post('/brands/:brandId/agents/:agentId/zepto/master/sku', authenticateToken, upload.single('file'), salesZeptoController.uploadSkuMaster);
+router.post('/brands/:brandId/agents/:agentId/zepto/master/ledger', authenticateToken, upload.single('file'), salesZeptoController.uploadLedgerMaster);
+router.post('/brands/:brandId/agents/:agentId/zepto/generate', authenticateToken, upload.single('file'), salesZeptoController.generate);
+
+router.post('/brands/:brandId/agents/:agentId/zepto/generate/preview', authenticateToken, upload.single('file'), salesZeptoController.generatePreview);
+router.post('/brands/:brandId/agents/:agentId/zepto/generate/commit', authenticateToken, salesZeptoController.generateCommit);
+router.post('/brands/:brandId/agents/:agentId/zepto/generate/discard', authenticateToken, salesZeptoController.generateDiscard);
+
 const totalSalesController = require('../controllers/agents/total-sales/totalSalesController');
 
 // ─── Total Sales Routes ────────────────────────────────────────────────────────

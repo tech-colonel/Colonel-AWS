@@ -141,13 +141,13 @@ ensureDir();
 const addSkuMasterSingle = async (req, res, next) => {
   try {
     const { brandId, agentId } = req.params;
-    const { salesPortalSku, tallyNewSku } = req.body;
-    
+    const { salesPortalSku, tallyNewSku, rate } = req.body;
+
     if (!salesPortalSku || !tallyNewSku) {
       return res.status(400).json({ error: 'Both Sales portal SKU and Tally new SKU are required' });
     }
 
-    const result = await salesService.addSkuMasterSingle(brandId, agentId, { salesPortalSku, tallyNewSku });
+    const result = await salesService.addSkuMasterSingle(brandId, agentId, { salesPortalSku, tallyNewSku, rate });
     res.json({ message: 'SKU mapping added successfully', ...result });
   } catch (error) {
     next(error);

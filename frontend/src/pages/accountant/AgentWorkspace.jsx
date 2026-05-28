@@ -83,6 +83,7 @@ const AgentWorkspace = () => {
   const [skuSearch, setSkuSearch] = useState('');
   const [newSkuSalesPortal, setNewSkuSalesPortal] = useState('');
   const [newSkuTallyNew, setNewSkuTallyNew] = useState('');
+  const [newSkuRate, setNewSkuRate] = useState('');
   const [isAddingSku, setIsAddingSku] = useState(false);
   const [deletingSkuKey, setDeletingSkuKey] = useState(null);
 
@@ -94,7 +95,8 @@ const AgentWorkspace = () => {
     salesFile: null,
     rtoFile: null,
     rtFile: null,
-    packedFile: null
+    packedFile: null,
+    selling_state: ''
   });
 
   const sidebarItems = [
@@ -142,6 +144,7 @@ const AgentWorkspace = () => {
       setFiles(sortedFiles);
     } catch (error) {
       console.error('Failed to load data:', error);
+      toast.error('Failed to load workspace data. Please refresh the page.');
     } finally {
       setLoading(false);
     }
@@ -155,6 +158,7 @@ const AgentWorkspace = () => {
       if (currentAgent?.name?.toLowerCase().includes('flipkart')) return 'flipkart';
       if (currentAgent?.name?.toLowerCase().includes('myntra')) return 'myntra';
       if (currentAgent?.name?.toLowerCase().includes('blinkit')) return 'blinkit';
+      if (currentAgent?.name?.toLowerCase().includes('zepto')) return 'zepto';
       if (currentAgent?.name?.toLowerCase().includes('firstcry')) return 'firstcry';
       if (currentAgent?.name?.toLowerCase().includes('jiomart')) return 'jiomart';
       if (currentAgent?.name?.toLowerCase().includes('shopify')) return 'shopify';
@@ -216,15 +220,22 @@ const AgentWorkspace = () => {
       toast.error('Both Sales Portal SKU and Tally New SKU are required');
       return;
     }
+    if (isZepto && !newSkuRate.trim()) {
+      toast.error('Rate is required for Zepto SKU master');
+      return;
+    }
     setIsAddingSku(true);
     try {
-      await api.post(`/api/brands/${brandId}/agents/${agentId}/master/sku/add`, {
+      const payload = {
         salesPortalSku: newSkuSalesPortal.trim(),
         tallyNewSku: newSkuTallyNew.trim()
-      });
+      };
+      if (isZepto) payload.rate = newSkuRate.trim();
+      await api.post(`/api/brands/${brandId}/agents/${agentId}/master/sku/add`, payload);
       toast.success('SKU added successfully');
       setNewSkuSalesPortal('');
       setNewSkuTallyNew('');
+      setNewSkuRate('');
       fetchData();
     } catch (error) {
       toast.error(error.response?.data?.error || 'Failed to add SKU');
@@ -286,12 +297,18 @@ const AgentWorkspace = () => {
     }
   };
 
-  // Build preview rows: only State + Final Invoice Number
+  // Build preview rows: only State/City + Final Invoice Number
   const buildInvoicePreviews = () => {
     const m = monthAbbr[formData.month];
     const suffix = m ? `-${m.num}` : `-${formData.month}`;
     return ledgerPreviewData.map(row => {
       const base = row.invoice_no || row['Invoice No.'] || row['Invoice No'] || row.invoice_number || '';
+      if (isZepto) {
+        const city = row['City'] || row.city || '';
+        const state = row['States'] || row['State'] || row.states || row.state || '';
+        const label = city ? `${city}${state ? ` (${state})` : ''}` : state;
+        return { state: label, preview: base ? `${base}${suffix}` : `(No base number)${suffix}` };
+      }
       const state = row.states || row.States || '';
       return { state, preview: base ? `${base}${suffix}` : `(No base number)${suffix}` };
     });
@@ -314,6 +331,10 @@ const AgentWorkspace = () => {
     }
     if (!isTotalSalesAnalyzer && !formData.month) {
       toast.error('Please select a month');
+      return;
+    }
+    if (isZepto && !formData.selling_state?.trim()) {
+      toast.error('Please enter the Selling State for Zepto');
       return;
     }
 
@@ -343,6 +364,9 @@ const AgentWorkspace = () => {
     data.append('year', formData.year);
     data.append('file_type', formData.file_type);
     data.append('inventory_type', formData.inventory_type);
+    if (isZepto && formData.selling_state) {
+      data.append('selling_state', formData.selling_state);
+    }
 
     setIsGenerating(true);
     setShowInvoicePreviewModal(false);
@@ -376,7 +400,7 @@ const AgentWorkspace = () => {
       setShowVerificationModal(false);
       setVerificationData(null);
       fetchData();
-      setFormData({ ...formData, salesFile: null, rtoFile: null, packedFile: null, rtFile: null });
+      setFormData({ ...formData, salesFile: null, rtoFile: null, packedFile: null, rtFile: null, selling_state: '' });
     } catch (error) {
       toast.error(error.response?.data?.error || 'Failed to save file');
     } finally {
@@ -493,6 +517,7 @@ const AgentWorkspace = () => {
   const isFlipkart = agent?.name?.toLowerCase().includes('flipkart');
   const isMyntra = agent?.name?.toLowerCase().includes('myntra');
   const isBlinkit = agent?.name?.toLowerCase().includes('blinkit');
+  const isZepto = agent?.name?.toLowerCase().includes('zepto');
   const isFirstcry = agent?.name?.toLowerCase().includes('firstcry');
   const isAmazon = agent?.name?.toLowerCase().includes('amazon');
   const isJiomart = agent?.name?.toLowerCase().includes('jiomart');
@@ -777,7 +802,9 @@ const AgentWorkspace = () => {
                     className="mt-2"
                   />
                   <p className="text-xs text-slate-500 mt-2">
-                    Upload Excel file with columns: Sales Portal SKU, Tally New SKU
+                    {isZepto
+                      ? 'Upload Excel file with columns: Tally New SKU, Sales Portal SKU, Rate'
+                      : 'Upload Excel file with columns: Sales Portal SKU, Tally New SKU'}
                   </p>
                 </div>
                 <div className="flex gap-3 pt-4">
@@ -810,7 +837,9 @@ const AgentWorkspace = () => {
                     className="mt-2"
                   />
                   <p className="text-xs text-slate-500 mt-2">
-                    Upload Excel file with columns: State, Ledger, Invoice No.
+                    {isZepto
+                      ? 'Upload Excel file with columns: City, States, Ledger, Invoice No.'
+                      : 'Upload Excel file with columns: State, Ledger, Invoice No.'}
                   </p>
                 </div>
                 <div className="flex gap-3 pt-4">
@@ -856,6 +885,20 @@ const AgentWorkspace = () => {
                       className="mt-1 h-8 text-sm"
                     />
                   </div>
+                  {isZepto && (
+                    <div className="w-24">
+                      <Label htmlFor="new-sku-rate" className="text-xs text-slate-600">Rate (%) *</Label>
+                      <Input
+                        id="new-sku-rate"
+                        placeholder="e.g. 18"
+                        value={newSkuRate}
+                        onChange={(e) => setNewSkuRate(e.target.value)}
+                        className="mt-1 h-8 text-sm"
+                        type="number"
+                        min="0"
+                      />
+                    </div>
+                  )}
                   <Button
                     onClick={handleAddSingleSku}
                     disabled={isAddingSku}
@@ -905,6 +948,7 @@ const AgentWorkspace = () => {
                           <TableHead className="text-xs">Tally New SKU</TableHead>
                           <TableHead className="text-xs">Sales Portal SKU</TableHead>
                           {isShopify && <TableHead className="text-xs">GST Rate</TableHead>}
+                          {isZepto && <TableHead className="text-xs">Rate (%)</TableHead>}
                           <TableHead className="text-right text-xs">Action</TableHead>
                         </TableRow>
                       </TableHeader>
@@ -918,6 +962,7 @@ const AgentWorkspace = () => {
                               <TableCell className="text-xs font-medium">{tallySku || <span className="text-slate-400 italic">—</span>}</TableCell>
                               <TableCell className="text-xs">{portalSku || <span className="text-slate-400 italic">—</span>}</TableCell>
                               {isShopify && <TableCell className="text-xs">{gstRate || '0'}</TableCell>}
+                              {isZepto && <TableCell className="text-xs">{row['Rate'] || row.rate || <span className="text-slate-400 italic">—</span>}</TableCell>}
                               <TableCell className="text-right">
                                 <Button
                                   size="sm"
@@ -976,18 +1021,21 @@ const AgentWorkspace = () => {
                     <Table>
                       <TableHeader>
                         <TableRow>
+                          {isZepto && <TableHead className="text-xs font-semibold">City</TableHead>}
                           <TableHead className="text-xs font-semibold">States</TableHead>
-                          <TableHead className="text-xs font-semibold">Ledger</TableHead>
+                          <TableHead className="text-xs font-semibold">{isZepto ? 'Tally Ledger' : 'Ledger'}</TableHead>
                           <TableHead className="text-xs font-semibold">Invoice No.</TableHead>
                         </TableRow>
                       </TableHeader>
                       <TableBody>
                         {masterData.ledger_master.slice(0, 50).map((row, idx) => {
+                          const city = row['City'] || row.city || '';
                           const state = row['States'] || row['State'] || row.states || row.state || '';
                           const ledger = row['Ledger'] || row.ledger || '';
                           const invoiceNo = row['Invoice No.'] || row['Invoice Number'] || row['Invoice No'] || row.invoiceNo || '';
                           return (
                             <TableRow key={idx}>
+                              {isZepto && <TableCell className="text-xs">{city || <span className="text-slate-400 italic">—</span>}</TableCell>}
                               <TableCell className="text-xs">{state || <span className="text-slate-400 italic">—</span>}</TableCell>
                               <TableCell className="text-xs">{ledger || <span className="text-slate-400 italic">—</span>}</TableCell>
                               <TableCell className="text-xs">{invoiceNo || <span className="text-slate-400 italic">—</span>}</TableCell>
@@ -1094,6 +1142,23 @@ const AgentWorkspace = () => {
                     <option value="Without">Without Inventory</option>
                   </select>
                 </div>
+
+                {isZepto && (
+                  <div>
+                    <Label htmlFor="selling-state">Selling State *</Label>
+                    <Input
+                      id="selling-state"
+                      placeholder="e.g. Maharashtra"
+                      value={formData.selling_state}
+                      onChange={(e) => setFormData({ ...formData, selling_state: e.target.value })}
+                      required
+                      className="mt-2"
+                    />
+                    <p className="text-xs text-slate-500 mt-2">
+                      State from which Zepto ships — determines IGST vs CGST/SGST split
+                    </p>
+                  </div>
+                )}
 
                 {isMyntra ? (
                   <div className="space-y-4">
@@ -1299,6 +1364,9 @@ const AgentWorkspace = () => {
                     wfTitle = 'Working';
                     pfTitle = 'GSTR B2C';
                     pf2Title = 'GSTR HSN';
+                  } else if (isZepto) {
+                    wfTitle = 'Working';
+                    pfTitle = 'Pivot';
                   }
 
                   let rows = [];
