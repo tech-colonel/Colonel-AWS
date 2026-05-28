@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const multer = require('multer');
-const { flipkart, getWorkingFiles, deleteWorkingFile, downloadWorkingFile, addSkuMasterSingle, deleteSkuMasterSingle, mergeWorkingFiles, downloadFileByName } = require('../controllers/salesController');
+const { flipkart, getWorkingFiles, deleteWorkingFile, downloadWorkingFile, addSkuMasterSingle, deleteSkuMasterSingle } = require('../controllers/salesController');
 const salesAmazonController = require('../controllers/agents/sales-amazon/salesAmazonController');
 const salesMyntraController = require('../controllers/agents/sales-myntra/salesMyntraController');
 const salesShopifyController = require('../controllers/agents/sales-shopify/salesShopifyController');
@@ -13,8 +13,6 @@ const upload = multer({ storage: multer.memoryStorage() });
 router.get('/brands/:brandId/agents/:agentId/working-files', authenticateToken, getWorkingFiles);
 router.delete('/brands/:brandId/agents/:agentId/working-files/:fileId', authenticateToken, deleteWorkingFile);
 router.get('/brands/:brandId/agents/:agentId/working-files/:fileId/download', authenticateToken, downloadWorkingFile);
-router.post('/brands/:brandId/agents/:agentId/working-files/merge', authenticateToken, mergeWorkingFiles);
-router.get('/brands/:brandId/agents/:agentId/working-files/download-temp', authenticateToken, downloadFileByName);
 
 // ─── Shared SKU Single Entry Routes (agent-agnostic) ──────────────────────────
 router.post('/brands/:brandId/agents/:agentId/master/sku/add', authenticateToken, addSkuMasterSingle);
@@ -32,7 +30,6 @@ const misController = require('../controllers/agents/common/misController');
 router.post('/brands/:brandId/agents/:agentId/amazon/generate/preview', authenticateToken, upload.single('file'), salesAmazonController.generatePreview);
 router.post('/brands/:brandId/agents/:agentId/amazon/generate/commit',  authenticateToken, salesAmazonController.generateCommit);
 router.post('/brands/:brandId/agents/:agentId/amazon/generate/discard', authenticateToken, salesAmazonController.generateDiscard);
-router.post('/brands/:brandId/agents/:agentId/amazon/generate/bulk', authenticateToken, upload.array('files'), salesAmazonController.generateBulk);
 
 router.post('/brands/:brandId/agents/:agentId/amazon/mis', authenticateToken, misController.generateAmazonMIS);
 
@@ -113,6 +110,18 @@ router.post('/brands/:brandId/agents/:agentId/shopify/generate', authenticateTok
 router.post('/brands/:brandId/agents/:agentId/shopify/generate/preview', authenticateToken, upload.single('file'), salesShopifyController.generatePreview);
 router.post('/brands/:brandId/agents/:agentId/shopify/generate/commit', authenticateToken, salesShopifyController.generateCommit);
 router.post('/brands/:brandId/agents/:agentId/shopify/generate/discard', authenticateToken, salesShopifyController.generateDiscard);
+
+const salesZeptoController = require('../controllers/agents/sales-zepto/salesZeptoController');
+
+// ─── Zepto Routes ─────────────────────────────────────────────────────────────
+router.get('/brands/:brandId/agents/:agentId/zepto/master', authenticateToken, salesZeptoController.getMasterData);
+router.post('/brands/:brandId/agents/:agentId/zepto/master/sku', authenticateToken, upload.single('file'), salesZeptoController.uploadSkuMaster);
+router.post('/brands/:brandId/agents/:agentId/zepto/master/ledger', authenticateToken, upload.single('file'), salesZeptoController.uploadLedgerMaster);
+router.post('/brands/:brandId/agents/:agentId/zepto/generate', authenticateToken, upload.single('file'), salesZeptoController.generate);
+
+router.post('/brands/:brandId/agents/:agentId/zepto/generate/preview', authenticateToken, upload.single('file'), salesZeptoController.generatePreview);
+router.post('/brands/:brandId/agents/:agentId/zepto/generate/commit', authenticateToken, salesZeptoController.generateCommit);
+router.post('/brands/:brandId/agents/:agentId/zepto/generate/discard', authenticateToken, salesZeptoController.generateDiscard);
 
 const totalSalesController = require('../controllers/agents/total-sales/totalSalesController');
 

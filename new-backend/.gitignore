@@ -28,16 +28,16 @@ test-options.js
 test-proxy.js
 test-query.js
 
-
 .agents/
 .cursor/
 .github/
-.jetro/
-.mcp.json
+.jetro
+.mcp.json           
 .windsurfrules
 AGENT.md
-CLAUDE.md
 data/
-new-backend/src/utils/executionStore.js
-new-backend/src/utils/test-db.js
 projects/
+new-backend/src/utils/test-db.js
+new-backend/backend-structure.md
+new-backend/test-data/
+new-backend/test-zepto-working.js
