@@ -1,4 +1,4 @@
-@import url('https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&family=Barlow:wght@300;400;600;700&display=swap');
 
 @tailwind base;
 @tailwind components;
@@ -56,6 +56,84 @@ code, .mono {
   .text-balance {
     text-wrap: balance;
   }
+}
+
+/* ─── Reco Suite CSS variables & components ───────────────────────────────── */
+:root {
+  --page-bg: #F5F6FA;
+  --surface: #FFFFFF;
+  --card-border: #E2E8F6;
+  --card-shadow: 0 1px 3px rgba(10,15,46,0.04), 0 6px 24px rgba(10,15,46,0.06);
+  --card-shadow-hover: 0 4px 16px rgba(10,15,46,0.08), 0 20px 48px rgba(10,15,46,0.10);
+  --text-heading: #0F172A;
+  --text-muted: #64748B;
+}
+
+@layer components {
+  .glass-card {
+    background: #FFFFFF;
+    border: 1px solid var(--card-border);
+    border-radius: 16px;
+    box-shadow: var(--card-shadow);
+    transition: box-shadow 0.25s ease, transform 0.25s ease, border-color 0.25s ease;
+  }
+  .glass-card:hover {
+    box-shadow: var(--card-shadow-hover);
+    transform: translateY(-2px);
+    border-color: #A3BFF8;
+  }
+
+  .stat-card {
+    background: #FFFFFF;
+    border: 1px solid #E2E8F6;
+    border-radius: 16px;
+    box-shadow: var(--card-shadow);
+    padding: 20px 24px;
+    position: relative;
+    overflow: hidden;
+    transition: all 0.25s ease;
+  }
+  .stat-card:hover {
+    box-shadow: var(--card-shadow-hover);
+    transform: translateY(-2px);
+  }
+
+  .badge-blue {
+    background: #E8EFFE;
+    color: #0748EE;
+    border: 1px solid #A3BFF8;
+    border-radius: 9999px;
+  }
+  .badge-neon {
+    @apply inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-xs font-semibold;
+    background: #DCFCE7;
+    color: #059669;
+    border: 1px solid #A7F3D0;
+  }
+
+  .btn-glow {
+    @apply relative overflow-hidden rounded-xl px-5 py-2.5 text-sm font-semibold text-white;
+    background: linear-gradient(135deg, #0748EE, #F115F8);
+    box-shadow: 0 4px 12px rgba(7,72,238,0.30), 0 1px 3px rgba(7,72,238,0.20);
+    transition: all 0.2s ease;
+  }
+  .btn-glow:hover {
+    box-shadow: 0 8px 24px rgba(7,72,238,0.40), 0 2px 6px rgba(241,21,248,0.25);
+    transform: translateY(-1px);
+  }
+
+  .table-dark th {
+    @apply px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider;
+    color: #64748B;
+    background: #F8FAFC;
+    border-bottom: 1.5px solid #E2E8F0;
+  }
+  .table-dark td {
+    @apply px-4 py-3.5 text-sm;
+    color: #2D2D2D;
+    border-bottom: 1px solid #F1F5F9;
+  }
+  .table-dark tr:hover td { background: #F8FAFC; }
 }
 
 /* ─── Invoice Processing Status Banner ────────────────────────────────────── */

@@ -13,6 +13,10 @@ import BrandSelection from './pages/accountant/BrandSelection';
 import BrandDashboard from './pages/accountant/BrandDashboard';
 import BrandAgentsInventory from './pages/accountant/BrandAgentsInventory';
 import AgentWorkspace from './pages/accountant/AgentWorkspace';
+import RecoSuite from './pages/accountant/RecoSuite';
+import RecoWorkspace from './pages/accountant/RecoWorkspace';
+import RecoMultiStateWorkspace from './pages/accountant/RecoMultiStateWorkspace';
+import RecoJobDashboard from './pages/accountant/RecoJobDashboard';
 import './App.css';
 
 function App() {
@@ -71,6 +75,42 @@ function App() {
             element={
               <ProtectedRoute allowedRoles={['accountant']}>
                 <AgentWorkspace />
+              </ProtectedRoute>
+            }
+          />
+
+          <Route
+            path="/brands/:brandId/reco"
+            element={
+              <ProtectedRoute allowedRoles={['accountant', 'admin']}>
+                <RecoSuite />
+              </ProtectedRoute>
+            }
+          />
+
+          <Route
+            path="/brands/:brandId/reco/gstr_2b_books_multistate"
+            element={
+              <ProtectedRoute allowedRoles={['accountant', 'admin']}>
+                <RecoMultiStateWorkspace />
+              </ProtectedRoute>
+            }
+          />
+
+          <Route
+            path="/brands/:brandId/reco/:agentType"
+            element={
+              <ProtectedRoute allowedRoles={['accountant', 'admin']}>
+                <RecoWorkspace />
+              </ProtectedRoute>
+            }
+          />
+
+          <Route
+            path="/brands/:brandId/reco/:agentType/results/:jobId"
+            element={
+              <ProtectedRoute allowedRoles={['accountant', 'admin']}>
+                <RecoJobDashboard />
               </ProtectedRoute>
             }
           />
