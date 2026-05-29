@@ -234,6 +234,50 @@ def _parse_ift(text: str) -> str:
     return ""
 
 
+def _parse_indusind_neft(text: str) -> str:
+    """
+    Parse IndusInd Bank NEFT debit narrations.
+    Format: N/NNNNN/ENTITY NAME/INDBHXXXXXXX/
+    Entity = 3rd slash-segment (bank truncates to ~14 chars).
+    """
+    parts = text.split('/')
+    if len(parts) >= 3:
+        entity = parts[2].strip()
+        # Strip the leading INDBH reference if the entity segment looks like a ref number
+        if re.match(r'^INDBH\d+$', entity):
+            return ""
+        return entity
+    return ""
+
+
+def _parse_indusind_rtgs_credit(text: str) -> str:
+    """
+    Parse IndusInd Bank RTGS credit narrations.
+    Format: R/<UTR>/<IFSC>/<SENDER NAME>//<PURPOSE>//<UTR>/
+    Sender = 4th slash-segment.
+    """
+    parts = text.split('/')
+    if len(parts) >= 4:
+        sender = parts[3].strip()
+        # Discard if it looks like a bank reference, not a name
+        if not sender or re.match(r'^[A-Z0-9]{10,}$', sender):
+            return ""
+        return sender
+    return ""
+
+
+def _parse_indusind_bill(text: str) -> str:
+    """
+    Parse IndusInd Bank bill/credit card payment narrations.
+    Format: BILL/<INVOICE>/<TYPE>/<ENTITY PARTIAL>/
+    Entity = 4th slash-segment.
+    """
+    parts = text.split('/')
+    if len(parts) >= 4:
+        return parts[3].strip()
+    return ""
+
+
 # ---------------------------------------------------------------------------
 # Core classifier
 # ---------------------------------------------------------------------------
@@ -298,9 +342,14 @@ class BankClassifier:
             ]
         )]
 
-        # Pre-compute suspense ledger (avoid repeated master scan at runtime)
-        self._suspense_ledger = next(
-            (l for l in ml if 'suspense' in l.lower()), "Suspense A/c"
+        # Pre-compute suspense ledger — prefer the exact "Suspense A/c" ledger.
+        # Some CoA exports also contain a "Suspenses" ledger; without the exact
+        # match preference, whichever appears first in column order wins, which
+        # causes the wrong name to show in output.
+        self._suspense_ledger = (
+            next((l for l in ml if l.strip().lower() == 'suspense a/c'), None)
+            or next((l for l in ml if 'suspense' in l.lower()), None)
+            or "Suspense A/c"
         )
 
         # Rent
@@ -388,6 +437,14 @@ class BankClassifier:
         best = max(choices, key=combined_score)
         score = combined_score(best)
         conf = "High" if score >= 87 else ("Medium" if score >= 72 else "Low")
+
+        # Downgrade to Medium when runner-up is within 8 points — ambiguous match
+        # Wrong ledger is worse than Suspense A/c, so be conservative.
+        if conf == "High" and len(choices) > 1:
+            second = sorted([combined_score(c) for c in choices], reverse=True)
+            if len(second) > 1 and (second[0] - second[1]) < 8:
+                conf = "Medium"
+
         return best, conf, score
 
     def _match_employee_ledger(self, entity: str, salary_ledgers: list) -> str:
@@ -462,6 +519,21 @@ class BankClassifier:
                 return {"ledger": matched, "type": "Contra",
                         "confidence": "High", "rule": "OAT/CASA Contra"}
 
+        # IndusInd Bank sweep transfer between OD and current accounts
+        # Format: "Sweep Trf From <ACCTNO>///" or "Sweep Trf To <ACCTNO>///"
+        if "SWEEP TRF" in orig_upper:
+            acc_m = re.search(r'\b(\d{10,})\b', orig_upper)
+            if acc_m:
+                acc_no = acc_m.group(1)
+                matched = next((l for l in self.own_account_ledgers if acc_no in l), None)
+                if not matched:
+                    matched = next((l for l in self.own_account_ledgers), None)
+            else:
+                matched = next((l for l in self.own_account_ledgers), None)
+            if matched:
+                return {"ledger": matched, "type": "Contra",
+                        "confidence": "High", "rule": "IndusInd Sweep Contra"}
+
         # "RATNR" is RBL Bank's RTGS prefix (Ratnakar→RBL). When it appears in an RTGS
         # narration alongside the company's own name, it signals an inter-bank self-transfer.
         if "RATNR" in orig_upper and ("RTGS" in orig_upper or "NEFT" in orig_upper):
@@ -514,8 +586,11 @@ class BankClassifier:
 
         # ------------------------------------------------------------------
         # STEP 4 — TDS keyword
+        # CBDT = Central Board of Direct Taxes (IndusInd Bank ETAX payments)
+        # IB ETAX CBDT narrations are income-tax / TDS challan payments.
         # ------------------------------------------------------------------
-        if re.search(r'\bTDS\b', orig_upper) or re.search(r'\bTIN\b', orig_upper):
+        if re.search(r'\bTDS\b', orig_upper) or re.search(r'\bTIN\b', orig_upper) \
+                or "CBDT" in orig_upper or "ETAX" in orig_upper:
             query = "TDS Receivable" if is_credit else "TDS Payable"
             if self.tds_ledgers:
                 ledger, conf, _ = self._fuzzy_match(query, self.tds_ledgers)
@@ -640,6 +715,24 @@ class BankClassifier:
             entity = _parse_ift(orig_upper)
         elif "BDP-" in orig_upper:
             entity = _parse_bdp(orig_upper)[0]  # service name as entity for D2C fuzzy
+        elif re.match(r'^N/\d+/', orig_upper):
+            # IndusInd Bank NEFT debit: N/<seq>/<Entity Name>/<INDBH ref>/
+            entity = _parse_indusind_neft(orig_upper)
+        elif orig_upper.startswith("R/") and orig_upper.count('/') >= 3:
+            # IndusInd Bank RTGS credit: R/<UTR>/<IFSC>/<Sender Name>//
+            entity = _parse_indusind_rtgs_credit(orig_upper)
+        elif orig_upper.startswith("BILL/") and orig_upper.count('/') >= 3:
+            # IndusInd Bank bill/card payment: BILL/<inv>/<type>/<Entity>/
+            # The 3rd segment is the payment type (CREDIT, DEBIT, etc.).
+            # Append "CREDIT CARD" when type=CREDIT so the fuzzy matcher prefers
+            # "HDFC Credit Card" over "HDFC Bank" or "Hdfc FD XX".
+            _bparts = orig_upper.split('/')
+            _bill_type   = _bparts[2].strip() if len(_bparts) >= 3 else ""
+            _bill_entity = _bparts[3].strip() if len(_bparts) >= 4 else ""
+            if "CREDIT" in _bill_type and _bill_entity:
+                entity = _bill_entity + " CREDIT CARD"
+            else:
+                entity = _bill_entity
         elif re.match(r'^(?:NEFT|RTGS|IMPS)\s+[A-Z0-9]{8,}\s+', orig_upper):
             # Generic bank NEFT/RTGS format: "NEFT <UTR> <Beneficiary Name...>"
             # Handles formats from HSBC (HSBCN), ICICI (ICICINXXX), etc.
@@ -661,6 +754,23 @@ class BankClassifier:
                 entity = possible
 
         entity = entity.strip()
+
+        # ------------------------------------------------------------------
+        # STEP 10.5 — IndusInd bulk salary batch
+        # Format: SALR<date><seq>/<batch>/NEFT/SALARY FOR <MONTH>/
+        # This is a bulk payroll run — no individual employee name is present.
+        # Map to the generic "Net Salary Payable" or "Salary Payable" ledger.
+        # ------------------------------------------------------------------
+        if re.match(r'^SALR\d+/', orig_upper) and "SALARY" in orig_upper:
+            net_sal = (
+                next((l for l in self.master_ledgers if 'net salary' in l.lower()), None)
+                or next((l for l in self.salary_ledgers if l.lower().strip() in ('salary payable',)), None)
+                or next((l for l in self.salary_ledgers), None)
+                or self._find_master(['net salary', 'salary payable'])
+                or self._suspense_ledger
+            )
+            return {"ledger": net_sal, "type": txn_type, "confidence": "High",
+                    "rule": "IndusInd Salary Batch"}
 
         # ------------------------------------------------------------------
         # STEP 11 — Salary / allowance routing
@@ -689,6 +799,30 @@ class BankClassifier:
             if matched:
                 return {"ledger": matched, "type": txn_type, "confidence": "High", "rule": "Salary Match"}
 
+        # Compute once — used by STEP 11.5 and STEP 12b
+        is_clean_neft = (
+            any(k in orig_upper for k in ["IB NEFT", "SC NEFT", "IB IFT", "CHQ PAID", "IB RTGS"])
+            or orig_upper.startswith("IFT-")
+            or bool(re.match(r'^N/\d+/', orig_upper))   # IndusInd NEFT debit
+            or orig_upper.startswith("R/")              # IndusInd RTGS credit
+            or orig_upper.startswith("BILL/")           # IndusInd bill payment
+        )
+
+        # ------------------------------------------------------------------
+        # STEP 11.5 — Employee match for clean NEFT/IFT without SALARY keyword
+        # Many payroll transfers don't include the word "SALARY" in the narration —
+        # the entity IS the employee name. Run name-aware matching here so these
+        # don't fall through to the generic anchored/fuzzy steps which have no
+        # suffix stemming or first-name anchoring logic.
+        # Returns Medium (not High) — inferred without keyword confirmation.
+        # ------------------------------------------------------------------
+        if is_clean_neft and entity and not is_salary_narration and not is_reimb_narration:
+            _emp = (self._match_employee_ledger(entity, self.salary_ledgers)
+                    or self._match_employee_ledger(entity, self.salary_ledgers_broad))
+            if _emp:
+                return {"ledger": _emp, "type": txn_type, "confidence": "Medium",
+                        "rule": "NEFT Employee Match (inferred)"}
+
         # ------------------------------------------------------------------
         # STEP 12 — Rent remark routing
         # Only checks the REMARK field (the decoded comment from IB NEFT narrations).
@@ -711,18 +845,23 @@ class BankClassifier:
         # or "Alpino HealthFoods" → "WLDD Private Limited" due to common token overlap.
         # If no anchor candidates exist, fall through to D2C and general fuzzy.
         # ------------------------------------------------------------------
-        # is_clean_neft gates the anchored entity match (STEP 12b).
+        # STEP 12b — First-word-anchored entity match (before D2C scan)
+        # is_clean_neft was computed before STEP 11.5 (above).
         # Generic NEFT/RTGS is intentionally excluded — those narrations should still pass
         # through the D2C scan (which correctly handles marketplace receipts like Razorpay
         # Collection) before falling back to general fuzzy with the extracted entity.
-        is_clean_neft = (
-            any(k in orig_upper for k in ["IB NEFT", "SC NEFT", "IB IFT", "CHQ PAID", "IB RTGS"])
-            or orig_upper.startswith("IFT-")
-        )
         # Also run anchored match for reimbursement narrations extracted above
         if entity and len(entity) > 4 and (is_clean_neft or is_reimb_narration):
             first_word = entity.split()[0].lower() if entity.split() else ""
-            anchored = [l for l in self.master_ledgers if first_word in l.lower()] if first_word else []
+            # Word-boundary match + minimum length guard.
+            # Substring "in l.lower()" causes false anchoring: first_word="int" would
+            # pull in "interest expense", "interior", etc. Also skip anchoring for very
+            # short/generic tokens (< 4 chars) — they match too many unrelated ledgers.
+            if first_word and len(first_word) >= 4:
+                _fw_pat = re.compile(r'\b' + re.escape(first_word) + r'\b', re.IGNORECASE)
+                anchored = [l for l in self.master_ledgers if _fw_pat.search(l)]
+            else:
+                anchored = []
             if anchored:
                 # Use a slightly lower threshold (68) for anchored matches — the first-word
                 # constraint already filters out unrelated ledgers, so a score of 68+ within
@@ -743,7 +882,14 @@ class BankClassifier:
                     anchored_effective = anchored
 
                 def combined(c):
-                    s = max(fuzz.token_set_ratio(entity, c), fuzz.token_sort_ratio(entity, c))
+                    # Expand abbreviations before scoring — mirrors _fuzzy_match exactly.
+                    # Without this, "ALPINO HEALTHFOODS PVT LIM" scores ~73 against
+                    # "Alpino Health Foods Private Limited" instead of ~90.
+                    e_norm = _expand_abbrevs(entity)
+                    c_norm = _expand_abbrevs(c)
+                    s1 = fuzz.token_set_ratio(e_norm, c_norm)
+                    s2 = fuzz.token_sort_ratio(e_norm, c_norm)
+                    s = round(0.85 * s1 + 0.15 * s2) if len(e_norm) <= 8 else round(0.6 * s1 + 0.4 * s2)
                     # Boost ledgers whose name echoes a remark keyword (tolerates typos)
                     if is_reimbursement and fuzz.partial_ratio("reimburse", c.lower()) >= 70:
                         s += 20
@@ -759,7 +905,10 @@ class BankClassifier:
                     return s
                 best_a = max(anchored_effective, key=combined)
                 score_a = combined(best_a)
-                if score_a >= 68:
+                # Raise bar when multiple similar ledgers compete — a score of 69
+                # is not reliable enough to commit when two vendors share a first word.
+                _anchor_threshold = 76 if len(anchored_effective) > 1 else 68
+                if score_a >= _anchor_threshold:
                     conf_a = "High" if score_a >= 87 else "Medium"
                     return {"ledger": best_a, "type": txn_type, "confidence": conf_a,
                             "rule": "Anchored Entity Match"}
@@ -855,21 +1004,53 @@ class BankClassifier:
 
 def load_ledger_master(filepath: str) -> list:
     """
-    Load ledger names from a Tally 'List of Ledgers' export.
-    Auto-detects the right sheet and reads column A.
+    Load ledger names from a Tally / CoA export.
+    Auto-detects the right sheet (by name or by scanning for the most ledger-like content)
+    and auto-detects the right column (the one with the most text-heavy, non-numeric entries).
     Filters out header rows, totals, and group summary lines.
     """
     xl = pd.ExcelFile(filepath)
 
-    # Prefer sheet with ledger/list/master in name
+    # Prefer a sheet whose name signals a chart of accounts / ledger list.
+    # Falls back to scanning all sheets for the one with the most text rows.
+    _coa_keywords = [
+        "ledger", "list", "master", "account", "chart", "coa", "gl",
+        "tally", "voucher", "accounts master", "list of ledger",
+    ]
     target = next(
         (s for s in xl.sheet_names
-         if any(k in s.lower() for k in ["ledger", "list", "master", "account", "chart"])),
-        xl.sheet_names[0]
+         if any(k in s.lower() for k in _coa_keywords)),
+        None,
     )
+    if target is None:
+        # No keyword match — pick the sheet with the most non-numeric rows in column A
+        best_sheet, best_count = xl.sheet_names[0], 0
+        for s in xl.sheet_names:
+            try:
+                _df = pd.read_excel(filepath, sheet_name=s, header=None, nrows=200)
+                count = _df[0].dropna().apply(
+                    lambda v: bool(re.search(r'[A-Za-z]{3,}', str(v)))
+                ).sum()
+                if count > best_count:
+                    best_count, best_sheet = count, s
+            except Exception:
+                pass
+        target = best_sheet
 
     df = pd.read_excel(filepath, sheet_name=target, header=None)
-    raw = df[0].dropna().astype(str).tolist()
+
+    # Auto-detect the column containing ledger names: the column with the most
+    # text-heavy (non-numeric, length > 2) entries in the first 200 rows.
+    _col_idx = 0
+    best_text_count = 0
+    for col in df.columns:
+        count = df[col].dropna().apply(
+            lambda v: bool(re.search(r'[A-Za-z]{3,}', str(v))) and not str(v).strip().isdigit()
+        ).sum()
+        if count > best_text_count:
+            best_text_count, _col_idx = count, col
+
+    raw = df[_col_idx].dropna().astype(str).tolist()
 
     # Standard Tally group names that appear in hierarchical Chart of Accounts exports —
     # these are not ledgers and should be excluded from the master list.
