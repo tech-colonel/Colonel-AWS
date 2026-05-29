@@ -494,7 +494,11 @@ class BankClassifier:
                     best_score = score
                     best_ledger = ledger
 
-        return best_ledger if best_score >= 150 else None
+        # Threshold 200 requires at least 2 word overlaps (or 1 overlap + strong
+        # token_set_ratio). Score of 150 allowed single-name matches like
+        # "DIVYA ROHIT SA" → "Salary - Divya Pillai" (wrong) or
+        # "PAWAR RAMESH G" → "Salary Payable-Ramesh" (wrong) to slip through.
+        return best_ledger if best_score >= 200 else None
 
     # ------------------------------------------------------------------
     def classify(self, narration: str, debit: float, credit: float) -> dict:
@@ -519,16 +523,25 @@ class BankClassifier:
                 return {"ledger": matched, "type": "Contra",
                         "confidence": "High", "rule": "OAT/CASA Contra"}
 
-        # IndusInd Bank sweep transfer between OD and current accounts
-        # Format: "Sweep Trf From <ACCTNO>///" or "Sweep Trf To <ACCTNO>///"
+        # IndusInd Bank sweep transfer between OD/FD and current account.
+        # Format: "Sweep Trf From <ACCTNO>///"
+        # Match the account number's last 4 digits against ledger names that contain
+        # "XX<last4>" (e.g. account 301051314975 → last4=4975 → IndusInd FD-XX4975).
+        # Search ALL master ledgers (not just own_account) because the sweep source
+        # is often an FD sub-account, not a bank current account.
         if "SWEEP TRF" in orig_upper:
             acc_m = re.search(r'\b(\d{10,})\b', orig_upper)
+            matched = None
             if acc_m:
                 acc_no = acc_m.group(1)
-                matched = next((l for l in self.own_account_ledgers if acc_no in l), None)
-                if not matched:
-                    matched = next((l for l in self.own_account_ledgers), None)
-            else:
+                last4  = acc_no[-4:]
+                matched = (
+                    next((l for l in self.master_ledgers if acc_no in l), None)
+                    or next((l for l in self.master_ledgers
+                             if f'XX{last4}' in l.upper() or l.upper().endswith(last4)), None)
+                    or next((l for l in self.own_account_ledgers), None)
+                )
+            if not matched:
                 matched = next((l for l in self.own_account_ledgers), None)
             if matched:
                 return {"ledger": matched, "type": "Contra",
@@ -541,6 +554,25 @@ class BankClassifier:
             if rbl:
                 return {"ledger": rbl, "type": "Contra", "confidence": "High",
                         "rule": "RATNR RBL Contra"}
+
+        # IndusInd Bank "Repayment credit [<ACCTNO>//...]" narrations.
+        # These are credits back FROM a sweep/FD sub-account into the current account.
+        # The narration contains "TDS Recovery" as a REMARK, NOT the ledger type —
+        # matching TDS keyword here would be wrong. Use account suffix to find the
+        # source FD/sub-account ledger instead.
+        if "REPAYMENT CREDIT" in orig_upper:
+            acc_m = re.search(r'\[(\d{10,})', orig_upper)
+            if acc_m:
+                acc_no = acc_m.group(1)
+                last4  = acc_no[-4:]
+                matched = (
+                    next((l for l in self.master_ledgers if acc_no in l), None)
+                    or next((l for l in self.master_ledgers
+                             if f'XX{last4}' in l.upper() or l.upper().endswith(last4)), None)
+                )
+                if matched:
+                    return {"ledger": matched, "type": txn_type, "confidence": "High",
+                            "rule": "IndusInd Repayment Credit"}
 
         # ------------------------------------------------------------------
         # STEP 2 — Statutory payments via BDP / ITG narration codes
@@ -762,11 +794,15 @@ class BankClassifier:
         # Map to the generic "Net Salary Payable" or "Salary Payable" ledger.
         # ------------------------------------------------------------------
         if re.match(r'^SALR\d+/', orig_upper) and "SALARY" in orig_upper:
+            # Prefer the plain "Salary Payable" ledger (no employee suffix) —
+            # this is a bulk payroll run, not a per-employee transfer.
+            # "Net Salary Payable" is a secondary fallback.
             net_sal = (
-                next((l for l in self.master_ledgers if 'net salary' in l.lower()), None)
-                or next((l for l in self.salary_ledgers if l.lower().strip() in ('salary payable',)), None)
+                next((l for l in self.salary_ledgers
+                      if l.lower().strip() == 'salary payable'), None)
+                or next((l for l in self.master_ledgers if 'net salary' in l.lower()), None)
                 or next((l for l in self.salary_ledgers), None)
-                or self._find_master(['net salary', 'salary payable'])
+                or self._find_master(['salary payable', 'net salary'])
                 or self._suspense_ledger
             )
             return {"ledger": net_sal, "type": txn_type, "confidence": "High",
@@ -1069,6 +1105,18 @@ def load_ledger_master(filepath: str) -> list:
     }
 
     skip_exact = {"total", "grand total", "list of ledgers", "ledger name", "name"}
+
+    # Patterns that identify company header / metadata rows — not ledger names.
+    # E.g. "Plot - C/59 Platina Bandra Kurla Complex G-Block Near City Union Bank"
+    #      "1-Apr-24 to 31-Mar-26"   "45 Group(s) and 261 Ledger(s)"
+    _METADATA_PATTERNS = [
+        re.compile(r'\bPlot\b', re.IGNORECASE),           # address line
+        re.compile(r'\d+\s*-\s*[A-Za-z]{3}\s*-\s*\d{2}'), # date range "1-Apr-24"
+        re.compile(r'\d+\s+Group', re.IGNORECASE),         # "45 Group(s)"
+        re.compile(r'\d+\s+Ledger', re.IGNORECASE),        # "261 Ledger(s)"
+        re.compile(r'\bto\s+\d{2}-\w{3}-\d{2,4}\b', re.IGNORECASE),  # "to 31-Mar-26"
+    ]
+
     cleaned = []
     for l in raw:
         l = l.strip()
@@ -1079,6 +1127,13 @@ def load_ledger_master(filepath: str) -> list:
         if l.lower() in _TALLY_GROUPS:
             continue
         if l.isdigit():
+            continue
+        # Skip rows longer than 100 chars — Tally ledger names are never this long;
+        # these are almost always company address lines from the CoA header.
+        if len(l) > 100:
+            continue
+        # Skip rows matching known metadata patterns
+        if any(p.search(l) for p in _METADATA_PATTERNS):
             continue
         cleaned.append(l)
 
