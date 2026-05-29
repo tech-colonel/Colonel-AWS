@@ -7,6 +7,8 @@ const crypto = require('crypto');
 
 const PYTHON_RECO_URL = process.env.PYTHON_RECO_URL || 'http://localhost:8765';
 
+const { loadCorrectionMap, normalizeNarration } = require('./bankCorrectionsController');
+
 // ── DB helpers (imported lazily to avoid circular deps) ──────────────────────
 
 /**
@@ -127,32 +129,39 @@ const saveRecoJob = async (sequelize, { brandId, agentType, month, year, fileHas
 
 /**
  * Bulk-insert bank_reco_results rows for a completed bank statement job.
- * Skips gracefully on any DB error — download is already returned to user.
+ * Only saves High confidence rows — Medium/Low are returned to the frontend
+ * for review but not persisted (keeps the DB clean with accountant-grade data only).
  */
 const saveBankRecoResults = async (sequelize, jobId, brandId, rows) => {
   if (!rows || rows.length === 0) return;
+  const highOnly = rows.filter(r => (r.confidence || '').toLowerCase() === 'high');
+  if (highOnly.length === 0) return;
   try {
     await sequelize.transaction(async (t) => {
       await sequelize.query(`SET LOCAL app.bypass_rls = 'true'`, { transaction: t });
-      const values = rows.map((r) => [
-        jobId, brandId,
-        parseIndianDate(r.date), r.description || null,
-        r.debit != null ? r.debit : null,
-        r.credit != null ? r.credit : null,
-        r.balance != null ? r.balance : null,
-        r.type || null, r.ledger_name || null, r.confidence || 'Low'
-      ]);
-      for (const v of values) {
+      for (const r of highOnly) {
         await sequelize.query(
           `INSERT INTO bank_reco_results
              (job_id, brand_id, txn_date, description, debit, credit, balance,
               txn_type, ledger_name, confidence)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
-          { bind: v, transaction: t }
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+           ON CONFLICT (brand_id, description, txn_date, COALESCE(debit,0), COALESCE(credit,0))
+           DO NOTHING`,
+          {
+            bind: [
+              jobId, brandId,
+              parseIndianDate(r.date), r.description || null,
+              r.debit != null ? r.debit : null,
+              r.credit != null ? r.credit : null,
+              r.balance != null ? r.balance : null,
+              r.type || null, r.ledger_name || null, 'High'
+            ],
+            transaction: t
+          }
         );
       }
     });
-    console.log(`[RECO-DB] ✅ Saved ${rows.length} bank_reco rows for job ${jobId}`);
+    console.log(`[RECO-DB] ✅ Saved ${highOnly.length}/${rows.length} High-confidence bank_reco rows for job ${jobId}`);
   } catch (err) {
     console.error('[RECO-DB] saveBankRecoResults error:', err.message);
   }
@@ -254,7 +263,7 @@ const RECO_TYPE_MAP = {
 const runUniversalClassifier = (ledgerPath, bankPath, outputPath) => {
   return new Promise((resolve, reject) => {
     const { exec } = require('child_process');
-    const CLASSIFY_SCRIPT = path.join(__dirname, '../../scripts/classify.py'); const cmd = `python3 "${CLASSIFY_SCRIPT}" --ledger "${ledgerPath}" --bank "${bankPath}" --out "${outputPath}"`;
+    const cmd = `python3 "/Users/dhavalchauhan/Colonel Full/Extra/bank-statement-classifier/scripts/classify.py" --ledger "${ledgerPath}" --bank "${bankPath}" --out "${outputPath}"`;
     console.log(`[RECO] Executing standalone: ${cmd}`);
     exec(cmd, (error, stdout, stderr) => {
       if (error) {
@@ -337,7 +346,7 @@ const runReco = async (req, res) => {
     // --- Standalone Decoupled Universal Bank Statement Integration ---
     if (recoType === 'universal_bank_statement') {
       const jobId = crypto.randomUUID();
-      const jobDir = path.join('/tmp/colonel_reco_jobs', `job_${jobId}`);
+      const jobDir = path.join(__dirname, '../../../Extra/temp_run', `job_${jobId}`);
       fs.mkdirSync(jobDir, { recursive: true });
 
       if (!req.files || req.files.length === 0) {
@@ -511,6 +520,56 @@ const runReco = async (req, res) => {
         results.push(rowData);
       });
 
+      // ── Apply per-brand corrections (Layer 0) ────────────────────────────
+      // Overrides predicted_ledger with accountant-confirmed mappings stored in
+      // bank_reco_corrections. Skipped entirely for "Other" brand (no DB).
+      if (brandId && brandId !== 'demo' && brandId !== 'other' && !isDemo) {
+        try {
+          const { Brand } = require('../models/master');
+          const { getBrandConnection } = require('../config/database');
+          const corrBrand = await Brand.findByPk(brandId);
+          if (corrBrand) {
+            const corrSeq = getBrandConnection(corrBrand.db_name);
+            const corrMap = await loadCorrectionMap(brandId, corrSeq);
+
+            // Build CoA ledger set for validation (skip stale corrections)
+            const ledgerSet = new Set();
+            try {
+              const lWb = new ExcelJS.Workbook();
+              await lWb.xlsx.readFile(ledgerPath);
+              lWb.worksheets[0]?.eachRow((row) => {
+                const val = row.getCell(1).text?.trim();
+                if (val) ledgerSet.add(val);
+              });
+            } catch (_) { /* non-fatal */ }
+
+            let corrected = 0;
+            results.forEach(row => {
+              const key = normalizeNarration(row.description);
+              const fix = corrMap[key];
+              if (!fix) return;
+              // Safeguard: skip if ledger was deleted/renamed from CoA
+              if (ledgerSet.size > 0 && !ledgerSet.has(fix.ledger)) return;
+              row.ledger_name = fix.ledger;
+              if (fix.type) row.type = fix.type;
+              row.confidence = 'High';
+              row.corrected = true;
+              corrected++;
+            });
+
+            if (corrected > 0) {
+              // Recount confidence buckets after corrections
+              highCount = results.filter(r => r.confidence === 'High').length;
+              mediumCount = results.filter(r => r.confidence === 'Medium').length;
+              lowCount = results.filter(r => r.confidence === 'Low').length;
+              console.log(`[RECO-CORRECTIONS] Applied ${corrected} stored corrections for brand ${brandId}`);
+            }
+          }
+        } catch (corrErr) {
+          console.warn('[RECO-CORRECTIONS] Non-fatal error loading corrections:', corrErr.message);
+        }
+      }
+
       // Count master ledgers dynamically
       let ledgerRowCount = 0;
       try {
@@ -523,7 +582,7 @@ const runReco = async (req, res) => {
       }
 
       // 5. Persist Excel File for Direct Download
-      const persistentDir = '/tmp/colonel_reco_outputs';
+      const persistentDir = path.join(__dirname, '../../../Extra/outputs');
       fs.mkdirSync(persistentDir, { recursive: true });
       const persistentPath = path.join(persistentDir, `${jobId}.xlsx`);
       fs.copyFileSync(outputPath, persistentPath);
@@ -742,7 +801,7 @@ const exportReco = async (req, res) => {
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.setHeader('Content-Disposition', `attachment; filename="${safeName}.xlsx"`);
 
-    const localPath = path.join('/tmp/colonel_reco_outputs', `${req.params.jobId}.xlsx`);
+    const localPath = path.join(__dirname, '../../../Extra/outputs', `${req.params.jobId}.xlsx`);
     if (fs.existsSync(localPath)) {
       console.log(`[RECO] Streaming local persistent Excel sheet: ${localPath}`);
       return fs.createReadStream(localPath).pipe(res);

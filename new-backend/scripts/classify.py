@@ -283,9 +283,12 @@ def _parse_indusind_bill(text: str) -> str:
 # ---------------------------------------------------------------------------
 
 class BankClassifier:
-    def __init__(self, master_ledgers: list):
+    def __init__(self, master_ledgers: list, corrections: dict | None = None):
         self.master_ledgers = [str(l).strip() for l in master_ledgers
                                if pd.notna(l) and str(l).strip()]
+        # corrections: {normalized_narration_key → {"ledger": str, "type": str|None}}
+        # Loaded from <brand>_corrections.json sidecar. Applied before any fuzzy step.
+        self.corrections = corrections or {}
         self._build_indices()
 
     def _build_indices(self):
@@ -506,6 +509,26 @@ class BankClassifier:
         orig_upper = orig.upper()
         is_credit  = credit > 0
         txn_type   = "Receipt" if is_credit else "Payment"
+
+        # ------------------------------------------------------------------
+        # STEP 0 — Per-brand accountant corrections (highest priority)
+        # Loaded from <brand>_corrections.json sidecar at startup.
+        # Checked before any fuzzy logic — 100% accurate for known narrations.
+        # CoA validation: skip stale corrections if ledger no longer in master.
+        # ------------------------------------------------------------------
+        if self.corrections:
+            key = orig.strip().upper()
+            key = ' '.join(key.split())  # collapse whitespace
+            fix = self.corrections.get(key)
+            if fix and fix.get('ledger'):
+                # Verify ledger still exists in the current CoA
+                if fix['ledger'] in self.master_ledgers:
+                    return {
+                        "ledger": fix['ledger'],
+                        "type": fix.get('type') or txn_type,
+                        "confidence": "High",
+                        "rule": "Stored Correction",
+                    }
 
         # ------------------------------------------------------------------
         # STEP 1 — Own-account transfers → Contra
@@ -1337,8 +1360,24 @@ def main():
               "Check that the bank file has a clear header row within the first 30 rows.", file=sys.stderr)
         sys.exit(1)
 
+    # Load per-brand corrections from sidecar JSON if present.
+    # File: corrections/<brand-slug>_corrections.json
+    # Format: {"NORMALIZED NARRATION KEY": {"ledger": "Ledger Name", "type": "Payment"}}
+    import json as _json
+    corrections = {}
+    _slug = re.sub(r'[^A-Za-z0-9_-]', '-', args.brand.strip()).lower()
+    _corr_path = os.path.join(os.path.dirname(args.output), '..', 'corrections', f'{_slug}_corrections.json')
+    _corr_path = os.path.normpath(_corr_path)
+    if os.path.exists(_corr_path):
+        try:
+            with open(_corr_path, 'r', encoding='utf-8') as _f:
+                corrections = _json.load(_f)
+            print(f"      → Loaded {len(corrections)} stored corrections for brand '{args.brand}'")
+        except Exception as _e:
+            print(f"      → Warning: could not load corrections file: {_e}")
+
     print("[3/4] Classifying transactions …")
-    classifier = BankClassifier(ledgers)
+    classifier = BankClassifier(ledgers, corrections=corrections)
     rows, summary = [], {"High": 0, "Medium": 0, "Low": 0}
 
     date_col  = col_map.get("txn_date")

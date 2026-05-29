@@ -2,15 +2,34 @@ import React, { useState, useRef, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import DashboardLayout from '../../components/layout/DashboardLayout';
 import {
-  LayoutDashboard, Bot, FileSearch2, ArrowLeft, Upload, Download,
+  LayoutDashboard, Bot, ArrowLeft, Upload, Download,
   Play, CheckCircle2, XCircle, AlertTriangle, RotateCcw,
   FileSpreadsheet, Loader2, ChevronDown, ChevronUp, Database, Info, CheckSquare,
-  BarChart3, ArrowRight
+  BarChart3, ArrowRight, Save
 } from 'lucide-react';
 import api from '../../lib/api';
 import { toast } from 'sonner';
 
 const AGENT_CONFIG = {
+  gstr_2b_vs_purchase: {
+    name: 'GSTR-2B vs Purchase Register',
+    icon: '📋',
+    color: '#0748EE', bg: '#E8EFFE', border: '#A3BFF8',
+    files: [
+      { key: 'gstr2b', label: 'GSTR-2B File', hint: '.xlsx / .xls', required: true },
+      { key: 'purchase', label: 'Purchase Register', hint: '.xlsx / .xls', required: true },
+    ],
+  },
+  gstr_2a_vs_2b_vs_books: {
+    name: 'GSTR2 vs Books',
+    icon: '🔄',
+    color: '#F115F8', bg: '#FEE8FF', border: '#F9A8FD',
+    files: [
+      { key: 'gstr2b', label: 'GSTR-2B File', hint: '.xlsx / .xls', required: true },
+      { key: 'purchase', label: 'Purchase Register', hint: '.xlsx / .xls', required: true },
+      { key: 'debit', label: 'Debit Note Register', hint: '.xlsx / .xls', required: true },
+    ],
+  },
   gstr_2b_books: {
     name: 'GSTR-2B vs Books',
     icon: '📂',
@@ -19,6 +38,37 @@ const AGENT_CONFIG = {
       { key: 'gstr2b', label: 'GSTR-2B File', hint: '.xlsx / .xls', required: true },
       { key: 'purchase', label: 'Purchase Register', hint: '.xlsx / .xls', required: true },
       { key: 'debit', label: 'Debit Note Register', hint: '.xlsx / .xls', required: true },
+    ],
+  },
+  gstr_3b_vs_2b: {
+    name: 'GSTR-3B vs GSTR-2B',
+    icon: '⚖️',
+    color: '#059669', bg: '#ECFDF5', border: '#A7F3D0',
+    files: [
+      { key: 'gstr3b', label: 'GSTR-3B Working File', hint: '.xlsx / .xls', required: true },
+      { key: 'gstr2b_3b', label: 'GSTR-2B File', hint: '.xlsx / .xls', required: true },
+    ],
+  },
+  gstr_1_vs_books: {
+    name: 'GSTR-1 vs Books',
+    icon: '📊',
+    color: '#D97706', bg: '#FFFBEB', border: '#FDE68A',
+    files: [
+      { key: 'tally_sales', label: 'Tally Sales Export', hint: '.xlsx / .xls', required: true },
+      { key: 'gstr1', label: 'GSTR-1 File', hint: '.xlsx / .xls', required: true },
+      { key: 'amazon', label: 'Amazon RTF (Optional)', hint: '.xlsx / .xls', required: false },
+    ],
+  },
+  bank_statement: {
+    name: 'Bank Statement Classifier',
+    icon: '🏦',
+    color: '#E11D48', bg: '#FFF1F2', border: '#FECDD3',
+    files: [
+      { key: 'bank_statement', label: 'Bank Statement', hint: '.xlsx / .xls / .csv', required: true },
+    ],
+    demoFiles: [
+      { key: 'bank_statement', label: 'Bank Statement', hint: '.xlsx / .xls / .csv', required: true },
+      { key: 'ledger_master', label: 'Ledger Master', hint: '.xlsx / .xls', required: false, isDemo: true },
     ],
   },
   universal_bank_statement: {
@@ -31,6 +81,14 @@ const AGENT_CONFIG = {
     demoFiles: [
       { key: 'bank_statement', label: 'Bank Statement', hint: '.xlsx / .xls / .csv', required: true },
       { key: 'ledger_master', label: 'Ledger Master', hint: '.xlsx / .xls', required: false, isDemo: true },
+    ],
+  },
+  gstr_3b_tally_entry: {
+    name: 'GSTR-3B Tally Entry',
+    icon: '📒',
+    color: '#0F766E', bg: '#F0FDFA', border: '#99F6E4',
+    files: [
+      { key: 'gstr3b', label: 'GSTR-3B File', hint: '.pdf / .xlsx / .xls', accept: '.pdf,.xlsx,.xls', required: true },
     ],
   },
 };
@@ -81,7 +139,7 @@ const FileDropzone = ({ fileConfig, file, onChange }) => {
         transition: 'all 0.2s ease',
       }}
     >
-      <input ref={inputRef} type="file" accept=".xlsx,.xls,.csv" className="hidden"
+      <input ref={inputRef} type="file" accept={fileConfig.accept || '.xlsx,.xls,.csv'} className="hidden"
         onChange={e => onChange(e.target.files[0])} />
       {file ? (
         <div className="flex items-center gap-3">
@@ -124,11 +182,23 @@ const RecoWorkspace = () => {
   const [showMonthly, setShowMonthly] = useState(false);
   const [ledgerStatus, setLedgerStatus] = useState(null);
 
+  // Universal bank statement: brand selector + correction state
+  const isUniversal = agentType === 'universal_bank_statement';
+  const [brands, setBrands] = useState([]);
+  const [selectedBrand, setSelectedBrand] = useState(brandId && brandId !== 'other' ? brandId : '');
+  const [editedLedgers, setEditedLedgers] = useState({}); // { rowIndex: newLedgerName }
+  const [savingCorrections, setSavingCorrections] = useState(false);
+  const corrExcelRef = useRef(null);
+  const effectiveBrandId = isUniversal ? (selectedBrand || null) : brandId;
+
   useEffect(() => {
     if (agentType === 'bank_statement' && !isDemo && brandId !== 'demo') {
       checkLedgerMaster();
     }
-  }, [agentType, brandId, isDemo]);
+    if (isUniversal) {
+      api.get('/api/brands').then(r => setBrands(r.data?.brands || r.data || [])).catch(() => {});
+    }
+  }, [agentType, brandId, isDemo, isUniversal]);
 
   const checkLedgerMaster = async () => {
     try {
@@ -164,12 +234,12 @@ const RecoWorkspace = () => {
     if (agentType === 'bank_statement' && isDemo && !uploadedFiles['ledger_master']) {
       toast.error('In demo mode, please upload the Ledger Master file'); return;
     }
-    setRunning(true); setResult(null);
+    setRunning(true); setResult(null); setEditedLedgers({});
     try {
       const formData = new FormData();
       formData.append('reco_type', agentType);
       formData.append('tolerance', tolerance);
-      formData.append('brand_id', brandId);
+      formData.append('brand_id', effectiveBrandId || brandId);
       formData.append('is_demo', isDemo ? 'true' : 'false');
       for (const [key, file] of Object.entries(uploadedFiles)) { if (file) formData.append(key, file); }
       const response = await api.post('/api/reco/run', formData, { headers: { 'Content-Type': 'multipart/form-data' } });
@@ -177,6 +247,45 @@ const RecoWorkspace = () => {
       toast.success(`Reconciliation complete! ${response.data.results?.length || 0} records processed.`);
     } catch (err) { toast.error(err.response?.data?.error || 'Reconciliation failed'); }
     finally { setRunning(false); }
+  };
+
+  // Save inline ledger edits as corrections for this brand
+  const handleSaveCorrections = async () => {
+    const edits = Object.entries(editedLedgers);
+    if (!edits.length) return;
+    if (!effectiveBrandId || effectiveBrandId === 'other') {
+      toast.error('Select a brand before saving corrections'); return;
+    }
+    setSavingCorrections(true);
+    try {
+      const rows = result?.results || [];
+      const corrections = edits.map(([idx, correct_ledger]) => {
+        const row = rows[parseInt(idx)];
+        return { description: row?.original_description || row?.description, correct_ledger, correct_type: row?.predicted_type || row?.type };
+      }).filter(c => c.description && c.correct_ledger);
+      await api.post(`/api/bank-reco/corrections/${effectiveBrandId}`, {
+        corrections, job_id: result?.job_id
+      });
+      toast.success(`${corrections.length} correction${corrections.length > 1 ? 's' : ''} saved — will apply on next run`);
+      setEditedLedgers({});
+    } catch { toast.error('Failed to save corrections'); }
+    finally { setSavingCorrections(false); }
+  };
+
+  // Upload a reviewed Excel file to extract corrections
+  const handleUploadCorrectionsExcel = async (file) => {
+    if (!file || !effectiveBrandId || effectiveBrandId === 'other') {
+      toast.error('Select a brand before uploading corrections'); return;
+    }
+    const fd = new FormData();
+    fd.append('file', file);
+    if (result?.job_id) fd.append('job_id', result.job_id);
+    try {
+      const res = await api.post(`/api/bank-reco/corrections/${effectiveBrandId}/upload-excel`, fd, {
+        headers: { 'Content-Type': 'multipart/form-data' }
+      });
+      toast.success(`${res.data.saved} correction${res.data.saved !== 1 ? 's' : ''} saved from Excel`);
+    } catch { toast.error('Failed to upload corrections Excel'); }
   };
 
   const handleDownload = async () => {
@@ -218,7 +327,10 @@ const RecoWorkspace = () => {
   const isGstResult = result?.results?.[0] && 'category' in result.results[0];
 
   const statusCounts = (result?.results || []).reduce((acc, r) => {
-    const s = isGstResult ? (r.category || 'Unknown') : (r.status || 'Unknown');
+    let s;
+    if (isGstResult) s = r.category || 'Unknown';
+    else if (isUniversal) s = (r.confidence || 'Low') + ' Confidence';
+    else s = r.status || 'Unknown';
     acc[s] = (acc[s] || 0) + 1; return acc;
   }, {});
 
@@ -280,6 +392,30 @@ const RecoWorkspace = () => {
                 Upload Files
               </h2>
               <div className="space-y-3">
+
+                {/* Brand selector — universal bank statement only */}
+                {isUniversal && (
+                  <div>
+                    <label className="block text-xs font-semibold mb-1.5" style={{ color: '#64748B' }}>
+                      Brand <span style={{ color: '#E11D48' }}>*</span>
+                    </label>
+                    <select
+                      value={selectedBrand}
+                      onChange={e => setSelectedBrand(e.target.value)}
+                      className="w-full px-3 py-2.5 rounded-xl text-sm outline-none"
+                      style={{ background: '#F8FAFC', border: '1.5px solid #E2E8F0', color: '#0F172A' }}
+                    >
+                      <option value="">Select brand…</option>
+                      {brands.map(b => (
+                        <option key={b.id} value={b.id}>{b.name}</option>
+                      ))}
+                      <option value="other">Other (no corrections / dev mode)</option>
+                    </select>
+                    <p className="text-xs mt-1" style={{ color: '#94A3B8' }}>
+                      Selecting a brand loads past corrections and saves new ones automatically.
+                    </p>
+                  </div>
+                )}
                 {activeFiles.map(f => (
                   <React.Fragment key={f.key}>
                     <FileDropzone fileConfig={f} file={uploadedFiles[f.key]} onChange={(file) => handleFileChange(f.key, file)} />
@@ -458,7 +594,28 @@ const RecoWorkspace = () => {
                   );
                 })}
               </div>
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 flex-wrap">
+                {/* Correction actions — universal bank statement only */}
+                {isUniversal && (
+                  <>
+                    {Object.keys(editedLedgers).length > 0 && (
+                      <button onClick={handleSaveCorrections} disabled={savingCorrections}
+                        className="flex items-center gap-2 text-sm font-semibold px-4 py-2 rounded-xl transition-all disabled:opacity-50"
+                        style={{ background: '#ECFDF5', border: '1px solid #A7F3D0', color: '#059669' }}>
+                        {savingCorrections ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
+                        Save {Object.keys(editedLedgers).length} Correction{Object.keys(editedLedgers).length > 1 ? 's' : ''}
+                      </button>
+                    )}
+                    <input ref={corrExcelRef} type="file" accept=".xlsx,.xls" className="hidden"
+                      onChange={e => { if (e.target.files[0]) handleUploadCorrectionsExcel(e.target.files[0]); e.target.value = ''; }} />
+                    <button onClick={() => corrExcelRef.current?.click()}
+                      className="flex items-center gap-2 text-sm font-semibold px-4 py-2 rounded-xl transition-all"
+                      style={{ background: '#FFFBEB', border: '1px solid #FDE68A', color: '#D97706' }}>
+                      <Upload className="w-4 h-4" />
+                      Upload Reviewed Excel
+                    </button>
+                  </>
+                )}
                 <button onClick={handleDownload} disabled={downloading}
                   className="flex items-center gap-2 text-sm font-semibold px-4 py-2 rounded-xl transition-all disabled:opacity-50"
                   style={{ background: '#E8EFFE', border: '1px solid #A3BFF8', color: '#0748EE' }}>
@@ -493,16 +650,56 @@ const RecoWorkspace = () => {
                   </thead>
                   <tbody>
                     {filteredResults.slice(0, 200).map((row, i) => {
-                      const sCfg = getStatusCfg(row.status || '');
+                      const sCfg = getStatusCfg(row.status || row.confidence || '');
+                      const originalIdx = (result?.results || []).findIndex(
+                        r => (r.original_description || r.description) === (row.original_description || row.description) && r.debit === row.debit && r.credit === row.credit
+                      );
+                      const isEdited = editedLedgers[originalIdx] !== undefined;
+                      const isVerified = row.corrected;
                       return (
-                        <tr key={i} style={{ borderBottom: '1px solid #F1F5F9' }} className="hover:bg-slate-50 transition-colors">
+                        <tr key={i} style={{ borderBottom: '1px solid #F1F5F9', background: isVerified ? '#F0FDF4' : undefined }}
+                          className="hover:bg-slate-50 transition-colors">
                           {Object.entries(row)
-                            .filter(([k]) => !['raw_books', 'raw_gstr'].includes(k))
+                            .filter(([k]) => !['raw_books', 'raw_gstr', 'corrected', 'cleaned_description', 'category'].includes(k))
                             .map(([k, v], j) => (
                               <td key={j} className="px-4 py-3 whitespace-nowrap" style={{ color: '#334155' }}>
-                                {k === 'status' ? (
+                                {/* Editable ledger cell for universal bank statement */}
+                                {isUniversal && (k === 'ledger_name' || k === 'predicted_ledger') ? (
+                                  <div className="flex items-center gap-1.5 min-w-[180px]">
+                                    {isVerified && !isEdited && (
+                                      <CheckCircle2 className="w-3.5 h-3.5 flex-shrink-0" style={{ color: '#059669' }} title="Accountant-verified" />
+                                    )}
+                                    <input
+                                      className="text-xs px-2 py-1 rounded-lg w-full outline-none transition-all"
+                                      style={{
+                                        background: isEdited ? '#FEF3C7' : isVerified ? '#DCFCE7' : '#F8FAFC',
+                                        border: `1px solid ${isEdited ? '#FDE68A' : isVerified ? '#86EFAC' : '#E2E8F0'}`,
+                                        color: '#0F172A',
+                                      }}
+                                      value={isEdited ? editedLedgers[originalIdx] : (String(v ?? ''))}
+                                      onChange={e => setEditedLedgers(prev => ({ ...prev, [originalIdx]: e.target.value }))}
+                                      onFocus={() => { if (!isEdited) setEditedLedgers(prev => ({ ...prev, [originalIdx]: String(v ?? '') })); }}
+                                      title={isVerified ? 'Accountant-verified correction' : 'Click to correct ledger name'}
+                                    />
+                                    {isEdited && (
+                                      <button className="text-xs text-slate-400 hover:text-slate-600 flex-shrink-0"
+                                        onClick={() => setEditedLedgers(prev => { const n = {...prev}; delete n[originalIdx]; return n; })}>
+                                        ✕
+                                      </button>
+                                    )}
+                                  </div>
+                                ) : k === 'status' ? (
                                   <span className="inline-flex items-center gap-1 text-xs px-2.5 py-0.5 rounded-full font-semibold"
                                     style={{ background: sCfg.bg, color: sCfg.color, border: `1px solid ${sCfg.border}` }}>
+                                    {v}
+                                  </span>
+                                ) : k === 'confidence' ? (
+                                  <span className="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full font-semibold"
+                                    style={{
+                                      background: v === 'High' ? '#ECFDF5' : v === 'Medium' ? '#FFFBEB' : '#FFF1F2',
+                                      color: v === 'High' ? '#059669' : v === 'Medium' ? '#D97706' : '#E11D48',
+                                      border: `1px solid ${v === 'High' ? '#A7F3D0' : v === 'Medium' ? '#FDE68A' : '#FECDD3'}`,
+                                    }}>
                                     {v}
                                   </span>
                                 ) : typeof v === 'number' ? (

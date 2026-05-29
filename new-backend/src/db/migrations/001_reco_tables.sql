@@ -58,6 +58,11 @@ CREATE INDEX IF NOT EXISTS bank_reco_results_job_id_idx   ON bank_reco_results (
 CREATE INDEX IF NOT EXISTS bank_reco_results_brand_id_idx ON bank_reco_results (brand_id);
 CREATE INDEX IF NOT EXISTS bank_reco_results_ledger_idx   ON bank_reco_results (ledger_name);
 
+-- Deduplication: same transaction (same narration + date + amount) can only exist once per brand.
+-- Prevents duplicate rows when the same bank statement file is uploaded multiple times.
+CREATE UNIQUE INDEX IF NOT EXISTS bank_reco_results_txn_uq
+    ON bank_reco_results (brand_id, description, txn_date, COALESCE(debit, 0), COALESCE(credit, 0));
+
 -- ────────────────────────────────────────────────────────────
 -- 3.  gstr_2b_results  — GSTR-2B vs Books reconciliation rows
 -- ────────────────────────────────────────────────────────────
@@ -145,41 +150,66 @@ CREATE INDEX IF NOT EXISTS gstr_1_results_job_id_idx   ON gstr_1_results (job_id
 CREATE INDEX IF NOT EXISTS gstr_1_results_brand_id_idx ON gstr_1_results (brand_id);
 
 -- ────────────────────────────────────────────────────────────
+-- 7.  bank_reco_corrections  — per-brand accountant corrections
+--     Each row teaches the classifier: this narration → this ledger.
+--     Corrections are applied BEFORE fuzzy matching on every future run.
+-- ────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS bank_reco_corrections (
+    id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    brand_id         UUID         NOT NULL,
+    narration_raw    TEXT         NOT NULL,   -- exact Description string from the run
+    narration_key    TEXT         NOT NULL,   -- UPPER + trim + collapse spaces
+    correct_ledger   VARCHAR(255) NOT NULL,
+    correct_type     VARCHAR(50),             -- 'Payment' | 'Receipt' | 'Contra'
+    source           VARCHAR(10)  NOT NULL DEFAULT 'ui',  -- 'ui' | 'excel'
+    created_at       TIMESTAMPTZ  DEFAULT NOW(),
+    updated_at       TIMESTAMPTZ  DEFAULT NOW(),
+    CONSTRAINT bank_reco_corrections_brand_narration_uq UNIQUE (brand_id, narration_key)
+);
+
+CREATE INDEX IF NOT EXISTS bank_reco_corrections_brand_idx
+    ON bank_reco_corrections (brand_id);
+
+-- ────────────────────────────────────────────────────────────
 -- Row Level Security
 -- The Node backend sets "app.brand_id" per transaction.
 -- Policies ensure a brand's data is never visible to another.
 -- ────────────────────────────────────────────────────────────
-ALTER TABLE reco_jobs       ENABLE ROW LEVEL SECURITY;
-ALTER TABLE bank_reco_results ENABLE ROW LEVEL SECURITY;
-ALTER TABLE gstr_2b_results  ENABLE ROW LEVEL SECURITY;
-ALTER TABLE gstr_2a_2b_results ENABLE ROW LEVEL SECURITY;
-ALTER TABLE gstr_3b_results  ENABLE ROW LEVEL SECURITY;
-ALTER TABLE gstr_1_results   ENABLE ROW LEVEL SECURITY;
+ALTER TABLE reco_jobs              ENABLE ROW LEVEL SECURITY;
+ALTER TABLE bank_reco_results      ENABLE ROW LEVEL SECURITY;
+ALTER TABLE gstr_2b_results        ENABLE ROW LEVEL SECURITY;
+ALTER TABLE gstr_2a_2b_results     ENABLE ROW LEVEL SECURITY;
+ALTER TABLE gstr_3b_results        ENABLE ROW LEVEL SECURITY;
+ALTER TABLE gstr_1_results         ENABLE ROW LEVEL SECURITY;
+ALTER TABLE bank_reco_corrections  ENABLE ROW LEVEL SECURITY;
 
 -- Force RLS even for superuser connections (backend runs as postgres)
-ALTER TABLE reco_jobs         FORCE ROW LEVEL SECURITY;
-ALTER TABLE bank_reco_results FORCE ROW LEVEL SECURITY;
-ALTER TABLE gstr_2b_results   FORCE ROW LEVEL SECURITY;
-ALTER TABLE gstr_2a_2b_results FORCE ROW LEVEL SECURITY;
-ALTER TABLE gstr_3b_results   FORCE ROW LEVEL SECURITY;
-ALTER TABLE gstr_1_results    FORCE ROW LEVEL SECURITY;
+ALTER TABLE reco_jobs              FORCE ROW LEVEL SECURITY;
+ALTER TABLE bank_reco_results      FORCE ROW LEVEL SECURITY;
+ALTER TABLE gstr_2b_results        FORCE ROW LEVEL SECURITY;
+ALTER TABLE gstr_2a_2b_results     FORCE ROW LEVEL SECURITY;
+ALTER TABLE gstr_3b_results        FORCE ROW LEVEL SECURITY;
+ALTER TABLE gstr_1_results         FORCE ROW LEVEL SECURITY;
+ALTER TABLE bank_reco_corrections  FORCE ROW LEVEL SECURITY;
 
 -- Drop existing policies before recreating (idempotent)
 DO $$ BEGIN
-  DROP POLICY IF EXISTS reco_jobs_brand_policy        ON reco_jobs;
-  DROP POLICY IF EXISTS bank_reco_brand_policy        ON bank_reco_results;
-  DROP POLICY IF EXISTS gstr_2b_brand_policy          ON gstr_2b_results;
-  DROP POLICY IF EXISTS gstr_2a_2b_brand_policy       ON gstr_2a_2b_results;
-  DROP POLICY IF EXISTS gstr_3b_brand_policy          ON gstr_3b_results;
-  DROP POLICY IF EXISTS gstr_1_brand_policy           ON gstr_1_results;
+  DROP POLICY IF EXISTS reco_jobs_brand_policy              ON reco_jobs;
+  DROP POLICY IF EXISTS bank_reco_brand_policy              ON bank_reco_results;
+  DROP POLICY IF EXISTS gstr_2b_brand_policy                ON gstr_2b_results;
+  DROP POLICY IF EXISTS gstr_2a_2b_brand_policy             ON gstr_2a_2b_results;
+  DROP POLICY IF EXISTS gstr_3b_brand_policy                ON gstr_3b_results;
+  DROP POLICY IF EXISTS gstr_1_brand_policy                 ON gstr_1_results;
+  DROP POLICY IF EXISTS bank_reco_corrections_brand_policy  ON bank_reco_corrections;
 
-  -- Migration bypass policy: allows the migration process itself to run
-  DROP POLICY IF EXISTS reco_jobs_migration_policy        ON reco_jobs;
-  DROP POLICY IF EXISTS bank_reco_migration_policy        ON bank_reco_results;
-  DROP POLICY IF EXISTS gstr_2b_migration_policy          ON gstr_2b_results;
-  DROP POLICY IF EXISTS gstr_2a_2b_migration_policy       ON gstr_2a_2b_results;
-  DROP POLICY IF EXISTS gstr_3b_migration_policy          ON gstr_3b_results;
-  DROP POLICY IF EXISTS gstr_1_migration_policy           ON gstr_1_results;
+  -- Migration bypass policies
+  DROP POLICY IF EXISTS reco_jobs_migration_policy           ON reco_jobs;
+  DROP POLICY IF EXISTS bank_reco_migration_policy           ON bank_reco_results;
+  DROP POLICY IF EXISTS gstr_2b_migration_policy             ON gstr_2b_results;
+  DROP POLICY IF EXISTS gstr_2a_2b_migration_policy          ON gstr_2a_2b_results;
+  DROP POLICY IF EXISTS gstr_3b_migration_policy             ON gstr_3b_results;
+  DROP POLICY IF EXISTS gstr_1_migration_policy              ON gstr_1_results;
+  DROP POLICY IF EXISTS bank_reco_corrections_migration_policy ON bank_reco_corrections;
 END $$;
 
 -- Brand isolation policies: row is visible/writable only when
@@ -216,6 +246,12 @@ CREATE POLICY gstr_3b_brand_policy ON gstr_3b_results
     );
 
 CREATE POLICY gstr_1_brand_policy ON gstr_1_results
+    USING (
+        current_setting('app.bypass_rls', true) = 'true'
+        OR brand_id::text = current_setting('app.brand_id', true)
+    );
+
+CREATE POLICY bank_reco_corrections_brand_policy ON bank_reco_corrections
     USING (
         current_setting('app.bypass_rls', true) = 'true'
         OR brand_id::text = current_setting('app.brand_id', true)
