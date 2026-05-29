@@ -128,40 +128,49 @@ const saveRecoJob = async (sequelize, { brandId, agentType, month, year, fileHas
 };
 
 /**
- * Bulk-insert bank_reco_results rows for a completed bank statement job.
- * Only saves High confidence rows — Medium/Low are returned to the frontend
- * for review but not persisted (keeps the DB clean with accountant-grade data only).
+ * Bulk-insert ALL bank_reco_results rows (High + Medium + Low) for a completed job.
+ * Stores actual confidence so analytics shows the full picture.
+ * ON CONFLICT DO UPDATE refreshes ledger/confidence when classifier improves on re-run.
+ * Auto-matching (Layer 0 corrections) only uses rows that were promoted to High —
+ * either by the classifier or by accountant correction via the UI.
  */
 const saveBankRecoResults = async (sequelize, jobId, brandId, rows) => {
   if (!rows || rows.length === 0) return;
-  const highOnly = rows.filter(r => (r.confidence || '').toLowerCase() === 'high');
-  if (highOnly.length === 0) return;
+  let saved = 0;
   try {
     await sequelize.transaction(async (t) => {
       await sequelize.query(`SET LOCAL app.bypass_rls = 'true'`, { transaction: t });
-      for (const r of highOnly) {
+      for (const r of rows) {
+        const conf = r.confidence || 'Low';
         await sequelize.query(
           `INSERT INTO bank_reco_results
              (job_id, brand_id, txn_date, description, debit, credit, balance,
               txn_type, ledger_name, confidence)
            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
-           ON CONFLICT (brand_id, description, txn_date, COALESCE(debit,0), COALESCE(credit,0))
-           DO NOTHING`,
+           ON CONFLICT (brand_id, description, txn_date,
+                        COALESCE(debit,0), COALESCE(credit,0), COALESCE(balance,0))
+           DO UPDATE SET
+             ledger_name = EXCLUDED.ledger_name,
+             confidence  = EXCLUDED.confidence,
+             txn_type    = EXCLUDED.txn_type,
+             job_id      = EXCLUDED.job_id`,
           {
             bind: [
               jobId, brandId,
               parseIndianDate(r.date), r.description || null,
-              r.debit != null ? r.debit : null,
+              r.debit  != null ? r.debit  : null,
               r.credit != null ? r.credit : null,
               r.balance != null ? r.balance : null,
-              r.type || null, r.ledger_name || null, 'High'
+              r.type || null, r.ledger_name || null, conf
             ],
             transaction: t
           }
         );
+        saved++;
       }
     });
-    console.log(`[RECO-DB] ✅ Saved ${highOnly.length}/${rows.length} High-confidence bank_reco rows for job ${jobId}`);
+    const high = rows.filter(r => (r.confidence || '').toLowerCase() === 'high').length;
+    console.log(`[RECO-DB] ✅ Saved ${saved} rows (${high} High) for job ${jobId}`);
   } catch (err) {
     console.error('[RECO-DB] saveBankRecoResults error:', err.message);
   }
@@ -607,12 +616,17 @@ const runReco = async (req, res) => {
             const month = parseInt(req.body.month) || null;
             const year = parseInt(req.body.year) || null;
 
-            // Idempotency: re-use existing job if data present (just update output_file_id for new Excel)
+            // Idempotency: same file → update output_file_id AND upsert any new High-confidence rows.
+            // ON CONFLICT DO NOTHING in saveBankRecoResults means true duplicates are safely skipped,
+            // but newly High rows (improved by classifier upgrades) are inserted.
             const existing = await findExistingJob(seq, brandId, 'bank_reco', month, year, fileHash);
             if (existing) {
               if (existing.total_rows > 0) {
                 await updateOutputFileId(seq, existing.id, jobId);
-                console.log(`[RECO-DB] Duplicate bank_reco — updated output_file_id to ${jobId}`);
+                // Re-save High rows — new classifier may produce more High-confidence rows
+                // than the original run. ON CONFLICT DO NOTHING prevents true duplicates.
+                await saveBankRecoResults(seq, existing.id, brandId, results);
+                console.log(`[RECO-DB] Same file re-run — output updated, upserted new High rows`);
                 return;
               }
               await deleteJob(seq, existing.id);

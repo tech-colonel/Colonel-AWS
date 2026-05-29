@@ -58,10 +58,12 @@ CREATE INDEX IF NOT EXISTS bank_reco_results_job_id_idx   ON bank_reco_results (
 CREATE INDEX IF NOT EXISTS bank_reco_results_brand_id_idx ON bank_reco_results (brand_id);
 CREATE INDEX IF NOT EXISTS bank_reco_results_ledger_idx   ON bank_reco_results (ledger_name);
 
--- Deduplication: same transaction (same narration + date + amount) can only exist once per brand.
--- Prevents duplicate rows when the same bank statement file is uploaded multiple times.
+-- Deduplication: same transaction = same narration + date + amount + running balance.
+-- Balance is cumulative so it's unique per transaction even when narration/amount repeats
+-- (e.g. multiple "SC NEFT OTHER THAN SB IMB" charges on the same day each have a unique balance).
 CREATE UNIQUE INDEX IF NOT EXISTS bank_reco_results_txn_uq
-    ON bank_reco_results (brand_id, description, txn_date, COALESCE(debit, 0), COALESCE(credit, 0));
+    ON bank_reco_results (brand_id, description, txn_date,
+                          COALESCE(debit, 0), COALESCE(credit, 0), COALESCE(balance, 0));
 
 -- ────────────────────────────────────────────────────────────
 -- 3.  gstr_2b_results  — GSTR-2B vs Books reconciliation rows

@@ -190,6 +190,7 @@ const RecoWorkspace = () => {
   const [savingCorrections, setSavingCorrections] = useState(false);
   const corrExcelRef = useRef(null);
   const effectiveBrandId = isUniversal ? (selectedBrand || null) : brandId;
+  const cacheKey = `reco_result_${agentType}_${effectiveBrandId || brandId}`;
 
   useEffect(() => {
     if (agentType === 'bank_statement' && !isDemo && brandId !== 'demo') {
@@ -197,6 +198,14 @@ const RecoWorkspace = () => {
     }
     if (isUniversal) {
       api.get('/api/brands').then(r => setBrands(r.data?.brands || r.data || [])).catch(() => {});
+      // Restore last result from sessionStorage so navigating to analytics and back
+      // doesn't wipe the results — accountant doesn't need to re-upload the file.
+      if (!result) {
+        try {
+          const cached = sessionStorage.getItem(cacheKey);
+          if (cached) setResult(JSON.parse(cached));
+        } catch (_) {}
+      }
     }
   }, [agentType, brandId, isDemo, isUniversal]);
 
@@ -244,6 +253,10 @@ const RecoWorkspace = () => {
       for (const [key, file] of Object.entries(uploadedFiles)) { if (file) formData.append(key, file); }
       const response = await api.post('/api/reco/run', formData, { headers: { 'Content-Type': 'multipart/form-data' } });
       setResult(response.data);
+      // Persist so "View Analytics → Back" doesn't lose the results
+      if (isUniversal) {
+        try { sessionStorage.setItem(cacheKey, JSON.stringify(response.data)); } catch (_) {}
+      }
       toast.success(`Reconciliation complete! ${response.data.results?.length || 0} records processed.`);
     } catch (err) { toast.error(err.response?.data?.error || 'Reconciliation failed'); }
     finally { setRunning(false); }
@@ -302,7 +315,10 @@ const RecoWorkspace = () => {
     finally { setDownloading(false); }
   };
 
-  const handleReset = () => { setUploadedFiles({}); setResult(null); setFilter('All'); };
+  const handleReset = () => {
+    if (isUniversal) { try { sessionStorage.removeItem(cacheKey); } catch (_) {} }
+    setUploadedFiles({}); setResult(null); setFilter('All'); setEditedLedgers({});
+  };
 
   // Flatten GST MatchResult objects (gstr2b/purchase are nested NormalizedInvoice dicts)
   const flattenResult = (row) => {
