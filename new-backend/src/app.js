@@ -35,12 +35,9 @@ const taskRoutes = require('./routes/taskRoutes');
 const dashboardRoutes = require('./routes/dashboardRoutes');
 const bankCorrectionsRoutes = require('./routes/bankCorrectionsRoutes');
 
-// Sync task tables + run hero DB migration on startup
+// Sync task tables on startup
 const { syncTaskTables } = require('./models/task');
 syncTaskTables();
-
-const { migrateAllBrands } = require('./db/migrate');
-migrateAllBrands().catch(err => console.error('[STARTUP] Migration error:', err.message));
 
 app.use('/api/auth', authRoutes);
 app.use('/api', brandRoutes);
