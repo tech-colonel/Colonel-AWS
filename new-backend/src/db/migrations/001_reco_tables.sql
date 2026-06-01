@@ -61,6 +61,17 @@ CREATE INDEX IF NOT EXISTS bank_reco_results_ledger_idx   ON bank_reco_results (
 -- Deduplication: same transaction = same narration + date + amount + running balance.
 -- Balance is cumulative so it's unique per transaction even when narration/amount repeats
 -- (e.g. multiple "SC NEFT OTHER THAN SB IMB" charges on the same day each have a unique balance).
+-- Idempotent upgrade: drop old index (without balance column) if present before recreating.
+DO $$ BEGIN
+  IF EXISTS (
+    SELECT 1 FROM pg_indexes
+    WHERE tablename = 'bank_reco_results'
+      AND indexname = 'bank_reco_results_txn_uq'
+      AND indexdef NOT LIKE '%balance%'
+  ) THEN
+    EXECUTE 'DROP INDEX bank_reco_results_txn_uq';
+  END IF;
+END $$;
 CREATE UNIQUE INDEX IF NOT EXISTS bank_reco_results_txn_uq
     ON bank_reco_results (brand_id, description, txn_date,
                           COALESCE(debit, 0), COALESCE(credit, 0), COALESCE(balance, 0));
