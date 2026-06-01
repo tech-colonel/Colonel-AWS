@@ -441,11 +441,11 @@ class BankClassifier:
         score = combined_score(best)
         conf = "High" if score >= 87 else ("Medium" if score >= 72 else "Low")
 
-        # Downgrade to Medium when runner-up is within 8 points — ambiguous match
-        # Wrong ledger is worse than Suspense A/c, so be conservative.
+        # Downgrade to Medium only when runner-up is within 4 points — nearly tied match.
+        # Gap of 8 was too aggressive; most real mismatches have a larger gap.
         if conf == "High" and len(choices) > 1:
             second = sorted([combined_score(c) for c in choices], reverse=True)
-            if len(second) > 1 and (second[0] - second[1]) < 8:
+            if len(second) > 1 and (second[0] - second[1]) < 4:
                 conf = "Medium"
 
         return best, conf, score
@@ -865,6 +865,7 @@ class BankClassifier:
             or bool(re.match(r'^N/\d+/', orig_upper))   # IndusInd NEFT debit
             or orig_upper.startswith("R/")              # IndusInd RTGS credit
             or orig_upper.startswith("BILL/")           # IndusInd bill payment
+            or bool(re.match(r'^(?:NEFT|RTGS|IMPS)\s+[A-Z0-9]{8,}\s+', orig_upper))  # Generic NEFT/RTGS (HSBC, ICICI, etc.)
         )
 
         # ------------------------------------------------------------------
@@ -906,9 +907,8 @@ class BankClassifier:
         # ------------------------------------------------------------------
         # STEP 12b — First-word-anchored entity match (before D2C scan)
         # is_clean_neft was computed before STEP 11.5 (above).
-        # Generic NEFT/RTGS is intentionally excluded — those narrations should still pass
-        # through the D2C scan (which correctly handles marketplace receipts like Razorpay
-        # Collection) before falling back to general fuzzy with the extracted entity.
+        # Generic NEFT/RTGS now included — anchor match runs first-word filter.
+        # If no anchored ledgers are found, falls through to D2C scan and general fuzzy.
         # Also run anchored match for reimbursement narrations extracted above
         if entity and len(entity) > 4 and (is_clean_neft or is_reimb_narration):
             first_word = entity.split()[0].lower() if entity.split() else ""
