@@ -23,6 +23,7 @@ const AGENT_META = {
   gstr_3b_vs_2b:              { label: 'GSTR-3B vs 2B',                       color: '#059669' },
   gstr_1_vs_books:            { label: 'GSTR-1 vs Books',                     color: '#D97706' },
   gstr_2b_books_multistate:   { label: 'GSTR-2B vs Books (Multi-State)',      color: '#7C3AED' },
+  gstr_3b_tally_entry:        { label: 'GSTR-3B Tally Entry',                 color: '#0F766E' },
 };
 
 const GST_STATE_CODES = {
@@ -207,6 +208,7 @@ const RecoJobDashboard = () => {
   const isBankReco    = job.agent_type === 'bank_reco';
   const isGst3b       = job.agent_type === 'gstr_3b_vs_2b';
   const isMultistate  = job.agent_type === 'gstr_2b_books_multistate';
+  const isTallyEntry  = job.agent_type === 'gstr_3b_tally_entry';
 
   return (
     <DashboardLayout sidebarItems={sidebarItems}>
@@ -277,8 +279,11 @@ const RecoJobDashboard = () => {
         {/* ── MULTI-STATE VIEW ── */}
         {isMultistate && <GstMultistateView rows={rows} filter={filter} setFilter={setFilter} meta={meta} />}
 
+        {/* ── TALLY ENTRY VIEW ── */}
+        {isTallyEntry && <TallyEntryView rows={rows} meta={meta} />}
+
         {/* ── GST INVOICE VIEW ── */}
-        {!isBankReco && !isGst3b && !isMultistate && (
+        {!isBankReco && !isGst3b && !isMultistate && !isTallyEntry && (
           <GstInvoiceView rows={rows} filter={filter} setFilter={setFilter} meta={meta} />
         )}
       </div>
@@ -889,6 +894,79 @@ const GstMultistateView = ({ rows, filter, setFilter, meta }) => {
               <p className="text-sm" style={{ color: 'var(--text-muted)' }}>No records match this filter</p>
             </div>
           )}
+        </div>
+      </div>
+    </>
+  );
+};
+
+/* ── GSTR-3B Tally Entry sub-view ──────────────────────────────────────────── */
+const TallyEntryView = ({ rows, meta }) => {
+  const dataRows    = rows.filter(r => r.row_type === 'data');
+  const totalDebit  = dataRows.reduce((s, r) => s + Number(r.debit  || 0), 0);
+  const totalCredit = dataRows.reduce((s, r) => s + Number(r.credit || 0), 0);
+
+  return (
+    <>
+      {/* Stat cards */}
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+        <StatCard label="Journal Entries" value={dataRows.length} icon={TrendingUp}   color={meta.color} />
+        <StatCard label="Total Debit (₹)" value={fmt(totalDebit)}  icon={CheckCircle2} color="#059669"    />
+        <StatCard label="Total Credit (₹)"value={fmt(totalCredit)} icon={AlertTriangle}color="#0748EE"    />
+      </div>
+
+      {/* Journal table */}
+      <div style={cardStyle}>
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr style={{ background: 'var(--page-bg)', borderBottom: '1.5px solid var(--card-border)' }}>
+                {['S.No', 'Particulars', 'Debit (₹)', 'Credit (₹)'].map(h => (
+                  <th key={h} className="px-4 py-3 text-left text-xs font-bold uppercase tracking-wider whitespace-nowrap"
+                    style={{ color: 'var(--text-muted)' }}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {rows.length === 0 ? (
+                <tr>
+                  <td colSpan={4} className="px-4 py-12 text-center text-sm" style={{ color: 'var(--text-muted)' }}>
+                    Re-run the agent to populate analytics
+                  </td>
+                </tr>
+              ) : rows.map((row, i) => {
+                if (row.row_type === 'blank') return null;
+                if (row.row_type === 'header') return null;
+                if (row.row_type === 'section') {
+                  return (
+                    <tr key={i} style={{ background: `${meta.color}10`, borderBottom: `1.5px solid ${meta.color}30` }}>
+                      <td colSpan={4} className="px-4 py-2 text-xs font-bold uppercase tracking-wider"
+                        style={{ color: meta.color }}>
+                        {row.particulars}
+                      </td>
+                    </tr>
+                  );
+                }
+                return (
+                  <tr key={i} className="transition-colors hover:opacity-80"
+                    style={{ borderBottom: '1px solid var(--card-border)' }}>
+                    <td className="px-4 py-3 text-xs font-semibold w-12" style={{ color: 'var(--text-muted)' }}>
+                      {row.sno || ''}
+                    </td>
+                    <td className="px-4 py-3 text-xs" style={{ color: 'var(--text-heading)', minWidth: '260px' }}>
+                      {row.particulars || '—'}
+                    </td>
+                    <td className="px-4 py-3 font-mono text-xs text-right" style={{ color: row.debit ? '#059669' : 'var(--text-muted)' }}>
+                      {row.debit ? fmt(row.debit) : '—'}
+                    </td>
+                    <td className="px-4 py-3 font-mono text-xs text-right" style={{ color: row.credit ? '#0748EE' : 'var(--text-muted)' }}>
+                      {row.credit ? fmt(row.credit) : '—'}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
         </div>
       </div>
     </>
