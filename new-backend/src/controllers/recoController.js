@@ -756,9 +756,16 @@ const runReco = async (req, res) => {
           console.log(`[RECO-DB] existing job:`, existing ? `id=${existing.id} total_rows=${existing.total_rows}` : 'none');
           if (existing) {
             if (existing.total_rows > 0) {
-              // Same files, data already saved — just update pointer to new Excel output
               await updateOutputFileId(seq, existing.id, pythonJobId || existing.output_file_id);
               console.log(`[RECO-DB] Duplicate ${recoType} — updated output_file_id to ${pythonJobId}`);
+              // For tally entry: delete old rows and re-save fresh (no unique constraint, safe to replace)
+              if (recoType === 'gstr_3b_tally_entry') {
+                const tallyRows = response.data?.results;
+                if (tallyRows?.length > 0) {
+                  await seq.query(`DELETE FROM gstr_3b_tally_results WHERE job_id = $1`, { bind: [existing.id] });
+                  await saveTallyEntryResults(seq, existing.id, brandId, tallyRows);
+                }
+              }
               return;
             }
             await deleteJob(seq, existing.id);
