@@ -102,13 +102,20 @@ const RecoMultiStateWorkspace = () => {
   const [filter, setFilter] = useState('All');
   const [downloading, setDownloading] = useState(false);
 
-  // Restore last result so Back from analytics doesn't lose the run
+  // Restore last result on mount — runs exactly once so Back from analytics restores the run
   useEffect(() => {
     try {
       const cached = sessionStorage.getItem(cacheKey);
       if (cached) setResult(JSON.parse(cached));
     } catch (_) {}
-  }, [brandId]);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Persist result whenever it changes — ensures cache stays current
+  useEffect(() => {
+    if (result) {
+      try { sessionStorage.setItem(cacheKey, JSON.stringify(result)); } catch (_) {}
+    }
+  }, [result]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const sidebarItems = [
     { path: `/brands/${brandId}/dashboard`, label: 'Dashboard', icon: LayoutDashboard, testId: 'nav-dashboard' },
@@ -147,7 +154,6 @@ const RecoMultiStateWorkspace = () => {
         headers: { 'Content-Type': 'multipart/form-data' },
       });
       setResult(response.data);
-      try { sessionStorage.setItem(cacheKey, JSON.stringify(response.data)); } catch (_) {}
       toast.success(`Reconciliation complete! ${response.data.results?.length || 0} records processed.`);
     } catch (err) {
       toast.error(err.response?.data?.error || 'Reconciliation failed');

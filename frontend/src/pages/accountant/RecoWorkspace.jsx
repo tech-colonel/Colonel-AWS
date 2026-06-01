@@ -193,20 +193,28 @@ const RecoWorkspace = () => {
   const effectiveBrandId = isUniversal ? (selectedBrand || null) : brandId;
   const cacheKey = `reco_result_${agentType}_${effectiveBrandId || brandId}`;
 
+  // Restore last result on mount — runs exactly once per mount so Back from analytics restores the run
+  useEffect(() => {
+    try {
+      const cached = sessionStorage.getItem(cacheKey);
+      if (cached) setResult(JSON.parse(cached));
+    } catch (_) {}
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Persist result to sessionStorage whenever it changes — ensures cache is always current
+  useEffect(() => {
+    if (result) {
+      try { sessionStorage.setItem(cacheKey, JSON.stringify(result)); } catch (_) {}
+    }
+  }, [result]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Other setup effects
   useEffect(() => {
     if (agentType === 'bank_statement' && !isDemo && brandId !== 'demo') {
       checkLedgerMaster();
     }
     if (isUniversal) {
       api.get('/api/brands').then(r => setBrands(r.data?.brands || r.data || [])).catch(() => {});
-    }
-    // Restore last result for ALL agent types — navigating to analytics and back
-    // doesn't wipe the results; accountant doesn't need to re-upload the file.
-    if (!result) {
-      try {
-        const cached = sessionStorage.getItem(cacheKey);
-        if (cached) setResult(JSON.parse(cached));
-      } catch (_) {}
     }
   }, [agentType, brandId, isDemo, isUniversal]);
 
@@ -254,10 +262,6 @@ const RecoWorkspace = () => {
       for (const [key, file] of Object.entries(uploadedFiles)) { if (file) formData.append(key, file); }
       const response = await api.post('/api/reco/run', formData, { headers: { 'Content-Type': 'multipart/form-data' } });
       setResult(response.data);
-      // Persist so "View Analytics → Back" doesn't lose the results
-      if (isUniversal) {
-        try { sessionStorage.setItem(cacheKey, JSON.stringify(response.data)); } catch (_) {}
-      }
       toast.success(`Reconciliation complete! ${response.data.results?.length || 0} records processed.`);
     } catch (err) { toast.error(err.response?.data?.error || 'Reconciliation failed'); }
     finally { setRunning(false); }
