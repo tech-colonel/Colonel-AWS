@@ -21,6 +21,37 @@ const parseDate = (dString) => {
     }
 };
 
+const isPlaceholderId = (value) => {
+  const text = String(value || '').toLowerCase().trim();
+  if (!text) return true;
+  if (text === 'dummy' || text === 'demo' || text === 'undefined' || text === 'null') return true;
+  if (/^[0-9a-f]{8}-0{4}-0{4}-0{4}-0{12}$/.test(text)) return true;
+  if (/^[a-z]0{8,}/.test(text)) return true;
+  return false;
+};
+
+const resolveBrandAndAgent = async (brandId, agentId) => {
+  const { Op } = require('sequelize');
+  let brand = !isPlaceholderId(brandId) ? await Brand.findByPk(brandId) : null;
+  let agent = !isPlaceholderId(agentId) ? await Agent.findByPk(agentId) : null;
+  let usedFallback = false;
+
+  if (!brand) {
+    brand = await Brand.findOne({ order: [['createdAt', 'ASC']] });
+    usedFallback = true;
+  }
+
+  if (!agent) {
+    agent = await Agent.findOne({
+      where: { name: { [Op.iLike]: '%invoice%' } },
+      order: [['createdAt', 'ASC']]
+    });
+    usedFallback = true;
+  }
+
+  return { brand, agent, usedFallback };
+};
+
 // ─── POST /api/n8n/invoice/feed ───────────────
 const feedInvoicesFromN8n = async (req, res, next) => {
     try {

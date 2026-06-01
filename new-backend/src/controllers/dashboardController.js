@@ -246,9 +246,8 @@ const getJobById = async (req, res) => {
          FROM reco_jobs
          WHERE (output_file_id = $1 OR id::text = $1)
            AND brand_id = $2
-           AND (created_by = $3 OR $3 IS NULL)
          LIMIT 1`,
-        { bind: [jobId, brandId, userId || null], transaction: t }
+        { bind: [jobId, brandId], transaction: t }
       );
       if (!job) return { job: null, rows: [] };
       const mapping = RESULTS_TABLE_MAP[job.agent_type];

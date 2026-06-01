@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import DashboardLayout from '../../components/layout/DashboardLayout';
 import {
@@ -13,35 +13,7 @@ const COLOR = '#7C3AED';
 const BG    = '#F5F3FF';
 const BORD  = '#C4B5FD';
 
-// ── Session persistence helpers ───────────────────────────────────────────────
-const SESSION_KEY = 'colonel_multistate_slots';
-const DEFAULT_SLOT_COUNT = 4;
-
-const fileToB64 = (file) => new Promise((resolve, reject) => {
-  const reader = new FileReader();
-  reader.onload = () => resolve({ name: file.name, size: file.size, b64: reader.result.split(',')[1] });
-  reader.onerror = reject;
-  reader.readAsDataURL(file);
-});
-
-const b64ToFile = ({ name, b64 }) => {
-  const bytes = atob(b64);
-  const arr = new Uint8Array(bytes.length);
-  for (let i = 0; i < bytes.length; i++) arr[i] = bytes.charCodeAt(i);
-  return new File([arr], name);
-};
-
-const loadSlotsFromSession = () => {
-  try {
-    const raw = sessionStorage.getItem(SESSION_KEY);
-    if (!raw) return null;
-    return JSON.parse(raw).map(slot => ({
-      gstr2b:   slot.gstr2b   ? b64ToFile(slot.gstr2b)   : null,
-      purchase: slot.purchase ? b64ToFile(slot.purchase) : null,
-      debit:    slot.debit    ? b64ToFile(slot.debit)    : null,
-    }));
-  } catch { return null; }
-};
+const DEFAULT_SLOT_COUNT = 1;
 
 const AGENT_META = {
   name: 'GSTR-2B vs Books (Multi-State)',
@@ -119,35 +91,14 @@ const RecoMultiStateWorkspace = () => {
   const { brandId } = useParams();
   const navigate = useNavigate();
 
-  // stateSlots: array of { gstr2b: File|null, purchase: File|null, debit: File|null }
-  // Initialise from session (persists across refresh) or default to 4 empty slots
   const [stateSlots, setStateSlots] = useState(
-    () => loadSlotsFromSession() || Array.from({ length: DEFAULT_SLOT_COUNT }, () => ({ gstr2b: null, purchase: null, debit: null }))
+    () => Array.from({ length: DEFAULT_SLOT_COUNT }, () => ({ gstr2b: null, purchase: null, debit: null }))
   );
   const [tolerance, setTolerance] = useState('1.0');
   const [running, setRunning] = useState(false);
   const [result, setResult] = useState(null);
   const [filter, setFilter] = useState('All');
   const [downloading, setDownloading] = useState(false);
-
-  // Persist slots to sessionStorage whenever files change
-  useEffect(() => {
-    const persist = async () => {
-      try {
-        const serialised = await Promise.all(
-          stateSlots.map(async slot => ({
-            gstr2b:   slot.gstr2b   ? await fileToB64(slot.gstr2b)   : null,
-            purchase: slot.purchase ? await fileToB64(slot.purchase) : null,
-            debit:    slot.debit    ? await fileToB64(slot.debit)    : null,
-          }))
-        );
-        sessionStorage.setItem(SESSION_KEY, JSON.stringify(serialised));
-      } catch {
-        // sessionStorage quota exceeded or unavailable — silently skip
-      }
-    };
-    persist();
-  }, [stateSlots]);
 
   const sidebarItems = [
     { path: `/brands/${brandId}/dashboard`, label: 'Dashboard', icon: LayoutDashboard, testId: 'nav-dashboard' },
@@ -213,7 +164,6 @@ const RecoMultiStateWorkspace = () => {
   };
 
   const handleClearFiles = () => {
-    sessionStorage.removeItem(SESSION_KEY);
     setStateSlots(Array.from({ length: DEFAULT_SLOT_COUNT }, () => ({ gstr2b: null, purchase: null, debit: null })));
     setResult(null);
     toast.success('All files cleared');

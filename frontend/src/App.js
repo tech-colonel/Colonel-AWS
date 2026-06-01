@@ -1,5 +1,5 @@
 import React from 'react';
-import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
+import { BrowserRouter, Routes, Route, Navigate, useParams } from 'react-router-dom';
 import { AuthProvider } from './context/AuthContext';
 import { Toaster } from 'sonner';
 import ProtectedRoute from './components/ProtectedRoute';
@@ -10,14 +10,16 @@ import AgentsPage from './pages/admin/AgentsPage';
 import AssignmentsPage from './pages/admin/AssignmentsPage';
 import BrandOverviewPage from './pages/admin/BrandOverviewPage';
 import BrandSelection from './pages/accountant/BrandSelection';
-import BrandDashboard from './pages/accountant/BrandDashboard';
-import BrandAgentsInventory from './pages/accountant/BrandAgentsInventory';
-import AgentWorkspace from './pages/accountant/AgentWorkspace';
 import RecoSuite from './pages/accountant/RecoSuite';
 import RecoWorkspace from './pages/accountant/RecoWorkspace';
 import RecoMultiStateWorkspace from './pages/accountant/RecoMultiStateWorkspace';
 import RecoJobDashboard from './pages/accountant/RecoJobDashboard';
 import './App.css';
+
+const RedirectToReco = () => {
+  const { brandId } = useParams();
+  return <Navigate to={`/brands/${brandId}/reco`} replace />;
+};
 
 function App() {
   return (
@@ -52,32 +54,9 @@ function App() {
             }
           />
 
-          <Route
-            path="/brands/:brandId/dashboard"
-            element={
-              <ProtectedRoute allowedRoles={['accountant']}>
-                <BrandDashboard />
-              </ProtectedRoute>
-            }
-          />
-
-          <Route
-            path="/brands/:brandId/agents"
-            element={
-              <ProtectedRoute allowedRoles={['accountant']}>
-                <BrandAgentsInventory />
-              </ProtectedRoute>
-            }
-          />
-
-          <Route
-            path="/brands/:brandId/agents/:agentId"
-            element={
-              <ProtectedRoute allowedRoles={['accountant']}>
-                <AgentWorkspace />
-              </ProtectedRoute>
-            }
-          />
+          <Route path="/brands/:brandId/dashboard" element={<RedirectToReco />} />
+          <Route path="/brands/:brandId/agents" element={<RedirectToReco />} />
+          <Route path="/brands/:brandId/agents/:agentId" element={<RedirectToReco />} />
 
           <Route
             path="/brands/:brandId/reco"
