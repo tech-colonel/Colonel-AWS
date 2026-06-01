@@ -663,7 +663,7 @@ const RecoWorkspace = () => {
                   Download Excel
                 </button>
                 <button
-                  onClick={() => navigate(`/brands/${brandId}/reco/${agentType}/results/${result?.job_id}`)}
+                  onClick={() => navigate(`/brands/${effectiveBrandId || brandId}/reco/${agentType}/results/${result?.job_id}`)}
                   className="flex items-center gap-2 text-sm font-semibold px-4 py-2 rounded-xl transition-all text-white"
                   style={{ background: '#0748EE' }}>
                   <BarChart3 className="w-4 h-4" />
