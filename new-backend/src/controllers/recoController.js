@@ -262,6 +262,7 @@ const RECO_TYPE_MAP = {
   'gstr_2a_vs_2b_vs_books': 'gstr_2b_books',           // 3-file: GSTR-2B + Purchase + Debit Note
   'gstr_2b_books': 'gstr_2b_books',                     // same handler
   'gstr_3b_vs_2b': 'gstr_3b_vs_2b',
+  'gstr_3b_tally_entry': 'gstr_3b_tally_entry',
   'gstr_1_vs_books': 'gstr_1_vs_books',
   'gstr_2b_books_multistate': 'gstr_2b_books_multistate', // multi-state variant
 };

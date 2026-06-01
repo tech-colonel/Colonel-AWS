@@ -19,6 +19,13 @@ const RECO_AGENTS = [
     fields: ['GSTR-2B × N States', 'Purchase Register × N States', 'Debit Note × N States'], accuracy: '99.5%',
   },
   {
+    id: 'gstr_3b_tally_entry', category: 'GST Reconciliation',
+    name: 'GSTR-3B Tally Entry', icon: '📒',
+    color: '#0F766E', bg: '#F0FDFA', border: '#99F6E4',
+    description: 'Parses a GSTR-3B file and generates ready-to-post Tally journal entries for ITC credit ledger transfer, output liability set-off, and RCM.',
+    fields: ['GSTR-3B File'], accuracy: '99.9%',
+  },
+  {
     id: 'universal_bank_statement', category: 'Bank & Finance',
     name: 'Universal Bank Statement', icon: '🌍',
     color: '#059669', bg: '#ECFDF5', border: '#A7F3D0',
@@ -129,7 +136,7 @@ const RecoSuite = () => {
         <div className="grid grid-cols-3 gap-4 mb-8">
           {[
             { label: 'Total Runs', value: '1,000+', icon: Activity, color: '#0748EE', bg: '#E8EFFE', border: '#C7D8FC' },
-            { label: 'Agents', value: '3', icon: Zap, color: '#D97706', bg: '#FFFBEB', border: '#FDE68A' },
+            { label: 'Agents', value: '4', icon: Zap, color: '#D97706', bg: '#FFFBEB', border: '#FDE68A' },
             { label: 'Avg Accuracy', value: '99.7%', icon: Shield, color: '#059669', bg: '#ECFDF5', border: '#A7F3D0' },
           ].map(stat => (
             <div key={stat.label} className="stat-card">
