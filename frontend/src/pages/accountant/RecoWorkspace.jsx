@@ -189,6 +189,7 @@ const RecoWorkspace = () => {
   const [editedLedgers, setEditedLedgers] = useState({}); // { rowIndex: newLedgerName }
   const [savingCorrections, setSavingCorrections] = useState(false);
   const corrExcelRef = useRef(null);
+  const outputUploadRef = useRef(null);
   const effectiveBrandId = isUniversal ? (selectedBrand || null) : brandId;
   const cacheKey = `reco_result_${agentType}_${effectiveBrandId || brandId}`;
 
@@ -283,6 +284,21 @@ const RecoWorkspace = () => {
       setEditedLedgers({});
     } catch { toast.error('Failed to save corrections'); }
     finally { setSavingCorrections(false); }
+  };
+
+  // Upload a previous output Excel — imports all High confidence rows as corrections
+  const handleUploadOutputExcel = async (file) => {
+    if (!file || !effectiveBrandId || effectiveBrandId === 'other') {
+      toast.error('Select a brand before uploading'); return;
+    }
+    const fd = new FormData();
+    fd.append('file', file);
+    try {
+      const res = await api.post(`/api/bank-reco/corrections/${effectiveBrandId}/upload-output`, fd, {
+        headers: { 'Content-Type': 'multipart/form-data' }
+      });
+      toast.success(`${res.data.saved} correction${res.data.saved !== 1 ? 's' : ''} imported from output Excel`);
+    } catch { toast.error('Failed to upload output Excel'); }
   };
 
   // Upload a reviewed Excel file to extract corrections
@@ -629,6 +645,14 @@ const RecoWorkspace = () => {
                       style={{ background: '#FFFBEB', border: '1px solid #FDE68A', color: '#D97706' }}>
                       <Upload className="w-4 h-4" />
                       Upload Reviewed Excel
+                    </button>
+                    <input ref={outputUploadRef} type="file" accept=".xlsx,.xls" className="hidden"
+                      onChange={e => { if (e.target.files[0]) handleUploadOutputExcel(e.target.files[0]); e.target.value = ''; }} />
+                    <button onClick={() => outputUploadRef.current?.click()}
+                      className="flex items-center gap-2 text-sm font-semibold px-4 py-2 rounded-xl transition-all"
+                      style={{ background: '#F0FDF4', border: '1px solid #86EFAC', color: '#16A34A' }}>
+                      <Upload className="w-4 h-4" />
+                      Upload Previous Output
                     </button>
                   </>
                 )}

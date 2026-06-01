@@ -5,6 +5,7 @@ const {
   getCorrections,
   saveCorrections,
   uploadCorrectionsExcel,
+  uploadOutputExcel,
 } = require('../controllers/bankCorrectionsController');
 
 const router = express.Router();
@@ -16,13 +17,22 @@ router.get('/corrections/:brandId', authenticateToken, authorize(), getCorrectio
 // POST /api/bank-reco/corrections/:brandId  (inline UI edits)
 router.post('/corrections/:brandId', authenticateToken, authorize(), saveCorrections);
 
-// POST /api/bank-reco/corrections/:brandId/upload-excel  (reviewed Excel file)
+// POST /api/bank-reco/corrections/:brandId/upload-excel  (reviewed Excel with CHANGES column)
 router.post(
   '/corrections/:brandId/upload-excel',
   authenticateToken,
   authorize(),
   upload.single('file'),
   uploadCorrectionsExcel
+);
+
+// POST /api/bank-reco/corrections/:brandId/upload-output  (previous output Excel — High rows auto-imported)
+router.post(
+  '/corrections/:brandId/upload-output',
+  authenticateToken,
+  authorize(),
+  upload.single('file'),
+  uploadOutputExcel
 );
 
 module.exports = router;

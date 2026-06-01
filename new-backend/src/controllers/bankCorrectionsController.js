@@ -216,6 +216,77 @@ const uploadCorrectionsExcel = async (req, res) => {
   }
 };
 
+// ─── POST /api/bank-reco/corrections/:brandId/upload-output ─────────────────
+// Accepts a standard classify.py output Excel (no CHANGES column needed).
+// Imports all High confidence rows as corrections into bank_reco_corrections.
+
+const uploadOutputExcel = async (req, res) => {
+  const { brandId } = req.params;
+
+  if (!req.file && (!req.files || req.files.length === 0)) {
+    return res.status(400).json({ error: 'Excel file is required' });
+  }
+  const fileBuffer = req.file ? req.file.buffer : req.files[0].buffer;
+
+  try {
+    const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.load(fileBuffer);
+
+    const ws = workbook.getWorksheet('Bank Statement') || workbook.worksheets[0];
+    if (!ws) return res.status(400).json({ error: 'Could not find Bank Statement sheet' });
+
+    // Map header names to column indices
+    const colIndex = {};
+    ws.getRow(1).values.forEach((cell, i) => {
+      const name = (cell || '').toString().trim().toLowerCase();
+      if (name === 'description')  colIndex.description = i;
+      if (name === 'ledger name' || name === 'ledger') colIndex.ledgerName = i;
+      if (name === 'type')         colIndex.txnType     = i;
+      if (name === 'confidence')   colIndex.confidence  = i;
+    });
+
+    if (!colIndex.description || !colIndex.ledgerName) {
+      return res.status(400).json({ error: 'Excel must have Description and Ledger Name columns' });
+    }
+
+    const seq = await getBrandSeq(brandId);
+    let saved = 0, skipped = 0;
+
+    await withBypass(seq, async (t) => {
+      ws.eachRow((row, rowNum) => {
+        if (rowNum === 1) return;
+        const conf = colIndex.confidence ? row.getCell(colIndex.confidence).text?.trim() : '';
+        if (conf !== 'High') { skipped++; return; }
+
+        const description    = row.getCell(colIndex.description).text?.trim();
+        const correct_ledger = row.getCell(colIndex.ledgerName).text?.trim();
+        const correct_type   = colIndex.txnType ? row.getCell(colIndex.txnType).text?.trim() : null;
+        if (!description || !correct_ledger) return;
+
+        const key = normalizeNarration(description);
+        seq.query(
+          `INSERT INTO bank_reco_corrections
+             (brand_id, narration_raw, narration_key, correct_ledger, correct_type, source, updated_at)
+           VALUES ($1, $2, $3, $4, $5, 'output_upload', NOW())
+           ON CONFLICT (brand_id, narration_key)
+           DO UPDATE SET
+             correct_ledger = EXCLUDED.correct_ledger,
+             correct_type   = EXCLUDED.correct_type,
+             source         = 'output_upload',
+             narration_raw  = EXCLUDED.narration_raw,
+             updated_at     = NOW()`,
+          { bind: [brandId, description, key, correct_ledger, correct_type || null], transaction: t }
+        );
+        saved++;
+      });
+    });
+
+    res.json({ saved, skipped, message: `${saved} corrections imported from output Excel` });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+};
+
 // ─── Utility: load correction map for a brand (used by recoController) ──────
 // Returns { narration_key → { ledger, type } } for all stored corrections.
 
@@ -244,6 +315,7 @@ module.exports = {
   getCorrections,
   saveCorrections,
   uploadCorrectionsExcel,
+  uploadOutputExcel,
   loadCorrectionMap,
   normalizeNarration,
 };
