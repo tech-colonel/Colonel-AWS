@@ -269,3 +269,30 @@ CREATE POLICY bank_reco_corrections_brand_policy ON bank_reco_corrections
         current_setting('app.bypass_rls', true) = 'true'
         OR brand_id::text = current_setting('app.brand_id', true)
     );
+
+-- ────────────────────────────────────────────────────────────
+-- 8.  gstr_3b_tally_results  — GSTR-3B Tally Entry journal rows
+-- ────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS gstr_3b_tally_results (
+    id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    job_id       UUID NOT NULL REFERENCES reco_jobs(id) ON DELETE CASCADE,
+    brand_id     UUID NOT NULL,
+    row_type     VARCHAR(20),
+    sno          VARCHAR(20),
+    particulars  TEXT,
+    debit        NUMERIC(15,2),
+    credit       NUMERIC(15,2),
+    created_at   TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS gstr_3b_tally_results_job_id_idx   ON gstr_3b_tally_results (job_id);
+CREATE INDEX IF NOT EXISTS gstr_3b_tally_results_brand_id_idx ON gstr_3b_tally_results (brand_id);
+
+ALTER TABLE gstr_3b_tally_results ENABLE ROW LEVEL SECURITY;
+ALTER TABLE gstr_3b_tally_results FORCE ROW LEVEL SECURITY;
+
+CREATE POLICY gstr_3b_tally_brand_policy ON gstr_3b_tally_results
+    USING (
+        current_setting('app.bypass_rls', true) = 'true'
+        OR brand_id::text = current_setting('app.brand_id', true)
+    );

@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import DashboardLayout from '../../components/layout/DashboardLayout';
 import {
@@ -91,6 +91,8 @@ const RecoMultiStateWorkspace = () => {
   const { brandId } = useParams();
   const navigate = useNavigate();
 
+  const cacheKey = `reco_result_gstr_2b_books_multistate_${brandId}`;
+
   const [stateSlots, setStateSlots] = useState(
     () => Array.from({ length: DEFAULT_SLOT_COUNT }, () => ({ gstr2b: null, purchase: null, debit: null }))
   );
@@ -99,6 +101,14 @@ const RecoMultiStateWorkspace = () => {
   const [result, setResult] = useState(null);
   const [filter, setFilter] = useState('All');
   const [downloading, setDownloading] = useState(false);
+
+  // Restore last result so Back from analytics doesn't lose the run
+  useEffect(() => {
+    try {
+      const cached = sessionStorage.getItem(cacheKey);
+      if (cached) setResult(JSON.parse(cached));
+    } catch (_) {}
+  }, [brandId]);
 
   const sidebarItems = [
     { path: `/brands/${brandId}/dashboard`, label: 'Dashboard', icon: LayoutDashboard, testId: 'nav-dashboard' },
@@ -137,6 +147,7 @@ const RecoMultiStateWorkspace = () => {
         headers: { 'Content-Type': 'multipart/form-data' },
       });
       setResult(response.data);
+      try { sessionStorage.setItem(cacheKey, JSON.stringify(response.data)); } catch (_) {}
       toast.success(`Reconciliation complete! ${response.data.results?.length || 0} records processed.`);
     } catch (err) {
       toast.error(err.response?.data?.error || 'Reconciliation failed');
@@ -160,6 +171,7 @@ const RecoMultiStateWorkspace = () => {
   };
 
   const handleReset = () => {
+    try { sessionStorage.removeItem(cacheKey); } catch (_) {}
     setResult(null); setFilter('All');
   };
 

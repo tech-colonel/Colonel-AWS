@@ -247,6 +247,26 @@ const saveGstRecoResults = async (sequelize, jobId, brandId, results, tableName)
   }
 };
 
+const saveTallyEntryResults = async (sequelize, jobId, brandId, results) => {
+  if (!results?.length) return;
+  const toNum = v => { const n = parseFloat(v); return isNaN(n) ? null : n; };
+  try {
+    await sequelize.transaction(async (t) => {
+      await sequelize.query(`SET LOCAL app.bypass_rls = 'true'`, { transaction: t });
+      for (const r of results) {
+        await sequelize.query(
+          `INSERT INTO gstr_3b_tally_results (job_id, brand_id, row_type, sno, particulars, debit, credit)
+           VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+          { bind: [jobId, brandId, r._type || null, String(r.sno ?? ''), r.particulars || null, toNum(r.debit), toNum(r.credit)], transaction: t }
+        );
+      }
+    });
+    console.log(`[RECO-DB] ✅ Saved ${results.length} tally rows for job ${jobId}`);
+  } catch (err) {
+    console.error(`[RECO-DB] saveTallyEntryResults error:`, err.message);
+  }
+};
+
 // Frontend reco types that use the gstr_2b_books Python engine → persist to gstr_2b_results
 const GST_2B_FRONTEND_TYPES = new Set([
   'gstr_2b_books', 'gstr_2a_vs_2b_vs_books', 'gstr_2b_vs_purchase',
@@ -765,6 +785,11 @@ const runReco = async (req, res) => {
             console.log(`[RECO-DB] GST path: gstRows=${gstRows?.length} recoType=${recoType}`);
             if (gstRows?.length > 0) {
               await saveGstRecoResults(seq, savedJobId, brandId, gstRows, 'gstr_2b_results');
+            }
+          } else if (savedJobId && recoType === 'gstr_3b_tally_entry') {
+            const tallyRows = response.data?.results;
+            if (tallyRows?.length > 0) {
+              await saveTallyEntryResults(seq, savedJobId, brandId, tallyRows);
             }
           } else {
             console.log(`[RECO-DB] Skipping GST rows: savedJobId=${savedJobId} isGST=${GST_2B_FRONTEND_TYPES.has(recoType)}`);

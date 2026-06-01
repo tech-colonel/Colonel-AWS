@@ -199,14 +199,14 @@ const RecoWorkspace = () => {
     }
     if (isUniversal) {
       api.get('/api/brands').then(r => setBrands(r.data?.brands || r.data || [])).catch(() => {});
-      // Restore last result from sessionStorage so navigating to analytics and back
-      // doesn't wipe the results — accountant doesn't need to re-upload the file.
-      if (!result) {
-        try {
-          const cached = sessionStorage.getItem(cacheKey);
-          if (cached) setResult(JSON.parse(cached));
-        } catch (_) {}
-      }
+    }
+    // Restore last result for ALL agent types — navigating to analytics and back
+    // doesn't wipe the results; accountant doesn't need to re-upload the file.
+    if (!result) {
+      try {
+        const cached = sessionStorage.getItem(cacheKey);
+        if (cached) setResult(JSON.parse(cached));
+      } catch (_) {}
     }
   }, [agentType, brandId, isDemo, isUniversal]);
 
@@ -332,7 +332,7 @@ const RecoWorkspace = () => {
   };
 
   const handleReset = () => {
-    if (isUniversal) { try { sessionStorage.removeItem(cacheKey); } catch (_) {} }
+    try { sessionStorage.removeItem(cacheKey); } catch (_) {}
     setUploadedFiles({}); setResult(null); setFilter('All'); setEditedLedgers({});
   };
 

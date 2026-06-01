@@ -229,6 +229,10 @@ const RESULTS_TABLE_MAP = {
     table: 'gstr_1_results',
     columns: 'invoice_number, invoice_date, customer_name, taxable_value, igst, cgst, sgst, remark_1, remark_2',
   },
+  gstr_3b_tally_entry: {
+    table: 'gstr_3b_tally_results',
+    columns: 'row_type, sno, particulars, debit, credit',
+  },
 };
 
 const getJobById = async (req, res) => {
