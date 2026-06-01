@@ -21,36 +21,22 @@ app.get('/api/health', (req, res) => {
   });
 });
 
-// Routes
-const authRoutes = require('./routes/authRoutes');
-const brandRoutes = require('./routes/brandRoutes');
-const agentRoutes = require('./routes/agentRoutes');
-const salesRoutes = require('./routes/salesRoutes');
-const userRoutes = require('./routes/userRoutes');
-const cfoAnalyticsRoutes = require('./routes/cfoAnalyticsRoutes');
-const invoiceRoutes = require('./routes/invoiceRoutes');
-const orderCycleRoutes = require('./routes/orderCycleRoutes');
-const recoRoutes = require('./routes/recoRoutes');
-const taskRoutes = require('./routes/taskRoutes');
-const dashboardRoutes = require('./routes/dashboardRoutes');
+// Routes — only what the 4 reco agents need
+const authRoutes           = require('./routes/authRoutes');
+const brandRoutes          = require('./routes/brandRoutes');
+const userRoutes           = require('./routes/userRoutes');
+const recoRoutes           = require('./routes/recoRoutes');
+const dashboardRoutes      = require('./routes/dashboardRoutes');
 const bankCorrectionsRoutes = require('./routes/bankCorrectionsRoutes');
+const taskRoutes           = require('./routes/taskRoutes');
 
-// Sync task tables on startup
-const { syncTaskTables } = require('./models/task');
-syncTaskTables();
-
-app.use('/api/auth', authRoutes);
-app.use('/api', brandRoutes);
-app.use('/api', agentRoutes);
-app.use('/api', salesRoutes);
-app.use('/api', userRoutes);
-app.use('/api', cfoAnalyticsRoutes);
-app.use('/api', invoiceRoutes);
-app.use('/api', orderCycleRoutes);
-app.use('/api', recoRoutes);
-app.use('/api', taskRoutes);
-app.use('/api', dashboardRoutes);
+app.use('/api/auth',      authRoutes);
+app.use('/api',           brandRoutes);
+app.use('/api',           userRoutes);
+app.use('/api',           recoRoutes);
+app.use('/api',           dashboardRoutes);
 app.use('/api/bank-reco', bankCorrectionsRoutes);
+app.use('/api',           taskRoutes);
 
 // Error handling middleware
 app.use((err, req, res, next) => {

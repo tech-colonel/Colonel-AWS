@@ -4,11 +4,6 @@ import { AuthProvider } from './context/AuthContext';
 import { Toaster } from 'sonner';
 import ProtectedRoute from './components/ProtectedRoute';
 import Login from './pages/Login';
-import AdminDashboard from './pages/admin/AdminDashboard';
-import BrandsPage from './pages/admin/BrandsPage';
-import AgentsPage from './pages/admin/AgentsPage';
-import AssignmentsPage from './pages/admin/AssignmentsPage';
-import BrandOverviewPage from './pages/admin/BrandOverviewPage';
 import BrandSelection from './pages/accountant/BrandSelection';
 import RecoSuite from './pages/accountant/RecoSuite';
 import RecoWorkspace from './pages/accountant/RecoWorkspace';
@@ -30,25 +25,9 @@ function App() {
           <Route path="/login" element={<Login />} />
           
           <Route
-            path="/admin/*"
-            element={
-              <ProtectedRoute allowedRoles={['admin']}>
-                <Routes>
-                  <Route path="/" element={<AdminDashboard />} />
-                  <Route path="/brands" element={<BrandsPage />} />
-                  <Route path="/brands/:id" element={<BrandOverviewPage />} />
-                  <Route path="/agents" element={<AgentsPage />} />
-                  <Route path="/users" element={<AdminDashboard />} />
-                  <Route path="/assignments" element={<AssignmentsPage />} />
-                </Routes>
-              </ProtectedRoute>
-            }
-          />
-
-          <Route
             path="/brands"
             element={
-              <ProtectedRoute allowedRoles={['accountant']}>
+              <ProtectedRoute allowedRoles={['accountant', 'admin']}>
                 <BrandSelection />
               </ProtectedRoute>
             }
@@ -90,20 +69,6 @@ function App() {
             element={
               <ProtectedRoute allowedRoles={['accountant', 'admin']}>
                 <RecoJobDashboard />
-              </ProtectedRoute>
-            }
-          />
-
-          <Route
-            path="/dashboard"
-            element={
-              <ProtectedRoute allowedRoles={['brand_executive']}>
-                <div className="min-h-screen flex items-center justify-center bg-slate-50">
-                  <div className="text-center">
-                    <h1 className="text-2xl font-bold text-slate-900 mb-2">Brand Executive Dashboard</h1>
-                    <p className="text-slate-600">Coming soon...</p>
-                  </div>
-                </div>
               </ProtectedRoute>
             }
           />
