@@ -19,7 +19,7 @@ const RECO_AGENTS = [
     fields: ['GSTR-2B × N States', 'Purchase Register × N States', 'Debit Note × N States'], accuracy: '99.5%',
   },
   {
-    id: 'gstr_3b_tally_entry', category: 'GST Reconciliation',
+    id: 'gstr_3b_tally_entry', category: 'Journal Entry',
     name: 'GSTR-3B Tally Entry', icon: '📒',
     color: '#0F766E', bg: '#F0FDFA', border: '#99F6E4',
     description: 'Parses a GSTR-3B file and generates ready-to-post Tally journal entries for ITC credit ledger transfer, output liability set-off, and RCM.',
@@ -78,7 +78,7 @@ const AgentCard = ({ agent, brandId, navigate, idx }) => {
       <div className="flex items-center justify-between">
         <span className="text-xs font-semibold px-2 py-0.5 rounded-full"
           style={{ background: agent.bg, color: agent.color, border: `1px solid ${agent.border}` }}>
-          {agent.category === 'GST Reconciliation' ? 'GSTR' : 'Bank'}
+          {agent.category === 'Bank & Finance' ? 'Bank' : 'GSTR'}
         </span>
         <div className="flex items-center gap-1 text-xs font-semibold transition-all group-hover:gap-1.5"
           style={{ color: agent.color }}>
@@ -100,8 +100,9 @@ const RecoSuite = () => {
     { path: '/tasks', label: 'Tasks', icon: CheckSquare, testId: 'nav-tasks' },
   ];
 
-  const gstAgents = RECO_AGENTS.filter(a => a.category === 'GST Reconciliation');
-  const bankAgents = RECO_AGENTS.filter(a => a.category === 'Bank & Finance');
+  const gstAgents     = RECO_AGENTS.filter(a => a.category === 'GST Reconciliation');
+  const journalAgents = RECO_AGENTS.filter(a => a.category === 'Journal Entry');
+  const bankAgents    = RECO_AGENTS.filter(a => a.category === 'Bank & Finance');
 
   return (
     <DashboardLayout sidebarItems={sidebarItems}>
@@ -171,6 +172,23 @@ const RecoSuite = () => {
           </div>
         </div>
 
+        {/* Journal Entry */}
+        <div className="mb-8">
+          <div className="flex items-center gap-3 mb-4">
+            <div className="flex items-center gap-2">
+              <div className="w-1 h-5 rounded-full bg-teal-500" />
+              <h2 className="text-sm font-bold" style={{ color: '#0F172A', fontFamily: 'Barlow' }}>Journal Entry</h2>
+            </div>
+            <div className="flex-1 h-px" style={{ background: '#E2E8F0' }} />
+            <span className="text-xs" style={{ color: '#94A3B8' }}>{journalAgents.length} agent</span>
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            {journalAgents.map((agent, idx) => (
+              <AgentCard key={agent.id} agent={agent} brandId={brandId} navigate={navigate} idx={gstAgents.length + idx} />
+            ))}
+          </div>
+        </div>
+
         {/* Bank & Finance */}
         <div>
           <div className="flex items-center gap-3 mb-4">
@@ -183,7 +201,7 @@ const RecoSuite = () => {
           </div>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             {bankAgents.map((agent, idx) => (
-              <AgentCard key={agent.id} agent={agent} brandId={brandId} navigate={navigate} idx={gstAgents.length + idx} />
+              <AgentCard key={agent.id} agent={agent} brandId={brandId} navigate={navigate} idx={gstAgents.length + journalAgents.length + idx} />
             ))}
           </div>
         </div>
