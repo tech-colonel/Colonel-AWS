@@ -4,8 +4,24 @@ const ExcelJS = require('exceljs');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const os = require('os');
+const { execFile } = require('child_process');
 
 const PYTHON_RECO_URL = process.env.PYTHON_RECO_URL || 'http://localhost:8765';
+
+// ── Production-safe paths — override via env vars on any deployment server ──
+// classify.py lives at new-backend/scripts/ (same copy as Colonel Full/Extra/)
+const CLASSIFIER_PATH = process.env.BANK_CLASSIFIER_PATH
+  || path.resolve(__dirname, '../../scripts/classify.py');
+const RECO_TEMP_DIR   = process.env.RECO_TEMP_DIR   || path.join(os.tmpdir(), 'colonel-reco-temp');
+const RECO_OUTPUT_DIR = process.env.RECO_OUTPUT_DIR
+  || path.resolve(__dirname, '../../output/reco');
+const LEDGER_MASTER_DIR = process.env.LEDGER_MASTER_DIR
+  || path.resolve(__dirname, '../../output/ledgers');
+
+// ── Concurrency cap — prevents OOM when many users submit large files at once ──
+let _activeRecoJobs = 0;
+const MAX_CONCURRENT_RECO = parseInt(process.env.MAX_CONCURRENT_RECO || '8', 10);
 
 const { loadCorrectionMap, normalizeNarration } = require('./bankCorrectionsController');
 
@@ -288,77 +304,55 @@ const RECO_TYPE_MAP = {
 };
 
 /**
- * Execute standalone Python classifier CLI via child process
+ * Execute standalone Python classifier CLI via child process.
+ * Uses execFile (not exec) — no shell expansion, safe with arbitrary file paths.
+ * Path resolved from BANK_CLASSIFIER_PATH env var or project-relative default.
  */
 const runUniversalClassifier = (ledgerPath, bankPath, outputPath) => {
   return new Promise((resolve, reject) => {
-    const { exec } = require('child_process');
-    const cmd = `python3 "/Users/dhavalchauhan/Colonel Full/Extra/bank-statement-classifier/scripts/classify.py" --ledger "${ledgerPath}" --bank "${bankPath}" --out "${outputPath}"`;
-    console.log(`[RECO] Executing standalone: ${cmd}`);
-    exec(cmd, (error, stdout, stderr) => {
-      if (error) {
-        console.error(`[RECO] CLI execution error:`, stderr || error.message);
-        return reject(new Error(stderr || error.message));
+    console.log(`[RECO] Executing standalone classifier: ${CLASSIFIER_PATH}`);
+    execFile(
+      'python3',
+      [CLASSIFIER_PATH, '--ledger', ledgerPath, '--bank', bankPath, '--out', outputPath],
+      { timeout: 180000 },
+      (error, stdout, stderr) => {
+        if (error) {
+          console.error(`[RECO] CLI execution error:`, stderr || error.message);
+          return reject(new Error(stderr || error.message));
+        }
+        resolve(stdout);
       }
-      resolve(stdout);
-    });
+    );
   });
 };
 
 /**
  * Fetch ledger_master JSON from brand DB and convert to Excel buffer.
  * The ledger_master is stored as a JSON array: [{name: 'ABC Traders', ...}, ...]
- * Python bank_reco expects a Master.xlsx with column "Ledger Name".
+ * Returns null if no saved ledger exists for this brand.
  */
-const getLedgerMasterBuffer = async (brandId) => {
+const getLedgerMasterBuffer = (brandId) => {
   try {
-    const { masterSequelize } = require('../config/database');
-    const { Brand } = require('../models/master');
-    const { getBrandConnection } = require('../config/database');
-
-    const brand = await Brand.findByPk(brandId);
-    if (!brand) throw new Error('Brand not found');
-
-    const brandDb = getBrandConnection(brand.db_name);
-    const { DataTypes } = require('sequelize');
-
-    // Get the BrandAgent model to access ledger_master
-    const BrandAgent = brandDb.define('brand_agent', {
-      brand_id: DataTypes.INTEGER,
-      agent_id: DataTypes.INTEGER,
-      ledger_master: DataTypes.JSONB,
-    }, { tableName: 'brand_agents', timestamps: false });
-
-    const agents = await BrandAgent.findAll({
-      where: { brand_id: brandId },
-      attributes: ['ledger_master']
-    });
-
-    // Collect all ledger names from all agents for this brand
-    const ledgerNames = new Set();
-    for (const agent of agents) {
-      const ledgers = agent.ledger_master || [];
-      for (const row of ledgers) {
-        const name = row['Ledger Name'] || row['ledger_name'] || row['name'] || row['LEDGER NAME'];
-        if (name) ledgerNames.add(String(name).trim());
-      }
-    }
-
-    if (ledgerNames.size === 0) return null;
-
-    // Build Excel workbook matching what Python bank_reco expects
-    const workbook = new ExcelJS.Workbook();
-    const ws = workbook.addWorksheet('Master');
-    ws.columns = [{ header: 'Ledger Name', key: 'name', width: 40 }];
-    for (const name of ledgerNames) {
-      ws.addRow({ name });
-    }
-
-    const buffer = await workbook.xlsx.writeBuffer();
-    return Buffer.from(buffer);
+    const filePath = path.join(LEDGER_MASTER_DIR, `${brandId}.xlsx`);
+    if (fs.existsSync(filePath)) return fs.readFileSync(filePath);
+    return null;
   } catch (err) {
     console.error('[RECO] getLedgerMasterBuffer error:', err.message);
     return null;
+  }
+};
+
+/**
+ * Persist a ledger master Excel for a brand so future runs load it automatically.
+ * Overwrites any previously saved file — no duplicates, always latest CoA.
+ */
+const saveLedgerMaster = (brandId, buffer) => {
+  try {
+    fs.mkdirSync(LEDGER_MASTER_DIR, { recursive: true });
+    fs.writeFileSync(path.join(LEDGER_MASTER_DIR, `${brandId}.xlsx`), buffer);
+    console.log(`[RECO] Ledger master saved for brand ${brandId}`);
+  } catch (err) {
+    console.error('[RECO] saveLedgerMaster error:', err.message);
   }
 };
 
@@ -368,6 +362,14 @@ const getLedgerMasterBuffer = async (brandId) => {
  * For bank_statement in production: auto-fetch ledger_master from DB.
  */
 const runReco = async (req, res) => {
+  // Concurrency gate — prevents OOM when 50+ users submit large files simultaneously
+  if (_activeRecoJobs >= MAX_CONCURRENT_RECO) {
+    return res.status(429).json({
+      error: 'Server is busy processing other reconciliations. Please retry in 30 seconds.',
+      retry_after: 30,
+    });
+  }
+  _activeRecoJobs++;
   try {
     const recoType = req.body.reco_type || 'gstr_2b_vs_purchase';
     const isDemo = req.body.is_demo === 'true';
@@ -376,8 +378,8 @@ const runReco = async (req, res) => {
     // --- Standalone Decoupled Universal Bank Statement Integration ---
     if (recoType === 'universal_bank_statement') {
       const jobId = crypto.randomUUID();
-      const jobDir = path.join(__dirname, '../../../Extra/temp_run', `job_${jobId}`);
-      fs.mkdirSync(jobDir, { recursive: true });
+      const jobDir = path.join(RECO_TEMP_DIR, `job_${jobId}`);
+      await fs.promises.mkdir(jobDir, { recursive: true });
 
       if (!req.files || req.files.length === 0) {
         return res.status(400).json({ error: 'No bank statement file uploaded' });
@@ -389,7 +391,7 @@ const runReco = async (req, res) => {
         return res.status(400).json({ error: 'Please upload a bank statement file' });
       }
       let bankPath = path.join(jobDir, `bank_statement_${bankFile.originalname}`);
-      fs.writeFileSync(bankPath, bankFile.buffer);
+      await fs.promises.writeFile(bankPath, bankFile.buffer);
 
       let ledgerPath = '';
 
@@ -461,20 +463,27 @@ const runReco = async (req, res) => {
         }
       }
 
-      // If no ledgerPath was extracted (e.g. single tab or CSV was uploaded), fallback to Brand DB or fallback files
+      // Track whether a fresh ledger was uploaded (vs loaded from saved copy)
+      let freshLedgerBuffer = null;
+
+      // If no ledgerPath was extracted (single tab or CSV), check: uploaded file → saved copy → fallback
       if (!ledgerPath) {
         const ledgerFile = req.files.find(f => f.fieldname === 'ledger_master');
         if (ledgerFile) {
           ledgerPath = path.join(jobDir, `ledger_master_${ledgerFile.originalname}`);
-          fs.writeFileSync(ledgerPath, ledgerFile.buffer);
+          await fs.promises.writeFile(ledgerPath, ledgerFile.buffer);
+          freshLedgerBuffer = ledgerFile.buffer; // will be saved after successful run
         } else if (!isDemo && brandId && brandId !== 'demo') {
-          console.log(`[RECO-UNIVERSAL] Fetching ledger_master from DB for brand ${brandId}...`);
-          const ledgerBuffer = await getLedgerMasterBuffer(brandId);
-          if (ledgerBuffer) {
+          const savedLedger = getLedgerMasterBuffer(brandId);
+          if (savedLedger) {
             ledgerPath = path.join(jobDir, 'ledger_master.xlsx');
-            fs.writeFileSync(ledgerPath, ledgerBuffer);
+            await fs.promises.writeFile(ledgerPath, savedLedger);
+            console.log(`[RECO-UNIVERSAL] ✅ Loaded saved ledger master for brand ${brandId}`);
           }
         }
+      } else if (!isDemo && brandId && brandId !== 'demo') {
+        // Multi-tab extraction produced a ledger — read it back to persist
+        freshLedgerBuffer = fs.readFileSync(ledgerPath);
       }
 
       if (!ledgerPath) {
@@ -496,6 +505,12 @@ const runReco = async (req, res) => {
 
       if (!fs.existsSync(outputPath)) {
         throw new Error('Standalone classifier failed to generate output spreadsheet.');
+      }
+
+      // Lock the ledger master for this brand — saved once, reused on all future runs.
+      // Overwrites any previous CoA so updates are reflected immediately.
+      if (freshLedgerBuffer && brandId && brandId !== 'demo' && !isDemo) {
+        saveLedgerMaster(brandId, freshLedgerBuffer);
       }
 
       // 4. Load & Parse Excel Output Sheets using exceljs
@@ -612,12 +627,11 @@ const runReco = async (req, res) => {
       }
 
       // 5. Persist Excel File for Direct Download
-      const persistentDir = path.join(__dirname, '../../../Extra/outputs');
-      fs.mkdirSync(persistentDir, { recursive: true });
-      const persistentPath = path.join(persistentDir, `${jobId}.xlsx`);
+      fs.mkdirSync(RECO_OUTPUT_DIR, { recursive: true });
+      const persistentPath = path.join(RECO_OUTPUT_DIR, `${jobId}.xlsx`);
       fs.copyFileSync(outputPath, persistentPath);
 
-      // 6. Asynchronous Self-Cleaning of sandboxed job folder
+      // 6. Guaranteed cleanup of sandboxed job folder — runs even if response throws
       fs.rm(jobDir, { recursive: true, force: true }, (err) => {
         if (err) console.error('[RECO-UNIVERSAL] Cleanup error:', err.message);
         else console.log(`[RECO-UNIVERSAL] Sandboxed job folder cleaned up: job_${jobId}`);
@@ -711,7 +725,7 @@ const runReco = async (req, res) => {
       const hasLedgerUploaded = req.files.some(f => f.fieldname === 'ledger_master');
       if (!hasLedgerUploaded) {
         console.log(`[RECO] Fetching ledger_master from DB for brand ${brandId}...`);
-        const ledgerBuffer = await getLedgerMasterBuffer(brandId);
+        const ledgerBuffer = getLedgerMasterBuffer(brandId);
         if (ledgerBuffer) {
           form.append('ledger_master', ledgerBuffer, {
             filename: 'ledger_master.xlsx',
@@ -814,6 +828,8 @@ const runReco = async (req, res) => {
       });
     }
     res.status(500).json({ error: err.response?.data?.error || err.message });
+  } finally {
+    _activeRecoJobs--;
   }
 };
 
@@ -830,7 +846,7 @@ const getLedgerStatus = async (req, res) => {
   }
 
   try {
-    const ledgerBuffer = await getLedgerMasterBuffer(brandId);
+    const ledgerBuffer = getLedgerMasterBuffer(brandId);
     res.json({ hasLedger: !!ledgerBuffer, count: ledgerBuffer ? 1 : 0 });
   } catch (err) {
     res.json({ hasLedger: false, count: 0, error: err.message });
@@ -848,7 +864,7 @@ const exportReco = async (req, res) => {
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.setHeader('Content-Disposition', `attachment; filename="${safeName}.xlsx"`);
 
-    const localPath = path.join(__dirname, '../../../Extra/outputs', `${req.params.jobId}.xlsx`);
+    const localPath = path.join(RECO_OUTPUT_DIR, `${req.params.jobId}.xlsx`);
     if (fs.existsSync(localPath)) {
       console.log(`[RECO] Streaming local persistent Excel sheet: ${localPath}`);
       return fs.createReadStream(localPath).pipe(res);

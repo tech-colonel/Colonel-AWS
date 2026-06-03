@@ -8,6 +8,17 @@ import { Button } from '../../components/ui/button';
 import api from '../../lib/api';
 import { toast } from 'sonner';
 
+const RECO_ROUTE_MAP = {
+  'gstr_2b_books':            'gstr_2b_books',
+  'GSTR-2B-Books':            'gstr_2b_books',
+  'gstr_2b_books_multistate': 'gstr_2b_books_multistate',
+  'GSTR-2B-Books-Multistate': 'gstr_2b_books_multistate',
+  'gstr_3b_tally_entry':      'gstr_3b_tally_entry',
+  'GSTR-3B-Tally-Entry':      'gstr_3b_tally_entry',
+  'universal_bank_statement': 'universal_bank_statement',
+  'Universal-Bank-Statement': 'universal_bank_statement',
+};
+
 const BrandDashboard = () => {
   const { brandId } = useParams();
   const navigate = useNavigate();
@@ -99,7 +110,12 @@ const BrandDashboard = () => {
                 <Card
                   key={agent.id}
                   className="hover:shadow-lg transition-shadow cursor-pointer"
-                  onClick={() => navigate(`/brands/${brandId}/agents/${agent.id}`)}
+                  onClick={() => {
+                    const recoSlug = RECO_ROUTE_MAP[agent.name];
+                    recoSlug
+                      ? navigate(`/brands/${brandId}/reco/${recoSlug}`)
+                      : navigate(`/brands/${brandId}/agents/${agent.id}`);
+                  }}
                   data-testid={`agent-card-${agent.id}`}
                 >
                   <CardHeader>

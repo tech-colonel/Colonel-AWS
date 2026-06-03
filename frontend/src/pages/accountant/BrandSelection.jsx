@@ -83,7 +83,7 @@ const BrandSelection = () => {
               <Card
                 key={brand.id}
                 className="hover:shadow-lg transition-shadow cursor-pointer"
-                onClick={() => navigate(`/brands/${brand.id}/reco`)}
+                onClick={() => navigate(`/brands/${brand.id}/agents`)}
                 data-testid={`brand-card-${brand.id}`}
               >
                 <CardHeader>

@@ -21,22 +21,37 @@ app.get('/api/health', (req, res) => {
   });
 });
 
-// Routes — only what the 4 reco agents need
-const authRoutes           = require('./routes/authRoutes');
-const brandRoutes          = require('./routes/brandRoutes');
-const userRoutes           = require('./routes/userRoutes');
-const recoRoutes           = require('./routes/recoRoutes');
-const dashboardRoutes      = require('./routes/dashboardRoutes');
+// ── Core routes ──────────────────────────────────────────────────────────────
+const authRoutes            = require('./routes/authRoutes');
+const brandRoutes           = require('./routes/brandRoutes');
+const userRoutes            = require('./routes/userRoutes');
+const agentRoutes           = require('./routes/agentRoutes');
+// ── Reco suite ───────────────────────────────────────────────────────────────
+const recoRoutes            = require('./routes/recoRoutes');
+const dashboardRoutes       = require('./routes/dashboardRoutes');
 const bankCorrectionsRoutes = require('./routes/bankCorrectionsRoutes');
-const taskRoutes           = require('./routes/taskRoutes');
+const taskRoutes            = require('./routes/taskRoutes');
+// ── Sales agents ─────────────────────────────────────────────────────────────
+const salesRoutes           = require('./routes/salesRoutes');
+const invoiceRoutes         = require('./routes/invoiceRoutes');
+const orderCycleRoutes      = require('./routes/orderCycleRoutes');
+const settlementRoutes      = require('./routes/settlementRoutes');
+// ── CFO dashboards ────────────────────────────────────────────────────────────
+const cfoAnalyticsRoutes    = require('./routes/cfoAnalyticsRoutes');
 
 app.use('/api/auth',      authRoutes);
 app.use('/api',           brandRoutes);
 app.use('/api',           userRoutes);
+app.use('/api',           agentRoutes);
 app.use('/api',           recoRoutes);
 app.use('/api',           dashboardRoutes);
 app.use('/api/bank-reco', bankCorrectionsRoutes);
 app.use('/api',           taskRoutes);
+app.use('/api',           salesRoutes);
+app.use('/api',           invoiceRoutes);
+app.use('/api',           orderCycleRoutes);
+app.use('/api',           settlementRoutes);
+app.use('/api',           cfoAnalyticsRoutes);
 
 // Error handling middleware
 app.use((err, req, res, next) => {

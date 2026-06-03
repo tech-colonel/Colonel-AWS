@@ -174,7 +174,7 @@ CREATE TABLE IF NOT EXISTS bank_reco_corrections (
     narration_key    TEXT         NOT NULL,   -- UPPER + trim + collapse spaces
     correct_ledger   VARCHAR(255) NOT NULL,
     correct_type     VARCHAR(50),             -- 'Payment' | 'Receipt' | 'Contra'
-    source           VARCHAR(10)  NOT NULL DEFAULT 'ui',  -- 'ui' | 'excel'
+    source           VARCHAR(20)  NOT NULL DEFAULT 'ui',  -- 'ui' | 'excel' | 'output_upload'
     created_at       TIMESTAMPTZ  DEFAULT NOW(),
     updated_at       TIMESTAMPTZ  DEFAULT NOW(),
     CONSTRAINT bank_reco_corrections_brand_narration_uq UNIQUE (brand_id, narration_key)
@@ -223,6 +223,7 @@ DO $$ BEGIN
   DROP POLICY IF EXISTS gstr_3b_migration_policy             ON gstr_3b_results;
   DROP POLICY IF EXISTS gstr_1_migration_policy              ON gstr_1_results;
   DROP POLICY IF EXISTS bank_reco_corrections_migration_policy ON bank_reco_corrections;
+  DROP POLICY IF EXISTS gstr_3b_tally_brand_policy             ON gstr_3b_tally_results;
 END $$;
 
 -- Brand isolation policies: row is visible/writable only when

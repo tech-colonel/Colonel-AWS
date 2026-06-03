@@ -7,6 +7,18 @@ import { Badge } from '../../components/ui/badge';
 import api from '../../lib/api';
 import { toast } from 'sonner';
 
+// Maps agent name → reco route slug. Covers both snake_case (colonel-automation) and Title-Case (colonel-v2).
+const RECO_ROUTE_MAP = {
+  'gstr_2b_books':            'gstr_2b_books',
+  'GSTR-2B-Books':            'gstr_2b_books',
+  'gstr_2b_books_multistate': 'gstr_2b_books_multistate',
+  'GSTR-2B-Books-Multistate': 'gstr_2b_books_multistate',
+  'gstr_3b_tally_entry':      'gstr_3b_tally_entry',
+  'GSTR-3B-Tally-Entry':      'gstr_3b_tally_entry',
+  'universal_bank_statement': 'universal_bank_statement',
+  'Universal-Bank-Statement': 'universal_bank_statement',
+};
+
 const BrandAgentsInventory = () => {
   const { brandId } = useParams();
   const navigate = useNavigate();
@@ -43,10 +55,15 @@ const BrandAgentsInventory = () => {
   };
 
   const handleAgentClick = (agent) => {
-    if (isAssigned(agent.id)) {
-      navigate(`/brands/${brandId}/agents/${agent.id}`);
-    } else {
+    if (!isAssigned(agent.id)) {
       toast.info('This agent is not assigned to this brand');
+      return;
+    }
+    const recoSlug = RECO_ROUTE_MAP[agent.name];
+    if (recoSlug) {
+      navigate(`/brands/${brandId}/reco/${recoSlug}`);
+    } else {
+      navigate(`/brands/${brandId}/agents/${agent.id}`);
     }
   };
 

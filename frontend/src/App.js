@@ -1,20 +1,26 @@
 import React from 'react';
-import { BrowserRouter, Routes, Route, Navigate, useParams } from 'react-router-dom';
+import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { AuthProvider } from './context/AuthContext';
 import { Toaster } from 'sonner';
 import ProtectedRoute from './components/ProtectedRoute';
 import Login from './pages/Login';
-import BrandSelection from './pages/accountant/BrandSelection';
-import RecoSuite from './pages/accountant/RecoSuite';
-import RecoWorkspace from './pages/accountant/RecoWorkspace';
+// ── Admin pages ───────────────────────────────────────────────────────────────
+import AdminDashboard    from './pages/admin/AdminDashboard';
+import BrandsPage        from './pages/admin/BrandsPage';
+import AgentsPage        from './pages/admin/AgentsPage';
+import AssignmentsPage   from './pages/admin/AssignmentsPage';
+import BrandOverviewPage from './pages/admin/BrandOverviewPage';
+// ── Accountant pages ──────────────────────────────────────────────────────────
+import BrandSelection        from './pages/accountant/BrandSelection';
+import BrandDashboard        from './pages/accountant/BrandDashboard';
+import BrandAgentsInventory  from './pages/accountant/BrandAgentsInventory';
+import AgentWorkspace        from './pages/accountant/AgentWorkspace';
+// ── Reco suite ────────────────────────────────────────────────────────────────
+import RecoSuite             from './pages/accountant/RecoSuite';
+import RecoWorkspace         from './pages/accountant/RecoWorkspace';
 import RecoMultiStateWorkspace from './pages/accountant/RecoMultiStateWorkspace';
-import RecoJobDashboard from './pages/accountant/RecoJobDashboard';
+import RecoJobDashboard      from './pages/accountant/RecoJobDashboard';
 import './App.css';
-
-const RedirectToReco = () => {
-  const { brandId } = useParams();
-  return <Navigate to={`/brands/${brandId}/reco`} replace />;
-};
 
 function App() {
   return (
@@ -23,7 +29,24 @@ function App() {
         <Toaster position="top-right" richColors />
         <Routes>
           <Route path="/login" element={<Login />} />
-          
+
+          {/* ── Admin panel ──────────────────────────────────────────────── */}
+          <Route
+            path="/admin/*"
+            element={
+              <ProtectedRoute allowedRoles={['admin']}>
+                <Routes>
+                  <Route path="/"            element={<AdminDashboard />} />
+                  <Route path="/brands"      element={<BrandsPage />} />
+                  <Route path="/brands/:id"  element={<BrandOverviewPage />} />
+                  <Route path="/agents"      element={<AgentsPage />} />
+                  <Route path="/assignments" element={<AssignmentsPage />} />
+                </Routes>
+              </ProtectedRoute>
+            }
+          />
+
+          {/* ── Brand selection ───────────────────────────────────────────── */}
           <Route
             path="/brands"
             element={
@@ -33,19 +56,35 @@ function App() {
             }
           />
 
-          <Route path="/brands/:brandId/dashboard" element={<RedirectToReco />} />
-          <Route path="/brands/:brandId/agents" element={<RedirectToReco />} />
-          <Route path="/brands/:brandId/agents/:agentId" element={<RedirectToReco />} />
-
+          {/* ── Brand dashboard ───────────────────────────────────────────── */}
           <Route
-            path="/brands/:brandId/reco"
+            path="/brands/:brandId/dashboard"
             element={
               <ProtectedRoute allowedRoles={['accountant', 'admin']}>
-                <RecoSuite />
+                <BrandDashboard />
               </ProtectedRoute>
             }
           />
 
+          {/* ── Agent inventory + generic workspace ──────────────────────── */}
+          <Route
+            path="/brands/:brandId/agents"
+            element={
+              <ProtectedRoute allowedRoles={['accountant', 'admin']}>
+                <BrandAgentsInventory />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/brands/:brandId/agents/:agentId"
+            element={
+              <ProtectedRoute allowedRoles={['accountant', 'admin']}>
+                <AgentWorkspace />
+              </ProtectedRoute>
+            }
+          />
+
+          {/* ── Reco suite — specific multistate route first ─────────────── */}
           <Route
             path="/brands/:brandId/reco/gstr_2b_books_multistate"
             element={
@@ -54,7 +93,14 @@ function App() {
               </ProtectedRoute>
             }
           />
-
+          <Route
+            path="/brands/:brandId/reco"
+            element={
+              <ProtectedRoute allowedRoles={['accountant', 'admin']}>
+                <RecoSuite />
+              </ProtectedRoute>
+            }
+          />
           <Route
             path="/brands/:brandId/reco/:agentType"
             element={
@@ -63,7 +109,6 @@ function App() {
               </ProtectedRoute>
             }
           />
-
           <Route
             path="/brands/:brandId/reco/:agentType/results/:jobId"
             element={
@@ -74,7 +119,7 @@ function App() {
           />
 
           <Route path="/" element={<Navigate to="/login" replace />} />
-          
+
           <Route
             path="/unauthorized"
             element={

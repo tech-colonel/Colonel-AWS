@@ -1,0 +1,55 @@
+# ── Node ──────────────────────────────────────────────────────────────────────
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# ── Environment ────────────────────────────────────────────────────────────────
+.env
+.env.local
+.env.*.local
+
+# ── Python ─────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+
+# ── Output / temp files (never commit generated Excel or uploaded CoA) ─────────
+new-backend/output/
+new-backend/outputs/
+reco-engine/output/
+*.xlsx~
+*.xls~
+
+# ── macOS ──────────────────────────────────────────────────────────────────────
+.DS_Store
+*.DS_Store
+
+# ── Editor / IDE ───────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+.cursor/
+.agents/
+.mcp.json
+.windsurfrules
+AGENT.md
+.jetro
+
+# ── Test files ────────────────────────────────────────────────────────────────
+test-file.js
+test-options.js
+test-proxy.js
+test-query.js
+new-backend/src/utils/test-db.js
+new-backend/test-data/
+new-backend/test-zepto-working.js
+new-backend/backend-structure.md
+
+# ── Build ─────────────────────────────────────────────────────────────────────
+frontend/build/
+coverage/

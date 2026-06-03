@@ -18,10 +18,12 @@ const masterSequelize = new Sequelize(
     dialect: 'postgres',
     logging: false,
     pool: {
-      max: 5,
-      min: 0,
+      max: 15,
+      min: 1,
       acquire: 30000,
-      idle: 10000
+      idle: 10000,
+      keepAlive: true,
+      keepAliveInitialDelayMillis: 0
     }
   }
 );
@@ -52,7 +54,9 @@ const getBrandConnection = (dbName) => {
         max: 5,
         min: 0,
         acquire: 30000,
-        idle: 10000
+        idle: 10000,
+        keepAlive: true,
+        keepAliveInitialDelayMillis: 0
       }
     }
   );

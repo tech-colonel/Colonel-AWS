@@ -8,6 +8,26 @@ dotenv.config();
 const PORT = process.env.PORT || 8001;
 
 /**
+ * Ensure the 4 RECO agents exist in the master agents table.
+ * Safe to run on every startup — ON CONFLICT (name) DO NOTHING is idempotent.
+ */
+const seedMasterAgents = async () => {
+  await masterSequelize.query(`
+    INSERT INTO agents (id, name, description, columns) VALUES
+      ('d0000000-0000-0000-0000-000000000001', 'gstr_2b_books',
+       'GSTR-2B vs Purchase Register + Debit Note Register reconciliation', '[]'),
+      ('d0000000-0000-0000-0000-000000000002', 'gstr_2b_books_multistate',
+       'GSTR-2B vs Books for multi-state brands — detects cross-state booking errors', '[]'),
+      ('d0000000-0000-0000-0000-000000000003', 'gstr_3b_tally_entry',
+       'Parse GSTR-3B and generate ready-to-post Tally journal entries', '[]'),
+      ('d0000000-0000-0000-0000-000000000004', 'universal_bank_statement',
+       'Brand-agnostic bank statement classifier mapped to Tally chart of accounts', '[]')
+    ON CONFLICT (name) DO NOTHING
+  `);
+  console.log('[SEED] RECO agents seeded into colonel-master.');
+};
+
+/**
  * Start the application
  */
 const start = async () => {
@@ -20,10 +40,13 @@ const start = async () => {
     await masterSequelize.sync({ alter: false });
     console.log('[MASTER DB] Models synchronized.');
 
-    // 3. Run reco table migrations on all brand DBs (idempotent)
+    // 3. Seed RECO agents into master agents table (idempotent)
+    await seedMasterAgents();
+
+    // 4. Run reco table migrations on all brand DBs (idempotent)
     await migrateAllBrands();
 
-    // 4. Start Express Server
+    // 5. Start Express Server
     app.listen(PORT, () => {
       console.log(`[SERVER] Colonel Backend running on port ${PORT}`);
       console.log(`[SERVER] Environment: ${process.env.NODE_ENV}`);

@@ -1,0 +1,281 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>CA Reconciliation AI Tool</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="side-rail" aria-label="Workspace navigation">
+        <div class="brand-mark">R</div>
+        <nav class="rail-nav">
+          <a class="rail-item active" href="#workspace" title="Workspace">W</a>
+          <a class="rail-item" href="#results" title="Results">R</a>
+          <a class="rail-item" href="#agents" title="Agents">A</a>
+        </nav>
+        <div class="rail-foot">CA</div>
+      </aside>
+
+      <main class="workspace" id="workspace">
+        <section class="hero-band">
+          <div class="hero-copy">
+            <p class="eyebrow">Local Reco OS</p>
+            <h1>Choose a reconciliation agent. Attach two Excel files. Review exceptions.</h1>
+            <p>
+              A local-first CA workspace for GST, books, and bank reconciliation. The engine stays rules-first;
+              the accountant layer explains exceptions like a senior reviewer.
+            </p>
+          </div>
+          <div class="hero-card" aria-label="Current workflow">
+            <span class="pulse"></span>
+            <div>
+              <strong>GST 2B Agent</strong>
+              <p>Ready for GSTR-2B vs Purchase Register</p>
+            </div>
+            <a id="exportLink" class="button ghost disabled" href="#" aria-disabled="true">Export Excel</a>
+          </div>
+        </section>
+
+        <section class="content-grid">
+          <section class="panel agent-panel" id="agents">
+            <div class="panel-head">
+              <div>
+                <p class="eyebrow">Reco agents</p>
+                <h2>Select the job</h2>
+              </div>
+              <span class="chip">4 active</span>
+            </div>
+
+            <div class="agent-grid">
+              <button class="agent-card selected" type="button" data-agent="gst_2b_purchase">
+                <span class="agent-icon">GST</span>
+                <strong>GSTR-2B vs Purchase</strong>
+                <small>Match ITC with purchase register</small>
+              </button>
+              <button class="agent-card" type="button" data-agent="gstr_2a_2b_books">
+                <span class="agent-icon">G2B</span>
+                <strong>GSTR2 vs Books</strong>
+                <small>Match GSTR-2B with Books / Purchase Register</small>
+              </button>
+              <button class="agent-card" type="button" data-agent="gstr_3b_vs_2b">
+                <span class="agent-icon">3B</span>
+                <strong>GSTR-3B vs GSTR-2B</strong>
+                <small>ITC claimed vs ITC available — line-item wise</small>
+              </button>
+              <button class="agent-card" type="button" data-agent="bank_reco">
+                <span class="agent-icon">BNK</span>
+                <strong>Bank Statement Process</strong>
+                <small>Classify statement with Master Ledgers</small>
+              </button>
+              <button class="agent-card" type="button" data-agent="gstr_1_vs_books">
+                <span class="agent-icon">G1</span>
+                <strong>GSTR-1 vs Books</strong>
+                <small>Sales register vs GSTR-1: B2B invoice-level + B2C state-wise</small>
+              </button>
+              <button class="agent-card locked" type="button" disabled>
+                <span class="agent-icon">TDS</span>
+                <strong>TDS / AIS Reco</strong>
+                <small>Coming next: 26AS, AIS, challans</small>
+              </button>
+            </div>
+          </section>
+
+          <section class="panel intake-panel">
+            <div class="panel-head">
+              <div>
+                <p class="eyebrow">Agent intake</p>
+                <h2>Give the agent two files</h2>
+              </div>
+              <span id="selectedAgent" class="chip strong">GST 2B Agent</span>
+            </div>
+
+            <form id="reconForm">
+              <input name="reco_type" type="hidden" value="gst_2b_purchase" />
+
+              <div class="chat-box">
+                <div class="message agent">
+                  <span class="avatar">AI</span>
+                  <p id="agentPrompt">
+                    I need the GSTR-2B Excel/JSON/CSV and your Purchase Register Excel/CSV.
+                    I will classify exact matches, tax mismatches, missing-in-books, and missing-in-2B.
+                  </p>
+                </div>
+                <label class="note-field">
+                  <span>Working note</span>
+                  <textarea name="working_note" rows="3" placeholder="Example: April 2026, client GSTIN, ignore previous-period pending if any."></textarea>
+                </label>
+              </div>
+
+              <div class="file-grid file-mode active" data-mode="gst_2b_purchase">
+                <label class="file-drop" data-file-label="GSTR-2B file">
+                  <input name="gstr2b" type="file" accept=".json,.xlsx,.xlsm,.csv" required />
+                  <span class="file-kicker">Source 1</span>
+                  <strong>GSTR-2B file</strong>
+                  <small>Excel, JSON, or CSV from GST portal</small>
+                  <em>Choose file</em>
+                </label>
+
+                <label class="file-drop" data-file-label="Purchase register">
+                  <input name="purchase" type="file" accept=".xlsx,.xlsm,.csv" required />
+                  <span class="file-kicker">Source 2</span>
+                  <strong>Purchase register</strong>
+                  <small>Excel or CSV from books, Tally, ERP, or working sheet</small>
+                  <em>Choose file</em>
+                </label>
+              </div>
+
+              <div class="file-mode" data-mode="gstr_2a_2b_books">
+                <div class="file-grid">
+                  <label class="file-drop" data-file-label="GSTR-2B file">
+                    <input name="gstr2b_multi" type="file" accept=".json,.xlsx,.xlsm,.csv" required />
+                    <span class="file-kicker">Source 1</span>
+                    <strong>GSTR-2B file</strong>
+                    <small>Excel, JSON, or CSV from GST portal</small>
+                    <em>Choose file</em>
+                  </label>
+
+                  <label class="file-drop" data-file-label="Books / Purchase Register">
+                    <input name="books" type="file" accept=".xlsx,.xlsm,.csv" required />
+                    <span class="file-kicker">Source 2</span>
+                    <strong>Books / Purchase Register</strong>
+                    <small>Excel or CSV from books, Tally, ERP, or working sheet</small>
+                    <em>Choose file</em>
+                  </label>
+                </div>
+               </div>
+               <div class="file-mode" data-mode="gstr_2b_books">
+                 <div class="file-grid">
+                   <label class="file-drop" data-file-label="GSTR-2B file">
+                     <input name="gstr2b" type="file" accept=".json,.xlsx,.xlsm,.csv" required />
+                     <span class="file-kicker">Source 1</span>
+                     <strong>GSTR-2B file</strong>
+                     <small>Excel, JSON, or CSV from GST portal</small>
+                     <em>Choose file</em>
+                   </label>
+
+                   <label class="file-drop" data-file-label="Purchase Register">
+                     <input name="purchase" type="file" accept=".xlsx,.xlsm,.csv" required />
+                     <span class="file-kicker">Source 2</span>
+                     <strong>Purchase Register</strong>
+                     <small>Excel or CSV from books, Tally, ERP, or working sheet</small>
+                     <em>Choose file</em>
+                   </label>
+
+                   <label class="file-drop" data-file-label="Debit Note Register">
+                     <input name="debit" type="file" accept=".xlsx,.xlsm,.csv" required />
+                     <span class="file-kicker">Source 3</span>
+                     <strong>Debit Note Register</strong>
+                     <small>Excel or CSV for debit notes</small>
+                     <em>Choose file</em>
+                   </label>
+                 </div>
+               </div>
+               <div class="file-mode" data-mode="gstr_3b_vs_2b">
+                 <div class="file-grid">
+                  <label class="file-drop" data-file-label="GSTR-2B file (combined)">
+                    <input name="gstr2b_3b" type="file" accept=".xlsx,.xlsm,.csv" />
+                    <span class="file-kicker">Source 1</span>
+                    <strong>GSTR-2B file (combined)</strong>
+                    <small>Combined monthly GSTR-2B with B2B, CDNR, IMPG sheets</small>
+                    <em>Choose file</em>
+                  </label>
+                  <label class="file-drop" data-file-label="GSTR-3B Working">
+                    <input name="gstr3b" type="file" accept=".xlsx,.xlsm,.csv" />
+                    <span class="file-kicker">Source 2</span>
+                    <strong>GSTR-3B Working</strong>
+                    <small>Invoice-level workings used during GSTR-3B filing</small>
+                    <em>Choose file</em>
+                  </label>
+                </div>
+              </div>
+
+              <div class="file-mode" data-mode="gstr_1_vs_books">
+                <div class="file-grid">
+                  <label class="file-drop" data-file-label="Tally Sales Register">
+                    <input name="tally_sales" type="file" accept=".xlsx,.xlsm,.csv" />
+                    <span class="file-kicker">Source 1 — Required</span>
+                    <strong>Tally Sales Register</strong>
+                    <small>Sales + Credit Note Register export from Tally (one file or combined)</small>
+                    <em>Choose file</em>
+                  </label>
+                  <label class="file-drop" data-file-label="GSTR-1 Export">
+                    <input name="gstr1" type="file" accept=".xlsx,.xlsm" />
+                    <span class="file-kicker">Source 2 — Required</span>
+                    <strong>GSTR-1 Export</strong>
+                    <small>Excel from GST software — must have B2B and B2C on separate sheets</small>
+                    <em>Choose file</em>
+                  </label>
+                </div>
+                <div class="file-grid compact-grid">
+                  <label class="file-drop compact" data-file-label="Amazon Ready-to-File">
+                    <input name="amazon" type="file" accept=".xlsx,.xlsm,.csv" />
+                    <span class="file-kicker">Source 3 — Optional</span>
+                    <strong>Amazon Ready-to-File</strong>
+                    <small>Invoice-level Amazon report. Replaces summarised Amazon entries in Tally.</small>
+                    <em>Choose file</em>
+                  </label>
+                </div>
+              </div>
+
+              <div class="file-mode" data-mode="bank_reco">
+                <div class="file-grid">
+                  <label class="file-drop" data-file-label="Bank Statement">
+                    <input name="bank_statement" type="file" accept=".xlsx,.xlsm,.csv" required />
+                    <span class="file-kicker">Statement</span>
+                    <strong>Bank Statement</strong>
+                    <small>Upload the OD Acc Excel file from the portal</small>
+                    <em>Choose file</em>
+                  </label>
+                </div>
+              </div>
+
+              <div class="run-row">
+                <label class="tolerance-field">
+                  <span>Tax-head tolerance</span>
+                  <input name="tolerance" type="number" min="0" max="10" step="0.5" value="1" />
+                </label>
+                <button id="runButton" class="button run-button" type="submit">Run Agent</button>
+              </div>
+            </form>
+            <div id="status" class="status-line" role="status">Agent waiting for files.</div>
+          </section>
+        </section>
+
+        <section class="summary-grid" id="summaryGrid" aria-label="Reconciliation summary"></section>
+
+        <section class="panel results-panel" id="results">
+          <div class="results-head">
+            <div>
+              <p class="eyebrow">Review desk</p>
+              <h2>Exceptions and matches</h2>
+            </div>
+            <div id="filters" class="filters"></div>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Category</th>
+                  <th>Confidence</th>
+                  <th id="sourceOneHead">GSTR-2B</th>
+                  <th id="sourceTwoHead">Purchase Register</th>
+                  <th id="sourceThreeHead" class="optional-col">Books</th>
+                  <th id="mismatchesHead">Mismatches</th>
+                  <th id="actionHead">Suggested Action</th>
+                </tr>
+              </thead>
+              <tbody id="resultsBody">
+                <tr>
+                  <td colspan="7" class="empty">Select a reco agent and upload files to begin.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+      </main>
+    </div>
+    <script src="/static/app.js"></script>
+  </body>
+</html>

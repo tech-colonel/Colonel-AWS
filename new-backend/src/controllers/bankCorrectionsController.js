@@ -232,39 +232,105 @@ const uploadOutputExcel = async (req, res) => {
     const workbook = new ExcelJS.Workbook();
     await workbook.xlsx.load(fileBuffer);
 
-    const ws = workbook.getWorksheet('Bank Statement') || workbook.worksheets[0];
-    if (!ws) return res.status(400).json({ error: 'Could not find Bank Statement sheet' });
+    // Collect High-confidence rows across all sheets that look like bank output.
+    // This handles both single-sheet and multi-sheet output Excel files.
+    const toImport = [];
+    let skipped = 0;
 
-    // Map header names to column indices
-    const colIndex = {};
-    ws.getRow(1).values.forEach((cell, i) => {
-      const name = (cell || '').toString().trim().toLowerCase();
-      if (name === 'description')  colIndex.description = i;
-      if (name === 'ledger name' || name === 'ledger') colIndex.ledgerName = i;
-      if (name === 'type')         colIndex.txnType     = i;
-      if (name === 'confidence')   colIndex.confidence  = i;
-    });
+    console.log(`[UPLOAD-OUTPUT] brandId=${brandId} fileSize=${fileBuffer.length} sheets=${workbook.worksheets.length}`);
 
-    if (!colIndex.description || !colIndex.ledgerName) {
-      return res.status(400).json({ error: 'Excel must have Description and Ledger Name columns' });
+    // Helper: extract text from any cell value (handles plain string, rich text objects, numbers)
+    const cellText = (val) => {
+      if (!val) return '';
+      if (typeof val === 'string') return val.trim();
+      if (typeof val === 'object' && Array.isArray(val.richText)) {
+        return val.richText.map(r => r.text || '').join('').trim();
+      }
+      return String(val).trim();
+    };
+
+    for (const ws of workbook.worksheets) {
+      // Scan row 1 first; if it looks like a merged title (all [object Object] / empty), try row 2
+      const scanHeaderRow = (rowNum) => {
+        const colIndex = {};
+        ws.getRow(rowNum).values.forEach((cell, i) => {
+          const name = cellText(cell).toLowerCase();
+          if (!name) return;
+          // Narration / description — any column whose name contains these keywords
+          if (!colIndex.description &&
+              (name.includes('description') || name.includes('narration') ||
+               name.includes('particulars') || name.includes('transaction detail') ||
+               name === 'details' || name === 'remarks')) {
+            colIndex.description = i;
+          }
+          // Ledger — any column whose name contains "ledger" or "tally" (e.g. "Ledger name as per tally")
+          if (!colIndex.ledgerName &&
+              (name.includes('ledger') || name.includes('tally') ||
+               name === 'account name' || name === 'account')) {
+            colIndex.ledgerName = i;
+          }
+          // Type (optional)
+          if (!colIndex.txnType &&
+              (name === 'type' || name.includes('txn type') || name.includes('transaction type') ||
+               name.includes('vch type') || name.includes('predicted_type'))) {
+            colIndex.txnType = i;
+          }
+          // Confidence (optional)
+          if (name === 'confidence') colIndex.confidence = i;
+        });
+        return colIndex;
+      };
+
+      let headerRowNum = 1;
+      let colIndex = scanHeaderRow(1);
+
+      // If row 1 has no useful headers (merged title row), try row 2
+      if (!colIndex.description && !colIndex.ledgerName) {
+        colIndex = scanHeaderRow(2);
+        if (colIndex.description || colIndex.ledgerName) headerRowNum = 2;
+      }
+
+      const allHeaders = ws.getRow(headerRowNum).values.map(c => cellText(c)).filter(Boolean);
+      console.log(`[UPLOAD-OUTPUT] sheet="${ws.name}" headerRow=${headerRowNum} headers=${JSON.stringify(allHeaders)} colIndex=`, colIndex);
+
+      if (!colIndex.description || !colIndex.ledgerName) {
+        console.log(`[UPLOAD-OUTPUT] skipping "${ws.name}" — no narration+ledger match in headers`);
+        continue;
+      }
+
+      ws.eachRow((row, rowNum) => {
+        if (rowNum <= headerRowNum) return; // skip header row(s)
+        const conf = colIndex.confidence
+          ? row.getCell(colIndex.confidence).text?.trim()
+          : 'High'; // no confidence column → accountant-prepared file, import all rows
+        if (conf && conf !== 'High') { skipped++; return; }
+
+        const description    = cellText(row.getCell(colIndex.description).value);
+        const correct_ledger = cellText(row.getCell(colIndex.ledgerName).value);
+        const correct_type   = colIndex.txnType
+          ? cellText(row.getCell(colIndex.txnType).value)
+          : null;
+        if (!description || !correct_ledger) return;
+        toImport.push({ description, correct_ledger, correct_type });
+      });
+    }
+
+    console.log(`[UPLOAD-OUTPUT] collected toImport=${toImport.length} skipped=${skipped}`);
+
+    if (toImport.length === 0) {
+      const sheetNames = workbook.worksheets.map(w => w.name).join(', ');
+      return res.status(400).json({
+        error: `No High confidence rows found. Sheets in file: [${sheetNames}]. Make sure you are uploading the classified output Excel (Download Excel button), not the raw bank statement.`
+      });
     }
 
     const seq = await getBrandSeq(brandId);
-    let saved = 0, skipped = 0;
+    let saved = 0;
 
     await withBypass(seq, async (t) => {
-      ws.eachRow((row, rowNum) => {
-        if (rowNum === 1) return;
-        const conf = colIndex.confidence ? row.getCell(colIndex.confidence).text?.trim() : '';
-        if (conf !== 'High') { skipped++; return; }
-
-        const description    = row.getCell(colIndex.description).text?.trim();
-        const correct_ledger = row.getCell(colIndex.ledgerName).text?.trim();
-        const correct_type   = colIndex.txnType ? row.getCell(colIndex.txnType).text?.trim() : null;
-        if (!description || !correct_ledger) return;
-
+      for (const { description, correct_ledger, correct_type } of toImport) {
         const key = normalizeNarration(description);
-        seq.query(
+        await seq.query(
           `INSERT INTO bank_reco_corrections
              (brand_id, narration_raw, narration_key, correct_ledger, correct_type, source, updated_at)
            VALUES ($1, $2, $3, $4, $5, 'output_upload', NOW())
@@ -278,7 +344,7 @@ const uploadOutputExcel = async (req, res) => {
           { bind: [brandId, description, key, correct_ledger, correct_type || null], transaction: t }
         );
         saved++;
-      });
+      }
     });
 
     res.json({ saved, skipped, message: `${saved} corrections imported from output Excel` });

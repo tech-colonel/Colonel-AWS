@@ -77,10 +77,7 @@ const AGENT_CONFIG = {
     color: '#059669', bg: '#ECFDF5', border: '#A7F3D0',
     files: [
       { key: 'bank_statement', label: 'Bank Statement', hint: '.xlsx / .xls / .csv', required: true },
-    ],
-    demoFiles: [
-      { key: 'bank_statement', label: 'Bank Statement', hint: '.xlsx / .xls / .csv', required: true },
-      { key: 'ledger_master', label: 'Ledger Master', hint: '.xlsx / .xls', required: false, isDemo: true },
+      { key: 'ledger_master', label: 'Chart of Accounts (Ledger Master)', hint: '.xlsx / .xls', required: false },
     ],
   },
   gstr_3b_tally_entry: {
@@ -211,16 +208,25 @@ const RecoWorkspace = () => {
   // Other setup effects
   useEffect(() => {
     if (agentType === 'bank_statement' && !isDemo && brandId !== 'demo') {
-      checkLedgerMaster();
+      checkLedgerMaster(brandId);
     }
     if (isUniversal) {
       api.get('/api/brands').then(r => setBrands(r.data?.brands || r.data || [])).catch(() => {});
     }
   }, [agentType, brandId, isDemo, isUniversal]);
 
-  const checkLedgerMaster = async () => {
+  // Re-check saved ledger when brand selection changes for universal_bank_statement
+  useEffect(() => {
+    if (isUniversal && effectiveBrandId && effectiveBrandId !== 'other' && !isDemo) {
+      checkLedgerMaster(effectiveBrandId);
+    } else if (isUniversal) {
+      setLedgerStatus(null);
+    }
+  }, [effectiveBrandId]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const checkLedgerMaster = async (bid) => {
     try {
-      const res = await api.get(`/api/reco/ledger-status/${brandId}`);
+      const res = await api.get(`/api/reco/ledger-status/${bid}`);
       setLedgerStatus(res.data.hasLedger ? 'loaded' : 'missing');
     } catch { setLedgerStatus('missing'); }
   };
@@ -263,6 +269,10 @@ const RecoWorkspace = () => {
       const response = await api.post('/api/reco/run', formData, { headers: { 'Content-Type': 'multipart/form-data' } });
       setResult(response.data);
       toast.success(`Reconciliation complete! ${response.data.results?.length || 0} records processed.`);
+      // If CoA was uploaded, backend just saved it — refresh the saved status
+      if (isUniversal && effectiveBrandId && effectiveBrandId !== 'other' && uploadedFiles['ledger_master']) {
+        checkLedgerMaster(effectiveBrandId);
+      }
     } catch (err) { toast.error(err.response?.data?.error || 'Reconciliation failed'); }
     finally { setRunning(false); }
   };
@@ -301,8 +311,14 @@ const RecoWorkspace = () => {
       const res = await api.post(`/api/bank-reco/corrections/${effectiveBrandId}/upload-output`, fd, {
         headers: { 'Content-Type': 'multipart/form-data' }
       });
-      toast.success(`${res.data.saved} correction${res.data.saved !== 1 ? 's' : ''} imported from output Excel`);
-    } catch { toast.error('Failed to upload output Excel'); }
+      if (res.data.saved > 0) {
+        toast.success(`${res.data.saved} correction${res.data.saved !== 1 ? 's' : ''} imported from output Excel`);
+      } else {
+        toast.warning(res.data.message || 'No corrections imported — upload the classified output Excel, not the raw bank statement');
+      }
+    } catch (err) {
+      toast.error(err.response?.data?.error || 'Failed to upload output Excel');
+    }
   };
 
   // Upload a reviewed Excel file to extract corrections
@@ -410,13 +426,26 @@ const RecoWorkspace = () => {
               <p className="text-xs mt-0.5" style={{ color: '#94A3B8' }}>Upload files and run reconciliation</p>
             </div>
           </div>
-          {result && (
-            <button onClick={handleReset}
-              className="flex items-center gap-1.5 text-xs font-semibold px-3 py-2 rounded-xl transition-colors hover:bg-slate-100"
-              style={{ color: '#64748B', border: '1px solid #E2E8F0' }}>
-              <RotateCcw className="w-3.5 h-3.5" /> Reset
-            </button>
-          )}
+          <div className="flex items-center gap-2">
+            {isUniversal && (
+              <>
+                <input ref={outputUploadRef} type="file" accept=".xlsx,.xls" className="hidden"
+                  onChange={e => { if (e.target.files[0]) handleUploadOutputExcel(e.target.files[0]); e.target.value = ''; }} />
+                <button onClick={() => outputUploadRef.current?.click()}
+                  className="flex items-center gap-1.5 text-xs font-semibold px-3 py-2 rounded-xl transition-colors hover:bg-green-50"
+                  style={{ color: '#16A34A', border: '1px solid #86EFAC' }}>
+                  <Upload className="w-3.5 h-3.5" /> Upload Previous Output
+                </button>
+              </>
+            )}
+            {result && (
+              <button onClick={handleReset}
+                className="flex items-center gap-1.5 text-xs font-semibold px-3 py-2 rounded-xl transition-colors hover:bg-slate-100"
+                style={{ color: '#64748B', border: '1px solid #E2E8F0' }}>
+                <RotateCcw className="w-3.5 h-3.5" /> Reset
+              </button>
+            )}
+          </div>
         </div>
 
         {/* Upload + Config */}
@@ -521,15 +550,21 @@ const RecoWorkspace = () => {
                       </div>
                     );
                   })}
-                  {agentType === 'bank_statement' && !isDemo && (
+                  {(agentType === 'bank_statement' || isUniversal) && !isDemo && (
                     <div className="flex items-center justify-between pt-2 mt-1" style={{ borderTop: '1px solid #F1F5F9' }}>
                       <div className="flex items-center gap-1.5">
                         <Database className="w-3 h-3" style={{ color: '#94A3B8' }} />
-                        <span className="text-xs" style={{ color: '#475569' }}>Ledger Master (DB)</span>
+                        <span className="text-xs" style={{ color: '#475569' }}>
+                          {isUniversal ? 'Chart of Accounts (Saved)' : 'Ledger Master (DB)'}
+                        </span>
                       </div>
                       <span className="text-xs font-semibold"
-                        style={{ color: ledgerStatus === 'loaded' ? '#059669' : ledgerStatus === 'missing' ? '#E11D48' : '#94A3B8' }}>
-                        {ledgerStatus === 'loaded' ? '✓ Auto' : ledgerStatus === 'missing' ? '✗ Missing' : '...'}
+                        style={{ color: ledgerStatus === 'loaded' ? '#059669' : ledgerStatus === 'missing' ? '#D97706' : '#94A3B8' }}>
+                        {ledgerStatus === 'loaded'
+                          ? '✓ Saved'
+                          : ledgerStatus === 'missing'
+                            ? uploadedFiles['ledger_master'] ? 'Will save' : 'Not saved yet'
+                            : effectiveBrandId ? '...' : '—'}
                       </span>
                     </div>
                   )}
@@ -649,14 +684,6 @@ const RecoWorkspace = () => {
                       style={{ background: '#FFFBEB', border: '1px solid #FDE68A', color: '#D97706' }}>
                       <Upload className="w-4 h-4" />
                       Upload Reviewed Excel
-                    </button>
-                    <input ref={outputUploadRef} type="file" accept=".xlsx,.xls" className="hidden"
-                      onChange={e => { if (e.target.files[0]) handleUploadOutputExcel(e.target.files[0]); e.target.value = ''; }} />
-                    <button onClick={() => outputUploadRef.current?.click()}
-                      className="flex items-center gap-2 text-sm font-semibold px-4 py-2 rounded-xl transition-all"
-                      style={{ background: '#F0FDF4', border: '1px solid #86EFAC', color: '#16A34A' }}>
-                      <Upload className="w-4 h-4" />
-                      Upload Previous Output
                     </button>
                   </>
                 )}
