@@ -414,7 +414,7 @@ const generate = async (req, res, next) => {
             filename: processFile
         }));
 
-        await Model.sync({ alter: true });
+        await Model.sync();
         const rows = await Model.bulkCreate(finalData, { returning: true });
 
         // ==================================

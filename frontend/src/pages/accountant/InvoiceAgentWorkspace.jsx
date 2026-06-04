@@ -15,7 +15,7 @@ import { toast } from 'sonner';
 import { format } from 'date-fns';
 import api from '../../lib/api';
 
-const API_URL = process.env.REACT_APP_BACKEND_URL || 'http://localhost:8001';
+const API_URL = process.env.REACT_APP_BACKEND_URL || 'https://notational-rompingly-lynnette.ngrok-free.dev ';
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 const formatDate = (dateStr) => {
