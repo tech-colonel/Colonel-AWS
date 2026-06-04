@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import DashboardLayout from '../../components/layout/DashboardLayout';
-import { LayoutDashboard, Bot, ArrowLeft, ChevronRight, TrendingUp, Zap, Shield, Activity, CheckSquare } from 'lucide-react';
+import { LayoutDashboard, Bot, ArrowLeft, ChevronRight, TrendingUp, Zap, Shield, Activity, ClipboardList } from 'lucide-react';
 
 const RECO_AGENTS = [
   {
@@ -97,7 +97,7 @@ const RecoSuite = () => {
   const sidebarItems = [
     { path: `/brands/${brandId}/dashboard`, label: 'Dashboard', icon: LayoutDashboard, testId: 'nav-dashboard' },
     { path: `/brands/${brandId}/agents`, label: 'All Agents', icon: Bot, testId: 'nav-agents' },
-    { path: '/tasks', label: 'Tasks', icon: CheckSquare, testId: 'nav-tasks' },
+    { path: `/brands/${brandId}/reco`, label: 'Reconciliation', icon: ClipboardList, testId: 'nav-reco' },
   ];
 
   const gstAgents     = RECO_AGENTS.filter(a => a.category === 'GST Reconciliation');

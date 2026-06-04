@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import DashboardLayout from '../../components/layout/DashboardLayout';
-import { LayoutDashboard, Bot } from 'lucide-react';
+import { LayoutDashboard, Bot, ClipboardList } from 'lucide-react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../../components/ui/card';
 import { Badge } from '../../components/ui/badge';
 import api from '../../lib/api';
@@ -28,7 +28,8 @@ const BrandAgentsInventory = () => {
 
   const sidebarItems = [
     { path: `/brands/${brandId}/dashboard`, label: 'Dashboard', icon: LayoutDashboard, testId: 'nav-dashboard' },
-    { path: `/brands/${brandId}/agents`, label: 'Agents', icon: Bot, testId: 'nav-agents' }
+    { path: `/brands/${brandId}/agents`, label: 'Agents', icon: Bot, testId: 'nav-agents' },
+    { path: `/brands/${brandId}/reco`, label: 'Reconciliation', icon: ClipboardList, testId: 'nav-reco' }
   ];
 
   useEffect(() => {
@@ -86,7 +87,7 @@ const BrandAgentsInventory = () => {
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6" data-testid="agents-inventory-grid">
-          {allAgents.map((agent) => {
+          {allAgents.filter(agent => !RECO_ROUTE_MAP[agent.name]).map((agent) => {
             const assigned = isAssigned(agent.id);
             
             return (

@@ -4,8 +4,8 @@ import DashboardLayout from '../../components/layout/DashboardLayout';
 import {
   LayoutDashboard, Bot, ArrowLeft, Upload, Download,
   Play, CheckCircle2, XCircle, AlertTriangle, RotateCcw,
-  FileSpreadsheet, Loader2, ChevronDown, ChevronUp, Database, Info, CheckSquare,
-  BarChart3, ArrowRight, Save
+  FileSpreadsheet, Loader2, ChevronDown, ChevronUp, Database, Info,
+  BarChart3, ArrowRight, Save, ClipboardList
 } from 'lucide-react';
 import api from '../../lib/api';
 import { toast } from 'sonner';
@@ -239,7 +239,7 @@ const RecoWorkspace = () => {
   const sidebarItems = [
     { path: `/brands/${brandId}/dashboard`, label: 'Dashboard', icon: LayoutDashboard, testId: 'nav-dashboard' },
     { path: `/brands/${brandId}/agents`, label: 'All Agents', icon: Bot, testId: 'nav-agents' },
-    { path: '/tasks', label: 'Tasks', icon: CheckSquare, testId: 'nav-tasks' },
+    { path: `/brands/${brandId}/reco`, label: 'Reconciliation', icon: ClipboardList, testId: 'nav-reco' },
   ];
 
   if (!config) {
