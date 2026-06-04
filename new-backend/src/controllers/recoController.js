@@ -34,13 +34,32 @@ const { loadCorrectionMap, normalizeNarration } = require('./bankCorrectionsCont
 const parseIndianDate = (dateStr) => {
   if (!dateStr) return null;
   const s = String(dateStr).trim();
-  const match = s.match(/^(\d{1,2})-(\d{1,2})-(\d{4})(.*)?$/);
-  if (match) {
-    const [, day, month, year, rest] = match;
+  if (!s || ['nan', 'nat', 'none', 'null', 'n/a', '-'].includes(s.toLowerCase())) return null;
+
+  // DD-MM-YYYY or DD-MM-YYYY HH:MM:SS
+  const m1 = s.match(/^(\d{1,2})-(\d{1,2})-(\d{4})(.*)?$/);
+  if (m1) {
+    const [, day, month, year, rest] = m1;
     const time = rest ? rest.trim() : '00:00:00';
     return `${year}-${month.padStart(2, '0')}-${day.padStart(2, '0')} ${time}`;
   }
-  return dateStr;
+
+  // DD/MM/YYYY
+  const m2 = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  if (m2) return `${m2[3]}-${m2[2].padStart(2, '0')}-${m2[1].padStart(2, '0')}`;
+
+  // DD/MM/YY — 2-digit year (e.g. 14/05/26 → 2026-05-14)
+  const m3 = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2})$/);
+  if (m3) {
+    const year = parseInt(m3[3], 10) + 2000;
+    return `${year}-${m3[2].padStart(2, '0')}-${m3[1].padStart(2, '0')}`;
+  }
+
+  // YYYY-MM-DD (already ISO)
+  if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10);
+
+  // Anything else (e.g. "INR 7884656.7", "Opening Balance") → null
+  return null;
 };
 
 /**
@@ -308,13 +327,12 @@ const RECO_TYPE_MAP = {
  * Uses execFile (not exec) — no shell expansion, safe with arbitrary file paths.
  * Path resolved from BANK_CLASSIFIER_PATH env var or project-relative default.
  */
-const runUniversalClassifier = (ledgerPath, bankPath, outputPath) => {
+const runUniversalClassifier = (ledgerPath, bankPath, outputPath, correctionsPath) => {
   return new Promise((resolve, reject) => {
     console.log(`[RECO] Executing standalone classifier: ${CLASSIFIER_PATH}`);
-    execFile(
-      'python3',
-      [CLASSIFIER_PATH, '--ledger', ledgerPath, '--bank', bankPath, '--out', outputPath],
-      { timeout: 180000 },
+    const args = ['--ledger', ledgerPath, '--bank', bankPath, '--out', outputPath];
+    if (correctionsPath) args.push('--corrections', correctionsPath);
+    execFile('python3', [CLASSIFIER_PATH, ...args], { timeout: 180000 },
       (error, stdout, stderr) => {
         if (error) {
           console.error(`[RECO] CLI execution error:`, stderr || error.message);
@@ -499,9 +517,36 @@ const runReco = async (req, res) => {
         }
       }
 
-      // 3. Execute Standalone Classifier Script
+      // 3. Write Layer 0 corrections to temp JSON so classify.py checks DB first
+      //    Order inside classify.py: Layer 0 → CoA fuzzy → keywords → Suspense A/c
+      let correctionsPath = null;
+      if (brandId && brandId !== 'demo' && !isDemo) {
+        try {
+          const { Brand } = require('../models/master');
+          const { getBrandConnection } = require('../config/database');
+          const corrBrand = await Brand.findByPk(brandId);
+          if (corrBrand) {
+            const corrSeq = getBrandConnection(corrBrand.db_name);
+            const corrMap = await loadCorrectionMap(brandId, corrSeq);
+            if (Object.keys(corrMap).length > 0) {
+              // Convert to classify.py format: {NARRATION_KEY: {ledger, type}}
+              const corrJson = {};
+              for (const [key, val] of Object.entries(corrMap)) {
+                corrJson[key] = { ledger: val.ledger, type: val.type || null };
+              }
+              correctionsPath = path.join(jobDir, 'corrections.json');
+              fs.writeFileSync(correctionsPath, JSON.stringify(corrJson));
+              console.log(`[RECO-CORRECTIONS] Wrote ${Object.keys(corrJson).length} Layer 0 corrections for classify.py`);
+            }
+          }
+        } catch (corrErr) {
+          console.warn('[RECO-CORRECTIONS] Non-fatal error writing corrections:', corrErr.message);
+        }
+      }
+
+      // 4. Execute Standalone Classifier Script
       const outputPath = path.join(jobDir, 'output.xlsx');
-      await runUniversalClassifier(ledgerPath, bankPath, outputPath);
+      await runUniversalClassifier(ledgerPath, bankPath, outputPath, correctionsPath);
 
       if (!fs.existsSync(outputPath)) {
         throw new Error('Standalone classifier failed to generate output spreadsheet.');

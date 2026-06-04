@@ -289,6 +289,19 @@ class BankClassifier:
         # corrections: {normalized_narration_key → {"ledger": str, "type": str|None}}
         # Loaded from <brand>_corrections.json sidecar. Applied before any fuzzy step.
         self.corrections = corrections or {}
+        # Pre-build stripped-key index: same corrections keyed by vendor portion only
+        # (trailing month/txn-ID removed). Used as fallback in STEP 0 for recurring payments.
+        self.stripped_corrections = {}
+        _strip_re = re.compile(
+            r'[-\s]+(FCM|IFT)-?[A-Z0-9]{6,}$'
+            r'|[\s\-]+(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)\d{0,2}$'
+            r'|\s+\d{2,4}$',
+            re.IGNORECASE
+        )
+        for full_key, val in self.corrections.items():
+            stripped = _strip_re.sub('', full_key).strip()
+            if stripped and stripped != full_key:
+                self.stripped_corrections.setdefault(stripped, val)
         self._build_indices()
 
     def _build_indices(self):
@@ -517,9 +530,24 @@ class BankClassifier:
         # CoA validation: skip stale corrections if ledger no longer in master.
         # ------------------------------------------------------------------
         if self.corrections:
-            key = orig.strip().upper()
-            key = ' '.join(key.split())  # collapse whitespace
+            key = ' '.join(orig.strip().upper().split())
+
+            # Primary: exact match
             fix = self.corrections.get(key)
+
+            # Secondary: strip trailing date/month/transaction-ID suffixes and check
+            # pre-built stripped_corrections index (built from same corrections dict).
+            # Handles recurring: "VENDOR- SAL APR26" matches "VENDOR- SAL FEB26" stored key.
+            if not fix:
+                stripped = re.sub(
+                    r'[-\s]+(FCM|IFT)-?[A-Z0-9]{6,}$'
+                    r'|[\s\-]+(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)\d{0,2}$'
+                    r'|\s+\d{2,4}$',
+                    '', key, flags=re.IGNORECASE
+                ).strip()
+                if stripped and stripped != key:
+                    fix = self.stripped_corrections.get(stripped)
+
             if fix and fix.get('ledger'):
                 # Verify ledger still exists in the current CoA
                 if fix['ledger'] in self.master_ledgers:
@@ -680,6 +708,75 @@ class BankClassifier:
                 or self._suspense_ledger
             )
             return {"ledger": ledger, "type": txn_type, "confidence": "High", "rule": "ESIC Match"}
+
+        # ------------------------------------------------------------------
+        # STEP 5.5 — Early CoA entity match (runs BEFORE generic keyword rules)
+        # Extract entity from the narration first, then try a high-confidence
+        # anchored fuzzy match against the Chart of Accounts.  If score ≥ 87
+        # we return immediately — CoA wins over Rent / Interest / Bank-Charges
+        # keywords.  A weaker match (< 87) sets `entity` for later steps and
+        # falls through so keyword rules still act as safety nets.
+        # ------------------------------------------------------------------
+        entity = ""
+        remark = ""
+        is_upi = bool(re.search(r'\bUPI\b', orig_upper))
+        _is_chq = orig_upper.startswith("CHQ PAID") or "MICR INWARD" in orig_upper
+
+        if _is_chq:
+            entity = _parse_chq(orig_upper)
+        elif is_upi:
+            entity = _parse_upi(orig_upper)
+        elif "IB NEFT" in orig_upper or "SC NEFT" in orig_upper or "IB IFT" in orig_upper:
+            entity, remark = _parse_ib_neft(orig_upper)
+        elif orig_upper.startswith("IFT-"):
+            entity = _parse_ift(orig_upper)
+        elif "BDP-" in orig_upper:
+            entity = _parse_bdp(orig_upper)[0]
+        elif re.match(r'^N/\d+/', orig_upper):
+            entity = _parse_indusind_neft(orig_upper)
+        elif orig_upper.startswith("R/") and orig_upper.count('/') >= 3:
+            entity = _parse_indusind_rtgs_credit(orig_upper)
+        elif orig_upper.startswith("BILL/") and orig_upper.count('/') >= 3:
+            _bparts = orig_upper.split('/')
+            _bill_type   = _bparts[2].strip() if len(_bparts) >= 3 else ""
+            _bill_entity = _bparts[3].strip() if len(_bparts) >= 4 else ""
+            entity = (_bill_entity + " CREDIT CARD") if "CREDIT" in _bill_type and _bill_entity else _bill_entity
+        elif re.match(r'^(?:NEFT|RTGS|IMPS)\s+[A-Z0-9]{8,}\s+', orig_upper):
+            m = re.match(r'^(?:NEFT|RTGS|IMPS)\s+[A-Z0-9]{8,}\s+(.+)', orig_upper)
+            if m:
+                entity = m.group(1).split('(')[0].strip()[:50].strip()
+        elif '-' in orig:
+            _bank_prefixes = {'NEFT', 'RTGS', 'IMPS', 'UPI', 'IB', 'SC', 'CHQ', 'IFT',
+                              'BDP', 'ETAX', 'GBO', 'INT', 'CHRG', 'JYOTI', 'VALUE'}
+            dash_idx = orig_upper.index('-')
+            possible = orig_upper[:dash_idx].strip()
+            first_word = possible.split()[0] if possible.split() else ''
+            if len(possible) > 5 and first_word not in _bank_prefixes and not possible[0].isdigit():
+                entity = possible
+        entity = entity.strip()
+
+        # High-confidence CoA anchored match — runs before keyword rules
+        if entity and len(entity) > 4 and self.master_ledgers:
+            _fw = entity.split()[0].lower()
+            if _fw and len(_fw) >= 4:
+                _fw_pat = re.compile(r'\b' + re.escape(_fw) + r'\b', re.IGNORECASE)
+                _anchored_early = [l for l in self.master_ledgers if _fw_pat.search(l)]
+            else:
+                _anchored_early = []
+            if _anchored_early:
+                def _coa_score(c):
+                    e_n = _expand_abbrevs(entity)
+                    c_n = _expand_abbrevs(c)
+                    s1  = fuzz.token_set_ratio(e_n, c_n)
+                    s2  = fuzz.token_sort_ratio(e_n, c_n)
+                    s   = round(0.6 * s1 + 0.4 * s2) if len(e_n) > 8 else round(0.85 * s1 + 0.15 * s2)
+                    if is_credit and any(k in c.lower() for k in ['collection', 'seller receipt']): s += 10
+                    return s
+                _best_early = max(_anchored_early, key=_coa_score)
+                _score_early = _coa_score(_best_early)
+                if _score_early >= 87:
+                    return {"ledger": _best_early, "type": txn_type,
+                            "confidence": "High", "rule": "CoA Entity Match"}
 
         # ------------------------------------------------------------------
         # STEP 6 — Rent / godown  (must run BEFORE bank charges to prevent
@@ -1182,12 +1279,20 @@ def load_bank_statement(filepath: str) -> tuple:
 
     header_idx = None
     for i, row in df_raw.iterrows():
-        if i > 30:
+        if i > 60:   # scan up to row 60 — some banks have 30+ header rows
             break
         vals = [str(v).lower().strip() for v in row.values if pd.notna(v)]
-        has_date  = any("date" in v or "txn" in v for v in vals)
-        has_desc  = any("desc" in v or "narration" in v or "particulars" in v for v in vals)
-        has_amt   = any(any(k in v for k in ["debit", "credit", "withdrawal", "deposit", "amount"]) for v in vals)
+        has_date = any("date" in v or "txn" in v for v in vals)
+        has_desc = any(
+            "desc" in v or "narration" in v or "particulars" in v
+            or "detail" in v or "remark" in v or "transaction" in v
+            for v in vals
+        )
+        has_amt = any(
+            any(k in v for k in ["debit", "credit", "withdrawal", "withdrawl",
+                                  "deposit", "amount", "dr.", "cr."])
+            for v in vals
+        )
         if (has_date and has_desc) or (has_desc and has_amt):
             header_idx = i
             break
@@ -1202,16 +1307,31 @@ def load_bank_statement(filepath: str) -> tuple:
     col_map = {}
     for c in cols:
         cl = c.lower()
-        if "txn_date" not in col_map and any(k in cl for k in ["txn date", "transaction date", "value date", "date"]):
+        if "txn_date" not in col_map and any(k in cl for k in [
+                "txn date", "transaction date", "value date", "tran date",
+                "posting date", "entry date", "date"]):
             col_map["txn_date"] = c
-        elif "description" not in col_map and any(k in cl for k in ["description", "narration", "particulars", "details"]):
+        elif "description" not in col_map and any(k in cl for k in [
+                "description", "narration", "particulars", "details",
+                "remarks", "transaction remark", "txn remark",
+                "cheque detail", "transaction detail"]):
             col_map["description"] = c
-        elif "debit" not in col_map and any(k in cl for k in ["withdrawal", "debit", "dr amount"]):
+        elif "debit" not in col_map and any(k in cl for k in [
+                "withdrawal", "withdrawl", "debit", "dr amount", "debit amount",
+                "withdrawal amount", "withdrawl amt", "paid out", "dr."]):
             col_map["debit"] = c
-        elif "credit" not in col_map and any(k in cl for k in ["deposit", "credit", "cr amount"]):
+        elif "credit" not in col_map and any(k in cl for k in [
+                "deposit", "credit", "cr amount", "credit amount",
+                "deposit amount", "paid in", "cr."]):
             col_map["credit"] = c
         elif "balance" not in col_map and "balance" in cl:
             col_map["balance"] = c
+        # Single-column amount + Dr/Cr indicator (Kotak, some ICICI formats)
+        elif "amount" not in col_map and re.search(r'^amount(\s*\(inr\))?$', cl.strip()):
+            col_map["amount"] = c
+        elif "dr_cr" not in col_map and any(k in cl for k in [
+                "dr / cr", "dr/cr", "cr/dr", "txn type", "type", "crdr"]):
+            col_map["dr_cr"] = c
 
     return df, col_map, target
 
@@ -1345,6 +1465,8 @@ def main():
                         help="Path to save the classified output Excel file")
     parser.add_argument("--brand",  default="Brand",
                         help="Brand name for the output filename/summary (default: Brand)")
+    parser.add_argument("--corrections", default=None,
+                        help="Path to corrections JSON file: {NARRATION_KEY: {ledger, type}}")
     args = parser.parse_args()
 
     print(f"[1/4] Loading ledger master: {args.ledger}")
@@ -1360,19 +1482,25 @@ def main():
               "Check that the bank file has a clear header row within the first 30 rows.", file=sys.stderr)
         sys.exit(1)
 
-    # Load per-brand corrections from sidecar JSON if present.
-    # File: corrections/<brand-slug>_corrections.json
+    # Load per-brand corrections (Layer 0 — highest priority, checked before CoA/fuzzy).
+    # Prefer --corrections <path> if provided by caller (Node.js writes this from DB).
+    # Fall back to sidecar convention: corrections/<brand-slug>_corrections.json
     # Format: {"NORMALIZED NARRATION KEY": {"ledger": "Ledger Name", "type": "Payment"}}
     import json as _json
     corrections = {}
-    _slug = re.sub(r'[^A-Za-z0-9_-]', '-', args.brand.strip()).lower()
-    _corr_path = os.path.join(os.path.dirname(args.output), '..', 'corrections', f'{_slug}_corrections.json')
-    _corr_path = os.path.normpath(_corr_path)
-    if os.path.exists(_corr_path):
+    _corr_path = None
+    if args.corrections and os.path.exists(args.corrections):
+        _corr_path = args.corrections
+    else:
+        _slug = re.sub(r'[^A-Za-z0-9_-]', '-', args.brand.strip()).lower()
+        _sidecar = os.path.join(os.path.dirname(args.output), '..', 'corrections', f'{_slug}_corrections.json')
+        if os.path.exists(os.path.normpath(_sidecar)):
+            _corr_path = os.path.normpath(_sidecar)
+    if _corr_path:
         try:
             with open(_corr_path, 'r', encoding='utf-8') as _f:
                 corrections = _json.load(_f)
-            print(f"      → Loaded {len(corrections)} stored corrections for brand '{args.brand}'")
+            print(f"      → Loaded {len(corrections)} Layer 0 corrections (checked before CoA/fuzzy)")
         except Exception as _e:
             print(f"      → Warning: could not load corrections file: {_e}")
 
@@ -1380,16 +1508,41 @@ def main():
     classifier = BankClassifier(ledgers, corrections=corrections)
     rows, summary = [], {"High": 0, "Medium": 0, "Low": 0}
 
-    date_col  = col_map.get("txn_date")
-    desc_col  = col_map.get("description")
-    debit_col = col_map.get("debit")
+    date_col   = col_map.get("txn_date")
+    desc_col   = col_map.get("description")
+    debit_col  = col_map.get("debit")
     credit_col = col_map.get("credit")
-    bal_col   = col_map.get("balance")
+    bal_col    = col_map.get("balance")
+    amount_col = col_map.get("amount")   # Kotak: single Amount column
+    dr_cr_col  = col_map.get("dr_cr")   # Kotak: Dr/Cr indicator column
 
+    in_summary = False
     for _, row in df_bank.iterrows():
         txn_date = row.get(date_col, "") if date_col else ""
         desc     = row.get(desc_col)
+
+        # Skip rows where both date and description are empty
         if pd.isna(desc) and pd.isna(txn_date):
+            continue
+
+        # Compute raw strings early — used by all filters below
+        date_raw = str(txn_date).strip() if pd.notna(txn_date) else ""
+        desc_raw = str(desc).strip() if pd.notna(desc) else ""
+
+        # Stop at STATEMENT SUMMARY / footer
+        any_cell = " ".join(str(v) for v in row.values if pd.notna(v))
+        if re.search(r'statement\s+summary', any_cell, re.IGNORECASE):
+            break
+
+        # Skip Opening Balance / Closing Balance / Total rows (not transactions)
+        if re.match(r'^\s*(opening\s+bal|closing\s+bal|brought\s+forward|carried\s+forward'
+                    r'|total\s*$|grand\s+total|balance\s+b/f|balance\s+c/f)', desc_raw, re.IGNORECASE):
+            continue
+        if re.match(r'^\*+$', date_raw) or re.match(r'^\*+$', desc_raw):
+            continue
+
+        # Skip rows with no valid date — catches totals, footers, metadata rows
+        if not date_raw or date_raw.lower() in ("nan", "nat", "none", ""):
             continue
 
         def format_excel_date(val):
@@ -1407,7 +1560,7 @@ def main():
             except Exception:
                 pass
             val_str = str(val).strip()
-            for fmt in ["%Y-%m-%d %H:%M:%S", "%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y", "%Y/%m/%d"]:
+            for fmt in ["%Y-%m-%d %H:%M:%S", "%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y", "%Y/%m/%d", "%d/%m/%y", "%d-%m-%y"]:
                 try:
                     dt = datetime.datetime.strptime(val_str.split(".")[0], fmt)
                     return dt.strftime("%d-%m-%Y")
@@ -1428,6 +1581,17 @@ def main():
         debit   = safe_float(row.get(debit_col))  if debit_col  else 0.0
         credit  = safe_float(row.get(credit_col)) if credit_col else 0.0
         balance = safe_float(row.get(bal_col))    if bal_col    else 0.0
+
+        # Kotak / single-column format: Amount + Dr/Cr indicator
+        # Amount is negative for Dr (debit) or positive for Cr (credit) in some formats.
+        # Dr/Cr column explicitly says "Dr" or "Cr".
+        if debit == 0.0 and credit == 0.0 and amount_col:
+            amt = safe_float(row.get(amount_col))
+            dr_cr_val = str(row.get(dr_cr_col, "")).strip().lower() if dr_cr_col else ""
+            if dr_cr_val == "dr" or amt < 0:
+                debit = abs(amt)
+            elif dr_cr_val == "cr" or amt > 0:
+                credit = abs(amt)
         desc_str = str(desc).strip() if pd.notna(desc) else ""
 
         result = classifier.classify(desc_str, debit, credit)

@@ -256,27 +256,33 @@ const uploadOutputExcel = async (req, res) => {
         ws.getRow(rowNum).values.forEach((cell, i) => {
           const name = cellText(cell).toLowerCase();
           if (!name) return;
-          // Narration / description — any column whose name contains these keywords
+          // Narration / description
           if (!colIndex.description &&
               (name.includes('description') || name.includes('narration') ||
                name.includes('particulars') || name.includes('transaction detail') ||
-               name === 'details' || name === 'remarks')) {
+               name.includes('transaction remark') || name.includes('txn remark') ||
+               name === 'details' || name === 'remarks' || name === 'cheque details')) {
             colIndex.description = i;
           }
-          // Ledger — any column whose name contains "ledger" or "tally" (e.g. "Ledger name as per tally")
+          // Ledger / account name — "ledger", "tally", "account", "chart of account", "gl account"
           if (!colIndex.ledgerName &&
               (name.includes('ledger') || name.includes('tally') ||
-               name === 'account name' || name === 'account')) {
+               name.includes('chart of account') || name.includes('gl account') ||
+               name === 'account name' || name === 'account' || name === 'gl')) {
             colIndex.ledgerName = i;
           }
-          // Type (optional)
+          // Type / voucher type
           if (!colIndex.txnType &&
               (name === 'type' || name.includes('txn type') || name.includes('transaction type') ||
-               name.includes('vch type') || name.includes('predicted_type'))) {
+               name.includes('vch type') || name.includes('voucher type') ||
+               name.includes('predicted_type') || name === 'dr/cr' || name === 'dr / cr')) {
             colIndex.txnType = i;
           }
-          // Confidence (optional)
-          if (name === 'confidence') colIndex.confidence = i;
+          // Confidence
+          if (!colIndex.confidence &&
+              (name === 'confidence' || name.includes('confidence') || name === 'score')) {
+            colIndex.confidence = i;
+          }
         });
         return colIndex;
       };
