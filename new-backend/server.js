@@ -8,7 +8,7 @@ dotenv.config();
 const PORT = process.env.PORT || 8001;
 
 /**
- * Ensure the 4 RECO agents exist in the master agents table.
+ * Ensure all 5 RECO agents exist in the master agents table.
  * Safe to run on every startup — ON CONFLICT (name) DO NOTHING is idempotent.
  */
 const seedMasterAgents = async () => {
@@ -21,10 +21,12 @@ const seedMasterAgents = async () => {
       ('d0000000-0000-0000-0000-000000000003', 'gstr_3b_tally_entry',
        'Parse GSTR-3B and generate ready-to-post Tally journal entries', '[]'),
       ('d0000000-0000-0000-0000-000000000004', 'universal_bank_statement',
-       'Brand-agnostic bank statement classifier mapped to Tally chart of accounts', '[]')
+       'Brand-agnostic bank statement classifier mapped to Tally chart of accounts', '[]'),
+      ('d0000000-0000-0000-0000-000000000005', 'gstr_1_vs_books',
+       'GSTR-1 outward supplies vs Tally sales register reconciliation', '[]')
     ON CONFLICT (name) DO NOTHING
   `);
-  console.log('[SEED] RECO agents seeded into colonel-master.');
+  console.log('[SEED] 5 RECO agents seeded into colonel-master.');
 };
 
 /**

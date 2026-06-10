@@ -7,7 +7,7 @@ import {
 } from 'recharts';
 import {
   ArrowLeft, Download, CheckCircle2, AlertTriangle, HelpCircle,
-  BarChart3, Loader2, TrendingUp, LayoutDashboard, FileSearch2, Map,
+  BarChart3, Loader2, TrendingUp, LayoutDashboard, Bot, Map,
 } from 'lucide-react';
 import api from '../../lib/api';
 import { toast } from 'sonner';
@@ -127,7 +127,7 @@ const RecoJobDashboard = () => {
 
   const sidebarItems = [
     { path: `/brands/${brandId}/dashboard`, label: 'Dashboard',  icon: LayoutDashboard },
-    { path: `/brands/${brandId}/reco`,      label: 'Reco Suite', icon: FileSearch2 },
+    { path: `/brands/${brandId}/agents`,    label: 'All Agents', icon: Bot },
   ];
 
   useEffect(() => {

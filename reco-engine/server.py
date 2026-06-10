@@ -16,7 +16,10 @@ from urllib.parse import parse_qs, urlparse
 from uuid import uuid4
 
 from openpyxl import Workbook
-from openpyxl.styles import Font, PatternFill
+from openpyxl.styles import (
+    Font, PatternFill, Alignment, Border, Side, numbers as xl_numbers
+)
+from openpyxl.formatting.rule import CellIsRule, FormulaRule
 
 ROOT = Path(__file__).resolve().parent
 STATIC = ROOT / "static"
@@ -27,8 +30,11 @@ from recon.core import MatchResult, reconcile, summarize
 from recon.gstr_2a_2b_books import read_three_way_uploads, reconcile_three_way, summarize_three_way
 from recon.gstr_3b_vs_2b import read_3b_2b_uploads, reconcile_3b_vs_2b, summarize_3b_vs_2b, build_month_pivot
 from recon.gstr_1_vs_books import (
-    read_gstr1_vs_books_uploads, reconcile_monthly_summary,
-    reconcile_b2b, reconcile_b2c, summarize_gstr1_reco,
+    read_octa_excel, read_tally_sales_raw, read_credit_note_raw,
+    parse_gstr1_pdf_monthly,
+    extract_gstr3b_monthly, aggregate_gstr1_monthly, aggregate_books_monthly,
+    build_monthly_comparison, reconcile_b2b_new, reconcile_b2c_new,
+    df_to_records, build_summary,
 )
 from recon.parsers import read_upload, read_excel_rows, normalize_rows
 from recon.bank_reco import process_bank_statement
@@ -134,27 +140,162 @@ class ReconciliationHandler(BaseHTTPRequestHandler):
                 return
 
             if reco_type == "gstr_1_vs_books":
-                books, gstr1_b2b, gstr1_b2c = read_gstr1_vs_books_uploads(files)
-                monthly = reconcile_monthly_summary(books, gstr1_b2b, gstr1_b2c, tolerance=tolerance)
-                b2b_results = reconcile_b2b(books, gstr1_b2b, tolerance=tolerance)
-                b2c_results = reconcile_b2c(books, gstr1_b2c, tolerance=tolerance)
-                all_results = [r.as_dict() for r in b2b_results] + [r.as_dict() for r in b2c_results]
+                octa_file   = files.get("gstr1_octa") or files.get("gstr1")
+                tally_file  = files.get("tally_sales")
+                pdf_file    = files.get("gstr1_pdf")
+                cn_file     = files.get("credit_note")
+                if not octa_file:
+                    self.write_json({"error": "Upload the GSTR-1 OCTA Report file (gstr1_octa)."}, 400)
+                    return
+                if not tally_file:
+                    self.write_json({"error": "Upload the Tally Sales Register file (tally_sales)."}, 400)
+                    return
+
+                # Read inputs
+                gstr1_df, gstr3b_df, gstr2b_df = read_octa_excel(octa_file)
+                tally_df = read_tally_sales_raw(tally_file)
+                cn_df = read_credit_note_raw(cn_file) if cn_file else None
+
+                # Step 0 (optional): GSTR-1 Pivot
+                pdf_monthly = None
+                if pdf_file and pdf_file.get("content"):
+                    pdf_monthly = parse_gstr1_pdf_monthly(pdf_file["content"])
+
+                # Steps 1–4: monthly comparison sections
+                gstr1_monthly   = aggregate_gstr1_monthly(gstr1_df)
+                gstr3b_monthly  = extract_gstr3b_monthly(gstr3b_df)
+                books_all       = aggregate_books_monthly(tally_df)
+                books_b2b       = aggregate_books_monthly(tally_df, category="B2B")
+                books_b2c       = aggregate_books_monthly(tally_df, category="B2C")
+
+                # Filter GSTR-1 B2B/B2C monthly totals
+                import re as _re
+                gstr1_b2b_monthly = {}
+                gstr1_b2c_monthly = {}
+                if not gstr1_df.empty:
+                    from recon.gstr_1_vs_books import _find_col, _f, _norm_month, _FY_MONTHS, _zero_amounts, _add_amounts
+                    period_col  = _find_col(gstr1_df, ["Tax Period", "Period"])
+                    gstin_col   = _find_col(gstr1_df, ["Customer GSTIN", "GSTIN of Recipient"])
+                    taxable_col = _find_col(gstr1_df, ["Item Taxable Value", "Taxable Value"])
+                    igst_col    = _find_col(gstr1_df, ["IGST", "Integrated Tax"])
+                    cgst_col    = _find_col(gstr1_df, ["CGST", "Central Tax"])
+                    sgst_col    = _find_col(gstr1_df, ["SGST", "State Tax"])
+                    from collections import defaultdict as _dd
+                    _b2b = _dd(_zero_amounts)
+                    _b2c = _dd(_zero_amounts)
+                    for _, row in gstr1_df.iterrows():
+                        from recon.gstr_1_vs_books import _col_val
+                        month = _norm_month(_col_val(row, period_col))
+                        if month not in _FY_MONTHS:
+                            continue
+                        gstin = str(_col_val(row, gstin_col, "")).strip()
+                        is_b2b = bool(gstin) and len(_re.sub(r"[^A-Z0-9]","",gstin.upper())) == 15
+                        bucket = _b2b[month] if is_b2b else _b2c[month]
+                        _add_amounts(bucket,
+                            taxable=_f(_col_val(row, taxable_col, 0)),
+                            igst=_f(_col_val(row, igst_col, 0)),
+                            cgst=_f(_col_val(row, cgst_col, 0)),
+                            sgst=_f(_col_val(row, sgst_col, 0)))
+                    gstr1_b2b_monthly = dict(_b2b)
+                    gstr1_b2c_monthly = dict(_b2c)
+
+                gst_reco_sections = {
+                    "gstr1_vs_gstr3b":    build_monthly_comparison(gstr1_monthly,  gstr3b_monthly,  "gstr1", "gstr3b"),
+                    "books_all_vs_gstr1": build_monthly_comparison(books_all,       gstr1_monthly,   "books", "gstr1"),
+                    "books_b2b_vs_gstr1": build_monthly_comparison(books_b2b,       gstr1_b2b_monthly, "books", "gstr1"),
+                    "books_b2c_vs_gstr1": build_monthly_comparison(books_b2c,       gstr1_b2c_monthly, "books", "gstr1"),
+                }
+
+                # Step 5: B2B Reco
+                b2b_rows = reconcile_b2b_new(tally_df, gstr1_df, tolerance)
+
+                # Step 6: B2C Reco
+                b2c_rows = reconcile_b2c_new(tally_df, gstr1_df, tolerance)
+
+                # GSTR-1 Pivot (Step 0)
+                pivot_rows = None
+                if pdf_monthly and gstr1_monthly:
+                    pivot_rows = build_monthly_comparison(gstr1_monthly, pdf_monthly, "excel", "pdf")
+
+                # Slim b2b rows for UI display (key fields only — avoids sending 52-col Tally data)
+                from recon.gstr_1_vs_books import _find_col as _fc2
+                _inv_k  = _fc2(tally_df, ["Voucher No.", "Voucher No", "Invoice No", "Doc No", "Bill No"])
+                _date_k = _fc2(tally_df, ["Date", "Invoice Date", "Voucher Date"])
+                _part_k = _fc2(tally_df, ["Particulars", "Party Name", "Buyer", "Ledger Name"])
+                _gst_k  = _fc2(tally_df, ["GSTIN", "GSTIN/UIN", "Buyer GSTIN"])
+                _tax_k  = _fc2(tally_df, ["Total Sales", "Taxable Value", "Taxable Amount"])
+                _igst_k = _fc2(tally_df, ["Total IGST", "IGST"])
+                _cgst_k = _fc2(tally_df, ["Total CGST", "CGST"])
+                _sgst_k = _fc2(tally_df, ["Total SGST", "SGST"])
+                b2b_ui_rows = [{
+                    "date":         _r.get(_date_k),
+                    "inv_no":       _r.get(_inv_k),
+                    "party":        _r.get(_part_k),
+                    "gstin":        _r.get(_gst_k),
+                    "t_taxable":    _r.get(_tax_k, 0),
+                    "t_igst":       _r.get(_igst_k, 0),
+                    "t_cgst":       _r.get(_cgst_k, 0),
+                    "t_sgst":       _r.get(_sgst_k, 0),
+                    "g1_inv":       _r.get("_gstr1_inv_no"),
+                    "g1_taxable":   _r.get("_gstr1_taxable", 0),
+                    "g1_igst":      _r.get("_gstr1_igst", 0),
+                    "g1_cgst":      _r.get("_gstr1_cgst", 0),
+                    "g1_sgst":      _r.get("_gstr1_sgst", 0),
+                    "diff_taxable": _r.get("_diff_taxable", 0),
+                    "diff_igst":    _r.get("_diff_igst", 0),
+                    "diff_cgst":    _r.get("_diff_cgst", 0),
+                    "diff_sgst":    _r.get("_diff_sgst", 0),
+                    "remark":       _r.get("_remark"),
+                } for _r in b2b_rows]
+
+                import base64
+                from io import BytesIO as _BytesIO
                 job_id = uuid4().hex
                 payload = {
                     "job_id": job_id,
                     "reco_type": reco_type,
-                    "summary": summarize_gstr1_reco(b2b_results, b2c_results, monthly),
-                    "monthly_summary": [m.as_dict() for m in monthly],
+                    "summary": build_summary(b2b_rows, b2c_rows),
                     "counts": {
-                        "books_records": len(books),
-                        "gstr1_b2b_records": len(gstr1_b2b),
-                        "gstr1_b2c_records": len(gstr1_b2c),
-                        "result_rows": len(all_results),
+                        "tally_rows":    len(tally_df),
+                        "gstr1_rows":    len(gstr1_df),
+                        "b2b_reco_rows": len(b2b_rows),
+                        "b2c_reco_rows": len(b2c_rows),
+                        "total_records": len(b2b_rows) + len(b2c_rows),
                     },
-                    "results": all_results,
+                    "results": [],  # not used by frontend for this agent
+                    # Private: reco data used by workbook builder
+                    "_gst_reco_sections": gst_reco_sections,
+                    "_b2b_reco_rows": b2b_rows,
+                    "_b2c_reco_rows": b2c_rows,
+                    "_pivot_rows": pivot_rows,
+                    "_tally_cols": list(tally_df.columns),
+                    # Raw DataFrames as records for passthrough sheets
+                    "_raw_gstr1":  df_to_records(gstr1_df),
+                    "_raw_gstr2b": df_to_records(gstr2b_df),
+                    "_raw_gstr3b": df_to_records(gstr3b_df),
+                    "_raw_tally":  df_to_records(tally_df),
+                    "_raw_cn":     df_to_records(cn_df) if cn_df is not None else None,
                 }
+                # Pre-build workbook now (during upload) so download is instant
+                try:
+                    _wb = build_gstr1_workbook(
+                        [], monthly_summary=[], summary=payload["summary"],
+                        counts=payload["counts"], payload=payload,
+                    )
+                    _buf = _BytesIO()
+                    _wb.save(_buf)
+                    payload["_xlsx_bytes"] = _buf.getvalue()
+                except Exception as _e:
+                    import logging as _log
+                    _log.getLogger(__name__).error("Pre-build workbook failed: %s", _e)
+                    payload["_xlsx_bytes"] = None
                 JOBS[job_id] = payload
-                self.write_json(payload)
+                # Return only public fields to frontend (plus UI display data)
+                public = {k: v for k, v in payload.items() if not k.startswith("_")}
+                public["gst_reco_sections"] = gst_reco_sections
+                public["b2b_ui_rows"] = b2b_ui_rows
+                public["b2c_rows"] = b2c_rows
+                self.write_json(public)
                 return
 
             if reco_type == "bank_reco":
@@ -401,19 +542,22 @@ class ReconciliationHandler(BaseHTTPRequestHandler):
         if not payload:
             self.write_json({"error": "Job not found"}, 404)
             return
-        workbook = build_workbook(
-            payload["results"],
-            payload["summary"],
-            payload["counts"],
-            payload.get("reco_type", "gst_2b_purchase"),
-            pivot=payload.get("pivot"),
-            payload=payload,
-        )
-        from io import BytesIO
-
-        buffer = BytesIO()
-        workbook.save(buffer)
-        data = buffer.getvalue()
+        # Use pre-built bytes when available (avoids timeout for large workbooks)
+        if payload.get("_xlsx_bytes"):
+            data = payload["_xlsx_bytes"]
+        else:
+            workbook = build_workbook(
+                payload["results"],
+                payload["summary"],
+                payload["counts"],
+                payload.get("reco_type", "gst_2b_purchase"),
+                pivot=payload.get("pivot"),
+                payload=payload,
+            )
+            from io import BytesIO
+            buffer = BytesIO()
+            workbook.save(buffer)
+            data = buffer.getvalue()
         self.send_response(200)
         reco_type = payload.get("reco_type", "gst_2b_purchase")
         if reco_type == "bank_reco":
@@ -451,12 +595,8 @@ def build_workbook(results: list[dict], summary: dict[str, int], counts: dict[st
     if reco_type == "bank_reco":
         return build_bank_reco_workbook(results, summary, counts)
     if reco_type == "gstr_1_vs_books":
-        p = payload or {}
         return build_gstr1_workbook(
-            p.get("results", results),
-            p.get("monthly_summary", []),
-            summary,
-            counts,
+            results, monthly_summary=[], summary=summary, counts=counts, payload=payload
         )
     if reco_type == "gstr_3b_tally_entry":
         return build_gstr3b_tally_workbook((payload or {}).get("_parsed", {}), results)
@@ -849,127 +989,556 @@ def build_gstr1_workbook(
     monthly_summary: list[dict],
     summary: dict[str, int],
     counts: dict[str, int],
+    payload: dict | None = None,
 ) -> Workbook:
-    workbook = Workbook()
+    """
+    Build the GSTR-1 vs Books output workbook (9 sheets).
+    Sheet order:
+      1. GST Reco         — 4-section master summary
+      2. GSTR-1 Pivot     — (only when PDF uploaded)
+      3. B2B Reco         — invoice-level, all Tally columns
+      4. B2C Reco         — state+rate aggregation
+      5. Final GSTR-1     — raw GSTR-1 data
+      6. GSTR2B           — raw GSTR-2B data
+      7. GSTR3B           — raw GSTR-3B data
+      8. Sales Register   — raw Tally data
+      9. Credit Note      — (only when credit note uploaded)
+    """
+    p = payload or {}
+    sections      = p.get("_gst_reco_sections") or {}
+    b2b_rows      = p.get("_b2b_reco_rows") or []
+    b2c_rows      = p.get("_b2c_reco_rows") or []
+    pivot_rows    = p.get("_pivot_rows")
+    tally_cols    = p.get("_tally_cols") or []
+    raw_gstr1     = p.get("_raw_gstr1") or []
+    raw_gstr2b    = p.get("_raw_gstr2b") or []
+    raw_gstr3b    = p.get("_raw_gstr3b") or []
+    raw_tally     = p.get("_raw_tally") or []
+    raw_cn        = p.get("_raw_cn")
 
-    # --- Sheet 1: Monthly Summary ---
-    ws_monthly = workbook.active
-    ws_monthly.title = "Monthly Summary"
-    monthly_headers = [
-        "Month", "Status",
-        "Books Taxable", "GSTR-1 Taxable", "Diff Taxable",
-        "Books CGST", "GSTR-1 CGST", "Diff CGST",
-        "Books SGST", "GSTR-1 SGST", "Diff SGST",
-        "Books IGST", "GSTR-1 IGST", "Diff IGST",
+    wb = Workbook()
+
+    # -----------------------------------------------------------------------
+    # Sheet 1: GST Reco (master summary — 4 sections)
+    # -----------------------------------------------------------------------
+    ws = wb.active
+    ws.title = "GST Reco"
+    ws.sheet_view.showGridLines = False
+
+    _section_configs = [
+        ("Sales Reco",                "gstr1_vs_gstr3b",    "GSTR-1",        "GSTR-3B"),
+        ("As per books (All sales)",  "books_all_vs_gstr1", "As per books",   "GSTR-1 (All sales)"),
+        ("As per books B2B",          "books_b2b_vs_gstr1", "As per books B2B", "GSTR-1 B2B"),
+        ("As per books B2C",          "books_b2c_vs_gstr1", "As per books B2C", "GSTR-1 B2C"),
     ]
-    ws_monthly.append(monthly_headers)
-    for row in monthly_summary:
-        ws_monthly.append([
-            row.get("month", ""),
-            row.get("status", ""),
-            row.get("books_taxable", 0), row.get("gstr1_taxable", 0), row.get("diff_taxable", 0),
-            row.get("books_cgst", 0), row.get("gstr1_cgst", 0), row.get("diff_cgst", 0),
-            row.get("books_sgst", 0), row.get("gstr1_sgst", 0), row.get("diff_sgst", 0),
-            row.get("books_igst", 0), row.get("gstr1_igst", 0), row.get("diff_igst", 0),
-        ])
-    style_header(ws_monthly)
 
-    # --- Sheet 2: B2B Reconciliation ---
-    b2b_rows = [r for r in results if r.get("reco_level") == "B2B"]
-    ws_b2b = workbook.create_sheet("B2B Reconciliation")
-    b2b_headers = [
-        "Category", "Confidence",
-        "Books Invoice No", "Books Date", "Books Party", "Books GSTIN",
-        "GSTR-1 Invoice No", "GSTR-1 Date", "GSTR-1 Party", "GSTR-1 GSTIN",
-        "Books Taxable", "GSTR-1 Taxable", "Diff Taxable",
-        "Books CGST", "GSTR-1 CGST",
-        "Books SGST", "GSTR-1 SGST",
-        "Books IGST", "GSTR-1 IGST",
-        "Mismatches", "Suggested Action",
+    current_row = 1
+    for section_title, section_key, left_label, right_label in _section_configs:
+        rows = sections.get(section_key) or []
+        current_row = _write_gst_reco_section(
+            ws, current_row, section_title, left_label, right_label, rows, section_key
+        )
+        current_row += 3  # gap between sections
+
+    _auto_col_width(ws, min_width=12, max_width=22)
+    ws.freeze_panes = "B6"
+
+    # -----------------------------------------------------------------------
+    # Sheet 2: GSTR-1 Pivot (only when PDF data present)
+    # -----------------------------------------------------------------------
+    if pivot_rows:
+        ws_pivot = wb.create_sheet("GSTR-1 Pivot")
+        ws_pivot.sheet_view.showGridLines = False
+        _write_pivot_sheet(ws_pivot, pivot_rows)
+
+    # -----------------------------------------------------------------------
+    # Sheet 3: B2B Reco
+    # -----------------------------------------------------------------------
+    ws_b2b = wb.create_sheet("B2B Reco")
+    ws_b2b.sheet_view.showGridLines = False
+    _write_b2b_reco_sheet(ws_b2b, b2b_rows, tally_cols)
+
+    # -----------------------------------------------------------------------
+    # Sheet 4: B2C Reco
+    # -----------------------------------------------------------------------
+    ws_b2c = wb.create_sheet("B2C Reco")
+    ws_b2c.sheet_view.showGridLines = False
+    _write_b2c_reco_sheet(ws_b2c, b2c_rows)
+
+    # -----------------------------------------------------------------------
+    # Sheets 5–9: Raw passthrough data
+    # -----------------------------------------------------------------------
+    _write_raw_sheet(wb, "Final GSTR-1", raw_gstr1)
+    _write_raw_sheet(wb, "GSTR2B",       raw_gstr2b)
+    _write_raw_sheet(wb, "GSTR3B",       raw_gstr3b)
+    _write_raw_sheet(wb, "Sales Register", raw_tally)
+    if raw_cn is not None:
+        _write_raw_sheet(wb, "Credit Note", raw_cn)
+
+    return wb
+
+
+# ---------------------------------------------------------------------------
+# GST Reco section writer
+# ---------------------------------------------------------------------------
+
+_NAVY      = "1F3864"
+_MED_BLUE  = "2E75B6"
+_LIGHT_BLUE = "EBF3FB"
+_GREY_TOTAL = "D9D9D9"
+_GREEN_FG  = "276221";  _GREEN_BG  = "C6EFCE"
+_RED_FG    = "9C0006";  _RED_BG    = "FFC7CE"
+_ORANGE_FG = "9C5700";  _ORANGE_BG = "FFEB9C"
+_BLUE_FG   = "1F4E79";  _BLUE_BG   = "DDEBF7"
+
+_NUM_FMT = '#,##0.00'
+_THIN = Side(style="thin")
+_MED  = Side(style="medium")
+
+
+def _cell_style(cell, bold=False, bg=None, fg="000000", num_fmt=None,
+               border=None, align="left", wrap=False):
+    cell.font = Font(bold=bold, color=fg)
+    if bg:
+        cell.fill = PatternFill("solid", fgColor=bg)
+    if num_fmt:
+        cell.number_format = num_fmt
+    if border:
+        cell.border = border
+    cell.alignment = Alignment(horizontal=align, vertical="center", wrap_text=wrap)
+
+
+def _header_border():
+    return Border(left=_THIN, right=_THIN, top=_MED, bottom=_MED)
+
+
+def _data_border():
+    return Border(left=_THIN, right=_THIN, top=_THIN, bottom=_THIN)
+
+
+def _write_gst_reco_section(ws, start_row, title, left_label, right_label, rows, section_key):
+    """Write a 4-column-group section in the GST Reco sheet."""
+    # Title row
+    title_cell = ws.cell(row=start_row, column=1, value=title)
+    _cell_style(title_cell, bold=True, bg=_NAVY, fg="FFFFFF", align="center")
+    start_row += 2
+
+    # Group headers row
+    group_headers = [left_label, None, None, None, None, None, None, right_label, None, None, None, None, None, None, "Difference"]
+    for ci, val in enumerate(group_headers, 1):
+        cell = ws.cell(row=start_row, column=ci, value=val)
+        if val:
+            _cell_style(cell, bold=True, bg=_MED_BLUE, fg="FFFFFF", align="center")
+    start_row += 1
+
+    # Column headers
+    COL_HEADERS = ["Month", "Taxable amount", "IGST", "CGST", "SGST", "Total", "",
+                   "Month", "Taxable amount", "IGST", "CGST", "SGST", "Total", "",
+                   "Month", "Taxable amount", "IGST", "CGST", "SGST", "Total"]
+    for ci, h in enumerate(COL_HEADERS, 1):
+        cell = ws.cell(row=start_row, column=ci, value=h if h else None)
+        _cell_style(cell, bold=True, bg=_MED_BLUE, fg="FFFFFF",
+                   border=_header_border(), align="center")
+    start_row += 1
+
+    # Map row keys based on section_key
+    if "gstr3b" in section_key:
+        left_pfx, right_pfx = "gstr1", "gstr3b"
+    else:
+        left_pfx, right_pfx = ("books", "gstr1") if rows and "books_taxable" in rows[0] else ("gstr1", "gstr3b")
+    # Detect actual prefixes from first data row
+    if rows:
+        keys = list(rows[0].keys())
+        left_pfx  = next((k.split("_")[0] for k in keys if "_taxable" in k), left_pfx)
+        # second prefix
+        matches = [k.split("_")[0] for k in keys if "_taxable" in k]
+        right_pfx = matches[1] if len(matches) > 1 else right_pfx
+
+    data_rows = [r for r in rows if r.get("month") != "Total"]
+    total_row = next((r for r in rows if r.get("month") == "Total"), None)
+    first_data_row = start_row
+
+    for ri, row in enumerate(data_rows):
+        is_alt = (ri % 2 == 1)
+        bg = _LIGHT_BLUE if is_alt else None
+        month = row.get("month", "")
+
+        def g(key, pfx=None):
+            for p in ([pfx] if pfx else [left_pfx, right_pfx, ""]):
+                v = row.get(f"{p}_{key}" if p else key)
+                if v is not None:
+                    return v
+            return 0
+
+        def lv(k):   return row.get(f"{left_pfx}_{k}", 0) or 0
+        def rv(k):   return row.get(f"{right_pfx}_{k}", 0) or 0
+        def dv(k):   return row.get(f"diff_{k}", 0) or 0
+
+        vals = [
+            month,
+            lv("taxable"), lv("igst"), lv("cgst"), lv("sgst"),
+            lv("taxable") + lv("igst") + lv("cgst") + lv("sgst"),
+            None,
+            month,
+            rv("taxable"), rv("igst"), rv("cgst"), rv("sgst"),
+            rv("taxable") + rv("igst") + rv("cgst") + rv("sgst"),
+            None,
+            month,
+            dv("taxable"), dv("igst"), dv("cgst"), dv("sgst"),
+            dv("taxable") + dv("igst") + dv("cgst") + dv("sgst"),
+        ]
+        for ci, v in enumerate(vals, 1):
+            cell = ws.cell(row=start_row, column=ci, value=v)
+            is_num = isinstance(v, (int, float)) and v is not None
+            is_diff = ci >= 15
+            if is_diff and is_num and v < 0:
+                _cell_style(cell, bg=bg, fg=_RED_FG, num_fmt=_NUM_FMT, border=_data_border())
+            elif is_diff and is_num and v > 0:
+                _cell_style(cell, bg=bg, fg="006100", num_fmt=_NUM_FMT, border=_data_border())
+            elif is_num:
+                _cell_style(cell, bg=bg, num_fmt=_NUM_FMT, border=_data_border(), align="right")
+            else:
+                _cell_style(cell, bg=bg, bold=(ci in (1, 8, 15)), border=_data_border())
+        start_row += 1
+
+    # Total row
+    if total_row:
+        def lv(k): return total_row.get(f"{left_pfx}_{k}", 0) or 0
+        def rv(k): return total_row.get(f"{right_pfx}_{k}", 0) or 0
+        def dv(k): return total_row.get(f"diff_{k}", 0) or 0
+        tot_vals = [
+            "Total",
+            lv("taxable"), lv("igst"), lv("cgst"), lv("sgst"),
+            lv("taxable") + lv("igst") + lv("cgst") + lv("sgst"),
+            None, "Total",
+            rv("taxable"), rv("igst"), rv("cgst"), rv("sgst"),
+            rv("taxable") + rv("igst") + rv("cgst") + rv("sgst"),
+            None, "Total",
+            dv("taxable"), dv("igst"), dv("cgst"), dv("sgst"),
+            dv("taxable") + dv("igst") + dv("cgst") + dv("sgst"),
+        ]
+        for ci, v in enumerate(tot_vals, 1):
+            cell = ws.cell(row=start_row, column=ci, value=v)
+            is_num = isinstance(v, (int, float)) and v is not None
+            _cell_style(cell, bold=True, bg=_GREY_TOTAL, num_fmt=_NUM_FMT if is_num else None,
+                       border=_header_border(), align="right" if is_num else "left")
+        start_row += 1
+
+    return start_row
+
+
+# ---------------------------------------------------------------------------
+# GSTR-1 Pivot sheet
+# ---------------------------------------------------------------------------
+
+def _write_pivot_sheet(ws, pivot_rows):
+    ws.cell(row=1, column=1, value="GSTR-1 Pivot — Excel (OCTA) vs PDF Validation")
+    _cell_style(ws.cell(row=1, column=1), bold=True, bg=_NAVY, fg="FFFFFF")
+
+    headers_top = ["", "Excel (OCTA)", None, None, None, "", "PDF (GST Portal)", None, None, None, "", "Difference"]
+    for ci, v in enumerate(headers_top, 1):
+        cell = ws.cell(row=3, column=ci, value=v if v else None)
+        if v:
+            _cell_style(cell, bold=True, bg=_MED_BLUE, fg="FFFFFF", align="center")
+
+    sub_headers = ["Month", "Taxable", "IGST", "CGST", "SGST", "",
+                   "Taxable", "IGST", "CGST", "SGST", "",
+                   "Taxable", "IGST", "CGST", "SGST"]
+    for ci, h in enumerate(sub_headers, 1):
+        cell = ws.cell(row=4, column=ci, value=h)
+        _cell_style(cell, bold=True, bg=_MED_BLUE, fg="FFFFFF", border=_header_border(), align="center")
+
+    data_rows = [r for r in pivot_rows if r.get("month") != "Total"]
+    total_row  = next((r for r in pivot_rows if r.get("month") == "Total"), None)
+
+    for ri, row in enumerate(data_rows):
+        is_alt = (ri % 2 == 1)
+        bg = _LIGHT_BLUE if is_alt else None
+        month = row.get("month", "")
+        ev = lambda k: row.get(f"excel_{k}", 0) or 0
+        pv = lambda k: row.get(f"pdf_{k}", 0) or 0
+        dv = lambda k: row.get(f"diff_{k}", 0) or 0
+        vals = [month, ev("taxable"), ev("igst"), ev("cgst"), ev("sgst"), None,
+                pv("taxable"), pv("igst"), pv("cgst"), pv("sgst"), None,
+                dv("taxable"), dv("igst"), dv("cgst"), dv("sgst")]
+        for ci, v in enumerate(vals, 1):
+            cell = ws.cell(row=5 + ri, column=ci, value=v)
+            is_num = isinstance(v, (int, float)) and v is not None
+            is_diff = ci >= 12
+            if is_diff and is_num and abs(v) > 1:
+                _cell_style(cell, bg=bg, fg=_RED_FG if v < 0 else "006100", num_fmt=_NUM_FMT, border=_data_border())
+            elif is_num:
+                _cell_style(cell, bg=bg, num_fmt=_NUM_FMT, border=_data_border(), align="right")
+            else:
+                _cell_style(cell, bg=bg, bold=(ci == 1), border=_data_border())
+
+    if total_row:
+        tr = 5 + len(data_rows)
+        ev = lambda k: total_row.get(f"excel_{k}", 0) or 0
+        pv = lambda k: total_row.get(f"pdf_{k}", 0) or 0
+        dv = lambda k: total_row.get(f"diff_{k}", 0) or 0
+        vals = ["Total", ev("taxable"), ev("igst"), ev("cgst"), ev("sgst"), None,
+                pv("taxable"), pv("igst"), pv("cgst"), pv("sgst"), None,
+                dv("taxable"), dv("igst"), dv("cgst"), dv("sgst")]
+        for ci, v in enumerate(vals, 1):
+            cell = ws.cell(row=tr, column=ci, value=v)
+            is_num = isinstance(v, (int, float)) and v is not None
+            _cell_style(cell, bold=True, bg=_GREY_TOTAL, num_fmt=_NUM_FMT if is_num else None,
+                       border=_header_border(), align="right" if is_num else "left")
+
+    _auto_col_width(ws, min_width=10, max_width=18)
+    ws.freeze_panes = "B5"
+
+
+# ---------------------------------------------------------------------------
+# B2B Reco sheet
+# ---------------------------------------------------------------------------
+
+_REMARK_COLORS = {
+    "Match":                    (_GREEN_FG,  _GREEN_BG),
+    "Diff":                     (_ORANGE_FG, _ORANGE_BG),
+    "Not in GSTR-1":            (_RED_FG,    _RED_BG),
+    "Not in Books":             (_RED_FG,    _RED_BG),
+    "Amazon Entry As per Tally":  (_BLUE_FG,  _BLUE_BG),
+    "Amazon Entry as per GSTR-1": ("5C3317",  "F0E6D3"),
+}
+
+
+def _write_b2b_reco_sheet(ws, b2b_rows: list[dict], tally_cols: list[str]):
+    ws.cell(row=1, column=1, value="Books VS GSTR-1 — B2B Reconciliation")
+    _cell_style(ws.cell(row=1, column=1), bold=True, bg=_NAVY, fg="FFFFFF")
+
+    # Dynamic columns = all Tally cols + separator + GSTR-1 cols + Diff + Remark
+    tally_display = [c for c in tally_cols if not c.startswith("_")]
+    g1_cols    = ["GSTR-1 Invoice No", "GSTR-1 GSTIN", "GSTR-1 Taxable", "GSTR-1 IGST", "GSTR-1 CGST", "GSTR-1 SGST"]
+    diff_cols  = ["Diff Taxable", "Diff IGST", "Diff CGST", "Diff SGST"]
+    remark_col = ["Remark"]
+    all_headers = tally_display + [""] + g1_cols + [""] + diff_cols + [" "] + remark_col
+
+    # Group header row (row 2)
+    n_tally = len(tally_display)
+    group_row = ws.cell(row=2, column=1, value="Sales Register")
+    _cell_style(group_row, bold=True, bg=_MED_BLUE, fg="FFFFFF", align="center")
+    g1_start = n_tally + 2
+    ws.cell(row=2, column=g1_start, value="GSTR-1")
+    _cell_style(ws.cell(row=2, column=g1_start), bold=True, bg=_MED_BLUE, fg="FFFFFF", align="center")
+    diff_start = g1_start + len(g1_cols) + 1
+    ws.cell(row=2, column=diff_start, value="Difference")
+    _cell_style(ws.cell(row=2, column=diff_start), bold=True, bg=_MED_BLUE, fg="FFFFFF", align="center")
+    remark_start = diff_start + len(diff_cols) + 1
+    ws.cell(row=2, column=remark_start, value="Remark")
+    _cell_style(ws.cell(row=2, column=remark_start), bold=True, bg=_NAVY, fg="FFFFFF", align="center")
+
+    # Column headers (row 3)
+    for ci, h in enumerate(all_headers, 1):
+        cell = ws.cell(row=3, column=ci, value=h or None)
+        if h and h.strip():
+            _cell_style(cell, bold=True, bg=_MED_BLUE, fg="FFFFFF", border=_header_border(), align="center")
+
+    # Map Tally row keys → internal column names
+    _g1_key_map = {
+        "GSTR-1 Invoice No": "_gstr1_inv_no",
+        "GSTR-1 GSTIN":      "_gstr1_gstin",
+        "GSTR-1 Taxable":    "_gstr1_taxable",
+        "GSTR-1 IGST":       "_gstr1_igst",
+        "GSTR-1 CGST":       "_gstr1_cgst",
+        "GSTR-1 SGST":       "_gstr1_sgst",
+        "Diff Taxable":      "_diff_taxable",
+        "Diff IGST":         "_diff_igst",
+        "Diff CGST":         "_diff_cgst",
+        "Diff SGST":         "_diff_sgst",
+    }
+
+    for ri, row in enumerate(b2b_rows):
+        xl_row = ri + 4
+        is_alt = (ri % 2 == 1)
+        bg = _LIGHT_BLUE if is_alt else None
+        remark = row.get("_remark", "")
+
+        ci = 1
+        # Tally columns (pass-through)
+        for col in tally_display:
+            v = row.get(col)
+            cell = ws.cell(row=xl_row, column=ci, value=_json_to_xl(v))
+            is_num = isinstance(v, (int, float)) and v is not None
+            _cell_style(cell, bg=bg, num_fmt=_NUM_FMT if is_num else None,
+                       border=_data_border(), align="right" if is_num else "left")
+            ci += 1
+
+        ci += 1  # separator
+
+        # GSTR-1 matched columns
+        for h in g1_cols:
+            key = _g1_key_map.get(h, "")
+            v = row.get(key)
+            cell = ws.cell(row=xl_row, column=ci, value=_json_to_xl(v))
+            is_num = isinstance(v, (int, float)) and v is not None
+            _cell_style(cell, bg=bg, num_fmt=_NUM_FMT if is_num else None,
+                       border=_data_border(), align="right" if is_num else "left")
+            ci += 1
+
+        ci += 1  # separator
+
+        # Diff columns
+        for h in diff_cols:
+            key = _g1_key_map.get(h, "")
+            v = row.get(key)
+            cell = ws.cell(row=xl_row, column=ci, value=_json_to_xl(v))
+            is_num = isinstance(v, (int, float)) and v is not None
+            if is_num and abs(v) > 0.5:
+                fg = _RED_FG if v > 0 else "006100"
+                _cell_style(cell, bg=bg, fg=fg, num_fmt=_NUM_FMT, border=_data_border(), align="right")
+            else:
+                _cell_style(cell, bg=bg, num_fmt=_NUM_FMT if is_num else None,
+                           border=_data_border(), align="right" if is_num else "left")
+            ci += 1
+
+        ci += 1  # separator before remark
+
+        # Remark column
+        rfg, rbg = _REMARK_COLORS.get(remark, ("000000", None))
+        remark_cell = ws.cell(row=xl_row, column=ci, value=remark)
+        _cell_style(remark_cell, bold=True, bg=rbg, fg=rfg, border=_header_border(), align="center")
+
+    _auto_col_width(ws, min_width=8, max_width=30)
+    ws.freeze_panes = "A4"
+
+
+def _json_to_xl(v):
+    """Convert stored JSON value back to Excel-friendly value."""
+    if v is None:
+        return None
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, (int, float)):
+        return v
+    return str(v)
+
+
+# ---------------------------------------------------------------------------
+# B2C Reco sheet
+# ---------------------------------------------------------------------------
+
+def _write_b2c_reco_sheet(ws, b2c_rows: list[dict]):
+    ws.cell(row=1, column=1, value="B2C Reconciliation — State + Rate Annual Aggregation")
+    _cell_style(ws.cell(row=1, column=1), bold=True, bg=_NAVY, fg="FFFFFF")
+
+    # Group headers (row 2)
+    group_map = {1: "GSTR-1", 8: "Books", 15: "Difference"}
+    for ci, label in group_map.items():
+        cell = ws.cell(row=2, column=ci, value=label)
+        _cell_style(cell, bold=True, bg=_MED_BLUE, fg="FFFFFF", align="center")
+
+    # Column headers (row 3)
+    headers = [
+        "States", "GST Rate", "Taxable Value", "IGST", "CGST", "SGST", "",
+        "States", "GST Rate", "Taxable Value", "IGST", "CGST", "SGST", "",
+        "Taxable Value", "IGST", "CGST", "SGST",
     ]
-    ws_b2b.append(b2b_headers)
-    for r in b2b_rows:
-        bk = r.get("books") or {}
-        g1 = r.get("gstr1") or {}
-        ws_b2b.append([
-            r.get("category", ""), r.get("confidence", ""),
-            bk.get("doc_no", ""), bk.get("doc_date", ""), bk.get("party_name", ""), bk.get("buyer_gstin", ""),
-            g1.get("doc_no", ""), g1.get("doc_date", ""), g1.get("party_name", ""), g1.get("buyer_gstin", ""),
-            bk.get("taxable_value", 0), g1.get("taxable_value", 0),
-            round(float(bk.get("taxable_value") or 0) - float(g1.get("taxable_value") or 0), 2),
-            bk.get("cgst", 0), g1.get("cgst", 0),
-            bk.get("sgst", 0), g1.get("sgst", 0),
-            bk.get("igst", 0), g1.get("igst", 0),
-            ", ".join(r.get("mismatch_fields", [])),
-            r.get("suggested_action", ""),
-        ])
-    style_header(ws_b2b)
+    for ci, h in enumerate(headers, 1):
+        cell = ws.cell(row=3, column=ci, value=h or None)
+        if h and h.strip():
+            _cell_style(cell, bold=True, bg=_MED_BLUE, fg="FFFFFF", border=_header_border(), align="center")
 
-    # --- Sheet 3: B2C Reconciliation ---
-    b2c_rows = [r for r in results if r.get("reco_level") == "B2C"]
-    ws_b2c = workbook.create_sheet("B2C Reconciliation")
-    b2c_headers = [
-        "Category", "Place of Supply", "Tax Rate (%)",
-        "Books Taxable", "GSTR-1 Taxable", "Diff Taxable",
-        "Books CGST", "GSTR-1 CGST", "Diff CGST",
-        "Books SGST", "GSTR-1 SGST", "Diff SGST",
-        "Books IGST", "GSTR-1 IGST", "Diff IGST",
-        "Suggested Action",
-    ]
-    ws_b2c.append(b2c_headers)
-    for r in b2c_rows:
-        ws_b2c.append([
-            r.get("category", ""), r.get("place_of_supply", ""), r.get("tax_rate", ""),
-            r.get("books_taxable", 0), r.get("gstr1_taxable", 0), r.get("diff_taxable", 0),
-            r.get("books_cgst", 0), r.get("gstr1_cgst", 0), r.get("diff_cgst", 0),
-            r.get("books_sgst", 0), r.get("gstr1_sgst", 0), r.get("diff_sgst", 0),
-            r.get("books_igst", 0), r.get("gstr1_igst", 0), r.get("diff_igst", 0),
-            r.get("suggested_action", ""),
-        ])
-    style_header(ws_b2c)
+    # Data rows
+    for ri, row in enumerate(b2c_rows):
+        xl_row = ri + 4
+        is_alt = (ri % 2 == 1)
+        bg = _LIGHT_BLUE if is_alt else None
+        state = row.get("state", "")
+        rate  = row.get("rate", 0)
 
-    # --- Sheet 4: Difference Report (exceptions only) ---
-    ws_diff = workbook.create_sheet("Difference Report")
-    diff_headers = ["Level", "Category", "Invoice No / State", "Party / Rate", "Difference", "Suggested Action"]
-    ws_diff.append(diff_headers)
-    matched_cats = {"Matched", "B2B: Matched", "B2C: Matched"}
-    for r in results:
-        if r.get("category") in matched_cats or r.get("category", "").endswith(": Matched"):
-            continue
-        level = r.get("reco_level", "")
-        if level == "B2B":
-            bk = r.get("books") or r.get("gstr1") or {}
-            inv = bk.get("doc_no", "")
-            party = bk.get("party_name", "")
-            diff = round(
-                float((r.get("books") or {}).get("taxable_value") or 0)
-                - float((r.get("gstr1") or {}).get("taxable_value") or 0), 2
-            )
-        else:
-            inv = r.get("place_of_supply", "")
-            party = f"Rate {r.get('tax_rate', '')}%"
-            diff = r.get("diff_taxable", 0)
-        ws_diff.append([
-            level, r.get("category", ""), inv, party, diff, r.get("suggested_action", ""),
-        ])
-    style_header(ws_diff)
+        gv = lambda k: row.get(f"gstr1_{k}", 0) or 0
+        bv = lambda k: row.get(f"books_{k}", 0) or 0
+        dv = lambda k: row.get(f"diff_{k}", 0) or 0
 
-    # --- Sheet 5: Summary ---
-    ws_sum = workbook.create_sheet("Summary")
-    ws_sum.append(["GSTR-1 vs Books Reconciliation"])
-    ws_sum.append([])
-    ws_sum.append(["Metric", "Value"])
-    ws_sum.append(["Books records", counts.get("books_records", 0)])
-    ws_sum.append(["GSTR-1 B2B records", counts.get("gstr1_b2b_records", 0)])
-    ws_sum.append(["GSTR-1 B2C records", counts.get("gstr1_b2c_records", 0)])
-    ws_sum.append([])
-    ws_sum.append(["Category", "Count"])
-    for cat, cnt in summary.items():
-        ws_sum.append([cat, cnt])
-    style_header_row(ws_sum, 3)
-    style_header_row(ws_sum, 8)
+        vals = [
+            state, rate,
+            gv("taxable"), gv("igst"), gv("cgst"), gv("sgst"), None,
+            state, rate,
+            bv("taxable"), bv("igst"), bv("cgst"), bv("sgst"), None,
+            dv("taxable"), dv("igst"), dv("cgst"), dv("sgst"),
+        ]
+        for ci, v in enumerate(vals, 1):
+            cell = ws.cell(row=xl_row, column=ci, value=v)
+            is_num = isinstance(v, (int, float)) and v is not None
+            is_diff = ci >= 15
+            if is_diff and is_num and abs(v) > 0.5:
+                fg = _RED_FG if v < 0 else "006100"
+                _cell_style(cell, bg=bg, fg=fg, num_fmt=_NUM_FMT, border=_data_border(), align="right")
+            elif is_num:
+                _cell_style(cell, bg=bg, num_fmt=_NUM_FMT, border=_data_border(), align="right")
+            else:
+                _cell_style(cell, bg=bg, border=_data_border())
 
-    return workbook
+    # Totals row
+    if b2c_rows:
+        tr = len(b2c_rows) + 4
+        sum_keys = ["gstr1_taxable", "gstr1_igst", "gstr1_cgst", "gstr1_sgst",
+                    "books_taxable", "books_igst", "books_cgst", "books_sgst",
+                    "diff_taxable", "diff_igst", "diff_cgst", "diff_sgst"]
+        sums = {k: sum(row.get(k, 0) or 0 for row in b2c_rows) for k in sum_keys}
+        tot_vals = [
+            "Total", "",
+            sums["gstr1_taxable"], sums["gstr1_igst"], sums["gstr1_cgst"], sums["gstr1_sgst"], None,
+            "Total", "",
+            sums["books_taxable"], sums["books_igst"], sums["books_cgst"], sums["books_sgst"], None,
+            sums["diff_taxable"], sums["diff_igst"], sums["diff_cgst"], sums["diff_sgst"],
+        ]
+        for ci, v in enumerate(tot_vals, 1):
+            cell = ws.cell(row=tr, column=ci, value=v)
+            is_num = isinstance(v, (int, float)) and v is not None
+            _cell_style(cell, bold=True, bg=_GREY_TOTAL, num_fmt=_NUM_FMT if is_num else None,
+                       border=_header_border(), align="right" if is_num else "left")
+
+    _auto_col_width(ws, min_width=10, max_width=22)
+    ws.freeze_panes = "A4"
+
+
+# ---------------------------------------------------------------------------
+# Raw passthrough sheet writer
+# ---------------------------------------------------------------------------
+
+def _write_raw_sheet(wb: Workbook, title: str, records: list[dict]):
+    if not records:
+        ws = wb.create_sheet(title)
+        ws.cell(row=1, column=1, value="(No data)")
+        return
+    ws = wb.create_sheet(title)
+    ws.sheet_view.showGridLines = False
+    headers = list(records[0].keys())
+    for ci, h in enumerate(headers, 1):
+        cell = ws.cell(row=1, column=ci, value=str(h))
+        _cell_style(cell, bold=True, bg=_NAVY, fg="FFFFFF", border=_header_border(), align="center")
+    for ri, row in enumerate(records, 2):
+        is_alt = (ri % 2 == 0)
+        bg = _LIGHT_BLUE if is_alt else None
+        for ci, h in enumerate(headers, 1):
+            v = row.get(h)
+            cell = ws.cell(row=ri, column=ci, value=_json_to_xl(v))
+            is_num = isinstance(v, (int, float)) and v is not None
+            _cell_style(cell, bg=bg, num_fmt=_NUM_FMT if is_num else None,
+                       border=_data_border(), align="right" if is_num else "left")
+    _auto_col_width(ws, min_width=8, max_width=30)
+    ws.freeze_panes = "A2"
+
+
+# ---------------------------------------------------------------------------
+# Auto column width helper
+# ---------------------------------------------------------------------------
+
+def _auto_col_width(ws, min_width=10, max_width=40):
+    from openpyxl.utils import get_column_letter
+    for col_cells in ws.columns:
+        max_len = 0
+        col_letter = get_column_letter(col_cells[0].column)
+        for cell in col_cells:
+            try:
+                if cell.value is not None:
+                    max_len = max(max_len, len(str(cell.value)))
+            except Exception:
+                pass
+        ws.column_dimensions[col_letter].width = min(max(max_len + 2, min_width), max_width)
 
 
 def main() -> None:

@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import DashboardLayout from '../../components/layout/DashboardLayout';
-import { LayoutDashboard, Bot, BarChart3, ClipboardList } from 'lucide-react';
+import { LayoutDashboard, Bot, BarChart3 } from 'lucide-react';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../../components/ui/modal';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../../components/ui/card';
 import { Button } from '../../components/ui/button';
@@ -13,6 +13,7 @@ const RECO_ROUTE_MAP = {
   'GSTR-2B-Books':            'gstr_2b_books',
   'gstr_2b_books_multistate': 'gstr_2b_books_multistate',
   'GSTR-2B-Books-Multistate': 'gstr_2b_books_multistate',
+  'gstr_1_vs_books':          'gstr_1_vs_books',
   'gstr_3b_tally_entry':      'gstr_3b_tally_entry',
   'GSTR-3B-Tally-Entry':      'gstr_3b_tally_entry',
   'universal_bank_statement': 'universal_bank_statement',
@@ -30,7 +31,6 @@ const BrandDashboard = () => {
   const sidebarItems = [
     { path: `/brands/${brandId}/dashboard`, label: 'Dashboard', icon: LayoutDashboard, testId: 'nav-dashboard' },
     { path: `/brands/${brandId}/agents`, label: 'Agents', icon: Bot, testId: 'nav-agents' },
-    { path: `/brands/${brandId}/reco`, label: 'Reconciliation', icon: ClipboardList, testId: 'nav-reco' }
   ];
 
   useEffect(() => {

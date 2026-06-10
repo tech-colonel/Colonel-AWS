@@ -35,6 +35,10 @@ from .core import (
 # ---------------------------------------------------------------------------
 
 ALLOWED_SHEETS = {"B2B", "B2BA", "B2B-CDNR", "B2B-CDNRA"}
+# Ordered so originals (B2B, B2B-CDNR) are parsed before amendments (B2BA, B2B-CDNRA).
+# This ensures the original entry is first in the records list and gets matched with Books
+# first in Pass 1 — leaving the amendment entry (B2BA/B2B-CDNRA) unmatched as expected.
+ALLOWED_SHEETS_ORDER = ["B2B", "B2B-CDNR", "B2BA", "B2B-CDNRA"]
 
 GST_STATE_CODES: dict[str, str] = {
     "01": "Jammu & Kashmir",        "02": "Himachal Pradesh",
@@ -196,7 +200,7 @@ def parse_gstr2b(data: bytes) -> list[NormalizedInvoice]:
     records: list[NormalizedInvoice] = []
     index = 0
 
-    for sheet in ALLOWED_SHEETS:
+    for sheet in ALLOWED_SHEETS_ORDER:
         try:
             rows = _read_gstr2b_sheet(data, sheet)
         except Exception:
@@ -608,42 +612,69 @@ def reconcile_by_invoice_no(
             ))
 
     # Pass 5 — Post-processing Calibration & Remark Overhaul
-    
-    # Build dup-type maps keyed by normalized_doc_no.
-    # "dup"       = same doc_no appears multiple times with the SAME sign → true duplicate
-    # "cross_ref" = same doc_no appears with OPPOSITE signs → INV+CRN or PR+DN cross-reference
-    # ""          = unique, no duplication
 
-    def _calc_dup_type(vals: list) -> str:
-        if len(vals) <= 1:
+    # ── Amendment detection sets ─────────────────────────────────────────────
+    # Two cases both need flagging:
+    #   Case A: B2BA unmatched + B2B has same invoice (B2B matched with Books)
+    #           → flag the B2BA row: "Amendment entry in B2BA"
+    #   Case B: B2B unmatched + B2BA has same invoice (B2BA matched with Books)
+    #           → flag the B2B row: "Original invoice amended in B2BA"
+    # Same logic applies for B2B-CDNR / B2B-CDNRA.
+    b2b_orig_nos  = {r.normalized_doc_no for r in gstr2b
+                     if r.sheet_name == "B2B"       and r.normalized_doc_no}
+    cdnr_orig_nos = {r.normalized_doc_no for r in gstr2b
+                     if r.sheet_name == "B2B-CDNR"  and r.normalized_doc_no}
+    b2ba_nos      = {r.normalized_doc_no for r in gstr2b
+                     if r.sheet_name == "B2BA"       and r.normalized_doc_no}
+    cdnra_nos     = {r.normalized_doc_no for r in gstr2b
+                     if r.sheet_name == "B2B-CDNRA"  and r.normalized_doc_no}
+
+    # ── Duplicate-type maps keyed by normalized_doc_no ───────────────────────
+    # "dup"              = same doc_no, same sign, same-ish party → true duplicate
+    # "same_no_diff_party" = same doc_no, same sign, different parties → different vendors, same number
+    # "cross_ref"        = same doc_no with OPPOSITE signs → INV+CRN or PR+DN pair
+    # ""                 = unique
+
+    def _calc_dup_type_enhanced(records: list) -> str:
+        """records: list of (taxable_value, supplier_name)"""
+        if len(records) <= 1:
             return ""
+        vals  = [r[0] for r in records]
+        names = [r[1] for r in records]
         all_pos = all(v >= 0 for v in vals)
         all_neg = all(v <= 0 for v in vals)
         if all_pos or all_neg:
-            return "dup"
+            any_diff = any(
+                _name_sim(names[i], names[j]) < 0.5
+                for i in range(len(names))
+                for j in range(i + 1, len(names))
+            )
+            return "same_no_diff_party" if any_diff else "dup"
         return "cross_ref"
 
-    g_key_vals: dict = {}
+    g_key_records: dict = {}
     for g_rec in gstr2b:
         if g_rec.normalized_doc_no:
-            g_key_vals.setdefault(g_rec.normalized_doc_no, []).append(g_rec.taxable_value)
-    g_key_dup_type: dict = {k: _calc_dup_type(v) for k, v in g_key_vals.items()}
+            g_key_records.setdefault(g_rec.normalized_doc_no, []).append(
+                (g_rec.taxable_value, g_rec.supplier_name or "")
+            )
+    g_key_dup_type: dict = {k: _calc_dup_type_enhanced(v) for k, v in g_key_records.items()}
 
-    b_key_vals: dict = {}
+    b_key_records: dict = {}
     for b_rec in books:
         if b_rec.normalized_doc_no:
-            b_key_vals.setdefault(b_rec.normalized_doc_no, []).append(b_rec.taxable_value)
-    b_key_dup_type: dict = {k: _calc_dup_type(v) for k, v in b_key_vals.items()}
+            b_key_records.setdefault(b_rec.normalized_doc_no, []).append(
+                (b_rec.taxable_value, b_rec.supplier_name or "")
+            )
+    b_key_dup_type: dict = {k: _calc_dup_type_enhanced(v) for k, v in b_key_records.items()}
 
     for r in results:
         g = r.gstr2b
         b = r.purchase
 
-        # Determine duplicate type for this result row
         g_dup_type = g_key_dup_type.get(g.normalized_doc_no, "") if g else ""
         b_dup_type = b_key_dup_type.get(b.normalized_doc_no, "") if b else ""
 
-        # Assign Remarks in exact priority order
         r.suggested_action_2 = ""
 
         # Scenario A: BOTH GSTR-2B and Books exist
@@ -653,7 +684,6 @@ def reconcile_by_invoice_no(
 
             sec_remarks = []
 
-            # CN-DN cross-type match: Credit Note (2B) matched with Debit Note (Books)
             if _get_val(g, "doc_type", "") == "CRN" and _get_val(b, "doc_type", "") == "DBN":
                 r.suggested_action = "Partially Matched"
                 r.category = "Partially Matched"
@@ -661,10 +691,8 @@ def reconcile_by_invoice_no(
                     f"CN-DN Match: {_get_val(g, 'doc_no', '')} ↔ {_get_val(b, 'doc_no', '')}"
                 )
             else:
-                # Remark 1 is always the primary match status for regular matches
                 r.suggested_action = "Matched"
 
-            # Tax Amount Mismatch → Remark 2
             if g_tax - b_tax > 1.0:
                 r.category = "Amount Mismatch"
                 sec_remarks.append("Tax Amount Mismatch, Excess in 2B")
@@ -672,7 +700,6 @@ def reconcile_by_invoice_no(
                 r.category = "Amount Mismatch"
                 sec_remarks.append("Tax Amount Mismatch, Excess in Books")
 
-            # Taxable Value Mismatch → Remark 2 (checked independently of tax)
             if g.taxable_value - b.taxable_value > 1.0:
                 r.category = "Amount Mismatch"
                 sec_remarks.append("Taxable Value Mismatch, Excess in 2B")
@@ -680,22 +707,25 @@ def reconcile_by_invoice_no(
                 r.category = "Amount Mismatch"
                 sec_remarks.append("Taxable Value Mismatch, Excess in Books")
 
-            # Date Mismatch → Remark 2
             from recon.core import parse_date
-            g_date_norm = parse_date(g.doc_date)
-            b_date_norm = parse_date(b.doc_date)
-            if g_date_norm != b_date_norm:
+            if parse_date(g.doc_date) != parse_date(b.doc_date):
                 sec_remarks.append("Invoice Date Mismatch")
 
-            # Duplicate / cross-reference → Remark 2
+            # Books duplicate/cross-ref
             if b_dup_type == "dup":
-                sec_remarks.append("Duplicate Entry in Books")
+                sec_remarks.append("Invoice appears twice in Books — verify if duplicate booking")
+            elif b_dup_type == "same_no_diff_party":
+                sec_remarks.append("Same voucher number in Books for different parties — verify")
             elif b_dup_type == "cross_ref":
                 sec_remarks.append("Invoice also referenced in DN Register")
-            elif g_dup_type == "dup":
-                sec_remarks.append("Duplicate Upload by Vendor")
+
+            # 2B duplicate/cross-ref (independent — both can appear)
+            if g_dup_type == "dup":
+                sec_remarks.append("Invoice appears twice in GSTR-2B — possible duplicate upload by vendor")
+            elif g_dup_type == "same_no_diff_party":
+                sec_remarks.append("Same invoice number in GSTR-2B for different parties — verify")
             elif g_dup_type == "cross_ref":
-                sec_remarks.append("Invoice has related Credit Note in GSTR-2B")
+                sec_remarks.append("Same invoice number also exists as Credit Note in GSTR-2B")
 
             r.suggested_action_2 = ", ".join(sec_remarks) if sec_remarks else ""
 
@@ -704,13 +734,49 @@ def reconcile_by_invoice_no(
             r.suggested_action = "Showing in 2B but Not in Books"
 
             sec_remarks = []
-            is_rcm = any("reverse charge" in k.lower() and str(v).strip().lower() == "yes" for k, v in g.raw.items())
+
+            # RCM check
+            is_rcm = any(
+                "reverse charge" in k.lower() and str(v).strip().lower() == "yes"
+                for k, v in g.raw.items()
+            )
             if is_rcm:
                 sec_remarks.append("RCM")
-            if g_dup_type == "dup":
-                sec_remarks.append("Duplicate Upload by Vendor")
-            elif g_dup_type == "cross_ref":
-                sec_remarks.append("Invoice has related Credit Note in GSTR-2B")
+
+            # Amendment detection — covers both directions:
+            # Case A: amendment sheet (B2BA/CDNRA) is unmatched, original (B2B/CDNR) matched Books
+            # Case B: original sheet (B2B/CDNR) is unmatched, amendment (B2BA/CDNRA) matched Books
+            # When amendment is flagged, skip the dup remark — dup is a false positive here.
+            is_amendment = False
+            if g.sheet_name == "B2BA" and g.normalized_doc_no in b2b_orig_nos:
+                sec_remarks.append(
+                    f"Amendment entry in B2BA — original invoice {g.doc_no} already present in B2B"
+                )
+                is_amendment = True
+            elif g.sheet_name == "B2B-CDNRA" and g.normalized_doc_no in cdnr_orig_nos:
+                sec_remarks.append(
+                    f"Amendment entry in B2B-CDNRA — original note {g.doc_no} already present in B2B-CDNR"
+                )
+                is_amendment = True
+            elif g.sheet_name == "B2B" and g.normalized_doc_no in b2ba_nos:
+                sec_remarks.append(
+                    f"Original invoice {g.doc_no} amended in B2BA — amendment entry also present in 2B"
+                )
+                is_amendment = True
+            elif g.sheet_name == "B2B-CDNR" and g.normalized_doc_no in cdnra_nos:
+                sec_remarks.append(
+                    f"Original note {g.doc_no} amended in B2B-CDNRA — amendment entry also present in 2B"
+                )
+                is_amendment = True
+
+            if not is_amendment:
+                if g_dup_type == "dup":
+                    sec_remarks.append("Invoice appears twice in GSTR-2B — possible duplicate upload by vendor")
+                elif g_dup_type == "same_no_diff_party":
+                    sec_remarks.append("Same invoice number in GSTR-2B for different parties — verify")
+                elif g_dup_type == "cross_ref":
+                    sec_remarks.append("Same invoice number also exists as Credit Note in GSTR-2B")
+
             r.suggested_action_2 = ", ".join(sec_remarks) if sec_remarks else ""
 
         # Scenario C: In Books but NOT in GSTR-2B
@@ -719,7 +785,9 @@ def reconcile_by_invoice_no(
 
             sec_remarks_c = []
             if b_dup_type == "dup":
-                sec_remarks_c.append("Duplicate Entry in Books")
+                sec_remarks_c.append("Invoice appears twice in Books — verify if duplicate booking")
+            elif b_dup_type == "same_no_diff_party":
+                sec_remarks_c.append("Same voucher number in Books for different parties — verify")
             elif b_dup_type == "cross_ref":
                 sec_remarks_c.append("Invoice also referenced in DN Register")
             r.suggested_action_2 = ", ".join(sec_remarks_c) if sec_remarks_c else ""
@@ -1073,31 +1141,34 @@ def _build_vendor_summary_sheet(ws, results: list[Any]) -> None:
 
         vg = vendor_groups[group_key]
 
-        if g:
-            n = str(_get_val(g, "supplier_name", "") or "").strip()
-            if n and not vg["name_2b"]:
-                vg["name_2b"] = n
-            vg["taxable_2b"] += float(_get_val(g, "taxable_value", 0) or 0)
-            vg["cgst_2b"]    += float(_get_val(g, "cgst",          0) or 0)
-            vg["sgst_2b"]    += float(_get_val(g, "sgst",          0) or 0)
-            vg["igst_2b"]    += float(_get_val(g, "igst",          0) or 0)
-            vg["has_2b"]      = True
+        try:
+            if g:
+                n = str(_get_val(g, "supplier_name", "") or "").strip()
+                if n and not vg["name_2b"]:
+                    vg["name_2b"] = n
+                vg["taxable_2b"] += float(_get_val(g, "taxable_value", 0) or 0)
+                vg["cgst_2b"]    += float(_get_val(g, "cgst",          0) or 0)
+                vg["sgst_2b"]    += float(_get_val(g, "sgst",          0) or 0)
+                vg["igst_2b"]    += float(_get_val(g, "igst",          0) or 0)
+                vg["has_2b"]      = True
 
-        if b:
-            n = str(_get_val(b, "supplier_name", "") or "").strip()
-            if n and not vg["name_books"]:
-                vg["name_books"] = n
-            vg["taxable_books"] += float(_get_val(b, "taxable_value", 0) or 0)
-            vg["cgst_books"]    += float(_get_val(b, "cgst",          0) or 0)
-            vg["sgst_books"]    += float(_get_val(b, "sgst",          0) or 0)
-            vg["igst_books"]    += float(_get_val(b, "igst",          0) or 0)
-            vg["has_books"]      = True
+            if b:
+                n = str(_get_val(b, "supplier_name", "") or "").strip()
+                if n and not vg["name_books"]:
+                    vg["name_books"] = n
+                vg["taxable_books"] += float(_get_val(b, "taxable_value", 0) or 0)
+                vg["cgst_books"]    += float(_get_val(b, "cgst",          0) or 0)
+                vg["sgst_books"]    += float(_get_val(b, "sgst",          0) or 0)
+                vg["igst_books"]    += float(_get_val(b, "igst",          0) or 0)
+                vg["has_books"]      = True
 
-        r2_str = str(_get_val(r, "suggested_action_2", "") or "").strip()
-        for tag in r2_str.split(","):
-            tag = tag.strip()
-            if tag:
-                vg["sec_tags"].add(tag)
+            r2_str = str(_get_val(r, "suggested_action_2", "") or "").strip()
+            for tag in r2_str.split(","):
+                tag = tag.strip()
+                if tag:
+                    vg["sec_tags"].add(tag)
+        except Exception as _agg_err:
+            print(f"Vendor Summary aggregation error for {group_key}: {_agg_err}")
 
     # ── Step 2: build sorted row lists ──────────────────────────────────────
     def _fmt(val, present):
@@ -1360,6 +1431,152 @@ def _copy_workbook_sheets(src_bytes: bytes, target_wb: Any, title_prefix: str) -
         print(f"Error copying sheets for prefix {title_prefix}: {e}")
 
 
+def _build_month_summary_sheet(wb: Any, results: list[Any]) -> None:
+    """Add a 'Month Summary' sheet when results span ≥ 2 distinct invoice months.
+    Groups by YYYY-MM (preferring 2B date, falling back to Books date).
+    Columns: Month | 2B Taxable/IGST/CGST/SGST | Books Taxable/IGST/CGST/SGST |
+             Diff Taxable/IGST | Matched | 2B Only | Books Only"""
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    from collections import defaultdict
+
+    month_data: dict = defaultdict(lambda: {
+        "taxable_2b": 0.0, "igst_2b": 0.0, "cgst_2b": 0.0, "sgst_2b": 0.0,
+        "taxable_bk": 0.0, "igst_bk": 0.0, "cgst_bk": 0.0, "sgst_bk": 0.0,
+        "matched": 0, "only_2b": 0, "only_bk": 0,
+    })
+
+    for r in results:
+        g = _get_val(r, "gstr2b",   None)
+        b = _get_val(r, "purchase", None)
+        g_date = str(_get_val(g, "doc_date", "") or "") if g else ""
+        b_date = str(_get_val(b, "doc_date", "") or "") if b else ""
+        month  = (g_date or b_date)[:7]   # "YYYY-MM" or ""
+        if not month or len(month) < 7:
+            month = "Unknown"
+        else:
+            try:
+                yr, mn = int(month[:4]), int(month[5:7])
+                if not (2000 <= yr <= 2099) or not (1 <= mn <= 12):
+                    month = "Unknown"
+            except (ValueError, IndexError):
+                month = "Unknown"
+
+        md = month_data[month]
+        if g:
+            md["taxable_2b"] += float(_get_val(g, "taxable_value", 0) or 0)
+            md["igst_2b"]    += float(_get_val(g, "igst",          0) or 0)
+            md["cgst_2b"]    += float(_get_val(g, "cgst",          0) or 0)
+            md["sgst_2b"]    += float(_get_val(g, "sgst",          0) or 0)
+        if b:
+            md["taxable_bk"] += float(_get_val(b, "taxable_value", 0) or 0)
+            md["igst_bk"]    += float(_get_val(b, "igst",          0) or 0)
+            md["cgst_bk"]    += float(_get_val(b, "cgst",          0) or 0)
+            md["sgst_bk"]    += float(_get_val(b, "sgst",          0) or 0)
+
+        status = str(_get_val(r, "suggested_action", "") or "")
+        if "Not in Books" in status:
+            md["only_2b"] += 1
+        elif "Not in 2B" in status:
+            md["only_bk"] += 1
+        else:
+            md["matched"] += 1
+
+    # Only add sheet when spanning ≥ 2 months
+    real_months = [m for m in month_data if m != "Unknown"]
+    if len(real_months) < 2:
+        return
+
+    thin   = Side(style="thin")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+    center = Alignment(horizontal="center", vertical="center")
+    right  = Alignment(horizontal="right",  vertical="center")
+
+    fill_hdr   = PatternFill("solid", fgColor="1F3864")
+    fill_total = PatternFill("solid", fgColor="D9E1F2")
+    fill_alt   = PatternFill("solid", fgColor="F2F2F2")
+    font_hdr   = Font(bold=True, color="FFFFFF", size=10)
+    font_total = Font(bold=True, size=10)
+    num_fmt    = "#,##0.00"
+    int_fmt    = "#,##0"
+
+    ws = wb.create_sheet(title="Month Summary")
+
+    headers = [
+        "Month",
+        "2B Taxable", "2B IGST", "2B CGST", "2B SGST",
+        "Books Taxable", "Books IGST", "Books CGST", "Books SGST",
+        "Diff Taxable", "Diff IGST",
+        "Matched", "2B Only", "Books Only",
+    ]
+    for col, hdr in enumerate(headers, 1):
+        c = ws.cell(row=1, column=col, value=hdr)
+        c.font      = font_hdr
+        c.fill      = fill_hdr
+        c.alignment = center
+        c.border    = border
+    ws.column_dimensions["A"].width = 14
+    for col in range(2, len(headers) + 1):
+        ws.column_dimensions[ws.cell(row=1, column=col).column_letter].width = 16
+
+    sorted_months = sorted(month_data.keys())
+    totals = {k: 0.0 for k in ["taxable_2b","igst_2b","cgst_2b","sgst_2b",
+                                 "taxable_bk","igst_bk","cgst_bk","sgst_bk",
+                                 "matched","only_2b","only_bk"]}
+
+    for row_idx, month in enumerate(sorted_months, 2):
+        md   = month_data[month]
+        fill = fill_alt if row_idx % 2 == 0 else PatternFill()
+        diff_t = round(md["taxable_2b"] - md["taxable_bk"], 2)
+        diff_i = round(md["igst_2b"]    - md["igst_bk"],    2)
+
+        row_vals = [
+            month,
+            md["taxable_2b"], md["igst_2b"], md["cgst_2b"], md["sgst_2b"],
+            md["taxable_bk"], md["igst_bk"], md["cgst_bk"], md["sgst_bk"],
+            diff_t, diff_i,
+            md["matched"], md["only_2b"], md["only_bk"],
+        ]
+        for col, val in enumerate(row_vals, 1):
+            c = ws.cell(row=row_idx, column=col, value=val)
+            c.border = border
+            c.fill   = fill
+            if col == 1:
+                c.alignment = center
+            elif col <= 11:
+                c.alignment    = right
+                c.number_format = num_fmt
+            else:
+                c.alignment    = right
+                c.number_format = int_fmt
+
+        for k in totals:
+            totals[k] += md.get(k, 0)
+
+    # Totals row
+    tr = len(sorted_months) + 2
+    diff_t_tot = round(totals["taxable_2b"] - totals["taxable_bk"], 2)
+    diff_i_tot = round(totals["igst_2b"]    - totals["igst_bk"],    2)
+    total_vals = [
+        "TOTAL",
+        totals["taxable_2b"], totals["igst_2b"], totals["cgst_2b"], totals["sgst_2b"],
+        totals["taxable_bk"], totals["igst_bk"], totals["cgst_bk"], totals["sgst_bk"],
+        diff_t_tot, diff_i_tot,
+        int(totals["matched"]), int(totals["only_2b"]), int(totals["only_bk"]),
+    ]
+    for col, val in enumerate(total_vals, 1):
+        c = ws.cell(row=tr, column=col, value=val)
+        c.font   = font_total
+        c.fill   = fill_total
+        c.border = border
+        c.alignment = center if col == 1 else right
+        if 2 <= col <= 11:
+            c.number_format = num_fmt
+        elif col > 11:
+            c.number_format = int_fmt
+
+    ws.freeze_panes = "B2"
+
+
 def _copy_rcm_sheet(src_bytes: bytes, target_wb: Any) -> None:
     src_bytes = _ensure_xlsx(src_bytes)
     import openpyxl
@@ -1396,10 +1613,10 @@ def _copy_rcm_sheet(src_bytes: bytes, target_wb: Any) -> None:
             if merged_range.max_row <= 6:
                 tgt_sheet.merge_cells(str(merged_range))
                 
-        # Find the column containing 'Supply Attract Reverse Charge' in rows 5 and 6 (index 5 and 6)
+        # Find the column containing 'Supply Attract Reverse Charge' in rows 4-7
         rcm_col_idx = 8  # Default fallback to Column H (8th column)
         found_col = False
-        for r_idx in (5, 6):
+        for r_idx in range(4, 8):
             if found_col:
                 break
             for col_idx in range(1, b2b_sheet.max_column + 1):
@@ -1438,10 +1655,69 @@ def _copy_rcm_sheet(src_bytes: bytes, target_wb: Any) -> None:
         print(f"Error copying RCM sheet: {e}")
 
 
+def _append_rcm_rows(gstr2b_bytes: bytes, target_wb: Any) -> None:
+    """Append RCM data rows (reverse charge = yes) from an additional state's GSTR-2B
+    into the existing 'RCM' sheet in target_wb. Headers are NOT re-copied (state 1 wrote them).
+    Called by the multistate builder for states 2-N."""
+    gstr2b_bytes = _ensure_xlsx(gstr2b_bytes)
+    import openpyxl
+    from io import BytesIO
+    import copy
+    try:
+        src_wb = openpyxl.load_workbook(BytesIO(gstr2b_bytes), data_only=True)
+        b2b_sheet = None
+        for name in src_wb.sheetnames:
+            if name.upper().strip() == "B2B":
+                b2b_sheet = src_wb[name]
+                break
+        if b2b_sheet is None:
+            for name in src_wb.sheetnames:
+                if "B2B" in name.upper():
+                    b2b_sheet = src_wb[name]
+                    break
+        if b2b_sheet is None:
+            return
+
+        # Locate RCM column
+        rcm_col_idx = 8
+        for r_idx in range(4, 8):
+            found = False
+            for col_idx in range(1, b2b_sheet.max_column + 1):
+                cell_val = str(b2b_sheet.cell(row=r_idx, column=col_idx).value or "").strip().lower()
+                if "supply attract reverse charge" in cell_val or "reverse charge" in cell_val:
+                    rcm_col_idx = col_idx
+                    found = True
+                    break
+            if found:
+                break
+
+        if "RCM" not in target_wb.sheetnames:
+            target_wb.create_sheet(title="RCM")
+        tgt_sheet = target_wb["RCM"]
+
+        # Append only RCM data rows (skip header rows 1-6)
+        for r in range(7, b2b_sheet.max_row + 1):
+            rcm_val = str(b2b_sheet.cell(row=r, column=rcm_col_idx).value or "").strip().lower()
+            if rcm_val == "yes":
+                new_row = tgt_sheet.max_row + 1
+                for c in range(1, b2b_sheet.max_column + 1):
+                    cell = b2b_sheet.cell(row=r, column=c)
+                    tgt_cell = tgt_sheet.cell(row=new_row, column=c, value=cell.value)
+                    if cell.has_style:
+                        tgt_cell.font      = copy.copy(cell.font)
+                        tgt_cell.fill      = copy.copy(cell.fill)
+                        tgt_cell.alignment = copy.copy(cell.alignment)
+                        tgt_cell.border    = copy.copy(cell.border)
+                        tgt_cell.number_format = cell.number_format
+        src_wb.close()
+    except Exception as e:
+        print(f"Error appending RCM rows: {e}")
+
+
 def build_gstr2b_books_workbook(results: list[dict], payload: dict | None = None) -> Any:
     import openpyxl
     wb = openpyxl.Workbook()
-    
+
     # 1. Copy GSTR-2B, Purchase Register, and Debit Note Register sheets first if payload is provided
     if payload:
         import base64
@@ -1485,14 +1761,17 @@ def build_gstr2b_books_workbook(results: list[dict], payload: dict | None = None
     ws_vendor = wb.create_sheet(title="Vendor Summary")
     _build_vendor_summary_sheet(ws_vendor, results)
 
-    # 4. Add main Output sheet (Reco 2B vs Books)
+    # 4. Add Month Summary sheet (only when results span ≥ 2 distinct months)
+    _build_month_summary_sheet(wb, results)
+
+    # 5. Add main Output sheet (Reco 2B vs Books)
     ws_output = wb.create_sheet(title="Reco 2B vs Books")
     _populate_workbook(ws_output, results)
-    
-    # 4. Remove the default 'Sheet' that openpyxl creates automatically if we added other sheets
+
+    # Remove the default 'Sheet' that openpyxl creates automatically if we added other sheets
     if "Sheet" in wb.sheetnames and len(wb.sheetnames) > 1:
         wb.remove(wb["Sheet"])
-        
+
     return wb
 
 

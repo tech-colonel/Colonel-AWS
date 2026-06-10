@@ -26,6 +26,7 @@ from .gstr_2b_books import (
     _get_val,
     _extract_gstin,
     _ensure_xlsx,
+    _append_rcm_rows,
 )
 
 
@@ -315,6 +316,12 @@ def build_gstr2b_books_multistate_workbook(
         _merge_state_into_sheets(wb, _b64.b64decode(all_purchase_b64[idx]), "PR")
     for idx in range(1, len(all_debit_b64)):
         _merge_state_into_sheets(wb, _b64.b64decode(all_debit_b64[idx]),    "DN")
+
+    # ── Append RCM rows from states 2-N into the RCM sheet ───────────────────
+    # State 1 RCM was already written by build_gstr2b_books_workbook.
+    # We append data rows (no headers) from each additional state's GSTR-2B file.
+    for idx in range(1, len(all_gstr2b_b64)):
+        _append_rcm_rows(_b64.b64decode(all_gstr2b_b64[idx]), wb)
 
     # ── Reco 2B vs Books: add Remark 3 as column AC (29) ─────────────────────
     # +6 columns vs single-state: GSTIN+Source+State for both 2B and Books sections

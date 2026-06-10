@@ -23,6 +23,9 @@ build/
 new-backend/output/
 new-backend/outputs/
 reco-engine/output/
+reco-engine/outputs/
+reco-engine/temp_run/
+Extra/
 *.xlsx~
 *.xls~
 

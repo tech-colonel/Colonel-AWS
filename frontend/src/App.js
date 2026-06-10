@@ -15,8 +15,8 @@ import BrandSelection        from './pages/accountant/BrandSelection';
 import BrandDashboard        from './pages/accountant/BrandDashboard';
 import BrandAgentsInventory  from './pages/accountant/BrandAgentsInventory';
 import AgentWorkspace        from './pages/accountant/AgentWorkspace';
+import AgentDispatch         from './pages/accountant/AgentDispatch';
 // ── Reco suite ────────────────────────────────────────────────────────────────
-import RecoSuite             from './pages/accountant/RecoSuite';
 import RecoWorkspace         from './pages/accountant/RecoWorkspace';
 import RecoMultiStateWorkspace from './pages/accountant/RecoMultiStateWorkspace';
 import RecoJobDashboard      from './pages/accountant/RecoJobDashboard';
@@ -79,7 +79,7 @@ function App() {
             path="/brands/:brandId/agents/:agentId"
             element={
               <ProtectedRoute allowedRoles={['accountant', 'admin']}>
-                <AgentWorkspace />
+                <AgentDispatch />
               </ProtectedRoute>
             }
           />
@@ -93,14 +93,7 @@ function App() {
               </ProtectedRoute>
             }
           />
-          <Route
-            path="/brands/:brandId/reco"
-            element={
-              <ProtectedRoute allowedRoles={['accountant', 'admin']}>
-                <RecoSuite />
-              </ProtectedRoute>
-            }
-          />
+          {/* /reco standalone listing no longer used — agents inventory is the entry point */}
           <Route
             path="/brands/:brandId/reco/:agentType"
             element={

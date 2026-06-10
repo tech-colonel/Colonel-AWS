@@ -41,6 +41,14 @@ const RECO_AGENTS = [
     createdAt: new Date(),
     updatedAt: new Date(),
   },
+  {
+    id: 'd0000000-0000-0000-0000-000000000005',
+    name: 'gstr_1_vs_books',
+    description: 'GSTR-1 outward supplies vs Tally Sales Register + Amazon books reconciliation',
+    columns: JSON.stringify([]),
+    createdAt: new Date(),
+    updatedAt: new Date(),
+  },
 ];
 
 module.exports = {
@@ -48,7 +56,7 @@ module.exports = {
     // Step 1: Insert the 4 RECO agents.
     // ignoreDuplicates: true = ON CONFLICT DO NOTHING on both id and name unique constraints.
     await queryInterface.bulkInsert('agents', RECO_AGENTS, { ignoreDuplicates: true });
-    console.log('  [SEED] agents — 4 RECO agents inserted (or already present)');
+    console.log('  [SEED] agents — 5 RECO agents inserted (or already present)');
 
     // Step 2: Assign all 4 RECO agents to every brand in the DB.
     // Uses CROSS JOIN so it works regardless of what brand UUIDs the target DB has —
@@ -66,6 +74,7 @@ module.exports = {
       WHERE a.name IN (
         'gstr_2b_books',
         'gstr_2b_books_multistate',
+        'gstr_1_vs_books',
         'gstr_3b_tally_entry',
         'universal_bank_statement'
       )

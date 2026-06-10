@@ -2,7 +2,7 @@
 
 ## What This Repo Is
 
-RECO branch of `colonel-automation`. Adds **4 reconciliation agents** on top of the existing platform:
+RECO branch of `colonel-automation`. Adds **5 reconciliation agents** on top of the existing platform:
 
 | Agent key | What it does |
 |---|---|
@@ -10,6 +10,7 @@ RECO branch of `colonel-automation`. Adds **4 reconciliation agents** on top of 
 | `gstr_2b_books_multistate` | Same as above for brands with multiple GSTINs/states — adds Remark 3 |
 | `gstr_3b_tally_entry` | Parses GSTR-3B → generates ready-to-post Tally journal entries |
 | `universal_bank_statement` | Classifies any Indian bank statement against Tally chart of accounts |
+| `gstr_1_vs_books` | GSTR-1 outward supplies vs Tally sales register + Amazon RTF data |
 
 The rest of the platform (sales agents, invoice agents, admin panel, CFO dashboards) is unchanged and lives in the same codebase.
 
@@ -36,7 +37,7 @@ The rest of the platform (sales agents, invoice agents, admin panel, CFO dashboa
 # 1. Install new Node dependencies (safe to re-run)
 cd new-backend && npm install
 
-# 2. Run the RECO seeder — adds 4 agents to DB + creates reco tables on all brand DBs
+# 2. Run the RECO seeder — adds 5 RECO agents to DB + creates reco tables on all brand DBs
 #    ONLY touches agents table and brand_agents. Never modifies users/brands/existing agents.
 cd new-backend && node seed.js
 
@@ -58,13 +59,32 @@ cd frontend && npm install && npx craco start
 [MIGRATE] ✅ colonel-stroom — hero tables ready
 [MIGRATE] ✅ colonel-koparo — hero tables ready
 ... (one line per brand)
-Done. The 4 RECO agents are now active for all brands.
+Done. The 5 RECO agents are now active for all brands.
 ```
 
-**If the 4 agents don't appear in the UI** after this, check:
+**If the 5 RECO agents don't appear in the UI** after this, check:
 - `node seed.js` completed without error
 - Backend is restarted (new routes need a fresh process)
 - User's account has brands assigned (`brand_users` table)
+
+---
+
+## RECO Agent UUIDs
+
+These stable UUIDs are seeded by `seed.js` and never change. Every RECO agent workspace is
+now accessed at `/brands/:brandId/agents/:agentId` — the same pattern as sales agents.
+`AgentDispatch.jsx` maps UUID → workspace component.
+
+| Agent | DB name | UUID |
+|---|---|---|
+| GSTR-2B vs Books | `gstr_2b_books` | `d0000000-0000-0000-0000-000000000001` |
+| GSTR-2B vs Books (Multi-State) | `gstr_2b_books_multistate` | `d0000000-0000-0000-0000-000000000002` |
+| GSTR-3B Tally Entry | `gstr_3b_tally_entry` | `d0000000-0000-0000-0000-000000000003` |
+| Universal Bank Statement | `universal_bank_statement` | `d0000000-0000-0000-0000-000000000004` |
+| GSTR-1 vs Books | `gstr_1_vs_books` | `d0000000-0000-0000-0000-000000000005` |
+
+> **Frontend routing**: `/brands/:brandId/agents/:agentId` → `AgentDispatch` → RECO workspace or `AgentWorkspace`
+> Results deep-links still use `/brands/:brandId/reco/:agentType/results/:jobId`
 
 ---
 
@@ -80,12 +100,13 @@ Done. The 4 RECO agents are now active for all brands.
 | `reco-engine/requirements.txt` | Python deps: pandas, openpyxl, xlrd, thefuzz |
 | `new-backend/scripts/classify.py` | Universal Bank Statement standalone CLI (subprocess, not HTTP) |
 | `new-backend/seed.js` | RECO delta seeder runner — run once after merge |
-| `new-backend/seeders/01-reco-agents.js` | Inserts 4 agent rows + brand assignments |
+| `new-backend/seeders/01-reco-agents.js` | Inserts 5 RECO agent rows + brand assignments |
+| `frontend/src/pages/accountant/AgentDispatch.jsx` | Routes `/agents/:agentId` → RECO workspace or AgentWorkspace based on UUID |
 | `new-backend/src/controllers/recoController.js` | Upload handler, Python proxy, DB saves, Layer 0 corrections |
 | `new-backend/src/controllers/bankCorrectionsController.js` | Corrections CRUD — `saveCorrections`, `uploadOutputExcel` |
 | `new-backend/src/controllers/dashboardController.js` | Job history, analytics, `getJobById` |
 | `new-backend/src/db/migrations/001_reco_tables.sql` | Idempotent SQL — all 8 reco tables. Runs on every backend startup |
-| `frontend/src/pages/accountant/RecoSuite.jsx` | 4-agent card grid |
+| `frontend/src/pages/accountant/RecoSuite.jsx` | RECO agent card grid |
 | `frontend/src/pages/accountant/RecoWorkspace.jsx` | Upload + run + results for all agents |
 | `frontend/src/pages/accountant/RecoMultiStateWorkspace.jsx` | Multi-state file slot UI |
 | `frontend/src/pages/accountant/RecoJobDashboard.jsx` | Job analytics + row-level results |

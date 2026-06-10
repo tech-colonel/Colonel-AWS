@@ -5,8 +5,8 @@
  * the colonel-master DB populated (users, brands, sales agents, etc.).
  *
  * What it does:
- *   1. Inserts the 4 RECO agent rows into colonel-master (agents table)
- *   2. Assigns those 4 agents to every brand (brand_agents table)
+ *   1. Inserts the 5 RECO agent rows into colonel-master (agents table)
+ *   2. Assigns those 5 agents to every brand (brand_agents table)
  *   3. Creates the 8 reco result tables on every brand DB via 001_reco_tables.sql
  *
  * Safe to re-run — all operations are idempotent (ON CONFLICT DO NOTHING).
@@ -60,11 +60,12 @@ const { migrateAllBrands } = require('./src/db/migrate');
   console.log('╔══════════════════════════════════════════════╗');
   console.log('║   ✅  Done! RECO branch is ready.            ║');
   console.log('╚══════════════════════════════════════════════╝\n');
-  console.log('The 4 RECO agents are now active for all brands:');
-  console.log('  • gstr_2b_books');
-  console.log('  • gstr_2b_books_multistate');
-  console.log('  • gstr_3b_tally_entry');
-  console.log('  • universal_bank_statement\n');
+  console.log('The 5 RECO agents are now active for all brands:');
+  console.log('  • gstr_2b_books              (d0000000-...-000000000001)');
+  console.log('  • gstr_2b_books_multistate   (d0000000-...-000000000002)');
+  console.log('  • gstr_3b_tally_entry        (d0000000-...-000000000003)');
+  console.log('  • universal_bank_statement   (d0000000-...-000000000004)');
+  console.log('  • gstr_1_vs_books            (d0000000-...-000000000005)\n');
   console.log('Start the server:');
   console.log('  cd new-backend && node server.js\n');
 
