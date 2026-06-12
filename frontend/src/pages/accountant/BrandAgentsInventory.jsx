@@ -8,6 +8,10 @@ import api from '../../lib/api';
 import { toast } from 'sonner';
 import { RECO_ID_TO_TYPE } from './AgentDispatch';
 
+// When REACT_APP_RECO_ONLY=true (ngrok / accountant build) only the 5 RECO agents are shown.
+// Default (port 3000 dev, fresh pull) shows ALL agents — main branch + RECO.
+const RECO_ONLY = process.env.REACT_APP_RECO_ONLY === 'true';
+
 // Rich metadata for RECO agent cards
 const RECO_AGENT_META = {
   gstr_2b_books: {
@@ -85,6 +89,11 @@ const BrandAgentsInventory = () => {
 
   const isAssigned = (agentId) => assignedAgents.some(a => a.id === agentId);
 
+  // RECO-only build hides main-branch agents; full build (port 3000) shows everything.
+  const visibleAgents = RECO_ONLY
+    ? allAgents.filter(agent => RECO_ID_TO_TYPE[agent.id])
+    : allAgents;
+
   const handleAgentClick = (agent) => {
     if (!isAssigned(agent.id)) {
       toast.info('This agent is not assigned to this brand');
@@ -112,7 +121,7 @@ const BrandAgentsInventory = () => {
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6" data-testid="agents-inventory-grid">
-          {allAgents.filter(agent => RECO_ID_TO_TYPE[agent.id]).map((agent) => {
+          {visibleAgents.map((agent) => {
             const assigned = isAssigned(agent.id);
             const recoMeta = RECO_AGENT_META[agent.name];
 
@@ -225,7 +234,7 @@ const BrandAgentsInventory = () => {
           })}
         </div>
 
-        {allAgents.filter(agent => RECO_ID_TO_TYPE[agent.id]).length === 0 && (
+        {visibleAgents.length === 0 && (
           <Card>
             <CardContent className="py-12 text-center">
               <Bot className="h-12 w-12 text-slate-400 mx-auto mb-4" />
