@@ -63,4 +63,11 @@ app.use((err, req, res, next) => {
   });
 });
 
+// Serve React frontend build (for single-domain ngrok / production)
+const frontendBuild = path.join(__dirname, '../../frontend/build');
+if (require('fs').existsSync(frontendBuild)) {
+  app.use(express.static(frontendBuild));
+  app.get('/{*path}', (req, res) => res.sendFile(path.join(frontendBuild, 'index.html')));
+}
+
 module.exports = app;
