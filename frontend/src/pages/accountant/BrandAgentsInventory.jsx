@@ -6,6 +6,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../..
 import { Badge } from '../../components/ui/badge';
 import api from '../../lib/api';
 import { toast } from 'sonner';
+import { RECO_ID_TO_TYPE } from './AgentDispatch';
 
 // Rich metadata for RECO agent cards
 const RECO_AGENT_META = {
@@ -111,7 +112,7 @@ const BrandAgentsInventory = () => {
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6" data-testid="agents-inventory-grid">
-          {allAgents.map((agent) => {
+          {allAgents.filter(agent => RECO_ID_TO_TYPE[agent.id]).map((agent) => {
             const assigned = isAssigned(agent.id);
             const recoMeta = RECO_AGENT_META[agent.name];
 
@@ -224,7 +225,7 @@ const BrandAgentsInventory = () => {
           })}
         </div>
 
-        {allAgents.length === 0 && (
+        {allAgents.filter(agent => RECO_ID_TO_TYPE[agent.id]).length === 0 && (
           <Card>
             <CardContent className="py-12 text-center">
               <Bot className="h-12 w-12 text-slate-400 mx-auto mb-4" />
