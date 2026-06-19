@@ -19,6 +19,7 @@ import AgentDispatch         from './pages/accountant/AgentDispatch';
 // ── Reco suite ────────────────────────────────────────────────────────────────
 import RecoWorkspace         from './pages/accountant/RecoWorkspace';
 import RecoMultiStateWorkspace from './pages/accountant/RecoMultiStateWorkspace';
+import PdfBankExtractorWorkspace from './pages/accountant/PdfBankExtractorWorkspace';
 import RecoJobDashboard      from './pages/accountant/RecoJobDashboard';
 import './App.css';
 
@@ -80,6 +81,16 @@ function App() {
             element={
               <ProtectedRoute allowedRoles={['accountant', 'admin']}>
                 <AgentDispatch />
+              </ProtectedRoute>
+            }
+          />
+
+          {/* ── PDF Bank Extractor — no DB storage ───────────────────────── */}
+          <Route
+            path="/brands/:brandId/pdf-bank"
+            element={
+              <ProtectedRoute allowedRoles={['accountant', 'admin']}>
+                <PdfBankExtractorWorkspace />
               </ProtectedRoute>
             }
           />

@@ -32,6 +32,14 @@ const RECO_AGENTS = [
     description: 'Brand-agnostic classifier that maps transactions from any Indian bank statement format to your exported Tally chart of accounts.',
     fields: ['Bank Statement', 'Ledger Master'], accuracy: '100.0%',
   },
+  {
+    id: 'pdf_bank_extract', category: 'Bank & Finance',
+    name: 'PDF → Bank Statement', icon: '📄',
+    color: '#0748EE', bg: '#E8EFFE', border: '#A3BFF8',
+    description: 'Convert any Indian bank statement PDF (HDFC, ICICI, SBI, Axis, Kotak) to Excel with Check Point validation columns — ready for the Universal Bank Statement classifier.',
+    fields: ['Bank Statement PDF'], accuracy: 'Auto-detect',
+    route: 'pdf-bank',
+  },
 ];
 
 const AgentCard = ({ agent, brandId, navigate, idx }) => {
@@ -43,7 +51,7 @@ const AgentCard = ({ agent, brandId, navigate, idx }) => {
 
   return (
     <button
-      onClick={() => navigate(`/brands/${brandId}/reco/${agent.id}`)}
+      onClick={() => navigate(agent.route ? `/brands/${brandId}/${agent.route}` : `/brands/${brandId}/reco/${agent.id}`)}
       className="glass-card p-5 text-left group"
       data-testid={`reco-card-${agent.id}`}
       style={{
