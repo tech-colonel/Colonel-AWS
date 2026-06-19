@@ -8,9 +8,24 @@ import api from '../../lib/api';
 import { toast } from 'sonner';
 import { RECO_ID_TO_TYPE } from './AgentDispatch';
 
-// When REACT_APP_RECO_ONLY=true (ngrok / accountant build) only the 5 RECO agents are shown.
-// Default (port 3000 dev, fresh pull) shows ALL agents — main branch + RECO.
-const RECO_ONLY = process.env.REACT_APP_RECO_ONLY === 'true';
+// Decide whether to show ONLY the 5 RECO agents (accountant view) or ALL agents (dev view).
+// Resolved at RUNTIME so env-file precedence can't bake in the wrong value:
+//   - REACT_APP_RECO_ONLY=true/false → explicit override (e.g. via .env.local), always wins.
+//   - else served from localhost (dev on :3000) → show ALL agents (main branch + RECO).
+//   - else (served from a tunnel: Cloudflare/ngrok → accountants) → show ONLY the 5 RECO agents.
+function isRecoOnly() {
+  const env = process.env.REACT_APP_RECO_ONLY;
+  if (env === 'true') return true;
+  if (env === 'false') return false;
+  const host = typeof window !== 'undefined' ? window.location.hostname : '';
+  return host !== 'localhost' && host !== '127.0.0.1';
+}
+const RECO_ONLY = isRecoOnly();
+
+// Agents hidden from the accountant/tunnel (RECO-only) view but still shown on local dev.
+const HIDDEN_WHEN_RECO_ONLY = new Set([
+  'd0000000-0000-0000-0000-000000000001', // GSTR-2B vs Books (single-state) — accountants use multi-state
+]);
 
 // Rich metadata for RECO agent cards
 const RECO_AGENT_META = {
@@ -54,6 +69,14 @@ const RECO_AGENT_META = {
     accuracy: '100.0%',
     fields: ['Bank Statement', 'Ledger Master'],
   },
+  amazon_mtr_consolidator: {
+    displayName: 'Amazon MTR Consolidator',
+    icon: '🛒',
+    category: 'Marketplace MIS',
+    color: '#D97706', bg: '#FFFBEB', border: '#FDE68A',
+    accuracy: '99.8%',
+    fields: ['Drive Folder Link', 'B2B Report', 'B2C Report'],
+  },
 };
 
 const BrandAgentsInventory = () => {
@@ -91,7 +114,7 @@ const BrandAgentsInventory = () => {
 
   // RECO-only build hides main-branch agents; full build (port 3000) shows everything.
   const visibleAgents = RECO_ONLY
-    ? allAgents.filter(agent => RECO_ID_TO_TYPE[agent.id])
+    ? allAgents.filter(agent => RECO_ID_TO_TYPE[agent.id] && !HIDDEN_WHEN_RECO_ONLY.has(agent.id))
     : allAgents;
 
   const handleAgentClick = (agent) => {
@@ -121,6 +144,50 @@ const BrandAgentsInventory = () => {
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6" data-testid="agents-inventory-grid">
+          {/* PDF → Bank Statement: no DB entry needed — always visible, no storage */}
+          <div
+            onClick={() => navigate(`/brands/${brandId}/pdf-bank`)}
+            data-testid="agent-inventory-card-pdf-bank-extract"
+            className="rounded-2xl border bg-white transition-all duration-200 flex flex-col overflow-hidden cursor-pointer hover:shadow-lg hover:-translate-y-0.5"
+            style={{ borderColor: '#A3BFF8' }}
+          >
+            <div className="p-5 flex-1">
+              <div className="flex items-start justify-between mb-3">
+                <div
+                  className="w-11 h-11 rounded-xl flex items-center justify-center text-2xl"
+                  style={{ background: '#E8EFFE', border: '1.5px solid #A3BFF8' }}
+                >
+                  📄
+                </div>
+                <span
+                  className="flex items-center gap-1 text-xs font-semibold px-2 py-1 rounded-full"
+                  style={{ background: '#E8EFFE', color: '#0748EE', border: '1px solid #A3BFF8' }}
+                >
+                  <TrendingUp className="w-3 h-3" />
+                  Auto-detect
+                </span>
+              </div>
+              <h3 className="font-bold text-slate-900 text-base mb-1 leading-snug">PDF → Bank Statement</h3>
+              <p className="text-slate-500 text-xs leading-relaxed mb-3 line-clamp-2">
+                Convert any Indian bank statement PDF (HDFC, ICICI, SBI, Axis, Kotak) to Excel with Check Point validation columns — ready for Universal Bank Statement.
+              </p>
+              <div className="flex flex-wrap gap-1.5">
+                {['Bank Statement PDF'].map(f => (
+                  <span key={f} className="text-[11px] px-2 py-0.5 rounded-full bg-slate-100 text-slate-600 font-medium">{f}</span>
+                ))}
+              </div>
+            </div>
+            <div
+              className="px-5 py-3 flex items-center justify-between border-t"
+              style={{ borderColor: '#A3BFF8', background: '#E8EFFE' }}
+            >
+              <span className="text-xs font-bold uppercase tracking-wide" style={{ color: '#0748EE' }}>Bank &amp; Finance</span>
+              <span className="flex items-center gap-1 text-xs font-semibold" style={{ color: '#0748EE' }}>
+                Run Agent <ChevronRight className="w-3.5 h-3.5" />
+              </span>
+            </div>
+          </div>
+
           {visibleAgents.map((agent) => {
             const assigned = isAssigned(agent.id);
             const recoMeta = RECO_AGENT_META[agent.name];
