@@ -1,5 +1,5 @@
 const { Agent, Brand, BrandAgent } = require('../models/master');
-const { getBrandConnection } = require('../config/database');
+const { getBrandConnection, masterSequelize } = require('../config/database');
 const { getBrandAgentModel, getDynamicModel } = require('../models/brand');
 
 /**
@@ -140,10 +140,114 @@ const proxyWebhook = async (req, res, next) => {
   }
 };
 
+/**
+ * GET /api/agents/:agentId/brands
+ * Returns all brands that have this agent assigned (from master brand_agents)
+ */
+const getAgentBrands = async (req, res, next) => {
+  try {
+    const { agentId } = req.params;
+    const agent = await Agent.findByPk(agentId);
+    if (!agent) return res.status(404).json({ error: 'Agent not found' });
+
+    const assignments = await BrandAgent.findAll({ where: { agent_id: agentId } });
+    const brandIds = assignments.map((a) => a.brand_id);
+    const brands = await Brand.findAll({ where: { id: brandIds } });
+
+    res.json(brands);
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * DELETE /api/brands/:brandId/agents/:agentId/data  (Admin only)
+ * Clears sku_master and ledger_master from the brand DB's brand_agents record.
+ */
+const clearBrandAgentData = async (req, res, next) => {
+  try {
+    const { brandId, agentId } = req.params;
+
+    const brand = await Brand.findByPk(brandId);
+    const agent = await Agent.findByPk(agentId);
+    if (!brand || !agent) return res.status(404).json({ error: 'Brand or Agent not found' });
+
+    const brandDb = getBrandConnection(brand.db_name);
+    const BrandAgentModel = getBrandAgentModel(brandDb);
+    await BrandAgentModel.sync({ force: false });
+
+    const record = await BrandAgentModel.findOne({ where: { brand_id: brandId, agent_id: agentId } });
+    if (!record) return res.status(404).json({ error: 'Assignment not found in brand database' });
+
+    await record.update({ sku_master: [], ledger_master: [] });
+
+    res.json({ success: true, message: `SKU and ledger data cleared for brand "${brand.name}" / agent "${agent.name}"` });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * DELETE /api/agents/:agentId  (Admin only)
+ * 1. Drops the agent's dynamic table from EVERY brand DB
+ * 2. Removes brand_agents records in every brand DB
+ * 3. Removes master brand_agents link records
+ * 4. Destroys the agent row itself
+ */
+const deleteAgent = async (req, res, next) => {
+  try {
+    const { agentId } = req.params;
+
+    const agent = await Agent.findByPk(agentId);
+    if (!agent) return res.status(404).json({ error: 'Agent not found' });
+
+    const tableName = agent.name.replace(/[^a-zA-Z0-9]/g, '_').toLowerCase();
+    const brands = await Brand.findAll();
+
+    const results = [];
+
+    for (const brand of brands) {
+      try {
+        const brandDb = getBrandConnection(brand.db_name);
+
+        // Drop the agent's processed-data table
+        await brandDb.query(`DROP TABLE IF EXISTS "${tableName}"`);
+
+        // Remove the brand_agents record that links this brand+agent
+        const BrandAgentModel = getBrandAgentModel(brandDb);
+        await BrandAgentModel.sync({ force: false });
+        await BrandAgentModel.destroy({ where: { agent_id: agentId } });
+
+        results.push({ brand: brand.name, status: 'cleaned' });
+      } catch (err) {
+        console.error(`[deleteAgent] Error on brand "${brand.name}":`, err.message);
+        results.push({ brand: brand.name, status: 'error', error: err.message });
+      }
+    }
+
+    // Remove master brand_agents links
+    await BrandAgent.destroy({ where: { agent_id: agentId } });
+
+    // Delete the agent itself
+    await agent.destroy();
+
+    res.json({
+      success: true,
+      message: `Agent "${agent.name}" deleted and tables dropped from all brand databases`,
+      details: results
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
 module.exports = {
   createAgent,
   getAllAgents,
   assignAgentToBrand,
   getBrandAgents,
+  getAgentBrands,
+  clearBrandAgentData,
+  deleteAgent,
   proxyWebhook
 };
