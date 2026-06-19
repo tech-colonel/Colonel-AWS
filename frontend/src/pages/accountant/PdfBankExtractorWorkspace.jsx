@@ -1,11 +1,12 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import {
-  LayoutDashboard, FileSearch, Bot, Upload, FileText,
+  LayoutDashboard, Bot, Upload, FileText,
   CheckCircle2, AlertTriangle, AlertCircle, Download,
-  X, ArrowRight, BarChart3,
+  X, ArrowRight,
 } from 'lucide-react';
 import DashboardLayout from '../../components/layout/DashboardLayout';
+import { sidebarFor } from '../../lib/adminNav';
 import api from '../../lib/api';
 
 const fmt = (n) =>
@@ -33,12 +34,10 @@ export default function PdfBankExtractorWorkspace() {
 
   const brandName = brands.find(b => String(b.id) === String(brandId))?.name || '';
 
-  const sidebarItems = [
-    { path: `/brands/${brandId}/dashboard`,  label: 'Dashboard',  icon: LayoutDashboard },
-    { path: `/brands/${brandId}/reco`,       label: 'Reco Suite',  icon: FileSearch },
-    { path: '/chat',                         label: 'Colonel AI',  icon: Bot },
-    { path: '/dashboard',                    label: 'Analytics',   icon: BarChart3 },
-  ];
+  const sidebarItems = sidebarFor([
+    { path: `/brands/${brandId}/dashboard`, label: 'Dashboard',  icon: LayoutDashboard },
+    { path: `/brands/${brandId}/agents`,    label: 'All Agents', icon: Bot },
+  ]);
 
   // ── Drop handling ──────────────────────────────────────────────
   const acceptFile = useCallback((file) => {
