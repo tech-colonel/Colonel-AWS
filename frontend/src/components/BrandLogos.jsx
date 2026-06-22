@@ -79,6 +79,21 @@ export default function BrandLogo({ type, size = 28 }) {
           <text x="24" y="33" fontFamily="Georgia, 'Times New Roman', serif" fontSize="26" fontWeight="700" fill="#fff" textAnchor="middle">T</text>
         </svg>
       );
+    case 'fireflies':
+      return (
+        <svg viewBox="0 0 48 48" style={s} aria-label="Fireflies.ai">
+          <defs>
+            <linearGradient id="ffG" x1="0" y1="0" x2="1" y2="1">
+              <stop offset="0" stopColor="#F23E9C" /><stop offset="1" stopColor="#B81E9A" />
+            </linearGradient>
+          </defs>
+          {/* Fireflies magenta rounded-tile mark */}
+          <rect x="7"  y="7"  width="15.5" height="15.5" rx="4.5" fill="url(#ffG)" />
+          <rect x="25.5" y="7"  width="15.5" height="15.5" rx="4.5" fill="#F77FC4" />
+          <rect x="7"  y="25.5" width="15.5" height="15.5" rx="4.5" fill="#F77FC4" />
+          <rect x="25.5" y="25.5" width="15.5" height="15.5" rx="4.5" fill="url(#ffG)" />
+        </svg>
+      );
     default:
       return (
         <svg viewBox="0 0 24 24" style={s} aria-label={type || 'integration'} fill="none" stroke="#64748B" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
