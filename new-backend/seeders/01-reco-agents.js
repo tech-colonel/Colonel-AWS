@@ -49,6 +49,22 @@ const RECO_AGENTS = [
     createdAt: new Date(),
     updatedAt: new Date(),
   },
+  {
+    id: 'd0000000-0000-0000-0000-000000000007',
+    name: 'pdf_bank_extract',
+    description: 'Convert any Indian bank statement PDF (HDFC, ICICI, SBI, Axis, Kotak) to Excel with Check Point validation columns',
+    columns: JSON.stringify([]),
+    createdAt: new Date(),
+    updatedAt: new Date(),
+  },
+  {
+    id: 'd0000000-0000-0000-0000-000000000006',
+    name: 'amazon_mtr_consolidator',
+    description: 'Consolidate Amazon B2B & B2C Merchant Tax Reports from all resellers into one workbook with Vendor Name + Month columns',
+    columns: JSON.stringify([]),
+    createdAt: new Date(),
+    updatedAt: new Date(),
+  },
 ];
 
 module.exports = {
@@ -76,7 +92,9 @@ module.exports = {
         'gstr_2b_books_multistate',
         'gstr_1_vs_books',
         'gstr_3b_tally_entry',
-        'universal_bank_statement'
+        'universal_bank_statement',
+        'amazon_mtr_consolidator',
+        'pdf_bank_extract'
       )
       ON CONFLICT DO NOTHING
     `);

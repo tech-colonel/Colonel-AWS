@@ -3,11 +3,14 @@ const router = express.Router();
 const { authenticateToken, authorize } = require('../middleware/authMiddleware');
 const {
   getTasks, getTask, createTask, updateTask,
-  deleteTask, addMessage, getTaskStats,
+  deleteTask, addMessage, getTaskStats, createFeedback,
 } = require('../controllers/taskController');
 
 const auth = authenticateToken;
 const adminOnly = [authenticateToken, authorize('admin')];
+
+// Any logged-in user can raise feedback on a reco result → becomes a feedback task.
+router.post('/feedback', auth, createFeedback);
 
 router.get('/tasks/stats', ...adminOnly, getTaskStats);
 router.get('/tasks', auth, getTasks);

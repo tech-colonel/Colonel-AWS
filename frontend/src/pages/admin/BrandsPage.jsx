@@ -13,14 +13,9 @@ import { toast } from 'sonner';
 import { format } from 'date-fns';
 
 import { useNavigate } from 'react-router-dom';
+import { ADMIN_SIDEBAR } from '../../lib/adminNav';
 
-const sidebarItems = [
-  { path: '/admin', label: 'Dashboard', icon: LayoutDashboard, testId: 'nav-dashboard' },
-  { path: '/admin/brands', label: 'Brands', icon: Building2, testId: 'nav-brands' },
-  { path: '/admin/agents', label: 'Agents', icon: Bot, testId: 'nav-agents' },
-  { path: '/admin/users', label: 'Users', icon: Users, testId: 'nav-users' },
-  { path: '/admin/assignments', label: 'Assignments', icon: LinkIcon, testId: 'nav-assignments' }
-];
+const sidebarItems = ADMIN_SIDEBAR;
 
 const BrandsPage = () => {
   const navigate = useNavigate();

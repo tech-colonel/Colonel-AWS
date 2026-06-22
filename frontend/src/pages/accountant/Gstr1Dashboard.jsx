@@ -1,5 +1,6 @@
 import React, { useState, useMemo } from 'react';
 import { Search, ChevronLeft, ChevronRight } from 'lucide-react';
+import { PieChart, Pie, Cell, Tooltip as RTooltip, ResponsiveContainer } from 'recharts';
 
 const REMARK_CFG = {
   'Match':                      { bg: '#C6EFCE', color: '#276221', border: '#A7D7A4' },
@@ -401,6 +402,10 @@ export default function Gstr1Dashboard({ result }) {
     { label: 'Amazon (GSTR-1)', count: remarkCounts['Amazon Entry as per GSTR-1'] || 0, bg: '#E2EFDA', color: '#375623', border: '#9DC3A5' },
   ];
 
+  const donutData = statCards.filter(c => c.count > 0).map(c => ({ name: c.label, value: c.count, color: c.color }));
+  const totalRemarks = donutData.reduce((s, d) => s + d.value, 0);
+  const matchPct = totalRemarks > 0 ? Math.round(((remarkCounts['Match'] || 0) / totalRemarks) * 100) : 0;
+
   return (
     <div style={{ marginTop: '8px' }}>
       {/* Summary stat cards */}
@@ -412,6 +417,27 @@ export default function Gstr1Dashboard({ result }) {
           </div>
         ))}
       </div>
+
+      {/* Reconciliation status donut (consistent with the other agents) */}
+      {donutData.length > 0 && (
+        <div className="glass-card" style={{ padding: '14px 16px', marginBottom: '20px', maxWidth: 420 }}>
+          <div style={{ fontSize: '11px', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.06em', color: '#64748B', marginBottom: '8px' }}>Reconciliation Status</div>
+          <div style={{ position: 'relative' }}>
+            <ResponsiveContainer width="100%" height={200}>
+              <PieChart>
+                <Pie data={donutData} dataKey="value" nameKey="name" innerRadius={58} outerRadius={84} paddingAngle={2}>
+                  {donutData.map((d) => <Cell key={d.name} fill={d.color} />)}
+                </Pie>
+                <RTooltip formatter={(v, n) => [v.toLocaleString('en-IN'), n]} />
+              </PieChart>
+            </ResponsiveContainer>
+            <div style={{ position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%,-60%)', textAlign: 'center', pointerEvents: 'none' }}>
+              <div style={{ fontSize: '24px', fontWeight: 900, fontFamily: 'Barlow, sans-serif', color: '#276221', lineHeight: 1 }}>{matchPct}%</div>
+              <div style={{ fontSize: '10px', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', color: '#64748B' }}>Matched</div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Tab bar */}
       <div style={{ display: 'flex', gap: '4px', borderBottom: '2px solid #E2E8F0', marginBottom: '16px', overflowX: 'auto', paddingBottom: '0' }}>

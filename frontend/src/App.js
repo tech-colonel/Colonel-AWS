@@ -10,6 +10,12 @@ import BrandsPage        from './pages/admin/BrandsPage';
 import AgentsPage        from './pages/admin/AgentsPage';
 import AssignmentsPage   from './pages/admin/AssignmentsPage';
 import BrandOverviewPage from './pages/admin/BrandOverviewPage';
+import UsersPage         from './pages/admin/UsersPage';
+import TasksPage         from './pages/admin/TasksPage';
+import PlansPage         from './pages/admin/PlansPage';
+import PlanEditor        from './pages/admin/PlanEditor';
+import IntegrationsPage  from './pages/admin/IntegrationsPage';
+import FeedbackPage      from './pages/developer/FeedbackPage';
 // ── Accountant pages ──────────────────────────────────────────────────────────
 import BrandSelection        from './pages/accountant/BrandSelection';
 import BrandDashboard        from './pages/accountant/BrandDashboard';
@@ -21,6 +27,8 @@ import RecoWorkspace         from './pages/accountant/RecoWorkspace';
 import RecoMultiStateWorkspace from './pages/accountant/RecoMultiStateWorkspace';
 import PdfBankExtractorWorkspace from './pages/accountant/PdfBankExtractorWorkspace';
 import RecoJobDashboard      from './pages/accountant/RecoJobDashboard';
+// ── Colonel AI (Round 3) ──────────────────────────────────────────────────────
+import ColonelChat           from './pages/ColonelChat';
 import './App.css';
 
 function App() {
@@ -41,8 +49,24 @@ function App() {
                   <Route path="/brands"      element={<BrandsPage />} />
                   <Route path="/brands/:id"  element={<BrandOverviewPage />} />
                   <Route path="/agents"      element={<AgentsPage />} />
+                  <Route path="/users"       element={<UsersPage />} />
+                  <Route path="/tasks"       element={<TasksPage />} />
+                  <Route path="/plans"       element={<PlansPage />} />
+                  <Route path="/plans/:id"   element={<PlanEditor />} />
+                  <Route path="/integrations" element={<IntegrationsPage />} />
+                  <Route path="/feedback"    element={<FeedbackPage />} />
                   <Route path="/assignments" element={<AssignmentsPage />} />
                 </Routes>
+              </ProtectedRoute>
+            }
+          />
+
+          {/* ── Colonel AI chat (all signed-in roles) ─────────────────────── */}
+          <Route
+            path="/chat"
+            element={
+              <ProtectedRoute allowedRoles={['admin', 'accountant', 'developer']}>
+                <ColonelChat />
               </ProtectedRoute>
             }
           />
@@ -53,6 +77,44 @@ function App() {
             element={
               <ProtectedRoute allowedRoles={['accountant', 'admin']}>
                 <BrandSelection />
+              </ProtectedRoute>
+            }
+          />
+
+          {/* ── Tasks (accountant view; admin uses /admin/tasks) ──────────── */}
+          <Route
+            path="/tasks"
+            element={
+              <ProtectedRoute allowedRoles={['accountant', 'admin']}>
+                <TasksPage />
+              </ProtectedRoute>
+            }
+          />
+
+          {/* ── Feedback (developer engineer view; admin uses /admin/feedback) ── */}
+          <Route
+            path="/feedback"
+            element={
+              <ProtectedRoute allowedRoles={['developer', 'admin']}>
+                <FeedbackPage />
+              </ProtectedRoute>
+            }
+          />
+
+          {/* ── Plans (accountant view of shared plans; developer builds plans) ── */}
+          <Route
+            path="/plans"
+            element={
+              <ProtectedRoute allowedRoles={['accountant', 'admin', 'developer']}>
+                <PlansPage />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/plans/:id"
+            element={
+              <ProtectedRoute allowedRoles={['accountant', 'admin', 'developer']}>
+                <PlanEditor />
               </ProtectedRoute>
             }
           />

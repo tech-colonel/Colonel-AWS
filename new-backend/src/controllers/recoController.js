@@ -24,6 +24,10 @@ let _activeRecoJobs = 0;
 const MAX_CONCURRENT_RECO = parseInt(process.env.MAX_CONCURRENT_RECO || '8', 10);
 
 const { loadCorrectionMap, normalizeNarration } = require('./bankCorrectionsController');
+const drive = require('../services/driveService');
+
+// jobId → Google Sheet URL, so repeat "Open in Sheets" clicks reuse one Sheet.
+const _sheetUrlCache = new Map();
 
 // ── DB helpers (imported lazily to avoid circular deps) ──────────────────────
 
@@ -302,6 +306,92 @@ const saveTallyEntryResults = async (sequelize, jobId, brandId, results) => {
   }
 };
 
+// GSTR-1 vs Books — sales/outward (customer-side). The Python engine returns the slim
+// reconciled B2B rows in `b2b_ui_rows` (its `results` is intentionally empty). Map the
+// engine remark → Remark 1 (status) / Remark 2 (detail) and persist to gstr_1_results.
+const G1_MATCHED_REMARKS = new Set(['Match', 'Amazon Entry As per Tally', 'Amazon Entry as per GSTR-1']);
+const mapGstr1Remark = (raw, diffTaxable) => {
+  const r = String(raw || '').trim();
+  if (r === 'Match') return ['Matched', null];
+  if (r === 'Diff') return ['Amount Mismatch', Number(diffTaxable) > 0 ? 'Excess in GSTR-1' : 'Excess in Books'];
+  if (r === 'Not in GSTR-1') return ['Showing in Books but Not in GSTR-1', null];
+  if (r === 'Not in Books') return ['Showing in GSTR-1 but Not in Books', null];
+  if (r.includes('Amazon')) return ['Matched', r];
+  return [r || 'Unknown', null];
+};
+
+const saveGstr1Results = async (sequelize, jobId, brandId, uiRows) => {
+  if (!uiRows?.length) return;
+  const num = v => { const n = Number(v); return isNaN(n) ? null : n; };
+  let saved = 0, failed = 0;
+  try {
+    await sequelize.transaction(async (t) => {
+      await sequelize.query(`SET LOCAL app.bypass_rls = 'true'`, { transaction: t });
+      for (const u of uiRows) {
+        const [rm1, rm2] = mapGstr1Remark(u.remark, u.diff_taxable);
+        const gstr1Only = String(u.remark || '').trim() === 'Not in Books'; // GSTR-1 side only → use g1_* amounts
+        try {
+          await sequelize.query(
+            `INSERT INTO gstr_1_results
+               (job_id, brand_id, customer_name, gstin, invoice_number, invoice_date,
+                taxable_value, igst, cgst, sgst, remark_1, remark_2)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+            { bind: [
+                jobId, brandId,
+                u.party  || null,
+                u.gstin  || null,
+                u.inv_no || u.g1_inv || null,
+                toSqlDate(u.date),
+                num(gstr1Only ? u.g1_taxable : u.t_taxable),
+                num(gstr1Only ? u.g1_igst    : u.t_igst),
+                num(gstr1Only ? u.g1_cgst    : u.t_cgst),
+                num(gstr1Only ? u.g1_sgst    : u.t_sgst),
+                rm1, rm2,
+              ], transaction: t }
+          );
+          saved++;
+        } catch (rowErr) {
+          failed++;
+          if (failed <= 3) console.error('[RECO-DB] gstr_1 row insert error:', rowErr.message, '| inv:', u.inv_no);
+        }
+      }
+    });
+    console.log(`[RECO-DB] ✅ Saved ${saved}/${uiRows.length} GSTR-1 rows for job ${jobId}` + (failed ? ` (${failed} skipped)` : ''));
+  } catch (err) {
+    console.error('[RECO-DB] saveGstr1Results error:', err.message);
+  }
+};
+
+// GSTR-1 B2C (consumer sales) — aggregated, no invoice/GSTIN. Persist ONE summary row
+// (remark_1 = 'B2C Summary') so the analysis page can show a B2C totals strip.
+const saveGstr1B2cSummary = async (sequelize, jobId, brandId, b2cRows) => {
+  if (!b2cRows?.length) return;
+  const sum = (k) => b2cRows.reduce((a, r) => a + (Number(r[k]) || 0), 0);
+  const r2 = (n) => Math.round(n * 100) / 100;
+  const g1Tax = sum('gstr1_taxable'), bkTax = sum('books_taxable');
+  try {
+    await sequelize.transaction(async (t) => {
+      await sequelize.query(`SET LOCAL app.bypass_rls = 'true'`, { transaction: t });
+      await sequelize.query(
+        `INSERT INTO gstr_1_results
+           (job_id, brand_id, customer_name, gstin, invoice_number, invoice_date,
+            taxable_value, igst, cgst, sgst, remark_1, remark_2)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+        { bind: [
+            jobId, brandId,
+            'B2C — Consumer Sales (aggregated)', null, null, null,
+            r2(bkTax), r2(sum('books_igst')), r2(sum('books_cgst')), r2(sum('books_sgst')),
+            'B2C Summary',
+            `GSTR-1 taxable ₹${Math.round(g1Tax).toLocaleString('en-IN')} vs Books ₹${Math.round(bkTax).toLocaleString('en-IN')} (${b2cRows.length} group${b2cRows.length === 1 ? '' : 's'})`,
+          ], transaction: t }
+      );
+    });
+    console.log(`[RECO-DB] ✅ Saved GSTR-1 B2C summary for job ${jobId}`);
+  } catch (err) {
+    console.error('[RECO-DB] saveGstr1B2cSummary error:', err.message);
+  }
+};
+
 // Frontend reco types that use the gstr_2b_books Python engine → persist to gstr_2b_results
 const GST_2B_FRONTEND_TYPES = new Set([
   'gstr_2b_books', 'gstr_2a_vs_2b_vs_books', 'gstr_2b_vs_purchase',
@@ -329,10 +419,14 @@ const RECO_TYPE_MAP = {
  */
 const runUniversalClassifier = (ledgerPath, bankPath, outputPath, correctionsPath) => {
   return new Promise((resolve, reject) => {
-    console.log(`[RECO] Executing standalone classifier: ${CLASSIFIER_PATH}`);
-    const args = ['--ledger', ledgerPath, '--bank', bankPath, '--out', outputPath];
+    const geminiKey = process.env.GEMINI_API_KEY;
+    const geminiModel = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
+    console.log(`[RECO] Executing standalone classifier (gemini=${geminiKey ? 'on' : 'off'}): ${CLASSIFIER_PATH}`);
+    const args = ['--ledger', ledgerPath, '--bank', bankPath, '--output', outputPath];
     if (correctionsPath) args.push('--corrections', correctionsPath);
-    execFile('python3', [CLASSIFIER_PATH, ...args], { timeout: 180000 },
+    // Gemini fallback: candidate-constrained LLM pass over Low/Suspense rows only.
+    if (geminiKey) args.push('--gemini-key', geminiKey, '--gemini-model', geminiModel);
+    execFile('python3', [CLASSIFIER_PATH, ...args], { timeout: 600000 },
       (error, stdout, stderr) => {
         if (error) {
           console.error(`[RECO] CLI execution error:`, stderr || error.message);
@@ -345,15 +439,62 @@ const runUniversalClassifier = (ledgerPath, bankPath, outputPath, correctionsPat
 };
 
 /**
- * Fetch ledger_master JSON from brand DB and convert to Excel buffer.
- * The ledger_master is stored as a JSON array: [{name: 'ABC Traders', ...}, ...]
- * Returns null if no saved ledger exists for this brand.
+ * Build the brand's FULL Chart of Accounts as an Excel buffer for classify.py.
+ * Source of truth = the DB-backed `ledger_master` table (populated when an accountant
+ * uploads a COA), unioned with accountant-verified `bank_reco_corrections` ledgers.
+ * Shared Postgres → identical COA across Colonel Full (3001) and this app (ngrok).
+ * Returns null only when the brand has no COA at all.
  */
-const getLedgerMasterBuffer = (brandId) => {
+const getLedgerMasterBuffer = async (brandId) => {
   try {
-    const filePath = path.join(LEDGER_MASTER_DIR, `${brandId}.xlsx`);
-    if (fs.existsSync(filePath)) return fs.readFileSync(filePath);
-    return null;
+    const { Brand } = require('../models/master');
+    const { getBrandConnection } = require('../config/database');
+    const brand = await Brand.findByPk(brandId);
+    if (!brand) throw new Error('Brand not found');
+    const brandDb = getBrandConnection(brand.db_name);
+
+    const ledgerNames = new Set();
+    let coaCount = 0;
+    try {
+      await brandDb.transaction(async (t) => {
+        await brandDb.query(`SET LOCAL app.bypass_rls = 'true'`, { transaction: t });
+        const [rows] = await brandDb.query(
+          `SELECT ledger_name FROM ledger_master WHERE brand_id = $1`,
+          { bind: [brandId], transaction: t }
+        );
+        for (const r of rows) if (r.ledger_name) ledgerNames.add(String(r.ledger_name).trim());
+      });
+      coaCount = ledgerNames.size;
+    } catch (err) {
+      console.warn(`[RECO] ledger_master read failed: ${err.message}`);
+    }
+
+    try {
+      await brandDb.transaction(async (t) => {
+        await brandDb.query(`SET LOCAL app.bypass_rls = 'true'`, { transaction: t });
+        const [rows] = await brandDb.query(
+          `SELECT DISTINCT correct_ledger FROM bank_reco_corrections WHERE brand_id = $1`,
+          { bind: [brandId], transaction: t }
+        );
+        for (const r of rows) if (r.correct_ledger) ledgerNames.add(r.correct_ledger.trim());
+      });
+    } catch (_) { /* corrections table may not exist yet */ }
+
+    const corrCount = ledgerNames.size - coaCount;
+    console.log(`[RECO] COA source: ledger_master=${coaCount} + corrections=${corrCount} ` +
+      `→ ${ledgerNames.size} total ledgers for brand ${brandId}`);
+    if (coaCount === 0) {
+      console.warn(`[RECO] ⚠️  No COA in ledger_master for brand ${brandId} — running on ` +
+        `${ledgerNames.size} corrections-derived ledgers only. Upload the full COA.`);
+    }
+    if (ledgerNames.size === 0) return null;
+
+    const workbook = new ExcelJS.Workbook();
+    const ws = workbook.addWorksheet('List of Ledgers');
+    ws.columns = [{ header: 'Ledger Name', key: 'name', width: 40 }];
+    for (const name of ledgerNames) ws.addRow({ name });
+    const buffer = await workbook.xlsx.writeBuffer();
+    return Buffer.from(buffer);
   } catch (err) {
     console.error('[RECO] getLedgerMasterBuffer error:', err.message);
     return null;
@@ -492,11 +633,11 @@ const runReco = async (req, res) => {
           await fs.promises.writeFile(ledgerPath, ledgerFile.buffer);
           freshLedgerBuffer = ledgerFile.buffer; // will be saved after successful run
         } else if (!isDemo && brandId && brandId !== 'demo') {
-          const savedLedger = getLedgerMasterBuffer(brandId);
+          const savedLedger = await getLedgerMasterBuffer(brandId);
           if (savedLedger) {
             ledgerPath = path.join(jobDir, 'ledger_master.xlsx');
             await fs.promises.writeFile(ledgerPath, savedLedger);
-            console.log(`[RECO-UNIVERSAL] ✅ Loaded saved ledger master for brand ${brandId}`);
+            console.log(`[RECO-UNIVERSAL] ✅ Loaded full COA from DB for brand ${brandId}`);
           }
         }
       } else if (!isDemo && brandId && brandId !== 'demo') {
@@ -552,10 +693,18 @@ const runReco = async (req, res) => {
         throw new Error('Standalone classifier failed to generate output spreadsheet.');
       }
 
-      // Lock the ledger master for this brand — saved once, reused on all future runs.
-      // Overwrites any previous CoA so updates are reflected immediately.
+      // Persist an uploaded/extracted COA into the DB-backed ledger_master table so every
+      // future run (and the Colonel Full app, which shares this Postgres) uses the full COA.
+      // Best-effort: a persistence hiccup must not fail the reconciliation the user just ran.
       if (freshLedgerBuffer && brandId && brandId !== 'demo' && !isDemo) {
-        saveLedgerMaster(brandId, freshLedgerBuffer);
+        try {
+          const { ingestLedgerMasterToTable } = require('../services/salesService');
+          const r = await ingestLedgerMasterToTable(brandId, freshLedgerBuffer);
+          console.log(`[RECO-UNIVERSAL] COA persisted to ledger_master: +${r.inserted} new ` +
+            `(${r.total} in file) for brand ${brandId}`);
+        } catch (ingestErr) {
+          console.error('[RECO-UNIVERSAL] COA ingest to ledger_master failed (non-fatal):', ingestErr.message);
+        }
       }
 
       // 4. Load & Parse Excel Output Sheets using exceljs
@@ -770,7 +919,7 @@ const runReco = async (req, res) => {
       const hasLedgerUploaded = req.files.some(f => f.fieldname === 'ledger_master');
       if (!hasLedgerUploaded) {
         console.log(`[RECO] Fetching ledger_master from DB for brand ${brandId}...`);
-        const ledgerBuffer = getLedgerMasterBuffer(brandId);
+        const ledgerBuffer = await getLedgerMasterBuffer(brandId);
         if (ledgerBuffer) {
           form.append('ledger_master', ledgerBuffer, {
             filename: 'ledger_master.xlsx',
@@ -789,7 +938,11 @@ const runReco = async (req, res) => {
       headers: { ...form.getHeaders() },
       maxContentLength: Infinity,
       maxBodyLength: Infinity,
-      timeout: 120000
+      // Multi-state now pre-builds the (heavy) workbook during the run so downloads
+      // are instant — give that build headroom for larger multi-state jobs.
+      // Raised to 10 min: on the small EC2 box heavy recos run slower but DO complete;
+      // 180s was cutting them off mid-build (engine still returned 200 afterwards).
+      timeout: 600000
     });
 
     res.json(response.data);
@@ -832,10 +985,15 @@ const runReco = async (req, res) => {
           }
           const pyResults  = response.data?.results || [];
           const pySummary  = response.data?.summary  || {};
-          const totalRows    = pySummary.total    ?? pyResults.length;
-          const matchedRows  = pySummary.matched  ?? pyResults.filter(r => r.suggested_action === 'Matched').length;
-          const unmatchedRows = pySummary.unmatched ?? (totalRows - matchedRows);
-          console.log(`[RECO-DB] pyResults=${pyResults.length} totalRows=${totalRows} matched=${matchedRows}`);
+          // GSTR-1 returns its reconciled rows in b2b_ui_rows (results is intentionally empty).
+          const g1Rows = recoType === 'gstr_1_vs_books' ? (response.data?.b2b_ui_rows || []) : null;
+          const totalRows    = g1Rows ? g1Rows.length
+                              : (pySummary.total ?? pyResults.length);
+          const matchedRows  = g1Rows ? g1Rows.filter(r => G1_MATCHED_REMARKS.has(String(r.remark || '').trim())).length
+                              : (pySummary.matched ?? pyResults.filter(r => r.suggested_action === 'Matched').length);
+          const unmatchedRows = g1Rows ? (totalRows - matchedRows)
+                              : (pySummary.unmatched ?? (totalRows - matchedRows));
+          console.log(`[RECO-DB] pyResults=${pyResults.length} g1Rows=${g1Rows?.length ?? '-'} totalRows=${totalRows} matched=${matchedRows}`);
 
           const savedJobId = await saveRecoJob(seq, {
             brandId, agentType: recoType, month, year, fileHash,
@@ -857,6 +1015,12 @@ const runReco = async (req, res) => {
             if (tallyRows?.length > 0) {
               await saveTallyEntryResults(seq, savedJobId, brandId, tallyRows);
             }
+          } else if (savedJobId && recoType === 'gstr_1_vs_books') {
+            console.log(`[RECO-DB] GSTR-1 path: g1Rows=${g1Rows?.length} b2c=${response.data?.b2c_rows?.length}`);
+            if (g1Rows?.length > 0) {
+              await saveGstr1Results(seq, savedJobId, brandId, g1Rows);
+            }
+            await saveGstr1B2cSummary(seq, savedJobId, brandId, response.data?.b2c_rows);
           } else {
             console.log(`[RECO-DB] Skipping GST rows: savedJobId=${savedJobId} isGST=${GST_2B_FRONTEND_TYPES.has(recoType)}`);
           }
@@ -871,6 +1035,12 @@ const runReco = async (req, res) => {
       return res.status(503).json({
         error: `Reconciliation engine is not running. Please start the Python service on port ${PYTHON_RECO_URL.split(':').pop()}.`
       });
+    }
+    // COA integrity guard tripped in classify.py — the file used as the COA was actually a
+    // bank statement / transaction sheet. Surface the clean, actionable message.
+    const coaErr = /COA integrity check failed:[^\n]*/.exec(err.message || '');
+    if (coaErr) {
+      return res.status(400).json({ error: coaErr[0] });
     }
     res.status(500).json({ error: err.response?.data?.error || err.message });
   } finally {
@@ -891,8 +1061,21 @@ const getLedgerStatus = async (req, res) => {
   }
 
   try {
-    const ledgerBuffer = getLedgerMasterBuffer(brandId);
-    res.json({ hasLedger: !!ledgerBuffer, count: ledgerBuffer ? 1 : 0 });
+    const { Brand } = require('../models/master');
+    const { getBrandConnection } = require('../config/database');
+    const brand = await Brand.findByPk(brandId);
+    if (!brand) return res.json({ hasLedger: false, count: 0 });
+    const brandDb = getBrandConnection(brand.db_name);
+    let count = 0;
+    await brandDb.transaction(async (t) => {
+      await brandDb.query(`SET LOCAL app.bypass_rls = 'true'`, { transaction: t });
+      const [rows] = await brandDb.query(
+        `SELECT count(*)::int AS n FROM ledger_master WHERE brand_id = $1`,
+        { bind: [brandId], transaction: t }
+      );
+      count = rows[0]?.n || 0;
+    });
+    res.json({ hasLedger: count > 0, count, source: 'ledger_master' });
   } catch (err) {
     res.json({ hasLedger: false, count: 0, error: err.message });
   }
@@ -917,12 +1100,68 @@ const exportReco = async (req, res) => {
 
     const response = await axios.get(
       `${PYTHON_RECO_URL}/api/jobs/${req.params.jobId}/export.xlsx`,
-      { responseType: 'stream', timeout: 30000 }
+      // Normally instant (pre-built bytes). Generous timeout covers the fallback
+      // path where the engine must rebuild a large workbook on demand.
+      { responseType: 'stream', timeout: 120000 }
     );
     response.data.pipe(res);
   } catch (err) {
     console.error('[RECO] exportReco error:', err.message);
     res.status(500).json({ error: err.message });
+  }
+};
+
+/**
+ * POST /api/reco/open-in-sheets/:jobId
+ * Upload the output xlsx to Drive as a Google Sheet (service account) and
+ * return a shareable link. Cached per jobId so re-clicks reuse the same Sheet.
+ */
+const openInSheets = async (req, res) => {
+  const { jobId } = req.params;
+  try {
+    if (!drive.isConfigured()) {
+      return res.status(503).json({ error: 'Google Drive is not configured on the server.' });
+    }
+    // Reuse an already-created Sheet for this job.
+    if (_sheetUrlCache.has(jobId)) {
+      return res.json({ url: _sheetUrlCache.get(jobId), cached: true });
+    }
+
+    // Resolve the local xlsx; rebuild from the Python engine to a temp file if missing.
+    let localPath = path.join(RECO_OUTPUT_DIR, `${jobId}.xlsx`);
+    let cleanup = null;
+    if (!fs.existsSync(localPath)) {
+      fs.mkdirSync(RECO_TEMP_DIR, { recursive: true });
+      const tmp = path.join(RECO_TEMP_DIR, `sheets-${jobId}.xlsx`);
+      const response = await axios.get(
+        `${PYTHON_RECO_URL}/api/jobs/${jobId}/export.xlsx`,
+        { responseType: 'stream', timeout: 120000 }
+      );
+      await new Promise((resolve, reject) => {
+        const w = fs.createWriteStream(tmp);
+        response.data.pipe(w);
+        w.on('finish', resolve); w.on('error', reject);
+      });
+      localPath = tmp;
+      cleanup = tmp;
+    }
+
+    const name = `${(req.query.name || 'Reconciliation').replace(/[^a-zA-Z0-9_\- ]/g, '_')} ${jobId.slice(0, 8)}`;
+    const { id, webViewLink } = await drive.uploadXlsxAsSheet(localPath, name);
+    try { await drive.makeAnyoneReader(id); } catch (e) { console.warn('[RECO] share failed:', e.message); }
+    if (cleanup) fs.unlink(cleanup, () => {});
+
+    _sheetUrlCache.set(jobId, webViewLink);
+    res.json({ url: webViewLink });
+  } catch (err) {
+    const msg = String(err?.errors?.[0]?.reason || err?.message || '');
+    console.error('[RECO] openInSheets error:', msg);
+    if (/storage\s*quota/i.test(msg)) {
+      return res.status(502).json({
+        error: 'Drive upload blocked: the service account has no storage. Ask the admin to set GOOGLE_OUTPUT_FOLDER_ID to a Shared Drive folder. You can still Download the Excel.',
+      });
+    }
+    res.status(502).json({ error: 'Could not open in Google Sheets. You can still Download the Excel.' });
   }
 };
 
@@ -943,4 +1182,40 @@ const checkHealth = async (req, res) => {
   }
 };
 
-module.exports = { runReco, exportReco, checkHealth, getLedgerStatus };
+/**
+ * DELETE /api/reco/job/:brandId/:jobId
+ * Per-run Reset — purge ONE reco job (and its CASCADE result rows) from the
+ * brand's DB. Accepts either the Python output_file_id or the PG id as :jobId.
+ */
+const deleteRecoJob = async (req, res) => {
+  try {
+    const { brandId, jobId } = req.params;
+    if (!brandId || ['other', 'demo'].includes(brandId)) {
+      return res.json({ deleted: false, reason: 'no-db-for-brand' });
+    }
+    const { Brand } = require('../models/master');
+    const { getBrandConnection } = require('../config/database');
+    const brand = await Brand.findByPk(brandId);
+    if (!brand) return res.status(404).json({ error: 'Brand not found' });
+    const seq = getBrandConnection(brand.db_name);
+
+    let pgId = null;
+    await seq.transaction(async (t) => {
+      await seq.query(`SET LOCAL app.bypass_rls = 'true'`, { transaction: t });
+      const [rows] = await seq.query(
+        `SELECT id FROM reco_jobs WHERE output_file_id = $1 OR id::text = $1 LIMIT 1`,
+        { bind: [jobId], transaction: t }
+      );
+      if (rows.length) pgId = rows[0].id;
+    });
+
+    if (!pgId) return res.json({ deleted: false, reason: 'not-found' });
+    await deleteJob(seq, pgId); // CASCADE removes the row-level result rows
+    return res.json({ deleted: true });
+  } catch (err) {
+    console.error('[RECO] deleteRecoJob error:', err.message);
+    return res.status(500).json({ error: err.message });
+  }
+};
+
+module.exports = { runReco, exportReco, openInSheets, checkHealth, getLedgerStatus, deleteRecoJob };

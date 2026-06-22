@@ -10,7 +10,9 @@ import {
   BarChart3, Loader2, TrendingUp, LayoutDashboard, Bot, Map,
 } from 'lucide-react';
 import api from '../../lib/api';
+import { sidebarFor, isAdminUser } from '../../lib/adminNav';
 import { toast } from 'sonner';
+import ToolResultDashboard from '../../components/reco/ToolResultDashboard';
 
 const AGENT_META = {
   bank_reco:                  { label: 'Bank Statement Classifier',           color: '#E11D48' },
@@ -52,6 +54,11 @@ const REMARK_COLORS = {
   'Matched': '#059669',
   'Showing in 2B but Not in Books': '#D97706',
   'Showing in Books but Not in 2B': '#E11D48',
+  // GSTR-1 (sales / outward)
+  'Amount Mismatch': '#D97706',
+  'Showing in GSTR-1 but Not in Books': '#F59E0B',
+  'Showing in Books but Not in GSTR-1': '#E11D48',
+  'B2C Summary': '#7C3AED',
 };
 
 const cardStyle = {
@@ -125,10 +132,10 @@ const RecoJobDashboard = () => {
   const resolvedType = job?.agent_type || agentType;
   const meta = AGENT_META[resolvedType] ?? AGENT_META[agentType] ?? { label: agentType, color: '#64748B' };
 
-  const sidebarItems = [
+  const sidebarItems = sidebarFor([
     { path: `/brands/${brandId}/dashboard`, label: 'Dashboard',  icon: LayoutDashboard },
     { path: `/brands/${brandId}/agents`,    label: 'All Agents', icon: Bot },
-  ];
+  ]);
 
   useEffect(() => {
     const fetch = async () => {
@@ -172,6 +179,22 @@ const RecoJobDashboard = () => {
     }
   };
 
+  const handleSendFeedback = async ({ comment, rows }) => {
+    try {
+      await api.post('/api/feedback', {
+        agentType: resolvedType,
+        agentLabel: meta?.label,
+        brandId,
+        jobId: job?.output_file_id || job?.id,
+        comment, rows,
+      });
+      toast.success('Feedback sent — the engineering team has been notified');
+    } catch (e) {
+      toast.error(e.response?.data?.error || 'Could not send feedback');
+      throw e;
+    }
+  };
+
   if (loading) {
     return (
       <DashboardLayout sidebarItems={sidebarItems}>
@@ -194,7 +217,7 @@ const RecoJobDashboard = () => {
           <HelpCircle className="w-10 h-10" style={{ color: '#94A3B8' }} />
           <p className="text-sm font-semibold" style={{ color: 'var(--text-muted)' }}>{errMsg}</p>
           <button
-            onClick={() => navigate(`/brands/${brandId}/reco`)}
+            onClick={() => navigate(isAdminUser() ? '/admin/agents' : `/brands/${brandId}/reco`)}
             className="text-xs font-semibold px-4 py-2 rounded-xl"
             style={{ background: 'var(--surface)', border: '1px solid var(--card-border)', color: 'var(--text-heading)' }}
           >
@@ -205,10 +228,8 @@ const RecoJobDashboard = () => {
     );
   }
 
-  const isBankReco    = job.agent_type === 'bank_reco';
-  const isGst3b       = job.agent_type === 'gstr_3b_vs_2b';
-  const isMultistate  = job.agent_type === 'gstr_2b_books_multistate';
-  const isTallyEntry  = job.agent_type === 'gstr_3b_tally_entry';
+  const isGstr1       = job.agent_type === 'gstr_1_vs_books';
+  const isMultistate  = job?.agent_type === 'gstr_2b_books_multistate';
 
   return (
     <DashboardLayout sidebarItems={sidebarItems}>
@@ -244,7 +265,7 @@ const RecoJobDashboard = () => {
               </h1>
               <div className="flex items-center gap-3 mt-0.5">
                 <span className="text-xs" style={{ color: 'var(--text-muted)' }}>
-                  {MONTHS[job.month]} {job.year}
+                  {MONTHS[job.month ?? 0]} {job.year ?? ''}
                 </span>
                 <span
                   className="inline-flex items-center gap-1 text-xs font-semibold px-2 py-0.5 rounded-full"
@@ -270,21 +291,25 @@ const RecoJobDashboard = () => {
           )}
         </div>
 
-        {/* ── BANK RECO VIEW ── */}
-        {isBankReco && <BankRecoView rows={rows} filter={filter} setFilter={setFilter} />}
-
-        {/* ── GST 3B VIEW ── */}
-        {isGst3b && <Gst3bView rows={rows} />}
-
-        {/* ── MULTI-STATE VIEW ── */}
-        {isMultistate && <GstMultistateView rows={rows} filter={filter} setFilter={setFilter} meta={meta} />}
-
-        {/* ── TALLY ENTRY VIEW ── */}
-        {isTallyEntry && <TallyEntryView rows={rows} meta={meta} />}
-
-        {/* ── GST INVOICE VIEW ── */}
-        {!isBankReco && !isGst3b && !isMultistate && !isTallyEntry && (
-          <GstInvoiceView rows={rows} filter={filter} setFilter={setFilter} meta={meta} />
+        {/* ── GSTR-1 vs BOOKS keeps its bespoke multi-tab view ── */}
+        {isGstr1 ? (
+          <Gstr1View rows={rows} filter={filter} setFilter={setFilter} meta={meta} />
+        ) : (
+          /* Every other agent → the premium shared dashboard (KPIs, charts,
+             status filters, row table). Persisted rows are read-only, so no
+             editable-ledger props are passed. */
+          <ToolResultDashboard
+            agentType={resolvedType}
+            rows={rows}
+            filter={filter}
+            setFilter={setFilter}
+            onDownload={job.output_file_id ? handleDownload : undefined}
+            downloading={downloading}
+            brandId={brandId}
+            jobId={job.output_file_id || job.id}
+            agentLabel={meta?.label}
+            onSendFeedback={handleSendFeedback}
+          />
         )}
       </div>
     </DashboardLayout>
@@ -632,6 +657,157 @@ const GstInvoiceView = ({ rows, filter, setFilter, meta }) => {
             <div className="py-12 text-center">
               <p className="text-sm" style={{ color: 'var(--text-muted)' }}>No records match this filter</p>
             </div>
+          )}
+        </div>
+      </div>
+    </>
+  );
+};
+
+/* ── GSTR-1 vs Books sub-view (sales / outward — customer-side) ─────────────── */
+const GSTR1_FILTER_TABS = ['All', 'Matched', 'Amount Mismatch', 'In GSTR-1 not in Books', 'In Books not in GSTR-1'];
+
+const Gstr1View = ({ rows, filter, setFilter, meta }) => {
+  // The aggregated B2C summary is stored as row(s) with remark_1 === 'B2C Summary';
+  // keep it out of the B2B invoice stats/table and show it as a strip instead.
+  const b2cRows = rows.filter(r => r.remark_1 === 'B2C Summary');
+  const b2b     = rows.filter(r => r.remark_1 !== 'B2C Summary');
+
+  const matched        = b2b.filter(r => r.remark_1 === 'Matched').length;
+  const amountMismatch = b2b.filter(r => r.remark_1 === 'Amount Mismatch').length;
+  const inG1NotBooks   = b2b.filter(r => r.remark_1 === 'Showing in GSTR-1 but Not in Books').length;
+  const inBooksNotG1   = b2b.filter(r => r.remark_1 === 'Showing in Books but Not in GSTR-1').length;
+
+  const remarkData = Object.entries(
+    b2b.reduce((acc, r) => { const k = r.remark_1 ?? 'Unknown'; acc[k] = (acc[k] || 0) + 1; return acc; }, {})
+  ).map(([name, value]) => ({ name, value }));
+
+  const customerData = Object.entries(
+    b2b.reduce((acc, r) => { const k = r.customer_name ?? 'Unknown'; acc[k] = (acc[k] || 0) + Number(r.taxable_value || 0); return acc; }, {})
+  ).sort((a, b) => b[1] - a[1]).slice(0, 8).map(([name, value]) => ({
+    name: name.length > 22 ? name.slice(0, 20) + '…' : name, fullName: name, value: Math.round(value),
+  }));
+
+  const filterMap = {
+    'All': () => true,
+    'Matched': r => r.remark_1 === 'Matched',
+    'Amount Mismatch': r => r.remark_1 === 'Amount Mismatch',
+    'In GSTR-1 not in Books': r => r.remark_1 === 'Showing in GSTR-1 but Not in Books',
+    'In Books not in GSTR-1': r => r.remark_1 === 'Showing in Books but Not in GSTR-1',
+  };
+  const filtered = b2b.filter(filterMap[filter] ?? (() => true));
+  const remarkColor = (v) => REMARK_COLORS[v] ?? '#64748B';
+
+  const b2cTotals = b2cRows.reduce((a, r) => ({
+    taxable: a.taxable + Number(r.taxable_value || 0),
+    igst: a.igst + Number(r.igst || 0), cgst: a.cgst + Number(r.cgst || 0), sgst: a.sgst + Number(r.sgst || 0),
+  }), { taxable: 0, igst: 0, cgst: 0, sgst: 0 });
+
+  return (
+    <>
+      {/* Stat cards */}
+      <div className="grid grid-cols-2 lg:grid-cols-5 gap-4">
+        <StatCard label="Total"                  value={b2b.length}     icon={TrendingUp}    color={meta.color} />
+        <StatCard label="Matched"                value={matched}        icon={CheckCircle2}  color="#059669"    />
+        <StatCard label="Amount Mismatch"        value={amountMismatch} icon={AlertTriangle} color="#D97706"    />
+        <StatCard label="In GSTR-1 not in Books" value={inG1NotBooks}   icon={AlertTriangle} color="#F59E0B"    />
+        <StatCard label="In Books not in GSTR-1" value={inBooksNotG1}   icon={AlertTriangle} color="#E11D48"    />
+      </div>
+
+      {/* B2C summary strip */}
+      {b2cRows.length > 0 && (
+        <div className="p-4 flex flex-wrap items-center gap-x-8 gap-y-2" style={{ ...cardStyle, borderLeft: `4px solid ${meta.color}` }}>
+          <span className="text-xs font-bold uppercase tracking-wider" style={{ color: meta.color }}>B2C (Consumer Sales) — Summary</span>
+          <span className="text-xs" style={{ color: 'var(--text-muted)' }}>Taxable: <b style={{ color: 'var(--text-heading)' }}>₹{fmt(b2cTotals.taxable)}</b></span>
+          <span className="text-xs" style={{ color: 'var(--text-muted)' }}>IGST: <b style={{ color: 'var(--text-heading)' }}>₹{fmt(b2cTotals.igst)}</b></span>
+          <span className="text-xs" style={{ color: 'var(--text-muted)' }}>CGST: <b style={{ color: 'var(--text-heading)' }}>₹{fmt(b2cTotals.cgst)}</b></span>
+          <span className="text-xs" style={{ color: 'var(--text-muted)' }}>SGST: <b style={{ color: 'var(--text-heading)' }}>₹{fmt(b2cTotals.sgst)}</b></span>
+        </div>
+      )}
+
+      {/* Charts */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <div className="p-5" style={cardStyle}>
+          <p className="text-xs font-bold uppercase tracking-wider mb-4" style={{ color: 'var(--text-muted)' }}>Remark Distribution</p>
+          <ResponsiveContainer width="100%" height={220}>
+            <PieChart>
+              <Pie data={remarkData} dataKey="value" innerRadius={55} outerRadius={80} paddingAngle={3}>
+                {remarkData.map((entry) => <Cell key={entry.name} fill={remarkColor(entry.name)} />)}
+              </Pie>
+              <Tooltip formatter={(v) => [v, 'Invoices']} />
+              <Legend />
+            </PieChart>
+          </ResponsiveContainer>
+        </div>
+        <div className="p-5" style={cardStyle}>
+          <p className="text-xs font-bold uppercase tracking-wider mb-4" style={{ color: 'var(--text-muted)' }}>Top Customers by Taxable Value</p>
+          <ResponsiveContainer width="100%" height={Math.max(220, customerData.length * 34)}>
+            <BarChart data={customerData} layout="vertical" margin={{ left: 4, right: 24, top: 4, bottom: 4 }}>
+              <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="var(--card-border)" />
+              <XAxis type="number" tick={{ fontSize: 10, fill: 'var(--text-muted)' }} axisLine={false} tickLine={false} />
+              <YAxis type="category" dataKey="name" width={155} tick={{ fontSize: 10, fill: 'var(--text-muted)' }} axisLine={false} tickLine={false} />
+              <Tooltip formatter={(v, _n, p) => [`₹${v.toLocaleString('en-IN')}`, p.payload.fullName || p.payload.name]} />
+              <Bar dataKey="value" fill={meta.color} radius={[0, 4, 4, 0]} barSize={18} />
+            </BarChart>
+          </ResponsiveContainer>
+        </div>
+      </div>
+
+      {/* Filter tabs */}
+      <div className="flex gap-2 flex-wrap">
+        {GSTR1_FILTER_TABS.map(tab => {
+          const active = filter === tab;
+          const color = tab === 'Matched' ? '#059669'
+            : tab === 'Amount Mismatch' ? '#D97706'
+            : tab === 'In GSTR-1 not in Books' ? '#F59E0B'
+            : tab === 'In Books not in GSTR-1' ? '#E11D48' : meta.color;
+          return (
+            <button key={tab} onClick={() => setFilter(tab)}
+              className="text-xs font-semibold px-3 py-1.5 rounded-full transition-all"
+              style={{ background: active ? `${color}18` : 'var(--surface)', border: `1.5px solid ${active ? color : 'var(--card-border)'}`, color: active ? color : 'var(--text-muted)' }}>
+              {tab}
+            </button>
+          );
+        })}
+      </div>
+
+      {/* Table */}
+      <div style={{ ...cardStyle, overflow: 'hidden' }}>
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr style={{ background: 'var(--page-bg)', borderBottom: '1.5px solid var(--card-border)' }}>
+                {['CUSTOMER','GSTIN','INVOICE #','DATE','TAXABLE VALUE','IGST','CGST','SGST','REMARK 1','REMARK 2'].map(h => (
+                  <th key={h} className="px-4 py-3 text-left text-xs font-bold uppercase tracking-wider whitespace-nowrap" style={{ color: 'var(--text-muted)' }}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {filtered.slice(0, 500).map((row, i) => (
+                <tr key={i} style={{ borderBottom: '1px solid var(--card-border)' }} className="transition-colors hover:opacity-80">
+                  <td className="px-4 py-3 text-xs" style={{ color: 'var(--text-heading)', maxWidth: 180 }}>
+                    <span className="block truncate" style={{ maxWidth: 160 }}>{row.customer_name ?? '—'}</span>
+                  </td>
+                  <td className="px-4 py-3 font-mono text-xs whitespace-nowrap" style={{ color: 'var(--text-heading)' }}>{row.gstin ?? '—'}</td>
+                  <td className="px-4 py-3 font-mono text-xs whitespace-nowrap" style={{ color: 'var(--text-heading)' }}>{row.invoice_number ?? '—'}</td>
+                  <td className="px-4 py-3 font-mono text-xs whitespace-nowrap" style={{ color: 'var(--text-heading)' }}>{row.invoice_date ?? '—'}</td>
+                  <td className="px-4 py-3 font-mono text-xs text-right whitespace-nowrap" style={{ color: 'var(--text-heading)' }}>{fmt(row.taxable_value)}</td>
+                  <td className="px-4 py-3 font-mono text-xs text-right whitespace-nowrap" style={{ color: 'var(--text-heading)' }}>{fmt(row.igst)}</td>
+                  <td className="px-4 py-3 font-mono text-xs text-right whitespace-nowrap" style={{ color: 'var(--text-heading)' }}>{fmt(row.cgst)}</td>
+                  <td className="px-4 py-3 font-mono text-xs text-right whitespace-nowrap" style={{ color: 'var(--text-heading)' }}>{fmt(row.sgst)}</td>
+                  <td className="px-4 py-3 whitespace-nowrap"><RemarkBadge value={row.remark_1} /></td>
+                  <td className="px-4 py-3 text-xs" style={{ color: 'var(--text-muted)', maxWidth: 200 }}>
+                    <span className="block truncate" style={{ maxWidth: 180 }}>{row.remark_2 ?? '—'}</span>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {filtered.length > 500 && (
+            <p className="text-xs text-center py-3" style={{ color: 'var(--text-muted)' }}>Showing 500 of {filtered.length} records — download Excel for full data</p>
+          )}
+          {filtered.length === 0 && (
+            <div className="py-12 text-center"><p className="text-sm" style={{ color: 'var(--text-muted)' }}>No records match this filter</p></div>
           )}
         </div>
       </div>

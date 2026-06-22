@@ -38,7 +38,7 @@ const RECO_AGENTS = [
     color: '#0748EE', bg: '#E8EFFE', border: '#A3BFF8',
     description: 'Convert any Indian bank statement PDF (HDFC, ICICI, SBI, Axis, Kotak) to Excel with Check Point validation columns — ready for the Universal Bank Statement classifier.',
     fields: ['Bank Statement PDF'], accuracy: 'Auto-detect',
-    route: 'pdf-bank',
+    agentId: 'd0000000-0000-0000-0000-000000000007',
   },
 ];
 
@@ -51,7 +51,7 @@ const AgentCard = ({ agent, brandId, navigate, idx }) => {
 
   return (
     <button
-      onClick={() => navigate(agent.route ? `/brands/${brandId}/${agent.route}` : `/brands/${brandId}/reco/${agent.id}`)}
+      onClick={() => navigate(agent.agentId ? `/brands/${brandId}/agents/${agent.agentId}` : `/brands/${brandId}/reco/${agent.id}`)}
       className="glass-card p-5 text-left group"
       data-testid={`reco-card-${agent.id}`}
       style={{

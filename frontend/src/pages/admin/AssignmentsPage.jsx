@@ -7,14 +7,9 @@ import { Label } from '../../components/ui/label';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../../components/ui/modal';
 import api from '../../lib/api';
 import { toast } from 'sonner';
+import { ADMIN_SIDEBAR } from '../../lib/adminNav';
 
-const sidebarItems = [
-  { path: '/admin', label: 'Dashboard', icon: LayoutDashboard, testId: 'nav-dashboard' },
-  { path: '/admin/brands', label: 'Brands', icon: Building2, testId: 'nav-brands' },
-  { path: '/admin/agents', label: 'Agents', icon: Bot, testId: 'nav-agents' },
-  { path: '/admin/users', label: 'Users', icon: UsersIcon, testId: 'nav-users' },
-  { path: '/admin/assignments', label: 'Assignments', icon: LinkIcon, testId: 'nav-assignments' }
-];
+const sidebarItems = ADMIN_SIDEBAR;
 
 const AssignmentsPage = () => {
   const [brands, setBrands] = useState([]);

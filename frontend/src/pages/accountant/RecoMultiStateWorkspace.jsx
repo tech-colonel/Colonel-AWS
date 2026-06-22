@@ -9,12 +9,28 @@ import {
   AlertCircle,
 } from 'lucide-react';
 import api from '../../lib/api';
+import { sidebarFor, isAdminUser } from '../../lib/adminNav';
+import { MULTISTATE_SAMPLE, urlToFile } from '../../lib/demoSamples';
 import { toast } from 'sonner';
+import { StatusDonut, ByReasons, FeedbackModal, distOf } from '../../components/reco/ToolResultDashboard';
 
 const COLOR  = '#7C3AED';
 const PAGE_SIZE = 100;
 
 const storageKey = (brandId) => `colonel_multistate_slots_${brandId}`;
+
+// The full reco result (with every row's raw source dict) is ~18MB for a large
+// multi-state job — far over sessionStorage's ~5MB quota, so caching it whole
+// silently failed and Back lost the result. The table never reads `.raw`, so we
+// cache a slim copy (raw stripped) — ~3MB, well within quota.
+const slimResultForCache = (data) => {
+  if (!data) return data;
+  const stripRaw = (o) => { if (!o || typeof o !== 'object') return o; const { raw, ...rest } = o; return rest; };
+  return {
+    ...data,
+    results: (data.results || []).map(r => ({ ...r, gstr2b: stripRaw(r.gstr2b), purchase: stripRaw(r.purchase) })),
+  };
+};
 
 const fileToB64 = (file) => new Promise((resolve, reject) => {
   const reader = new FileReader();
@@ -233,13 +249,22 @@ const RecoMultiStateWorkspace = () => {
   const { brandId } = useParams();
   const navigate = useNavigate();
 
+  // Persist the last reco result so navigating to Analytics and back (or a refresh)
+  // restores it instead of forcing a full re-run.
+  const resultKey = `reco_result_gstr_2b_books_multistate_${brandId}`;
+
   const [stateSlots, setStateSlots] = useState(
     () => loadSlotsFromStorage(brandId) || Array.from({ length: 4 }, () => ({ gstr2b: null, purchase: null, debit: null }))
   );
   const [tolerance, setTolerance] = useState('1.0');
   const [running, setRunning] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(null);
-  const [result, setResult] = useState(null);
+  const [phase, setPhase] = useState(null); // 'uploading' | 'reconciling' | 'preparing' | null
+  const phaseTimer = useRef(null);
+  const [result, setResult] = useState(() => {
+    try { const c = sessionStorage.getItem(resultKey); return c ? JSON.parse(c) : null; }
+    catch { return null; }
+  });
   const [downloading, setDownloading] = useState(false);
   const [activeTab, setActiveTab] = useState('All');
   const [search, setSearch] = useState('');
@@ -261,10 +286,27 @@ const RecoMultiStateWorkspace = () => {
     persist();
   }, [stateSlots, brandId]);
 
-  const sidebarItems = [
+  // Admin demo: auto-load the 2-state sample set so Anshul can run with one click.
+  useEffect(() => {
+    if (!isAdminUser()) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const slots = await Promise.all(MULTISTATE_SAMPLE.map(async (s, i) => ({
+          gstr2b:   await urlToFile(s.gstr2b,   `State${i + 1}_GSTR2B.xlsx`),
+          purchase: await urlToFile(s.purchase, `State${i + 1}_Purchase.xlsx`),
+          debit:    await urlToFile(s.debit,    `State${i + 1}_DebitNote.xlsx`),
+        })));
+        if (!cancelled) { setStateSlots(slots); toast.success('Sample files loaded — click Run Reconciliation'); }
+      } catch (_) { /* skip on failure */ }
+    })();
+    return () => { cancelled = true; };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const sidebarItems = sidebarFor([
     { path: `/brands/${brandId}/dashboard`, label: 'Dashboard', icon: LayoutDashboard, testId: 'nav-dashboard' },
     { path: `/brands/${brandId}/agents`,    label: 'All Agents', icon: Bot, testId: 'nav-agents' },
-  ];
+  ]);
 
   const addState    = () => setStateSlots(prev => [...prev, { gstr2b: null, purchase: null, debit: null }]);
   const removeState = (idx) => setStateSlots(prev => prev.filter((_, i) => i !== idx));
@@ -279,6 +321,7 @@ const RecoMultiStateWorkspace = () => {
       toast.error('Each state needs a GSTR-2B file and a Purchase Register.'); return;
     }
     setRunning(true); setResult(null); setActiveTab('All'); setSearch(''); setPage(0); setUploadProgress(0);
+    setPhase('uploading');
     try {
       const formData = new FormData();
       formData.append('reco_type', 'gstr_2b_books_multistate');
@@ -294,14 +337,29 @@ const RecoMultiStateWorkspace = () => {
       const response = await api.post('/api/reco/run', formData, {
         headers: { 'Content-Type': 'multipart/form-data' },
         onUploadProgress: (evt) => {
-          if (evt.total) setUploadProgress(Math.round((evt.loaded / evt.total) * 100));
+          if (evt.total) {
+            const pct = Math.round((evt.loaded / evt.total) * 100);
+            setUploadProgress(pct);
+            if (pct >= 100) {
+              // Upload finished — server now reconciles, then builds the Excel
+              // (the long tail). Advance the status so the user knows why it waits.
+              setPhase('reconciling');
+              clearTimeout(phaseTimer.current);
+              phaseTimer.current = setTimeout(() => setPhase('preparing'), 5000);
+            }
+          }
         },
       });
+      clearTimeout(phaseTimer.current);
       setUploadProgress(null);
+      setPhase('done');
       setResult(response.data);
+      try { sessionStorage.setItem(resultKey, JSON.stringify(slimResultForCache(response.data))); } catch (_) {}
       toast.success(`Done! ${response.data.results?.length || 0} records processed.`);
     } catch (err) {
+      clearTimeout(phaseTimer.current);
       setUploadProgress(null);
+      setPhase(null);
       toast.error(err.response?.data?.error || 'Reconciliation failed');
     } finally { setRunning(false); }
   };
@@ -320,11 +378,19 @@ const RecoMultiStateWorkspace = () => {
     finally { setDownloading(false); }
   };
 
-  const handleReset = () => { setResult(null); setActiveTab('All'); setSearch(''); setPage(0); };
+  const handleReset = async () => {
+    // Multi-State persists row-level results — purge this run from the brand DB.
+    if (result?.job_id && brandId && brandId !== 'other' && brandId !== 'demo') {
+      try { await api.delete(`/api/reco/job/${brandId}/${result.job_id}`); } catch (_) {}
+    }
+    try { sessionStorage.removeItem(resultKey); } catch (_) {}
+    setResult(null); setActiveTab('All'); setSearch(''); setPage(0);
+  };
 
   const handleClearFiles = () => {
     if (!window.confirm('Clear all uploaded state files? This cannot be undone.')) return;
     localStorage.removeItem(storageKey(brandId));
+    try { sessionStorage.removeItem(resultKey); } catch (_) {}
     setStateSlots(Array.from({ length: 4 }, () => ({ gstr2b: null, purchase: null, debit: null })));
     setResult(null);
     toast.success('All files cleared');
@@ -362,6 +428,35 @@ const RecoMultiStateWorkspace = () => {
     }
     return { matched, mismatch, only2b, onlyBk, cross, total: flatRows.length };
   }, [flatRows]);
+
+  // Status donut = full remark_1 distribution (incl. Matched).
+  const donutData = useMemo(() => {
+    const m = {};
+    for (const r of flatRows) { const k = r.remark_1 || '—'; m[k] = (m[k] || 0) + 1; }
+    return Object.entries(m).map(([name, value]) => ({ name, value }));
+  }, [flatRows]);
+
+  // "By reason" = secondary observations (Remark 2: tax/value mismatch, Excess in
+  // 2B vs Books…) + cross-state reasons (Remark 3).
+  const reasonsData = useMemo(
+    () => [...distOf(flatRows, (r) => r.remark_2), ...distOf(flatRows, (r) => r.remark_3)],
+    [flatRows],
+  );
+
+  const [fbOpen, setFbOpen] = useState(false);
+  const handleSendFeedback = async ({ comment, rows }) => {
+    try {
+      await api.post('/api/feedback', {
+        agentType: 'gstr_2b_books_multistate',
+        agentLabel: 'GSTR-2B vs Books (Multi-State)',
+        brandId, jobId: result?.job_id, comment, rows,
+      });
+      toast.success('Feedback sent — the engineering team has been notified');
+    } catch (e) {
+      toast.error(e.response?.data?.error || 'Could not send feedback');
+      throw e;
+    }
+  };
 
   const monthSummary = useMemo(() => {
     const months = {};
@@ -448,7 +543,7 @@ const RecoMultiStateWorkspace = () => {
 
         {/* Breadcrumb */}
         <button
-          onClick={() => navigate(`/brands/${brandId}/agents`)}
+          onClick={() => navigate(isAdminUser() ? '/admin/agents' : `/brands/${brandId}/agents`)}
           style={{
             display: 'flex', alignItems: 'center', gap: 6,
             fontSize: 13, color: 'var(--text-muted)', background: 'none',
@@ -673,9 +768,13 @@ const RecoMultiStateWorkspace = () => {
                   style={{ width: '100%', padding: '13px 0', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8 }}
                 >
                   {running
-                    ? uploadProgress !== null && uploadProgress < 100
-                      ? <><Upload style={{ width: 15, height: 15 }} /> Uploading {uploadProgress}%</>
-                      : <><Loader2 style={{ width: 15, height: 15 }} className="animate-spin" /> Processing…</>
+                    ? phase === 'uploading'
+                      ? <><Upload style={{ width: 15, height: 15 }} /> Uploading {uploadProgress ?? 0}%</>
+                      : <><Loader2 style={{ width: 15, height: 15 }} className="animate-spin" /> {
+                          phase === 'reconciling' ? 'Reconciling…'
+                          : phase === 'preparing' ? 'Preparing Excel…'
+                          : 'Processing…'
+                        }</>
                     : <><Zap style={{ width: 15, height: 15 }} /> Run Reconciliation</>
                   }
                 </button>
@@ -690,6 +789,42 @@ const RecoMultiStateWorkspace = () => {
                     }} />
                   </div>
                 )}
+
+                {/* Phased progress — tells the user which stage is running and why
+                    a large multi-state job takes time (Excel is prepared up-front). */}
+                {running && (() => {
+                  const order = ['uploading', 'reconciling', 'preparing'];
+                  const steps = [
+                    { key: 'uploading',   label: 'Uploading files' },
+                    { key: 'reconciling', label: 'Running reconciliation' },
+                    { key: 'preparing',   label: 'Preparing Excel for download' },
+                  ];
+                  const cur = order.indexOf(phase);
+                  return (
+                    <div className="glass-card" style={{ padding: 14, display: 'flex', flexDirection: 'column', gap: 9 }}>
+                      {steps.map((s, i) => {
+                        const done = cur > i, active = cur === i;
+                        return (
+                          <div key={s.key} style={{ display: 'flex', alignItems: 'center', gap: 9 }}>
+                            {done
+                              ? <CheckCircle2 style={{ width: 15, height: 15, color: '#059669', flexShrink: 0 }} />
+                              : active
+                                ? <Loader2 style={{ width: 15, height: 15, color: COLOR, flexShrink: 0 }} className="animate-spin" />
+                                : <div style={{ width: 13, height: 13, margin: 1, borderRadius: '50%', border: '2px solid var(--border)', flexShrink: 0 }} />}
+                            <span style={{
+                              fontSize: 12.5, fontFamily: 'Barlow',
+                              fontWeight: active ? 700 : 600,
+                              color: done ? '#059669' : active ? 'var(--text-body)' : 'var(--text-muted)',
+                            }}>{s.label}{active && '…'}</span>
+                          </div>
+                        );
+                      })}
+                      <p style={{ fontSize: 11, color: 'var(--text-muted)', fontFamily: 'DM Sans', margin: '2px 0 0', lineHeight: 1.4 }}>
+                        Large multi-state files can take a minute — the Excel is built now so your download is instant.
+                      </p>
+                    </div>
+                  );
+                })()}
 
                 {/* States status panel */}
                 <div className="glass-card" style={{ padding: 16 }}>
@@ -769,6 +904,14 @@ const RecoMultiStateWorkspace = () => {
               </div>
             )}
 
+            {/* Analysis charts — status donut + issues by reason (same as other agents) */}
+            {flatRows.length > 0 && (
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: 16 }}>
+                <StatusDonut data={donutData} />
+                {reasonsData.length > 0 && <ByReasons title="Issues by Reason" data={reasonsData} />}
+              </div>
+            )}
+
             {/* Tab bar */}
             <div style={{ borderBottom: '2px solid var(--card-border)', display: 'flex', gap: 0, overflowX: 'auto' }}>
               {TABS.map(tab => {
@@ -820,6 +963,14 @@ const RecoMultiStateWorkspace = () => {
                     />
                   </div>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <button onClick={() => setFbOpen(true)} style={{
+                      display: 'flex', alignItems: 'center', gap: 6, padding: '8px 14px',
+                      borderRadius: 8, fontSize: 12, fontWeight: 700,
+                      background: '#fff', border: '1.5px solid #A3BFF8',
+                      color: '#0748EE', cursor: 'pointer', fontFamily: 'Barlow',
+                    }}>
+                      🚩 Flag / Feedback
+                    </button>
                     <button onClick={handleDownload} disabled={downloading} style={{
                       display: 'flex', alignItems: 'center', gap: 6, padding: '8px 14px',
                       borderRadius: 8, fontSize: 12, fontWeight: 700,
@@ -961,6 +1112,16 @@ const RecoMultiStateWorkspace = () => {
                   </div>
                 )}
               </>
+            )}
+
+            {fbOpen && (
+              <FeedbackModal
+                kind="2b"
+                rows={flatRows.map((r) => ({ ...r, taxable_value: r.g_tax ?? r.b_tax }))}
+                agentLabel="GSTR-2B vs Books (Multi-State)"
+                onClose={() => setFbOpen(false)}
+                onSend={handleSendFeedback}
+              />
             )}
           </div>
         )}

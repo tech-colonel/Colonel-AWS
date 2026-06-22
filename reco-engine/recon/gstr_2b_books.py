@@ -195,8 +195,165 @@ def _read_gstr2b_sheet(data: bytes, sheet_name: str) -> list[dict[str, Any]]:
     return rows
 
 
+# ---------------------------------------------------------------------------
+# OCTA GSTR-2B flat-format support
+# (single sheet, one header row at the top, one row per invoice — NOT the portal
+#  multi-sheet B2B/B2BA/CDNR layout). Detected and parsed separately; the portal
+#  path below is left completely unchanged.)
+# ---------------------------------------------------------------------------
+
+GSTR2B_OCTA_COL_MAP: dict[str, list[str]] = {
+    "supplier_gstin":  ["supplier gstin"],
+    "supplier_name":   ["supplier name"],
+    "tally_name":      ["as per tally name"],
+    "doc_no":          ["doc no", "document number", "invoice number"],
+    "doc_type":        ["doc type", "document type"],
+    "doc_date":        ["doc date", "document date"],
+    "taxable_value":   ["item taxable value", "taxable value"],
+    "igst":            ["igst", "integrated tax"],
+    "cgst":            ["cgst", "central tax"],
+    "sgst":            ["sgst", "state/ut tax"],
+    "cess":            ["cess"],
+    "invoice_value":   ["doc value", "document value"],
+    "reverse_charge":  ["reverse charge"],
+    "place_of_supply": ["place of supply"],
+    "is_amendment":    ["is amendment"],
+    "original_doc_no": ["original doc no", "original document number"],
+}
+
+# Signature headers that uniquely identify the OCTA export vs the GST portal export.
+_OCTA_SIGNATURE = ("item taxable value", "supplier gstin")
+
+
+def _find_octa_header_idx(raw) -> int:
+    """Return the 0-based index of the OCTA header row, or -1 if not an OCTA sheet."""
+    for idx in range(min(15, len(raw))):
+        cells = {_norm(v) for v in raw.iloc[idx]}
+        if all(sig in cells for sig in _OCTA_SIGNATURE):
+            return idx
+    return -1
+
+
+def _is_octa_format(data: bytes) -> bool:
+    """True when the first sheet carries the OCTA signature headers."""
+    try:
+        raw = pd.read_excel(BytesIO(data), sheet_name=0, header=None, dtype=object)
+    except Exception:
+        return False
+    return _find_octa_header_idx(raw) >= 0
+
+
+def _read_octa_sheet(data: bytes) -> list[dict[str, Any]]:
+    """Read the OCTA flat sheet into row dicts (header detected dynamically)."""
+    raw = pd.read_excel(BytesIO(data), sheet_name=0, header=None, dtype=object)
+    header_idx = _find_octa_header_idx(raw)
+    if header_idx < 0:
+        return []
+    raw_headers = [str(v).strip() if str(v) != "nan" else f"_col{i}"
+                   for i, v in enumerate(raw.iloc[header_idx])]
+    seen: dict[str, int] = {}
+    headers = []
+    for h in raw_headers:
+        count = seen.get(h, 0)
+        seen[h] = count + 1
+        headers.append(f"{h}_{count}" if count else h)
+    data_rows = raw.iloc[header_idx + 1:].copy()
+    data_rows.columns = headers
+    data_rows = data_rows.dropna(how="all")
+    return data_rows.fillna("").to_dict(orient="records")
+
+
+def _parse_gstr2b_octa(data: bytes) -> list[NormalizedInvoice]:
+    """Parse the OCTA flat GSTR-2B export into NormalizedInvoice records.
+
+    Mirrors parse_gstr2b's NormalizedInvoice construction. Credit Notes are stored
+    PRE-SIGNED (negative) in OCTA, so values are normalised with -abs() for CRN —
+    never re-negated like the portal path (which receives positive CN values)."""
+    records: list[NormalizedInvoice] = []
+    index = 0
+    for row in _read_octa_sheet(data):
+        get = _build_getter(row, GSTR2B_OCTA_COL_MAP)
+        gstin = str(get("supplier_gstin") or "").strip().upper()
+        if not _GSTIN_RE.match(gstin):
+            gstin = ""
+        doc_no = str(get("doc_no") or "").strip()
+        # Skip blank / summary / footer-total rows (no GSTIN and no Doc No).
+        if not gstin and not doc_no:
+            continue
+
+        doc_type_raw = str(get("doc_type") or "").upper()
+        if "CREDIT" in doc_type_raw or "CN" in doc_type_raw:
+            doc_type = "CRN"
+        elif "DEBIT" in doc_type_raw or "DN" in doc_type_raw:
+            doc_type = "DBN"
+        else:
+            doc_type = "INV"
+
+        taxable = round_money(get("taxable_value"))
+        igst = round_money(get("igst"))
+        cgst = round_money(get("cgst"))
+        sgst = round_money(get("sgst"))
+        cess = round_money(get("cess"))
+        invoice_value = round_money(get("invoice_value"))
+
+        # OCTA pre-signs Credit Notes negative — force consistent CN sign without
+        # double-negating (robust whether source value is signed or not).
+        if doc_type == "CRN":
+            taxable, igst, cgst, sgst, cess, invoice_value = (
+                -abs(taxable), -abs(igst), -abs(cgst),
+                -abs(sgst), -abs(cess), -abs(invoice_value),
+            )
+
+        # Enrich-only: OCTA already maps each supplier to its Tally ledger name
+        # ("As per Tally Name", e.g. "SIMK LABELS PRIVATE LIMITED (Maharashtra)").
+        # Use it as supplier_name so Pass-2 name similarity and the Vendor Summary
+        # common name align with the Tally Books side. Matching itself is unchanged
+        # (still keyed on invoice number). Portal name kept in raw for reference.
+        portal_name = str(get("supplier_name") or "").strip()
+        tally_name  = str(get("tally_name") or "").strip()
+        supplier_name = tally_name or portal_name
+
+        # Amendments: OCTA flags them inline (Is Amendment + Original Doc No) rather
+        # than via separate B2BA/CDNRA sheets. Map onto the sheet labels Pass-5's
+        # amendment detection expects so those remarks fire.
+        is_amendment = str(get("is_amendment") or "").strip().lower() in ("yes", "true", "1")
+        if doc_type == "CRN":
+            sheet_label = "B2B-CDNRA" if is_amendment else "B2B-CDNR"
+        else:
+            sheet_label = "B2BA" if is_amendment else "B2B"
+
+        index += 1
+        rec = NormalizedInvoice(
+            source="GSTR-2B",
+            row_id=f"GSTR2B-OCTA-{index}",
+            supplier_gstin=gstin,
+            supplier_name=supplier_name,
+            doc_type=doc_type,
+            doc_no=doc_no,
+            normalized_doc_no=normalize_doc_no(doc_no),
+            doc_date=parse_date(get("doc_date")),
+            taxable_value=taxable,
+            igst=igst,
+            cgst=cgst,
+            sgst=sgst,
+            cess=cess,
+            invoice_value=invoice_value,
+            sheet_name=sheet_label,
+            raw={str(k): v for k, v in row.items() if not str(k).startswith("_")},
+        )
+        rec.raw["_tally_name"] = tally_name
+        rec.raw["_octa_portal_name"] = portal_name
+        records.append(rec)
+    return records
+
+
 def parse_gstr2b(data: bytes) -> list[NormalizedInvoice]:
     data = _ensure_xlsx(data)
+    # OCTA flat-format export uses a single sheet with inline columns — detect and
+    # route to its dedicated parser. The GST portal multi-sheet logic below is
+    # left completely unchanged.
+    if _is_octa_format(data):
+        return _parse_gstr2b_octa(data)
     records: list[NormalizedInvoice] = []
     index = 0
 
@@ -293,6 +450,44 @@ def _is_tax_col(c: str) -> bool:
 
 def _is_tds_col(c: str) -> bool:
     return "tds" in c.lower()
+
+
+def _is_round_off_col(c: str) -> bool:
+    """True for a Tally 'Round Off' rounding-adjustment column.
+    Collapses spaces so 'Round Off' / 'RoundOff' match; 'Ground Rent' etc. do not."""
+    return "roundoff" in str(c).lower().replace(" ", "")
+
+
+def _find_value_col(row: dict[str, Any]) -> str | None:
+    """Return the source header that holds the explicit taxable value.
+
+    Prefers an explicit "Taxable Value"/"Taxable Amount" column, otherwise an
+    exact "Value" column. Never matches "Gross Total" (or any "gross" header) —
+    Gross Total includes tax/round-off and must never be used as the taxable."""
+    exact_value = None
+    for k in row.keys():
+        n = _norm(k)
+        if "gross" in n:
+            continue
+        if n in ("taxable value", "taxable amount") or ("taxable" in n and "value" in n):
+            return k
+        if n == "value" and exact_value is None:
+            exact_value = k
+    return exact_value
+
+
+def _is_present_number(cell: Any) -> bool:
+    """True only when the cell holds an actual number (not blank/placeholder)."""
+    if cell is None:
+        return False
+    s = str(cell).replace(",", "").replace("₹", "").strip()
+    if s.lower() in ("", "-", "nan", "nat", "none", "null", "n/a"):
+        return False
+    try:
+        float(s)
+        return True
+    except ValueError:
+        return False
 
 
 IGST_ALIASES = [
@@ -414,22 +609,37 @@ def parse_books(purchase_data: bytes, debit_data: bytes) -> list[NormalizedInvoi
                 elif "cess" in k_lower and "process" not in k_lower:
                     cess += round_money(v)
 
-            # Mathematical Identity Formula for Taxable Value
+            # ── Books taxable value ──────────────────────────────────────────
+            # ALWAYS the sum of the purchase/expense ledger columns positioned
+            # AFTER "Gross Total". The "Value" column is intentionally NOT used:
+            # it is blank for no-GRN invoices and omits freight/penalty/etc.
+            # Excluded from the sum:
+            #   • GST input tax (Input IGST/CGST/SGST/UTGST/Cess) — _is_tax_col.
+            #     "GST Interstate Purchase X%" is a PURCHASE ledger (no igst/cgst/
+            #     sgst token) and is therefore correctly INCLUDED — it is the key
+            #     amount on these files.
+            #   • TDS columns                                      — _is_tds_col
+            #   • Round Off (rounding adjustment, not an expense)  — _is_round_off_col
             gross = round_money(row.get("Gross Total", 0))
-            total_tax = 0.0
-            total_tds = 0.0
-            round_off = 0.0
-
-            for k, v in row.items():
-                if _is_tax_col(str(k)):
-                    total_tax += round_money(v)
-                elif _is_tds_col(str(k)):
-                    total_tds += round_money(v)
-                elif "round" in str(k).lower():
-                    round_off += round_money(v)
-
-            taxable = round(gross - total_tax + total_tds + round_off, 2)
             invoice_value = gross
+
+            taxable_breakdown: list[tuple[str, float]] = []
+            keys = list(row.keys())
+            gt_pos = next(
+                (i for i, k in enumerate(keys) if _norm(k) == "gross total"),
+                -1,
+            )
+            running = 0.0
+            for k in keys[gt_pos + 1:]:
+                ks = str(k)
+                if _is_tax_col(ks) or _is_tds_col(ks) or _is_round_off_col(ks):
+                    continue
+                amt = round_money(row.get(k))
+                if amt:
+                    running += amt
+                    taxable_breakdown.append((ks, round(amt, 2)))
+            taxable = round(running, 2)
+            taxable_derived = True
 
             if default_type == "DBN":
                 taxable = -taxable
@@ -438,9 +648,10 @@ def parse_books(purchase_data: bytes, debit_data: bytes) -> list[NormalizedInvoi
                 sgst = -sgst
                 cess = -cess
                 invoice_value = -invoice_value
+                taxable_breakdown = [(h, -a) for h, a in taxable_breakdown]
 
             index += 1
-            records.append(NormalizedInvoice(
+            rec = NormalizedInvoice(
                 source=source,
                 row_id=f"{source}-{index}",
                 supplier_gstin="",           # Tally doesn't export GSTIN
@@ -456,7 +667,14 @@ def parse_books(purchase_data: bytes, debit_data: bytes) -> list[NormalizedInvoi
                 cess=cess,
                 invoice_value=invoice_value,
                 raw={str(k): v for k, v in row.items()},
-            ))
+            )
+            # Display-only audit trail: when taxable was derived (no Value column),
+            # remember which expense heads were summed so the output can show a
+            # live formula + cell comment. Never affects the numeric value above.
+            rec.raw["_taxable_derived"] = taxable_derived
+            if taxable_derived:
+                rec.raw["_taxable_breakdown"] = taxable_breakdown
+            records.append(rec)
 
     return records
 
@@ -987,6 +1205,19 @@ def _populate_workbook(ws, results: list[Any]) -> None:
                 c.fill = fill
             c.border = border
 
+        # Books Taxable (col P = 16): when the value was DERIVED (no source Value
+        # column), replace the static number with a live Excel formula summing the
+        # expense heads + a hover comment naming each head, so it's auditable.
+        raw_b_disp = _get_val(b, "raw", {}) or {}
+        if raw_b_disp.get("_taxable_derived") and raw_b_disp.get("_taxable_breakdown"):
+            from openpyxl.comments import Comment
+            breakdown = raw_b_disp["_taxable_breakdown"]
+            note = " + ".join(f"{head} {amt:,.2f}" for head, amt in breakdown)
+            # Keep the NUMERIC taxable already written by ws.append — an Excel formula
+            # here renders blank/0 in viewers that don't auto-recalc (e.g. Numbers),
+            # which made the whole column look empty. Show the make-up as a comment.
+            ws.cell(row=row_idx, column=16).comment = Comment(f"= {note}", "Colonel")
+
         # Highlight GSTR-2B duplicates/cross-refs — Invoice Number is now col C (3)
         g_doc = str(_get_val(g, "doc_no", "")).strip().upper()
         g_dt = gstr2b_doc_dup_type.get(g_doc, "")
@@ -1376,11 +1607,14 @@ def _copy_workbook_sheets(src_bytes: bytes, target_wb: Any, title_prefix: str) -
     import openpyxl
     from io import BytesIO
     import copy
+    # OCTA 2B exports are a single flat sheet (e.g. "Sheet1"), not the portal
+    # B2B/B2BA/CDNR tabs — copy it as-is instead of filtering it out.
+    is_octa_2b = title_prefix == "2B" and _is_octa_format(src_bytes)
     try:
         src_wb = openpyxl.load_workbook(BytesIO(src_bytes), data_only=True)
         for name in src_wb.sheetnames:
             # ONLY copy the allowed 2B sheets (case-insensitive checking) if prefix is 2B
-            if title_prefix == "2B":
+            if title_prefix == "2B" and not is_octa_2b:
                 name_clean = str(name).strip().upper()
                 allowed_clean = {s.upper() for s in ALLOWED_SHEETS}
                 if name_clean not in allowed_clean:

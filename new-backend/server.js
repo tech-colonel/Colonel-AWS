@@ -30,6 +30,29 @@ const seedMasterAgents = async () => {
 };
 
 /**
+ * Idempotent schema extras that Sequelize sync({alter:false}) won't apply:
+ *  - add the 'developer' role to the users + task_messages enums
+ *  - add tasks.category + tasks.source_meta columns (feedback loop)
+ * `ADD VALUE IF NOT EXISTS` / `ADD COLUMN IF NOT EXISTS` are safe to re-run.
+ */
+const ensureSchemaExtras = async () => {
+  const stmts = [
+    `ALTER TYPE "enum_users_role" ADD VALUE IF NOT EXISTS 'developer'`,
+    `ALTER TYPE "enum_task_messages_sender_role" ADD VALUE IF NOT EXISTS 'developer'`,
+    // legacy CHECK constraints predate the enum and still pin the old value set
+    `ALTER TABLE users DROP CONSTRAINT IF EXISTS users_role_check`,
+    `ALTER TABLE task_messages DROP CONSTRAINT IF EXISTS task_messages_sender_role_check`,
+    `ALTER TABLE tasks ADD COLUMN IF NOT EXISTS category VARCHAR(32) NOT NULL DEFAULT 'task'`,
+    `ALTER TABLE tasks ADD COLUMN IF NOT EXISTS source_meta JSONB`,
+  ];
+  for (const sql of stmts) {
+    try { await masterSequelize.query(sql); }
+    catch (e) { console.warn('[MASTER DB] schema-extra skipped:', e.message); }
+  }
+  console.log('[MASTER DB] Schema extras ensured (developer role, task.category/source_meta).');
+};
+
+/**
  * Start the application
  */
 const start = async () => {
@@ -37,6 +60,9 @@ const start = async () => {
     // 1. Authenticate Master DB
     await masterSequelize.authenticate();
     console.log('[MASTER DB] Connection established.');
+
+    // 1b. Enum + column extras (idempotent) BEFORE sync so models line up.
+    await ensureSchemaExtras();
 
     // 2. Sync Master Models
     await masterSequelize.sync({ alter: false });

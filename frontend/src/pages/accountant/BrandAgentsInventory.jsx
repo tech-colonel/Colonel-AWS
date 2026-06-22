@@ -6,6 +6,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../..
 import { Badge } from '../../components/ui/badge';
 import api from '../../lib/api';
 import { toast } from 'sonner';
+import { sidebarFor } from '../../lib/adminNav';
 import { RECO_ID_TO_TYPE } from './AgentDispatch';
 
 // Decide whether to show ONLY the 5 RECO agents (accountant view) or ALL agents (dev view).
@@ -77,6 +78,14 @@ const RECO_AGENT_META = {
     accuracy: '99.8%',
     fields: ['Drive Folder Link', 'B2B Report', 'B2C Report'],
   },
+  pdf_bank_extract: {
+    displayName: 'PDF → Bank Statement',
+    icon: '📄',
+    category: 'Bank & Finance',
+    color: '#0748EE', bg: '#E8EFFE', border: '#A3BFF8',
+    accuracy: 'Auto-detect',
+    fields: ['Bank Statement PDF'],
+  },
 };
 
 const BrandAgentsInventory = () => {
@@ -86,10 +95,10 @@ const BrandAgentsInventory = () => {
   const [assignedAgents, setAssignedAgents] = useState([]);
   const [loading, setLoading] = useState(true);
 
-  const sidebarItems = [
+  const sidebarItems = sidebarFor([
     { path: `/brands/${brandId}/dashboard`, label: 'Dashboard', icon: LayoutDashboard, testId: 'nav-dashboard' },
     { path: `/brands/${brandId}/agents`, label: 'Agents', icon: Bot, testId: 'nav-agents' },
-  ];
+  ]);
 
   useEffect(() => {
     fetchData();
@@ -144,50 +153,6 @@ const BrandAgentsInventory = () => {
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6" data-testid="agents-inventory-grid">
-          {/* PDF → Bank Statement: no DB entry needed — always visible, no storage */}
-          <div
-            onClick={() => navigate(`/brands/${brandId}/pdf-bank`)}
-            data-testid="agent-inventory-card-pdf-bank-extract"
-            className="rounded-2xl border bg-white transition-all duration-200 flex flex-col overflow-hidden cursor-pointer hover:shadow-lg hover:-translate-y-0.5"
-            style={{ borderColor: '#A3BFF8' }}
-          >
-            <div className="p-5 flex-1">
-              <div className="flex items-start justify-between mb-3">
-                <div
-                  className="w-11 h-11 rounded-xl flex items-center justify-center text-2xl"
-                  style={{ background: '#E8EFFE', border: '1.5px solid #A3BFF8' }}
-                >
-                  📄
-                </div>
-                <span
-                  className="flex items-center gap-1 text-xs font-semibold px-2 py-1 rounded-full"
-                  style={{ background: '#E8EFFE', color: '#0748EE', border: '1px solid #A3BFF8' }}
-                >
-                  <TrendingUp className="w-3 h-3" />
-                  Auto-detect
-                </span>
-              </div>
-              <h3 className="font-bold text-slate-900 text-base mb-1 leading-snug">PDF → Bank Statement</h3>
-              <p className="text-slate-500 text-xs leading-relaxed mb-3 line-clamp-2">
-                Convert any Indian bank statement PDF (HDFC, ICICI, SBI, Axis, Kotak) to Excel with Check Point validation columns — ready for Universal Bank Statement.
-              </p>
-              <div className="flex flex-wrap gap-1.5">
-                {['Bank Statement PDF'].map(f => (
-                  <span key={f} className="text-[11px] px-2 py-0.5 rounded-full bg-slate-100 text-slate-600 font-medium">{f}</span>
-                ))}
-              </div>
-            </div>
-            <div
-              className="px-5 py-3 flex items-center justify-between border-t"
-              style={{ borderColor: '#A3BFF8', background: '#E8EFFE' }}
-            >
-              <span className="text-xs font-bold uppercase tracking-wide" style={{ color: '#0748EE' }}>Bank &amp; Finance</span>
-              <span className="flex items-center gap-1 text-xs font-semibold" style={{ color: '#0748EE' }}>
-                Run Agent <ChevronRight className="w-3.5 h-3.5" />
-              </span>
-            </div>
-          </div>
-
           {visibleAgents.map((agent) => {
             const assigned = isAssigned(agent.id);
             const recoMeta = RECO_AGENT_META[agent.name];

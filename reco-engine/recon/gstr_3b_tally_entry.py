@@ -193,9 +193,10 @@ def _parse_gstr3b_pdf(data: bytes) -> dict:
         'gstin': '', 'state': '', 'state_short': '', 'period': '',
         'row_4c':       _empty_tax(),
         'row_4_45':     _empty_tax(),
-        'row_61a_tax':  _empty_tax(),  # Tax Amount (output liability) per tax type
-        'row_61a_itc':  _empty_tax(),
-        'row_61a_cash': _empty_tax(),
+        'row_61a_tax':         _empty_tax(),  # Tax Amount (output liability) per tax type
+        'row_61a_itc':         _empty_tax(),
+        'row_61a_cash':        _empty_tax(),
+        'row_61a_credit_type': _empty_tax(),  # ITC by credit ledger type (IGST/CGST/SGST column sums)
         'row_61b':      _empty_tax(),  # RCM Tax Amount (= Cash paid for RCM)
     }
 
@@ -285,6 +286,13 @@ def _parse_gstr3b_pdf(data: bytes) -> dict:
                                        'cgst': max(0.0, cgst_tax - cgst_cash),
                                        'sgst': max(0.0, sgst_tax - sgst_cash)}
             result['row_61a_cash'] = {'igst': igst_cash, 'cgst': cgst_cash, 'sgst': sgst_cash}
+            # ITC credit-ledger type breakdown: sum each ITC column (4=IGST,5=CGST,6=SGST)
+            # across all 3 output rows to get how much of each credit ledger was consumed.
+            result['row_61a_credit_type'] = {
+                'igst': _gc(igst_r, 4) + _gc(cgst_r, 4) + _gc(sgst_r, 4),
+                'cgst': _gc(igst_r, 5) + _gc(cgst_r, 5) + _gc(sgst_r, 5),
+                'sgst': _gc(igst_r, 6) + _gc(cgst_r, 6) + _gc(sgst_r, 6),
+            }
 
         # Row 6.1(B) – "(B) Reverse charge …" label row. Same column structure.
         # RCM: Tax Payable (col 1) = Cash paid (col 8); ITC = 0 for RCM.
@@ -502,8 +510,9 @@ def build_tally_entries(parsed: dict) -> list[dict]:
     r4c       = parsed['row_4c']
     r4_45     = parsed['row_4_45']
     r61a_tax  = parsed.get('row_61a_tax', _empty_tax())
-    r61a_itc  = parsed['row_61a_itc']
-    r61a_cash = parsed['row_61a_cash']
+    r61a_itc         = parsed['row_61a_itc']
+    r61a_cash        = parsed['row_61a_cash']
+    r61a_credit_type = parsed.get('row_61a_credit_type', _empty_tax())
     r61b      = parsed['row_61b']
 
     entries: list[dict] = []
@@ -563,10 +572,19 @@ def build_tally_entries(parsed: dict) -> list[dict]:
         row(str(sno), f'Output {tax_name} {st}', debit=tax_amt(tax_key))
         sno += 1
 
-    # Total ITC used across all tax types → credit to IGST Credit Ledger
-    total_itc  = sum(r61a_itc[k]  for k in ('igst', 'cgst', 'sgst'))
+    # Credit side: one row per ITC credit ledger type (IGST/CGST/SGST), skip if zero.
+    # Use the credit-type breakdown from PDF (col 4/5/6 per output row) when available;
+    # fall back to a single IGST entry for Excel inputs where the breakdown isn't parsed.
     total_cash = sum(r61a_cash[k] for k in ('igst', 'cgst', 'sgst'))
-    row('', f'Credit Ledger IGST {st}', credit=total_itc)
+    _credit_total = sum(r61a_credit_type[k] for k in ('igst', 'cgst', 'sgst'))
+    if _credit_total > 0:
+        for _itc_name, _itc_key in TAX:
+            _amt = r61a_credit_type.get(_itc_key, 0.0)
+            if _amt:
+                row('', f'Credit Ledger {_itc_name} {st}', credit=_amt)
+    else:
+        total_itc = sum(r61a_itc[k] for k in ('igst', 'cgst', 'sgst'))
+        row('', f'Credit Ledger IGST {st}', credit=total_itc)
     if total_cash:
         row('', f'Electronic Cash Ledger {st}', credit=total_cash)
 

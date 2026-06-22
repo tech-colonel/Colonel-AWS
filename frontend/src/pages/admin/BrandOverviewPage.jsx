@@ -9,14 +9,9 @@ import { Badge } from '../../components/ui/badge';
 import { Download } from 'lucide-react';
 import api from '../../lib/api';
 import { toast } from 'sonner';
+import { ADMIN_SIDEBAR } from '../../lib/adminNav';
 
-const sidebarItems = [
-  { path: '/admin', label: 'Dashboard', icon: LayoutDashboard, testId: 'nav-dashboard' },
-  { path: '/admin/brands', label: 'Brands', icon: Building2, testId: 'nav-brands' },
-  { path: '/admin/agents', label: 'Agents', icon: Bot, testId: 'nav-agents' },
-  { path: '/admin/users', label: 'Users', icon: Users, testId: 'nav-users' },
-  { path: '/admin/assignments', label: 'Assignments', icon: LinkIcon, testId: 'nav-assignments' }
-];
+const sidebarItems = ADMIN_SIDEBAR;
 
 const BrandOverviewPage = () => {
   const { id } = useParams();

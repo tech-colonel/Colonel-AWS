@@ -162,6 +162,9 @@ CREATE TABLE IF NOT EXISTS gstr_1_results (
 CREATE INDEX IF NOT EXISTS gstr_1_results_job_id_idx   ON gstr_1_results (job_id);
 CREATE INDEX IF NOT EXISTS gstr_1_results_brand_id_idx ON gstr_1_results (brand_id);
 
+-- Customer GSTIN for GSTR-1 analysis (added later; idempotent).
+ALTER TABLE gstr_1_results ADD COLUMN IF NOT EXISTS gstin VARCHAR(20);
+
 -- ────────────────────────────────────────────────────────────
 -- 7.  bank_reco_corrections  — per-brand accountant corrections
 --     Each row teaches the classifier: this narration → this ledger.
@@ -292,7 +295,41 @@ CREATE INDEX IF NOT EXISTS gstr_3b_tally_results_brand_id_idx ON gstr_3b_tally_r
 ALTER TABLE gstr_3b_tally_results ENABLE ROW LEVEL SECURITY;
 ALTER TABLE gstr_3b_tally_results FORCE ROW LEVEL SECURITY;
 
+-- Idempotent: drop before create so re-running the migration never throws
+-- "policy already exists" (which would roll back the whole transaction and
+-- prevent later tables in this file from being created on existing brand DBs).
+DROP POLICY IF EXISTS gstr_3b_tally_brand_policy ON gstr_3b_tally_results;
 CREATE POLICY gstr_3b_tally_brand_policy ON gstr_3b_tally_results
+    USING (
+        current_setting('app.bypass_rls', true) = 'true'
+        OR brand_id::text = current_setting('app.brand_id', true)
+    );
+
+-- ────────────────────────────────────────────────────────────
+-- 9.  ledger_master  — per-brand Chart of Accounts (COA), DB-backed.
+--     Replaces the non-portable disk cache (output/ledgers/*.xlsx). One row per
+--     unique ledger name. Populated when an accountant uploads a COA in the UI;
+--     every reco run fetches the FULL list from here. Shared Postgres → identical
+--     across Colonel Full (3001) and this app (ngrok/3000).
+-- ────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS ledger_master (
+    id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    brand_id         UUID         NOT NULL,
+    ledger_name      VARCHAR(255) NOT NULL,
+    ledger_name_key  TEXT         NOT NULL,   -- UPPER + trim + collapse spaces (dedup key)
+    source           VARCHAR(20)  NOT NULL DEFAULT 'upload',  -- 'upload' | 'correction'
+    created_at       TIMESTAMPTZ  DEFAULT NOW(),
+    updated_at       TIMESTAMPTZ  DEFAULT NOW(),
+    CONSTRAINT ledger_master_brand_name_uq UNIQUE (brand_id, ledger_name_key)
+);
+
+CREATE INDEX IF NOT EXISTS ledger_master_brand_idx ON ledger_master (brand_id);
+
+ALTER TABLE ledger_master ENABLE ROW LEVEL SECURITY;
+ALTER TABLE ledger_master FORCE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS ledger_master_brand_policy ON ledger_master;
+CREATE POLICY ledger_master_brand_policy ON ledger_master
     USING (
         current_setting('app.bypass_rls', true) = 'true'
         OR brand_id::text = current_setting('app.brand_id', true)

@@ -12,6 +12,7 @@ import { Badge } from '../../components/ui/badge';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../../components/ui/modal';
 import api from '../../lib/api';
 import { toast } from 'sonner';
+import { sidebarFor } from '../../lib/adminNav';
 import { format } from 'date-fns';
 import * as XLSX from 'xlsx';
 import InvoiceAgentWorkspace from './InvoiceAgentWorkspace';
@@ -99,11 +100,11 @@ const AgentWorkspace = () => {
     selling_state: ''
   });
 
-  const sidebarItems = [
+  const sidebarItems = sidebarFor([
     { path: `/brands/${brandId}/dashboard`, label: 'Agent Workspace', icon: LayoutDashboard, testId: 'nav-dashboard' },
     { path: `/brands/${brandId}/agents`, label: 'Agents', icon: Bot, testId: 'nav-agents' },
     { path: `/brands/${brandId}/agents`, label: `${agent?.name} Dashboard`, icon: Bot, testId: 'nav-agents' }
-  ];
+  ]);
 
   useEffect(() => {
     fetchData();

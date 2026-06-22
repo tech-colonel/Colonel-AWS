@@ -113,6 +113,26 @@ def _expand_abbrevs(text: str) -> str:
     return t
 
 
+# Generic business-suffix words that carry no identity. Two ledgers sharing ONLY these
+# (e.g. "UDM Enterprises" vs "M K Enterprises") must NOT be treated as a confident match —
+# token_set_ratio inflates such pairs. Used by the generic-token guard in _fuzzy_match.
+_GENERIC_BIZ_WORDS = {
+    'enterprises', 'enterprise', 'services', 'service', 'foods', 'food', 'traders', 'trader',
+    'private', 'limited', 'pvt', 'ltd', 'llp', 'and', 'co', 'company', 'the', 'industries',
+    'industry', 'products', 'product', 'solutions', 'solution', 'india', 'indian', 'inc',
+    'corporation', 'corp', 'logistics', 'logistic', 'technologies', 'technology', 'global',
+    'retail', 'online', 'store', 'sons', 'son', 'bros', 'brothers', 'group', 'international',
+    'intl', 'trading', 'exports', 'imports', 'distributors', 'distributor', 'agencies',
+    'agency', 'marketing', 'sales', 'a/c', 'ac',
+}
+
+
+def _distinctive_tokens(s: str) -> list:
+    """Identity-bearing tokens of a name: length>=3, not a generic business-suffix word."""
+    s = re.sub(r'[^a-z0-9 ]', ' ', str(s).lower())
+    return [w for w in s.split() if len(w) >= 3 and w not in _GENERIC_BIZ_WORDS]
+
+
 # Words stripped when cleaning narrations for generic fuzzy matching
 NOISE_WORDS = {
     "NEFT", "RTGS", "IMPS", "UPI", "MB", "TO", "FROM", "DR", "CR", "BANK",
@@ -289,19 +309,6 @@ class BankClassifier:
         # corrections: {normalized_narration_key → {"ledger": str, "type": str|None}}
         # Loaded from <brand>_corrections.json sidecar. Applied before any fuzzy step.
         self.corrections = corrections or {}
-        # Pre-build stripped-key index: same corrections keyed by vendor portion only
-        # (trailing month/txn-ID removed). Used as fallback in STEP 0 for recurring payments.
-        self.stripped_corrections = {}
-        _strip_re = re.compile(
-            r'[-\s]+(FCM|IFT)-?[A-Z0-9]{6,}$'
-            r'|[\s\-]+(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)\d{0,2}$'
-            r'|\s+\d{2,4}$',
-            re.IGNORECASE
-        )
-        for full_key, val in self.corrections.items():
-            stripped = _strip_re.sub('', full_key).strip()
-            if stripped and stripped != full_key:
-                self.stripped_corrections.setdefault(stripped, val)
         self._build_indices()
 
     def _build_indices(self):
@@ -358,13 +365,13 @@ class BankClassifier:
             ]
         )]
 
-        # Pre-compute suspense ledger — prefer the exact "Suspense A/c" ledger.
-        # Some CoA exports also contain a "Suspenses" ledger; without the exact
-        # match preference, whichever appears first in column order wins, which
-        # causes the wrong name to show in output.
+        # Pre-compute suspense ledger. Convention (confirmed with the firm): unclassified
+        # rows are labelled "Suspense A/c". Only reuse a COA ledger that is EXACTLY named
+        # "Suspense A/c" / "Suspense" — do NOT borrow a substring match like "Suspense
+        # Purchase" (a different, purchase-side ledger). Otherwise emit the literal label.
         self._suspense_ledger = (
             next((l for l in ml if l.strip().lower() == 'suspense a/c'), None)
-            or next((l for l in ml if 'suspense' in l.lower()), None)
+            or next((l for l in ml if l.strip().lower() == 'suspense'), None)
             or "Suspense A/c"
         )
 
@@ -412,7 +419,8 @@ class BankClassifier:
         return None
 
     # ------------------------------------------------------------------
-    def _fuzzy_match(self, query: str, choices: list, threshold: int = 72) -> tuple:
+    def _fuzzy_match(self, query: str, choices: list, threshold: int = 72,
+                     guard_generic: bool = False) -> tuple:
         """
         Returns (matched_ledger, confidence_band, score).
         confidence_band: 'High' (≥87), 'Medium' (72–86), 'Low' (<72).
@@ -454,6 +462,19 @@ class BankClassifier:
         score = combined_score(best)
         conf = "High" if score >= 87 else ("Medium" if score >= 72 else "Low")
 
+        # Generic-token guard (only for free-text matches against the full master).
+        # If the query has identity-bearing tokens but shares NONE of them with the
+        # winner — i.e. they overlap only on generic words like "Enterprises"/"Services" —
+        # the score is inflated noise. Refuse it (return Low → caller falls to Suspense)
+        # rather than emit a confident wrong vendor.
+        if guard_generic and conf != "Low":
+            q_dist = _distinctive_tokens(query)
+            if q_dist:
+                c_dist = _distinctive_tokens(best)
+                shares = any(fuzz.ratio(a, b) >= 85 for a in q_dist for b in c_dist)
+                if not shares:
+                    return best, "Low", score
+
         # Downgrade to Medium only when runner-up is within 4 points — nearly tied match.
         # Gap of 8 was too aggressive; most real mismatches have a larger gap.
         if conf == "High" and len(choices) > 1:
@@ -462,6 +483,39 @@ class BankClassifier:
                 conf = "Medium"
 
         return best, conf, score
+
+    def top_candidates(self, query: str, k: int = 15) -> list:
+        """Candidate COA ledgers for the LLM fallback to choose from (all REAL ledgers).
+
+        Combines two signals so the right ledger is reliably offered:
+          1. Token expansion — every ledger that word-matches a distinctive (>=4 char) token
+             of the query. Guarantees e.g. "NSDL New" surfaces "NSDL E-GOVERNANCE ... LIMITED",
+             which pure fuzzy ranking misses (short alias vs long official name).
+          2. Fuzzy top-k — nearest ledgers by the same blended score the matcher uses.
+        """
+        if not query or not str(query).strip():
+            return []
+        q = _expand_abbrevs(str(query))
+
+        def sc(choice):
+            cn = _expand_abbrevs(choice)
+            s1 = fuzz.token_set_ratio(q, cn)
+            s2 = fuzz.token_sort_ratio(q, cn)
+            return 0.85 * s1 + 0.15 * s2 if len(q) <= 8 else 0.6 * s1 + 0.4 * s2
+
+        fuzzy_top = sorted(self.master_ledgers, key=sc, reverse=True)[:k]
+
+        tok_matches = []
+        for t in (t for t in _distinctive_tokens(query) if len(t) >= 4):
+            pat = re.compile(r'\b' + re.escape(t), re.IGNORECASE)
+            tok_matches += [l for l in self.master_ledgers if pat.search(l)]
+
+        seen, out = set(), []
+        for l in tok_matches[:15] + fuzzy_top:   # token matches first (most relevant)
+            if l not in seen:
+                seen.add(l)
+                out.append(l)
+        return out[:20]
 
     def _match_employee_ledger(self, entity: str, salary_ledgers: list) -> str:
         """
@@ -530,24 +584,9 @@ class BankClassifier:
         # CoA validation: skip stale corrections if ledger no longer in master.
         # ------------------------------------------------------------------
         if self.corrections:
-            key = ' '.join(orig.strip().upper().split())
-
-            # Primary: exact match
+            key = orig.strip().upper()
+            key = ' '.join(key.split())  # collapse whitespace
             fix = self.corrections.get(key)
-
-            # Secondary: strip trailing date/month/transaction-ID suffixes and check
-            # pre-built stripped_corrections index (built from same corrections dict).
-            # Handles recurring: "VENDOR- SAL APR26" matches "VENDOR- SAL FEB26" stored key.
-            if not fix:
-                stripped = re.sub(
-                    r'[-\s]+(FCM|IFT)-?[A-Z0-9]{6,}$'
-                    r'|[\s\-]+(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)\d{0,2}$'
-                    r'|\s+\d{2,4}$',
-                    '', key, flags=re.IGNORECASE
-                ).strip()
-                if stripped and stripped != key:
-                    fix = self.stripped_corrections.get(stripped)
-
             if fix and fix.get('ledger'):
                 # Verify ledger still exists in the current CoA
                 if fix['ledger'] in self.master_ledgers:
@@ -652,6 +691,13 @@ class BankClassifier:
                 return {"ledger": fallback, "type": txn_type,
                         "confidence": "Medium", "rule": f"BDP Statutory {service} (fallback)"}
 
+            # NOTE: non-statutory BDP services (e.g. BDP-CRED-CASHFREE for the CRED
+            # credit-card app) are intentionally NOT hardcoded here. How they map is
+            # brand-dependent — Drips books CRED → "Credit Card", STROOM books it →
+            # Suspense. Hardcoding one convention creates confident-WRONG entries for the
+            # other brand. These are handled by the per-brand learned corrections layer
+            # (validated against the live COA), not a global rule.
+
         # ------------------------------------------------------------------
         # STEP 3 — GSTN challan / raw GST keyword in narration
         # GSTN can appear as standalone (GSTN Payable) or with digits (GSTN1082...-...)
@@ -708,75 +754,6 @@ class BankClassifier:
                 or self._suspense_ledger
             )
             return {"ledger": ledger, "type": txn_type, "confidence": "High", "rule": "ESIC Match"}
-
-        # ------------------------------------------------------------------
-        # STEP 5.5 — Early CoA entity match (runs BEFORE generic keyword rules)
-        # Extract entity from the narration first, then try a high-confidence
-        # anchored fuzzy match against the Chart of Accounts.  If score ≥ 87
-        # we return immediately — CoA wins over Rent / Interest / Bank-Charges
-        # keywords.  A weaker match (< 87) sets `entity` for later steps and
-        # falls through so keyword rules still act as safety nets.
-        # ------------------------------------------------------------------
-        entity = ""
-        remark = ""
-        is_upi = bool(re.search(r'\bUPI\b', orig_upper))
-        _is_chq = orig_upper.startswith("CHQ PAID") or "MICR INWARD" in orig_upper
-
-        if _is_chq:
-            entity = _parse_chq(orig_upper)
-        elif is_upi:
-            entity = _parse_upi(orig_upper)
-        elif "IB NEFT" in orig_upper or "SC NEFT" in orig_upper or "IB IFT" in orig_upper:
-            entity, remark = _parse_ib_neft(orig_upper)
-        elif orig_upper.startswith("IFT-"):
-            entity = _parse_ift(orig_upper)
-        elif "BDP-" in orig_upper:
-            entity = _parse_bdp(orig_upper)[0]
-        elif re.match(r'^N/\d+/', orig_upper):
-            entity = _parse_indusind_neft(orig_upper)
-        elif orig_upper.startswith("R/") and orig_upper.count('/') >= 3:
-            entity = _parse_indusind_rtgs_credit(orig_upper)
-        elif orig_upper.startswith("BILL/") and orig_upper.count('/') >= 3:
-            _bparts = orig_upper.split('/')
-            _bill_type   = _bparts[2].strip() if len(_bparts) >= 3 else ""
-            _bill_entity = _bparts[3].strip() if len(_bparts) >= 4 else ""
-            entity = (_bill_entity + " CREDIT CARD") if "CREDIT" in _bill_type and _bill_entity else _bill_entity
-        elif re.match(r'^(?:NEFT|RTGS|IMPS)\s+[A-Z0-9]{8,}\s+', orig_upper):
-            m = re.match(r'^(?:NEFT|RTGS|IMPS)\s+[A-Z0-9]{8,}\s+(.+)', orig_upper)
-            if m:
-                entity = m.group(1).split('(')[0].strip()[:50].strip()
-        elif '-' in orig:
-            _bank_prefixes = {'NEFT', 'RTGS', 'IMPS', 'UPI', 'IB', 'SC', 'CHQ', 'IFT',
-                              'BDP', 'ETAX', 'GBO', 'INT', 'CHRG', 'JYOTI', 'VALUE'}
-            dash_idx = orig_upper.index('-')
-            possible = orig_upper[:dash_idx].strip()
-            first_word = possible.split()[0] if possible.split() else ''
-            if len(possible) > 5 and first_word not in _bank_prefixes and not possible[0].isdigit():
-                entity = possible
-        entity = entity.strip()
-
-        # High-confidence CoA anchored match — runs before keyword rules
-        if entity and len(entity) > 4 and self.master_ledgers:
-            _fw = entity.split()[0].lower()
-            if _fw and len(_fw) >= 4:
-                _fw_pat = re.compile(r'\b' + re.escape(_fw) + r'\b', re.IGNORECASE)
-                _anchored_early = [l for l in self.master_ledgers if _fw_pat.search(l)]
-            else:
-                _anchored_early = []
-            if _anchored_early:
-                def _coa_score(c):
-                    e_n = _expand_abbrevs(entity)
-                    c_n = _expand_abbrevs(c)
-                    s1  = fuzz.token_set_ratio(e_n, c_n)
-                    s2  = fuzz.token_sort_ratio(e_n, c_n)
-                    s   = round(0.6 * s1 + 0.4 * s2) if len(e_n) > 8 else round(0.85 * s1 + 0.15 * s2)
-                    if is_credit and any(k in c.lower() for k in ['collection', 'seller receipt']): s += 10
-                    return s
-                _best_early = max(_anchored_early, key=_coa_score)
-                _score_early = _coa_score(_best_early)
-                if _score_early >= 87:
-                    return {"ledger": _best_early, "type": txn_type,
-                            "confidence": "High", "rule": "CoA Entity Match"}
 
         # ------------------------------------------------------------------
         # STEP 6 — Rent / godown  (must run BEFORE bank charges to prevent
@@ -995,6 +972,40 @@ class BankClassifier:
                     return {"ledger": ledger, "type": txn_type, "confidence": conf, "rule": "Rent Remark"}
 
         # ------------------------------------------------------------------
+        # STEP 11.9 — Marketplace settlement routing (MUST run before STEP 12b)
+        # Marketplace payees (Zepto, Amazon, Blinkit, Flipkart, Swiggy, …) must book to the
+        # brand's "<Marketplace> Settlement/Clearing A/c" — NOT a state sub-ledger
+        # ("Zepto Private Limited Jaipur", "Amazon Delhi") or "…Debtors". Accountants can't
+        # attribute a marketplace payout to a state. The first-word anchored match (STEP 12b)
+        # would otherwise grab a state ledger, so we resolve the settlement ledger here first.
+        # Only fires when such a ledger exists in THIS brand's COA — otherwise we fall through
+        # untouched (non-marketplace vendors and settlement-less brands are unaffected).
+        # BDP narrations scan only the SERVICE segment (not the gateway), mirroring STEP 15.
+        # ------------------------------------------------------------------
+        if "BDP-" in orig_upper:
+            _mp_scan = _parse_bdp(orig_upper)[0].lower()
+        else:
+            _mp_scan = orig_upper.lower()
+        for _brand, _terms in D2C_KEYWORDS.items():
+            if not any(t in _mp_scan for t in _terms):
+                continue
+            _subset = self._d2c_ledger_map.get(_brand, [])
+            if not _subset:
+                continue
+            if is_credit:
+                # Receipt from a marketplace → collection / seller receipt / settlement.
+                _pref = next((l for l in _subset if any(k in l.lower() for k in
+                              ['collection', 'seller receipt', 'settlement', 'clearing'])), None)
+            else:
+                # Payment to a marketplace → settlement / clearing.
+                _pref = next((l for l in _subset if 'settlement' in l.lower() or 'clearing' in l.lower()), None)
+            if _pref:
+                return {"ledger": _pref, "type": txn_type, "confidence": "High",
+                        "rule": f"Marketplace Settlement ({_brand})"}
+            # No settlement/clearing ledger for this brand in the COA → don't force a match here;
+            # let STEP 12b / STEP 15 handle it (e.g. Creditors/Debtors per existing logic).
+
+        # ------------------------------------------------------------------
         # STEP 12b — First-word-anchored entity match (before D2C scan)
         # When the entity is cleanly extracted from a structured NEFT/CHQ/IFT narration,
         # restrict candidates to ledgers containing the entity's FIRST WORD before fuzzy
@@ -1136,14 +1147,14 @@ class BankClassifier:
         # STEP 14 — General fuzzy: try entity first, then full cleaned narration
         # ------------------------------------------------------------------
         if entity and len(entity) > 2:
-            ledger, conf, _ = self._fuzzy_match(entity, self.master_ledgers)
+            ledger, conf, _ = self._fuzzy_match(entity, self.master_ledgers, guard_generic=True)
             if conf != "Low":
                 return {"ledger": ledger, "type": txn_type, "confidence": conf,
                         "rule": "Fuzzy Entity Match"}
 
         generic = clean_narration(orig)
         if generic and len(generic) > 3:
-            ledger, conf, _ = self._fuzzy_match(generic, self.master_ledgers)
+            ledger, conf, _ = self._fuzzy_match(generic, self.master_ledgers, guard_generic=True)
             if conf != "Low":
                 return {"ledger": ledger, "type": txn_type, "confidence": conf,
                         "rule": "Fuzzy Generic Match"}
@@ -1151,7 +1162,8 @@ class BankClassifier:
         # ------------------------------------------------------------------
         # FALLBACK — Suspense A/c (pre-computed from master during init)
         # ------------------------------------------------------------------
-        return {"ledger": self._suspense_ledger, "type": txn_type, "confidence": "Low", "rule": "Suspense Fallback"}
+        return {"ledger": self._suspense_ledger, "type": txn_type, "confidence": "Low",
+                "rule": "Suspense Fallback", "entity": entity}
 
 
 # ---------------------------------------------------------------------------
@@ -1257,6 +1269,58 @@ def load_ledger_master(filepath: str) -> list:
             continue
         cleaned.append(l)
 
+    # ------------------------------------------------------------------
+    # COA INTEGRITY GUARD (P1) — fail loudly instead of matching against garbage.
+    #
+    # The single biggest source of mass mis-classification ("50% wrong") was the app
+    # feeding a *bank statement* in as the COA (e.g. a sheet mis-named "List of Ledger"
+    # that actually held transactions). A bank statement's text column is full of
+    # transaction narrations (IB NEFT / SC NEFT / UPI/ / IMPS / RTGS / IFT- / BDP- ...),
+    # which a real Chart of Accounts never contains. Detect that signature and refuse,
+    # so the run errors with a clear message rather than silently producing nonsense.
+    # ------------------------------------------------------------------
+    _TXN_SIG = re.compile(
+        r'\b(IB\s+NEFT|SC\s+NEFT|IB\s+ITG|IB\s+IFT|IB\s+OAT|IB\s+RTGS|NEFT\s+Dr|NEFT\s+Cr'
+        r'|RTGS|IMPS|UPI/|IFT-|BDP-|CHQ\s+PAID|MICR\s+INWARD|OTH-Transfer'
+        r'|OTHER\s+THAN\s+SB)\b',
+        re.IGNORECASE,
+    )
+    # Date-dominated column → the auto-detector picked a Date / Value-Date column from a
+    # transaction sheet (e.g. "01 May 2026", "1-Apr-24", "01-05-2026", "2026-06-03").
+    # A real Chart of Accounts column holds names, never dates.
+    _DATE_SIG = re.compile(
+        r'^\s*(\d{1,2}[\s\-/](Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*[\s\-/]\d{2,4}'
+        r'|\d{1,2}[-/]\d{1,2}[-/]\d{2,4}'
+        r'|\d{4}-\d{2}-\d{2})\s*$',
+        re.IGNORECASE,
+    )
+    if cleaned:
+        txn_like = sum(1 for l in cleaned if _TXN_SIG.search(l))
+        date_like = sum(1 for l in cleaned if _DATE_SIG.search(l))
+        bad_frac = (txn_like + date_like) / len(cleaned)
+        if bad_frac > 0.20:
+            kind = "BANK STATEMENT (transaction narrations)" if txn_like >= date_like \
+                else "transaction sheet (date column)"
+            raise ValueError(
+                f"COA integrity check failed: the selected sheet/column in "
+                f"'{os.path.basename(filepath)}' (sheet '{target}', column {_col_idx}) looks like a "
+                f"{kind}, not a Chart of Accounts — {txn_like + date_like}/{len(cleaned)} "
+                f"({bad_frac:.0%}) of entries are transactions/dates. "
+                f"Upload the brand's Ledger Master / List of Ledgers instead."
+            )
+
+    if not cleaned:
+        raise ValueError(
+            f"COA integrity check failed: no ledger names could be read from "
+            f"'{os.path.basename(filepath)}' (sheet '{target}', column {_col_idx})."
+        )
+
+    # Surface what was loaded so a wrong/tiny COA is visible in logs (never silent).
+    if len(cleaned) < 50:
+        print(f"⚠️  COA WARNING: only {len(cleaned)} ledgers loaded from "
+              f"'{os.path.basename(filepath)}' (sheet '{target}') — verify this is the full "
+              f"Chart of Accounts, not a partial/derived list.", file=sys.stderr)
+
     return cleaned
 
 
@@ -1279,20 +1343,12 @@ def load_bank_statement(filepath: str) -> tuple:
 
     header_idx = None
     for i, row in df_raw.iterrows():
-        if i > 60:   # scan up to row 60 — some banks have 30+ header rows
+        if i > 30:
             break
         vals = [str(v).lower().strip() for v in row.values if pd.notna(v)]
-        has_date = any("date" in v or "txn" in v for v in vals)
-        has_desc = any(
-            "desc" in v or "narration" in v or "particulars" in v
-            or "detail" in v or "remark" in v or "transaction" in v
-            for v in vals
-        )
-        has_amt = any(
-            any(k in v for k in ["debit", "credit", "withdrawal", "withdrawl",
-                                  "deposit", "amount", "dr.", "cr."])
-            for v in vals
-        )
+        has_date  = any("date" in v or "txn" in v for v in vals)
+        has_desc  = any("desc" in v or "narration" in v or "particulars" in v for v in vals)
+        has_amt   = any(any(k in v for k in ["debit", "credit", "withdrawal", "deposit", "amount"]) for v in vals)
         if (has_date and has_desc) or (has_desc and has_amt):
             header_idx = i
             break
@@ -1307,31 +1363,16 @@ def load_bank_statement(filepath: str) -> tuple:
     col_map = {}
     for c in cols:
         cl = c.lower()
-        if "txn_date" not in col_map and any(k in cl for k in [
-                "txn date", "transaction date", "value date", "tran date",
-                "posting date", "entry date", "date"]):
+        if "txn_date" not in col_map and any(k in cl for k in ["txn date", "transaction date", "value date", "date"]):
             col_map["txn_date"] = c
-        elif "description" not in col_map and any(k in cl for k in [
-                "description", "narration", "particulars", "details",
-                "remarks", "transaction remark", "txn remark",
-                "cheque detail", "transaction detail"]):
+        elif "description" not in col_map and any(k in cl for k in ["description", "narration", "particulars", "details"]):
             col_map["description"] = c
-        elif "debit" not in col_map and any(k in cl for k in [
-                "withdrawal", "withdrawl", "debit", "dr amount", "debit amount",
-                "withdrawal amount", "withdrawl amt", "paid out", "dr."]):
+        elif "debit" not in col_map and any(k in cl for k in ["withdrawal", "debit", "dr amount"]):
             col_map["debit"] = c
-        elif "credit" not in col_map and any(k in cl for k in [
-                "deposit", "credit", "cr amount", "credit amount",
-                "deposit amount", "paid in", "cr."]):
+        elif "credit" not in col_map and any(k in cl for k in ["deposit", "credit", "cr amount"]):
             col_map["credit"] = c
         elif "balance" not in col_map and "balance" in cl:
             col_map["balance"] = c
-        # Single-column amount + Dr/Cr indicator (Kotak, some ICICI formats)
-        elif "amount" not in col_map and re.search(r'^amount(\s*\(inr\))?$', cl.strip()):
-            col_map["amount"] = c
-        elif "dr_cr" not in col_map and any(k in cl for k in [
-                "dr / cr", "dr/cr", "cr/dr", "txn type", "type", "crdr"]):
-            col_map["dr_cr"] = c
 
     return df, col_map, target
 
@@ -1454,20 +1495,109 @@ def write_output(rows: list, summary: dict, brand: str, output_path: str):
 # CLI entry point
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Gemini LLM fallback — resolves rows the rule engine could not match (Low).
+# SAFETY: the model may ONLY return a ledger that exists in `candidates` (all of
+# which are real COA ledgers). Anything else — abstention, an invented name, a
+# timeout, an API error — yields None, and the caller keeps "Suspense A/c".
+# It can never produce a wrong/invented ledger.
+# ---------------------------------------------------------------------------
+def gemini_classify(narration, candidates, api_key, model="gemini-2.5-flash", timeout=30):
+    import urllib.request
+    import json as _json
+    if not api_key or not candidates or not str(narration).strip():
+        return None
+    cand_block = "\n".join(candidates)
+    prompt = (
+        "You are an expert Indian bank-reconciliation assistant mapping a bank transaction "
+        "to a Tally ledger. From the CANDIDATES list, choose the ONE ledger that best matches "
+        "the transaction narration (consider payee/vendor name, UPI/NEFT counterparty, and "
+        "purpose). You MUST copy a candidate EXACTLY as written. If none is a clear match, "
+        "reply exactly: SUSPENSE. Reply with ONLY the chosen ledger name or SUSPENSE — no "
+        "explanation, no extra text.\n\n"
+        f"TRANSACTION NARRATION:\n{narration}\n\nCANDIDATES:\n{cand_block}"
+    )
+    body = _json.dumps({
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {"temperature": 0, "maxOutputTokens": 2000},
+    }).encode("utf-8")
+    url = (f"https://generativelanguage.googleapis.com/v1beta/models/"
+           f"{model}:generateContent?key={api_key}")
+    # Build an SSL context backed by certifi's CA bundle. Many environments (notably
+    # macOS Python) lack a system CA bundle, which makes urllib fail every HTTPS call
+    # with CERTIFICATE_VERIFY_FAILED — silently disabling Gemini. certifi fixes that.
+    import ssl
+    try:
+        import certifi
+        _ctx = ssl.create_default_context(cafile=certifi.where())
+    except Exception:
+        _ctx = ssl.create_default_context()
+    try:
+        req = urllib.request.Request(url, data=body,
+                                     headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=timeout, context=_ctx) as resp:
+            data = _json.loads(resp.read().decode("utf-8"))
+        text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
+    except Exception as _e:
+        # Safe fallback (caller keeps Suspense A/c) but log so failures aren't invisible.
+        print(f"      → Gemini call failed: {type(_e).__name__}: {str(_e)[:160]}", file=sys.stderr)
+        return None
+    if not text or text.strip().upper() == "SUSPENSE":
+        return None
+    # Strict validation: the reply MUST exactly (normalised) equal a candidate.
+    def _n(x):
+        return ' '.join(re.sub(r'[^a-z0-9 ]', ' ', str(x).lower()).split())
+    nt = _n(text)
+    for c in candidates:
+        if _n(c) == nt:
+            return c
+    return None  # model returned something not in the COA candidate list → reject
+
+
 def main():
     import argparse
     parser = argparse.ArgumentParser(description="Universal Tally Bank Statement Classifier")
     parser.add_argument("--ledger", required=True,
                         help="Path to List of Ledgers Tally export (Excel)")
-    parser.add_argument("--bank",   required=True,
+    parser.add_argument("--bank",   required=False,
                         help="Path to raw Bank Statement file (Excel or CSV)")
-    parser.add_argument("--output", required=True,
+    parser.add_argument("--output", required=False,
                         help="Path to save the classified output Excel file")
     parser.add_argument("--brand",  default="Brand",
                         help="Brand name for the output filename/summary (default: Brand)")
     parser.add_argument("--corrections", default=None,
                         help="Path to corrections JSON file: {NARRATION_KEY: {ledger, type}}")
+    parser.add_argument("--gemini-key", default=None,
+                        help="Gemini API key for the LLM fallback (else env GEMINI_API_KEY)")
+    parser.add_argument("--gemini-model", default="gemini-2.5-flash",
+                        help="Gemini model for the fallback (default: gemini-2.5-flash)")
+    parser.add_argument("--list-ledgers", action="store_true",
+                        help="COA ingest mode: load + validate --ledger and print the cleaned "
+                             "ledger names as a JSON array to stdout, then exit. Applies the same "
+                             "Tally-group/metadata filtering and COA-integrity guard as a real run, "
+                             "so a bank statement uploaded as a COA is rejected here with a clear error.")
     args = parser.parse_args()
+
+    # ------------------------------------------------------------------
+    # COA INGEST MODE (--list-ledgers): used by the backend to validate + extract a
+    # brand's Chart of Accounts before storing it in the ledger_master DB table.
+    # Reuses load_ledger_master() so cleaning + the integrity guard are identical to a
+    # classification run. On a bad file (bank statement / date column) load_ledger_master
+    # raises ValueError → we print it to stderr and exit 2 so the caller can surface it.
+    # ------------------------------------------------------------------
+    if args.list_ledgers:
+        import json as _json
+        try:
+            _ledgers = load_ledger_master(args.ledger)
+        except ValueError as _e:
+            print(str(_e), file=sys.stderr)
+            sys.exit(2)
+        sys.stdout.write(_json.dumps(_ledgers, ensure_ascii=False))
+        sys.stdout.flush()
+        sys.exit(0)
+
+    if not args.bank or not args.output:
+        parser.error("--bank and --output are required unless --list-ledgers is set")
 
     print(f"[1/4] Loading ledger master: {args.ledger}")
     ledgers = load_ledger_master(args.ledger)
@@ -1494,13 +1624,14 @@ def main():
     else:
         _slug = re.sub(r'[^A-Za-z0-9_-]', '-', args.brand.strip()).lower()
         _sidecar = os.path.join(os.path.dirname(args.output), '..', 'corrections', f'{_slug}_corrections.json')
-        if os.path.exists(os.path.normpath(_sidecar)):
-            _corr_path = os.path.normpath(_sidecar)
+        _sidecar = os.path.normpath(_sidecar)
+        if os.path.exists(_sidecar):
+            _corr_path = _sidecar
     if _corr_path:
         try:
             with open(_corr_path, 'r', encoding='utf-8') as _f:
                 corrections = _json.load(_f)
-            print(f"      → Loaded {len(corrections)} Layer 0 corrections (checked before CoA/fuzzy)")
+            print(f"      → Loaded {len(corrections)} stored corrections")
         except Exception as _e:
             print(f"      → Warning: could not load corrections file: {_e}")
 
@@ -1508,41 +1639,16 @@ def main():
     classifier = BankClassifier(ledgers, corrections=corrections)
     rows, summary = [], {"High": 0, "Medium": 0, "Low": 0}
 
-    date_col   = col_map.get("txn_date")
-    desc_col   = col_map.get("description")
-    debit_col  = col_map.get("debit")
+    date_col  = col_map.get("txn_date")
+    desc_col  = col_map.get("description")
+    debit_col = col_map.get("debit")
     credit_col = col_map.get("credit")
-    bal_col    = col_map.get("balance")
-    amount_col = col_map.get("amount")   # Kotak: single Amount column
-    dr_cr_col  = col_map.get("dr_cr")   # Kotak: Dr/Cr indicator column
+    bal_col   = col_map.get("balance")
 
-    in_summary = False
     for _, row in df_bank.iterrows():
         txn_date = row.get(date_col, "") if date_col else ""
         desc     = row.get(desc_col)
-
-        # Skip rows where both date and description are empty
         if pd.isna(desc) and pd.isna(txn_date):
-            continue
-
-        # Compute raw strings early — used by all filters below
-        date_raw = str(txn_date).strip() if pd.notna(txn_date) else ""
-        desc_raw = str(desc).strip() if pd.notna(desc) else ""
-
-        # Stop at STATEMENT SUMMARY / footer
-        any_cell = " ".join(str(v) for v in row.values if pd.notna(v))
-        if re.search(r'statement\s+summary', any_cell, re.IGNORECASE):
-            break
-
-        # Skip Opening Balance / Closing Balance / Total rows (not transactions)
-        if re.match(r'^\s*(opening\s+bal|closing\s+bal|brought\s+forward|carried\s+forward'
-                    r'|total\s*$|grand\s+total|balance\s+b/f|balance\s+c/f)', desc_raw, re.IGNORECASE):
-            continue
-        if re.match(r'^\*+$', date_raw) or re.match(r'^\*+$', desc_raw):
-            continue
-
-        # Skip rows with no valid date — catches totals, footers, metadata rows
-        if not date_raw or date_raw.lower() in ("nan", "nat", "none", ""):
             continue
 
         def format_excel_date(val):
@@ -1560,7 +1666,7 @@ def main():
             except Exception:
                 pass
             val_str = str(val).strip()
-            for fmt in ["%Y-%m-%d %H:%M:%S", "%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y", "%Y/%m/%d", "%d/%m/%y", "%d-%m-%y"]:
+            for fmt in ["%Y-%m-%d %H:%M:%S", "%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y", "%Y/%m/%d"]:
                 try:
                     dt = datetime.datetime.strptime(val_str.split(".")[0], fmt)
                     return dt.strftime("%d-%m-%Y")
@@ -1581,17 +1687,6 @@ def main():
         debit   = safe_float(row.get(debit_col))  if debit_col  else 0.0
         credit  = safe_float(row.get(credit_col)) if credit_col else 0.0
         balance = safe_float(row.get(bal_col))    if bal_col    else 0.0
-
-        # Kotak / single-column format: Amount + Dr/Cr indicator
-        # Amount is negative for Dr (debit) or positive for Cr (credit) in some formats.
-        # Dr/Cr column explicitly says "Dr" or "Cr".
-        if debit == 0.0 and credit == 0.0 and amount_col:
-            amt = safe_float(row.get(amount_col))
-            dr_cr_val = str(row.get(dr_cr_col, "")).strip().lower() if dr_cr_col else ""
-            if dr_cr_val == "dr" or amt < 0:
-                debit = abs(amt)
-            elif dr_cr_val == "cr" or amt > 0:
-                credit = abs(amt)
         desc_str = str(desc).strip() if pd.notna(desc) else ""
 
         result = classifier.classify(desc_str, debit, credit)
@@ -1605,6 +1700,7 @@ def main():
             "predicted_type": result["type"],
             "predicted_ledger": result["ledger"],
             "confidence":     result["confidence"],
+            "entity":         result.get("entity", ""),
         })
 
     total = len(rows)
@@ -1612,6 +1708,53 @@ def main():
     print(f"         High:   {summary['High']}  ({summary['High']/total*100:.1f}%)")
     print(f"         Medium: {summary['Medium']}  ({summary['Medium']/total*100:.1f}%)")
     print(f"         Low:    {summary['Low']}  ({summary['Low']/total*100:.1f}%)")
+
+    # ------------------------------------------------------------------
+    # Gemini LLM fallback — only on rows the rule engine left Low/Suspense.
+    # Pure recall gain: confident rows are never touched. The model can only
+    # pick a real COA ledger; on any failure the row stays "Suspense A/c".
+    # ------------------------------------------------------------------
+    gemini_key = args.gemini_key or os.environ.get("GEMINI_API_KEY")
+    if gemini_key and total:
+        low_idx = [i for i, r in enumerate(rows) if r["confidence"] == "Low"]
+        if low_idx:
+            print(f"[3.5/4] Gemini fallback on {len(low_idx)} low-confidence rows "
+                  f"(model {args.gemini_model}) …")
+            from concurrent.futures import ThreadPoolExecutor
+            suspense_label = classifier._suspense_ledger
+            _cache = {}
+
+            def _resolve(i):
+                desc = rows[i]["description"]
+                entity = rows[i].get("entity", "")
+                key = ' '.join(str(desc).upper().split())
+                if key in _cache:
+                    return i, _cache[key]
+                # Build candidates from the extracted payee entity when available
+                # (cleaner signal), else from the full narration.
+                cands = classifier.top_candidates(entity or desc, k=15)
+                if not cands:
+                    cands = classifier.top_candidates(desc, k=15)
+                if suspense_label not in cands:
+                    cands = cands + [suspense_label]
+                pick = gemini_classify(desc, cands, gemini_key, args.gemini_model)
+                _cache[key] = pick
+                return i, pick
+
+            resolved = 0
+            try:
+                with ThreadPoolExecutor(max_workers=6) as ex:
+                    for i, pick in ex.map(_resolve, low_idx):
+                        if pick and pick != suspense_label:
+                            rows[i]["predicted_ledger"] = pick
+                            rows[i]["confidence"] = "Medium"
+                            summary["Low"] -= 1
+                            summary["Medium"] += 1
+                            resolved += 1
+            except Exception as _e:
+                print(f"        → Gemini fallback aborted ({_e}); rows kept as Suspense A/c")
+            print(f"        → Gemini resolved {resolved}/{len(low_idx)} "
+                  f"(unresolved stay Suspense A/c)")
 
     print(f"[4/4] Writing output: {args.output}")
     write_output(rows, summary, args.brand, args.output)

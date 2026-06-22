@@ -27,6 +27,92 @@ The rest of the platform (sales agents, invoice agents, admin panel, CFO dashboa
 
 **All three must be running** for the RECO agents to work. The Python engine handles all GST agents. `universal_bank_statement` uses `classify.py` (subprocess) — does NOT need the Python engine.
 
+> This is the **port-3000 / production** app. Main & RECO logic is developed/tested first in
+> **Colonel Full (port 3001)**, then ported here. Reco logic lives in BOTH `recon/` trees — keep in
+> sync. See the root `Colonel Full/CLAUDE.md` for the 3-app workflow.
+
+---
+
+## Tech Stack
+
+- **Frontend** (3000): React 18 + CRA via **craco**, Tailwind, axios (`src/lib/api.js`).
+- **Backend** (8001): Node + Express, **Sequelize** over PostgreSQL, JWT auth (**bcryptjs**),
+  serves `frontend/build` as static (single-origin for tunnels).
+- **DB**: master `colonel-master` (users, brands, agents, brand_users, brand_agents) + **one DB per
+  brand** (`reco_jobs` + result tables, RLS-protected).
+- **Reco engine** (8765): pure Python 3 stdlib HTTP, pandas/openpyxl/xlrd. `universal_bank_statement`
+  runs `new-backend/scripts/classify.py` as a subprocess (not via 8765).
+- **Tunnel**: ngrok permanent URL (default) or cloudflared quick tunnel.
+
+---
+
+## Sharing the RECO link (tunnel)
+
+- `./start-reco.sh` → starts reco engine (8765) + backend (8001) + **ngrok permanent URL**
+  `https://eggbeater-thesis-crowbar.ngrok-free.dev`. Backend serves `frontend/build`, so ONE tunnel
+  serves UI + API on one origin. Use after a Mac restart.
+- ngrok free shows a one-time "Visit Site" interstitial. App XHR bypasses it via the
+  `ngrok-skip-browser-warning` header (set in `src/lib/api.js`); the first page navigation can't, so
+  accountants click "Visit Site" once. **Blank page** = an extension blocking `cdn.ngrok.com` → use incognito.
+- No-interstitial alternative: `cloudflared tunnel --url http://localhost:8001` (but its
+  `*.trycloudflare.com` URL changes on every restart).
+
+---
+
+## Runtime config — NO build-time env vars (IMPORTANT)
+
+- Backend URL and RECO-only mode resolve at **runtime by hostname**, never baked into the build:
+  - `src/lib/api.js` `resolveApiUrl()`: `localhost` → `http://localhost:8001`; any other host (a
+    tunnel) → same-origin (`''`). **Never set `REACT_APP_BACKEND_URL`** in the build — a baked
+    `localhost` breaks the tunnel (Chrome blocks public-origin → loopback) and CRA empty-value
+    precedence is unreliable.
+  - `BrandAgentsInventory.jsx` `isRecoOnly()`: `localhost` → show ALL agents (dev on :3000); tunnel
+    host → show ONLY the 5 RECO agents (accountant view). Override via `REACT_APP_RECO_ONLY` in `.env.local`.
+- `frontend/.env` + `.env.production` are comment-only (no `REACT_APP_*`) and gitignored.
+- After ANY frontend change, run `npx craco build` so the tunnel serves it; dev (:3000) uses live source.
+- **Service-worker gotcha**: `index.html` loads `assets.emergent.sh/.../emergent-main.js`, which
+  registers a SW that caches the app and **survives hard-refresh**. After a rebuild, test in incognito
+  (or DevTools → Application → Service Workers → Unregister).
+
+---
+
+## Accountant & brand provisioning
+
+- Brand access is gated by the **`brand_users`** table; `GET /api/brands/my-brands` returns only a
+  user's assigned brands (admin sees all). Per-brand agent runnability = **`brand_agents`** rows.
+- **Password convention**: `<name-before-dot>123` (e.g. `jayesh.colonel@gmail.com` → `jayesh123`).
+- Provision via LOCAL idempotent Node scripts that reuse `src/models/master` + `bcryptjs`
+  (`seed-accountants.js`, `add-prashant.js`, `update-users.js`). They hold plaintext passwords →
+  **gitignored, never pushed**.
+- **Create a brand fully**: `createBrandDatabase()` (config/database.js) + `migrateBrandDb()`
+  (db/migrate.js → the 8 reco tables) + assign the 5 RECO agents via `BrandAgent`. A brand is unusable
+  without its per-brand DB + reco tables + agent rows. New-brand `db_name` = `colonel_<slug>`
+  (underscores); legacy brands use hyphens (`colonel-stroom`).
+- Renaming a brand's `name` is safe (FKs use `brand_id`/`db_name`) EXCEPT invoice-agent `.env` webhook
+  keys (keyed by brand name) — irrelevant for RECO-only accountants.
+
+### Current DB state (snapshot — June 2026; passwords follow the convention, set via local scripts)
+
+- **Brands (15):** Plenaire, Stroom, Koparo, Nestroots, M Brands, Biglilpeople, Urban Plant, Zaydn,
+  D'Chicha, Shumee Toys, Shumee Playroom, Flo Mattress, Amama, Flipside, Nailinit.
+  *(Renamed: Zayden→Zaydn, DChica→D'Chicha; Shumee→Shumee Toys + new Shumee Playroom;
+  new brands: Flo Mattress, Amama, Flipside, Nailinit.)*
+- **Accountants → brands:** jayesh→Koparo · varshita→M Brands, Urban Plant · amjad→Shumee Toys,
+  Shumee Playroom, Biglilpeople · vidhi→Zaydn · pankajrathore→D'Chicha · kunal→Flo Mattress, Amama ·
+  riya→Nestroots · shrikant→Stroom · manisha→Flipside · akshat→Stroom · prashant→Koparo, Nestroots,
+  Biglilpeople, Zaydn, Shumee Toys, Shumee Playroom, Nailinit.
+
+---
+
+## Changelog — Updates (June 2026)
+
+- Frontend backend-URL + RECO-only mode now resolve at **runtime by hostname** (removed build-time env vars).
+- Backend serves `frontend/build`; a single tunnel (ngrok permanent URL / cloudflared) serves UI + API.
+- `start-reco.sh` one-command startup; accountant **share-link is live**.
+- Accountant + brand provisioning via local idempotent scripts; `brand_users` gating; `<name>123` passwords.
+- New/renamed brands with full per-brand DB + reco tables + 5 RECO agents (see DB snapshot).
+- GST Reco sheet freeze-pane removed in `reco-engine/server.py` (was pinning the April summary row).
+
 ---
 
 ## CRITICAL: After Merging This Branch — Do These 4 Steps
@@ -290,3 +376,6 @@ Always use `effectiveBrandId` (from brand selector) not the URL param `brandId`.
 8. **`output/` and `output/ledgers/`** are gitignored — CoA files are per-deployment, not committed
 9. **classify.py** is a subprocess (not HTTP) — the Python engine on 8765 is NOT involved in universal_bank_statement
 10. **Python engine imports** use `from recon.<module>` (relative to `reco-engine/`) — do not revert to `from app.recon.<module>`
+11. **No build-time backend URL / RECO flag** — both resolve at runtime by hostname (see *Runtime config*). Never reintroduce `REACT_APP_BACKEND_URL` into the build.
+12. **GST Reco sheet freeze**: `reco-engine/server.py` GST Reco sheet must use `freeze_panes = None` (stacked multi-section sheet — freezing pinned the April summary). Restart the engine after edits.
+13. **Logic is ported FROM Colonel Full (port 3001)** — develop/verify main & RECO logic there first, then port the same change here. Keep both `recon/` trees in sync.

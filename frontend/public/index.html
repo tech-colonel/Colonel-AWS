@@ -155,6 +155,34 @@
             },
         });
     </script>
+
+    <!-- Self-heal stale caches. The emergent script registers a service worker
+         that caches the app bundle and survives hard-refresh, which repeatedly
+         served STALE JS/API responses after deploys. This app is always served
+         fresh from the backend and needs no offline cache, so on every load we
+         unregister any service worker and clear caches. Runs after emergent's
+         async registration, so it kills whatever got registered. -->
+    <script>
+      (function () {
+        try {
+          if ('serviceWorker' in navigator) {
+            var kill = function () {
+              navigator.serviceWorker.getRegistrations()
+                .then(function (rs) { rs.forEach(function (r) { r.unregister(); }); })
+                .catch(function () {});
+            };
+            kill();
+            // emergent registers the SW asynchronously; sweep again shortly after.
+            setTimeout(kill, 2000);
+          }
+          if (window.caches && caches.keys) {
+            caches.keys().then(function (ks) {
+              ks.forEach(function (k) { caches.delete(k); });
+            }).catch(function () {});
+          }
+        } catch (e) { /* never block app boot */ }
+      })();
+    </script>
 </body>
 
 </html>

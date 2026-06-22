@@ -56,3 +56,4 @@ new-backend/backend-structure.md
 # ── Build ─────────────────────────────────────────────────────────────────────
 frontend/build/
 coverage/
+new-backend/seed-accountants.js

@@ -27,6 +27,17 @@ const Task = masterSequelize.define('Task', {
     type: DataTypes.DATEONLY,
     allowNull: true,
   },
+  // 'task' (normal admin task) | 'feedback' (raised by a user on a reco result)
+  category: {
+    type: DataTypes.STRING(32),
+    allowNull: false,
+    defaultValue: 'task',
+  },
+  // For feedback tasks: { agentType, brandId, brandName, jobId, rows:[…], by:{id,name,email} }
+  source_meta: {
+    type: DataTypes.JSONB,
+    allowNull: true,
+  },
   assigned_to: {
     type: DataTypes.UUID,
     allowNull: false,
@@ -63,7 +74,7 @@ const TaskMessage = masterSequelize.define('TaskMessage', {
     allowNull: false,
   },
   sender_role: {
-    type: DataTypes.ENUM('admin', 'accountant'),
+    type: DataTypes.ENUM('admin', 'accountant', 'developer'),
     allowNull: false,
   },
 }, {

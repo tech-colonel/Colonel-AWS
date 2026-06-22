@@ -1,6 +1,19 @@
 import axios from 'axios';
 
-const API_URL = process.env.REACT_APP_BACKEND_URL || 'http://localhost:8001';
+// Resolve the backend base URL at RUNTIME (a function call, so the bundler can't
+// constant-fold a wrong value into the build):
+//   1. REACT_APP_BACKEND_URL set to a NON-EMPTY value → explicit override (always wins).
+//   2. App served from localhost (local dev on :3000) → talk to local backend on :8001.
+//   3. Otherwise (served from a tunnel / production, one host serves UI + API) →
+//      same-origin relative URLs. Works through Cloudflare, ngrok, etc. with no rebuild.
+export function resolveApiUrl() {
+  const override = process.env.REACT_APP_BACKEND_URL;
+  if (override) return override;
+  const host = typeof window !== 'undefined' ? window.location.hostname : '';
+  if (host === 'localhost' || host === '127.0.0.1') return 'http://localhost:8001';
+  return ''; // same-origin
+}
+export const API_URL = resolveApiUrl();
 
 const api = axios.create({
   baseURL: API_URL,

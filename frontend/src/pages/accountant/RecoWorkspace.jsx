@@ -2,6 +2,7 @@ import React, { useState, useRef, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import DashboardLayout from '../../components/layout/DashboardLayout';
 import Gstr1Dashboard from './Gstr1Dashboard';
+import ToolResultDashboard from '../../components/reco/ToolResultDashboard';
 import {
   LayoutDashboard, Bot, ArrowLeft, Upload, Download,
   Play, CheckCircle2, XCircle, AlertTriangle, RotateCcw,
@@ -11,6 +12,8 @@ import {
   Zap,
 } from 'lucide-react';
 import api from '../../lib/api';
+import { sidebarFor, isAdminUser } from '../../lib/adminNav';
+import { DEMO_SAMPLES, urlToFile } from '../../lib/demoSamples';
 import { toast } from 'sonner';
 
 const AGENT_CONFIG = {
@@ -289,6 +292,8 @@ const RecoWorkspace = ({ agentTypeProp } = {}) => {
   const [tolerance, setTolerance] = useState('1.0');
   const [running, setRunning] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(null);
+  const [phase, setPhase] = useState(null); // 'uploading' | 'reconciling' | 'preparing' | null
+  const phaseTimer = useRef(null);
   const [result, setResult] = useState(null);
   const [filter, setFilter] = useState('All');
   const [downloading, setDownloading] = useState(false);
@@ -308,6 +313,18 @@ const RecoWorkspace = ({ agentTypeProp } = {}) => {
   const effectiveBrandName = brands.find(b => b.id === effectiveBrandId)?.name || null;
   const cacheKey = `reco_result_${agentType}_${effectiveBrandId || brandId}`;
   const editsKey = `reco_edits_${agentType}_${effectiveBrandId || brandId}`;
+
+  // Cache a slim copy (raw source dicts stripped) so large results stay under
+  // sessionStorage's ~5MB quota — otherwise the save throws and Back loses the
+  // result. The results table never reads `.raw`.
+  const slimResultForCache = (data) => {
+    if (!data) return data;
+    const stripRaw = (o) => { if (!o || typeof o !== 'object') return o; const { raw, ...rest } = o; return rest; };
+    return {
+      ...data,
+      results: (data.results || []).map(r => ({ ...r, gstr2b: stripRaw(r.gstr2b), purchase: stripRaw(r.purchase) })),
+    };
+  };
 
   useEffect(() => {
     try {
@@ -352,6 +369,27 @@ const RecoWorkspace = ({ agentTypeProp } = {}) => {
     }
   }, [effectiveBrandId]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Admin demo: auto-load engine-valid sample files so Anshul can run with one click.
+  useEffect(() => {
+    if (!isAdminUser()) return;
+    const samples = DEMO_SAMPLES[agentType];
+    if (!samples) return;
+    let cancelled = false;
+    (async () => {
+      let loaded = 0;
+      for (const s of samples) {
+        try {
+          const file = await urlToFile(s.url, s.filename);
+          if (cancelled) return;
+          setUploadedFiles(prev => ({ ...prev, [s.key]: file }));
+          loaded++;
+        } catch (_) { /* skip missing sample */ }
+      }
+      if (!cancelled && loaded) toast.success('Sample files loaded — click Run Reconciliation');
+    })();
+    return () => { cancelled = true; };
+  }, [agentType]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const checkLedgerMaster = async (bid) => {
     try {
       const res = await api.get(`/api/reco/ledger-status/${bid}`);
@@ -365,10 +403,10 @@ const RecoWorkspace = ({ agentTypeProp } = {}) => {
     return config?.files || [];
   })();
 
-  const sidebarItems = [
+  const sidebarItems = sidebarFor([
     { path: `/brands/${brandId}/dashboard`, label: 'Dashboard', icon: LayoutDashboard, testId: 'nav-dashboard' },
     { path: `/brands/${brandId}/agents`, label: 'All Agents', icon: Bot, testId: 'nav-agents' },
-  ];
+  ]);
 
   if (!config) {
     return (
@@ -389,6 +427,7 @@ const RecoWorkspace = ({ agentTypeProp } = {}) => {
       toast.error('In demo mode, please upload the Ledger Master file'); return;
     }
     setRunning(true); setResult(null); setEditedLedgers({}); setUploadProgress(0);
+    setPhase('uploading');
     try {
       const formData = new FormData();
       formData.append('reco_type', agentType);
@@ -399,17 +438,27 @@ const RecoWorkspace = ({ agentTypeProp } = {}) => {
       const response = await api.post('/api/reco/run', formData, {
         headers: { 'Content-Type': 'multipart/form-data' },
         onUploadProgress: (evt) => {
-          if (evt.total) setUploadProgress(Math.round((evt.loaded / evt.total) * 100));
+          if (evt.total) {
+            const pct = Math.round((evt.loaded / evt.total) * 100);
+            setUploadProgress(pct);
+            if (pct >= 100) {
+              setPhase('reconciling');
+              clearTimeout(phaseTimer.current);
+              phaseTimer.current = setTimeout(() => setPhase('preparing'), 5000);
+            }
+          }
         },
       });
+      clearTimeout(phaseTimer.current);
       setUploadProgress(null);
+      setPhase('done');
       setResult(response.data);
-      if (isUniversal) {
-        try { sessionStorage.setItem(cacheKey, JSON.stringify(response.data)); } catch (_) {}
-      }
+      try { sessionStorage.setItem(cacheKey, JSON.stringify(slimResultForCache(response.data))); } catch (_) {}
       toast.success(`Reconciliation complete! ${response.data.results?.length || 0} records processed.`);
     } catch (err) {
+      clearTimeout(phaseTimer.current);
       setUploadProgress(null);
+      setPhase(null);
       toast.error(err.response?.data?.error || 'Reconciliation failed');
     } finally { setRunning(false); }
   };
@@ -473,8 +522,29 @@ const RecoWorkspace = ({ agentTypeProp } = {}) => {
     finally { setDownloading(false); }
   };
 
-  const handleReset = () => {
-    if (!window.confirm('Clear all results and uploaded files? This cannot be undone.')) return;
+  const handleSendFeedback = async ({ comment, rows }) => {
+    try {
+      await api.post('/api/feedback', {
+        agentType,
+        agentLabel: config?.name,
+        brandId: effectiveBrandId || brandId,
+        brandName: effectiveBrandName,
+        jobId: result?.job_id,
+        comment, rows,
+      });
+      toast.success('Feedback sent — the engineering team has been notified');
+    } catch (e) {
+      toast.error(e.response?.data?.error || 'Could not send feedback');
+      throw e;
+    }
+  };
+
+  const handleReset = async () => {
+    if (!window.confirm('Clear all results and uploaded files? This also purges this run from the database. This cannot be undone.')) return;
+    const bId = effectiveBrandId || brandId;
+    if (result?.job_id && bId && bId !== 'other' && bId !== 'demo') {
+      try { await api.delete(`/api/reco/job/${bId}/${result.job_id}`); } catch (_) {}
+    }
     try { sessionStorage.removeItem(cacheKey); sessionStorage.removeItem(editsKey); } catch (_) {}
     setUploadedFiles({}); setResult(null); setFilter('All'); setEditedLedgers({});
   };
@@ -489,28 +559,15 @@ const RecoWorkspace = ({ agentTypeProp } = {}) => {
       taxable_value: inv.taxable_value, igst: inv.igst, cgst: inv.cgst, sgst: inv.sgst,
       suggested_action: row.suggested_action || '—',
       remark_2: row.suggested_action_2 || row.explanation || '—',
+      suggested_action_3: row.suggested_action_3 || null,
     };
   };
 
-  const isGstResult = result?.results?.[0] && 'category' in result.results[0];
-
-  const statusCounts = (result?.results || []).reduce((acc, r) => {
-    let s;
-    if (isGstResult) s = r.category || 'Unknown';
-    else if (isUniversal) s = (r.confidence || 'Low') + ' Confidence';
-    else s = r.status || 'Unknown';
-    acc[s] = (acc[s] || 0) + 1; return acc;
-  }, {});
-
-  const filterTabs = ['All', ...Object.keys(statusCounts)];
-
-  const filteredResults = (result?.results || [])
-    .map(flattenResult)
-    .filter(r => {
-      if (filter === 'All') return true;
-      const key = isGstResult ? r.category : r.status;
-      return (key || 'Unknown') === filter;
-    });
+  // Full, UNFILTERED rows for the premium dashboard — same order/length as
+  // result.results, so the dashboard's absolute row index lines up with the
+  // index handleSaveCorrections uses (result.results[idx]) when persisting
+  // ledger edits. The dashboard owns filtering + the 200-row cap internally.
+  const dashboardRows = (result?.results || []).map(flattenResult);
 
   // ── Brand Picker Modal ────────────────────────────────────────────────────
   const canDismissPicker = !!(selectedBrand);
@@ -647,7 +704,7 @@ const RecoWorkspace = ({ agentTypeProp } = {}) => {
 
         {/* Breadcrumb */}
         <button
-          onClick={() => navigate(`/brands/${brandId}/agents`)}
+          onClick={() => navigate(isAdminUser() ? '/admin/agents' : `/brands/${brandId}/agents`)}
           style={{
             display: 'flex', alignItems: 'center', gap: 6,
             fontSize: 13, color: 'var(--text-muted)',
@@ -943,9 +1000,13 @@ const RecoWorkspace = ({ agentTypeProp } = {}) => {
                 style={{ width: '100%', padding: '13px 0', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8 }}
               >
                 {running
-                  ? uploadProgress !== null && uploadProgress < 100
-                    ? <><Upload style={{ width: 15, height: 15 }} /> Uploading {uploadProgress}%</>
-                    : <><Loader2 style={{ width: 15, height: 15 }} className="animate-spin" /> Processing…</>
+                  ? phase === 'uploading'
+                    ? <><Upload style={{ width: 15, height: 15 }} /> Uploading {uploadProgress ?? 0}%</>
+                    : <><Loader2 style={{ width: 15, height: 15 }} className="animate-spin" /> {
+                        phase === 'reconciling' ? 'Reconciling…'
+                        : phase === 'preparing' ? 'Preparing Excel…'
+                        : 'Processing…'
+                      }</>
                   : <><Zap style={{ width: 15, height: 15 }} /> Run Reconciliation</>
                 }
               </button>
@@ -960,6 +1021,42 @@ const RecoWorkspace = ({ agentTypeProp } = {}) => {
                   }} />
                 </div>
               )}
+
+              {/* Phased progress — shows the user which stage is running and why a
+                  large file takes time (the Excel is prepared up-front). */}
+              {running && (() => {
+                const order = ['uploading', 'reconciling', 'preparing'];
+                const steps = [
+                  { key: 'uploading',   label: 'Uploading files' },
+                  { key: 'reconciling', label: 'Running reconciliation' },
+                  { key: 'preparing',   label: 'Preparing Excel for download' },
+                ];
+                const cur = order.indexOf(phase);
+                return (
+                  <div className="glass-card" style={{ padding: 14, display: 'flex', flexDirection: 'column', gap: 9 }}>
+                    {steps.map((s, i) => {
+                      const done = cur > i, active = cur === i;
+                      return (
+                        <div key={s.key} style={{ display: 'flex', alignItems: 'center', gap: 9 }}>
+                          {done
+                            ? <CheckCircle2 style={{ width: 15, height: 15, color: '#059669', flexShrink: 0 }} />
+                            : active
+                              ? <Loader2 style={{ width: 15, height: 15, color: config.color, flexShrink: 0 }} className="animate-spin" />
+                              : <div style={{ width: 13, height: 13, margin: 1, borderRadius: '50%', border: '2px solid var(--border)', flexShrink: 0 }} />}
+                          <span style={{
+                            fontSize: 12.5, fontFamily: 'Barlow',
+                            fontWeight: active ? 700 : 600,
+                            color: done ? '#059669' : active ? 'var(--text-body)' : 'var(--text-muted)',
+                          }}>{s.label}{active && '…'}</span>
+                        </div>
+                      );
+                    })}
+                    <p style={{ fontSize: 11, color: 'var(--text-muted)', fontFamily: 'DM Sans', margin: '2px 0 0', lineHeight: 1.4 }}>
+                      Large files can take a minute — the Excel is built now so your download is instant.
+                    </p>
+                  </div>
+                );
+              })()}
 
               {/* Files status panel */}
               <div className="glass-card" style={{ padding: 16 }}>
@@ -1011,38 +1108,6 @@ const RecoWorkspace = ({ agentTypeProp } = {}) => {
         {/* ── Results ─────────────────────────────────────────────────── */}
         {result && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
-
-            {/* Stat cards — left-bordered, flat */}
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(160px, 1fr))', gap: 12 }}>
-              {Object.entries(statusCounts).map(([status, count]) => {
-                const cfg = getStatusCfg(status);
-                return (
-                  <StatCard
-                    key={status} status={status} count={count}
-                    active={filter === status} cfg={cfg}
-                    onClick={() => setFilter(filter === status ? 'All' : status)}
-                  />
-                );
-              })}
-              {result.results && (
-                <div style={{
-                  background: 'var(--surface)',
-                  border: `1px solid var(--card-border)`,
-                  borderLeft: `4px solid ${config.color}`,
-                  borderRadius: 10, padding: '14px 18px',
-                }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
-                    <FileSpreadsheet style={{ width: 13, height: 13, color: config.color }} />
-                    <span style={{ fontSize: 10, fontWeight: 700, letterSpacing: '0.08em', textTransform: 'uppercase', color: config.color, fontFamily: 'DM Sans' }}>
-                      Total Records
-                    </span>
-                  </div>
-                  <p style={{ fontSize: 34, fontWeight: 900, fontFamily: 'Barlow', lineHeight: 1, color: 'var(--text-heading)', margin: 0 }}>
-                    {(result.counts?.total_records ?? result.results.length).toLocaleString('en-IN')}
-                  </p>
-                </div>
-              )}
-            </div>
 
             {/* Monthly Summary */}
             {result.monthly_summary?.length > 0 && (
@@ -1097,25 +1162,9 @@ const RecoWorkspace = ({ agentTypeProp } = {}) => {
               </div>
             )}
 
-            {/* Filter tabs + action bar */}
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
-              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                {agentType !== 'gstr_1_vs_books' && filterTabs.map(tab => {
-                  const active = filter === tab;
-                  const tabCfg = tab !== 'All' ? getStatusCfg(tab) : null;
-                  return (
-                    <button key={tab} onClick={() => setFilter(tab)} style={{
-                      padding: '5px 12px', borderRadius: 6, fontSize: 11, fontWeight: 700,
-                      letterSpacing: '0.04em', fontFamily: 'DM Sans', cursor: 'pointer',
-                      background: active ? (tabCfg ? tabCfg.bg : 'rgba(7,72,238,0.08)') : 'var(--surface)',
-                      border: `1px solid ${active ? (tabCfg ? tabCfg.border : 'rgba(7,72,238,0.2)') : 'var(--card-border)'}`,
-                      color: active ? (tabCfg ? tabCfg.color : '#0748EE') : 'var(--text-muted)',
-                    }}>
-                      {tab}{tab !== 'All' && statusCounts[tab] ? ` · ${statusCounts[tab]}` : ''}
-                    </button>
-                  );
-                })}
-              </div>
+            {/* Action bar — corrections + download + analytics. KPIs, charts and
+                status filters now live inside the dashboard below. */}
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 12, flexWrap: 'wrap' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
                 {isUniversal && (
                   <>
@@ -1144,16 +1193,20 @@ const RecoWorkspace = ({ agentTypeProp } = {}) => {
                     </button>
                   </>
                 )}
-                <button onClick={handleDownload} disabled={downloading} style={{
-                  display: 'flex', alignItems: 'center', gap: 6, padding: '8px 14px',
-                  borderRadius: 8, fontSize: 12, fontWeight: 700,
-                  background: 'rgba(7,72,238,0.08)', border: '1px solid rgba(7,72,238,0.2)',
-                  color: '#0748EE', cursor: 'pointer', opacity: downloading ? 0.6 : 1,
-                  fontFamily: 'Barlow',
-                }}>
-                  {downloading ? <Loader2 style={{ width: 13, height: 13 }} className="animate-spin" /> : <Download style={{ width: 13, height: 13 }} />}
-                  Download Excel
-                </button>
+                {/* GSTR-1 uses Gstr1Dashboard (no built-in download); every other
+                    agent gets its Download Excel button inside ToolResultDashboard. */}
+                {agentType === 'gstr_1_vs_books' && (
+                  <button onClick={handleDownload} disabled={downloading} style={{
+                    display: 'flex', alignItems: 'center', gap: 6, padding: '8px 14px',
+                    borderRadius: 8, fontSize: 12, fontWeight: 700,
+                    background: 'rgba(7,72,238,0.08)', border: '1px solid rgba(7,72,238,0.2)',
+                    color: '#0748EE', cursor: 'pointer', opacity: downloading ? 0.6 : 1,
+                    fontFamily: 'Barlow',
+                  }}>
+                    {downloading ? <Loader2 style={{ width: 13, height: 13 }} className="animate-spin" /> : <Download style={{ width: 13, height: 13 }} />}
+                    Download Excel
+                  </button>
+                )}
                 <button
                   onClick={() => navigate(`/brands/${effectiveBrandId || brandId}/reco/${agentType}/results/${result?.job_id}`)}
                   style={{
@@ -1177,147 +1230,28 @@ const RecoWorkspace = ({ agentTypeProp } = {}) => {
               </div>
             )}
 
-            {/* Results table */}
+            {/* Premium tool-output dashboard — KPIs, charts, status filters and
+                the row-level table for every non-GSTR-1 agent. The component owns
+                filtering and the 200-row cap; we pass the FULL unfiltered rows so
+                ledger-edit indices line up with result.results. */}
             {agentType !== 'gstr_1_vs_books' && (
-              <div className="glass-card" style={{ overflow: 'hidden' }}>
-                {/* Pagination banner */}
-                {filteredResults.length > 200 && (
-                  <div style={{
-                    display: 'flex', alignItems: 'center', gap: 10,
-                    padding: '10px 18px',
-                    background: 'rgba(217,119,6,0.06)', borderBottom: '1px solid rgba(217,119,6,0.15)',
-                  }}>
-                    <AlertCircle style={{ width: 14, height: 14, color: '#D97706', flexShrink: 0 }} />
-                    <p style={{ fontSize: 12, fontWeight: 600, color: '#D97706', margin: 0 }}>
-                      Showing first 200 of {filteredResults.length} records.
-                      <span style={{ fontWeight: 400, color: 'var(--text-muted)', marginLeft: 4 }}>
-                        Download the Excel file to view all.
-                      </span>
-                    </p>
-                    <button onClick={handleDownload} disabled={downloading} style={{
-                      marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 5,
-                      padding: '4px 10px', borderRadius: 6, fontSize: 11, fontWeight: 700,
-                      background: 'rgba(217,119,6,0.1)', border: '1px solid rgba(217,119,6,0.25)',
-                      color: '#D97706', cursor: 'pointer', flexShrink: 0,
-                      opacity: downloading ? 0.6 : 1, fontFamily: 'Barlow',
-                    }}>
-                      {downloading ? <Loader2 style={{ width: 12, height: 12 }} className="animate-spin" /> : <Download style={{ width: 12, height: 12 }} />}
-                      Download All
-                    </button>
-                  </div>
-                )}
-                <div style={{ overflowX: 'auto' }}>
-                  <table style={{ width: '100%', fontSize: 12, borderCollapse: 'collapse' }}>
-                    <thead>
-                      <tr style={{ background: 'var(--page-bg)', borderBottom: '1.5px solid var(--card-border)' }}>
-                        {filteredResults[0] && Object.keys(filteredResults[0])
-                          .filter(k => !['raw_books', 'raw_gstr'].includes(k))
-                          .map(k => (
-                            <th key={k} style={{
-                              padding: '10px 14px', textAlign: 'left',
-                              fontSize: 10, fontWeight: 700, letterSpacing: '0.1em',
-                              textTransform: 'uppercase', color: 'var(--text-muted)',
-                              whiteSpace: 'nowrap', fontFamily: 'DM Sans',
-                            }}>
-                              {k.replace(/_/g, ' ')}
-                            </th>
-                          ))}
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {filteredResults.slice(0, 200).map((row, i) => {
-                        const sCfg = getStatusCfg(row.status || row.confidence || '');
-                        const originalIdx = (result?.results || []).findIndex(
-                          r => (r.original_description || r.description) === (row.original_description || row.description) && r.debit === row.debit && r.credit === row.credit
-                        );
-                        const isEdited = editedLedgers[originalIdx] !== undefined;
-                        const isVerified = row.corrected;
-                        return (
-                          <tr key={i}
-                            style={{
-                              borderBottom: '1px solid var(--card-border)',
-                              background: isVerified ? 'rgba(5,150,105,0.03)' : undefined,
-                            }}
-                          >
-                            {Object.entries(row)
-                              .filter(([k]) => !['raw_books', 'raw_gstr', 'corrected', 'cleaned_description', 'category'].includes(k))
-                              .map(([k, v], j) => (
-                                <td key={j} style={{ padding: '10px 14px', whiteSpace: 'nowrap', color: 'var(--text-body)' }}>
-                                  {isUniversal && (k === 'ledger_name' || k === 'predicted_ledger') ? (
-                                    <div style={{ display: 'flex', alignItems: 'center', gap: 5, minWidth: 180 }}>
-                                      {isVerified && !isEdited && (
-                                        <CheckCircle2 style={{ width: 12, height: 12, flexShrink: 0, color: '#059669' }} title="Accountant-verified" />
-                                      )}
-                                      <input
-                                        aria-label={`Edit ledger for row ${i + 1}`}
-                                        style={{
-                                          fontSize: 12, padding: '3px 8px', borderRadius: 6,
-                                          width: '100%', outline: 'none',
-                                          background: isEdited ? 'rgba(217,119,6,0.08)' : isVerified ? 'rgba(5,150,105,0.06)' : 'var(--page-bg)',
-                                          border: `1px solid ${isEdited ? 'rgba(217,119,6,0.25)' : isVerified ? 'rgba(5,150,105,0.2)' : 'var(--card-border)'}`,
-                                          color: 'var(--text-heading)',
-                                          fontFamily: 'DM Sans',
-                                        }}
-                                        value={isEdited ? editedLedgers[originalIdx] : (String(v ?? ''))}
-                                        onChange={e => setEditedLedgers(prev => ({ ...prev, [originalIdx]: e.target.value }))}
-                                        onFocus={() => { if (!isEdited) setEditedLedgers(prev => ({ ...prev, [originalIdx]: String(v ?? '') })); }}
-                                        title={isVerified ? 'Accountant-verified correction' : 'Click to correct ledger name'}
-                                      />
-                                      {isEdited && (
-                                        <button
-                                          aria-label="Discard ledger edit"
-                                          onClick={() => setEditedLedgers(prev => { const n = {...prev}; delete n[originalIdx]; return n; })}
-                                          style={{
-                                            width: 18, height: 18, borderRadius: 4, flexShrink: 0,
-                                            display: 'flex', alignItems: 'center', justifyContent: 'center',
-                                            background: 'var(--page-bg)', border: '1px solid var(--card-border)',
-                                            color: 'var(--text-muted)', cursor: 'pointer',
-                                          }}>
-                                          <X style={{ width: 10, height: 10 }} />
-                                        </button>
-                                      )}
-                                    </div>
-                                  ) : k === 'status' ? (
-                                    <span style={{
-                                      display: 'inline-flex', alignItems: 'center', gap: 4,
-                                      fontSize: 11, fontWeight: 700, padding: '2px 8px',
-                                      borderRadius: 4, fontFamily: 'DM Sans',
-                                      background: sCfg.bg, color: sCfg.color, border: `1px solid ${sCfg.border}`,
-                                    }}>
-                                      {v}
-                                    </span>
-                                  ) : k === 'confidence' ? (
-                                    <span style={{
-                                      display: 'inline-flex', alignItems: 'center', gap: 4,
-                                      fontSize: 11, fontWeight: 700, padding: '2px 8px',
-                                      borderRadius: 4, fontFamily: 'DM Sans',
-                                      background: v === 'High' ? 'rgba(5,150,105,0.08)' : v === 'Medium' ? 'rgba(217,119,6,0.08)' : 'rgba(225,29,72,0.08)',
-                                      color: v === 'High' ? '#059669' : v === 'Medium' ? '#D97706' : '#E11D48',
-                                      border: `1px solid ${v === 'High' ? 'rgba(5,150,105,0.2)' : v === 'Medium' ? 'rgba(217,119,6,0.2)' : 'rgba(225,29,72,0.2)'}`,
-                                    }}>
-                                      {v}
-                                    </span>
-                                  ) : typeof v === 'number' ? (
-                                    <span style={{ fontFamily: 'monospace', fontSize: 12 }}>
-                                      {v.toLocaleString('en-IN', { maximumFractionDigits: 2 })}
-                                    </span>
-                                  ) : (
-                                    String(v ?? '')
-                                  )}
-                                </td>
-                              ))}
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
-                  {filteredResults.length === 0 && (
-                    <div style={{ textAlign: 'center', padding: '48px 0' }}>
-                      <p style={{ fontSize: 13, color: 'var(--text-muted)' }}>No records match this filter</p>
-                    </div>
-                  )}
-                </div>
-              </div>
+              <ToolResultDashboard
+                agentType={agentType}
+                summary={result.summary}
+                counts={result.counts}
+                rows={dashboardRows}
+                filter={filter}
+                setFilter={setFilter}
+                onDownload={handleDownload}
+                downloading={downloading}
+                isUniversal={isUniversal}
+                editedLedgers={editedLedgers}
+                setEditedLedgers={setEditedLedgers}
+                brandId={effectiveBrandId || brandId}
+                jobId={result?.job_id}
+                agentLabel={config?.name}
+                onSendFeedback={handleSendFeedback}
+              />
             )}
           </div>
         )}

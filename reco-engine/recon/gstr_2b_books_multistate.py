@@ -27,6 +27,7 @@ from .gstr_2b_books import (
     _extract_gstin,
     _ensure_xlsx,
     _append_rcm_rows,
+    _is_octa_format,
 )
 
 
@@ -233,11 +234,13 @@ def _merge_state_into_sheets(wb, file_bytes: bytes, label_prefix: str) -> None:
     pfx = f"{label_prefix} - "
     try:
         xlsx_bytes = _ensure_xlsx(file_bytes)
+        # OCTA 2B exports are a single flat sheet — copy it as-is, don't filter to B2B tabs.
+        is_octa_2b = label_prefix == "2B" and _is_octa_format(xlsx_bytes)
         src_wb = openpyxl.load_workbook(BytesIO(xlsx_bytes), read_only=True, data_only=True)
 
         for src_sheet_name in src_wb.sheetnames:
             # For 2B only copy the same sheets the base engine copies
-            if label_prefix == "2B" and src_sheet_name.upper().strip() not in _allowed_2b:
+            if label_prefix == "2B" and not is_octa_2b and src_sheet_name.upper().strip() not in _allowed_2b:
                 continue
 
             # Match to existing output sheet

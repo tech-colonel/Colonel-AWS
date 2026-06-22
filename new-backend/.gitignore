@@ -41,3 +41,18 @@ new-backend/src/utils/test-db.js
 new-backend/backend-structure.md
 new-backend/test-data/
 new-backend/test-zepto-working.js
+# Google service-account key (never commit)
+config/google-credentials.json
+config/*.json
+output/mtr/
+
+# Local provisioning scripts — hold plaintext passwords, never commit/push
+/add-*.js
+/set-dhaval-*.js
+/grant-all-brands-*.js
+/update-users.js
+/seed-accountants.js
+
+# Backup / editor artifacts
+/scripts/*.bak*
+*.bak-*

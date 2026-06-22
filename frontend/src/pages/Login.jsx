@@ -25,6 +25,8 @@ const Login = () => {
       
       if (user.role === 'admin') {
         navigate('/admin');
+      } else if (user.role === 'developer') {
+        navigate('/feedback');
       } else if (user.role === 'accountant') {
         navigate('/brands');
       } else if (user.role === 'brand_executive') {

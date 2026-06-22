@@ -38,6 +38,10 @@ const orderCycleRoutes      = require('./routes/orderCycleRoutes');
 const settlementRoutes      = require('./routes/settlementRoutes');
 // ── CFO dashboards ────────────────────────────────────────────────────────────
 const cfoAnalyticsRoutes    = require('./routes/cfoAnalyticsRoutes');
+const mtrRoutes             = require('./routes/mtrRoutes');
+const plansRoutes           = require('./routes/plansRoutes');
+const integrationRoutes     = require('./routes/integrationRoutes');
+const chatRoutes            = require('./routes/chatRoutes');
 
 app.use('/api/auth',      authRoutes);
 app.use('/api',           brandRoutes);
@@ -52,6 +56,10 @@ app.use('/api',           invoiceRoutes);
 app.use('/api',           orderCycleRoutes);
 app.use('/api',           settlementRoutes);
 app.use('/api',           cfoAnalyticsRoutes);
+app.use('/api',           mtrRoutes);
+app.use('/api',           plansRoutes);
+app.use('/api',           integrationRoutes);
+app.use('/api',           chatRoutes);
 
 // Error handling middleware
 app.use((err, req, res, next) => {

@@ -13,9 +13,7 @@ import {
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { format } from 'date-fns';
-import api from '../../lib/api';
-
-const API_URL = process.env.REACT_APP_BACKEND_URL || 'http://localhost:8001';
+import api, { API_URL } from '../../lib/api';
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 const formatDate = (dateStr) => {

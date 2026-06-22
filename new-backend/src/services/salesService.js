@@ -194,10 +194,80 @@ const deleteSkuMasterSingle = async (brandId, agentId, tallySku) => {
   return { success: true, count: updatedSkuMaster.length };
 };
 
+// Path to the standalone classifier (reused in --list-ledgers mode for COA validation/extraction).
+const CLASSIFY_PY = process.env.BANK_CLASSIFIER_PATH
+  || path.resolve(__dirname, '../../scripts/classify.py');
+
+const ledgerKey = (name) => String(name).trim().toUpperCase().replace(/\s+/g, ' ');
+
+/**
+ * Ingest a brand's full Chart of Accounts into the DB-backed `ledger_master` table.
+ * Reuses classify.py's `--list-ledgers` mode so the same Tally cleaning + COA-integrity
+ * guard run here (a bank statement uploaded as a COA is rejected, exit 2). Idempotent:
+ * ON CONFLICT keeps existing rows, so re-uploading an updated COA only adds new ledgers.
+ * @returns {Promise<{inserted:number,total:number,skipped:number}>}
+ */
+const ingestLedgerMasterToTable = async (brandId, fileBuffer) => {
+  const brand = await Brand.findByPk(brandId);
+  if (!brand) throw new Error('Brand not found');
+
+  const os = require('os');
+  const { execFile } = require('child_process');
+  const tmpFile = path.join(os.tmpdir(), `coa_ingest_${brandId}_${Date.now()}.xlsx`);
+  await fs.writeFile(tmpFile, fileBuffer);
+
+  let names;
+  try {
+    const stdout = await new Promise((resolve, reject) => {
+      execFile('python3', [CLASSIFY_PY, '--ledger', tmpFile, '--list-ledgers'],
+        { maxBuffer: 64 * 1024 * 1024 },
+        (err, out, stderr) => {
+          if (err) return reject(new Error((stderr || err.message || '').toString().trim()));
+          resolve(out);
+        });
+    });
+    names = JSON.parse(stdout);
+  } finally {
+    fs.remove(tmpFile).catch(() => {});
+  }
+
+  if (!Array.isArray(names) || names.length === 0) {
+    throw new Error('No ledger names could be read from the uploaded COA file.');
+  }
+
+  const seen = new Set();
+  const unique = [];
+  for (const n of names) {
+    const k = ledgerKey(n);
+    if (!k || seen.has(k)) continue;
+    seen.add(k);
+    unique.push({ name: String(n).trim(), key: k });
+  }
+
+  const brandDb = getBrandConnection(brand.db_name);
+  let inserted = 0;
+  await brandDb.transaction(async (t) => {
+    await brandDb.query(`SET LOCAL app.bypass_rls = 'true'`, { transaction: t });
+    for (const { name, key } of unique) {
+      const [rows] = await brandDb.query(
+        `INSERT INTO ledger_master (brand_id, ledger_name, ledger_name_key, source)
+         VALUES ($1, $2, $3, 'upload')
+         ON CONFLICT (brand_id, ledger_name_key) DO NOTHING
+         RETURNING id`,
+        { bind: [brandId, name, key], transaction: t }
+      );
+      if (rows && rows.length) inserted++;
+    }
+  });
+
+  return { inserted, total: names.length, skipped: names.length - inserted };
+};
+
 module.exports = {
   uploadMasterData,
   getMasterData,
   generateAmazonWorkingFile,
   addSkuMasterSingle,
-  deleteSkuMasterSingle
+  deleteSkuMasterSingle,
+  ingestLedgerMasterToTable
 };

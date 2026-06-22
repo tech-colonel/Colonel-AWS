@@ -7,6 +7,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../..
 import { Button } from '../../components/ui/button';
 import api from '../../lib/api';
 import { toast } from 'sonner';
+import { sidebarFor } from '../../lib/adminNav';
 
 const RECO_ROUTE_MAP = {
   'gstr_2b_books':            'gstr_2b_books',
@@ -28,10 +29,10 @@ const BrandDashboard = () => {
   const [loading, setLoading] = useState(true);
   const [showAgentPicker, setShowAgentPicker] = useState(false);
 
-  const sidebarItems = [
+  const sidebarItems = sidebarFor([
     { path: `/brands/${brandId}/dashboard`, label: 'Dashboard', icon: LayoutDashboard, testId: 'nav-dashboard' },
     { path: `/brands/${brandId}/agents`, label: 'Agents', icon: Bot, testId: 'nav-agents' },
-  ];
+  ]);
 
   useEffect(() => {
     fetchData();
