@@ -172,6 +172,7 @@ const AgentWorkspace = () => {
       if (currentAgent?.name?.toLowerCase().includes('total-sales')) return 'total-sales-analyzer';
       if (currentAgent?.name?.toLowerCase().includes('mirrow')) return 'mirrow';
       if (currentAgent?.name?.toLowerCase().includes('cread')) return 'cread';
+      if (currentAgent?.name?.toLowerCase().includes('limeroad')) return 'limeroad';
       return 'amazon';
     } catch (error) {
       return 'amazon';
@@ -540,6 +541,7 @@ const AgentWorkspace = () => {
   const isNykaa = agent?.name?.toLowerCase().includes('nykaa');
   const isMirrow = agent?.name?.toLowerCase().includes('mirrow');
   const isCread = agent?.name?.toLowerCase().includes('cread');
+  const isLimeroad = agent?.name?.toLowerCase().includes('limeroad');
 
   return (
     <DashboardLayout sidebarItems={sidebarItems}>
@@ -1370,7 +1372,53 @@ const AgentWorkspace = () => {
                   </span>
                 </p>
 
-                {verificationData?.summary && (() => {
+                {isLimeroad && verificationData?.summary && (() => {
+                  const s = verificationData.summary;
+                  const fmt = (n) => (n ?? 0).toLocaleString('en-IN', { minimumFractionDigits: 2 });
+                  return (
+                    <div className="space-y-3">
+                      <div className="border rounded-lg overflow-hidden">
+                        <table className="w-full text-sm">
+                          <thead>
+                            <tr className="bg-slate-50 border-b">
+                              <th className="p-3 text-left font-semibold text-slate-700">Metric</th>
+                              <th className="p-3 text-right font-semibold text-slate-700">Sales</th>
+                              <th className="p-3 text-right font-semibold text-slate-700">Returns</th>
+                              <th className="p-3 text-right font-semibold text-slate-700">Net</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {[
+                              { label: 'Count', sale: s.saleCount, ret: s.returnCount, net: s.saleCount - s.returnCount, isCnt: true },
+                              { label: 'Quantity', sale: s.saleQty, ret: s.returnQty, net: s.saleQty - s.returnQty, isCnt: true },
+                              { label: 'Taxable Amount', sale: `₹${fmt(s.saleAmount)}`, ret: `₹${fmt(s.returnAmount)}`, net: `₹${fmt(s.netAmount)}` },
+                              { label: 'IGST', sale: `₹${fmt(s.saleIGST)}`, ret: `₹${fmt(s.returnIGST)}`, net: `₹${fmt(s.netIGST)}` },
+                              { label: 'CGST', sale: `₹${fmt(s.saleCGST)}`, ret: `₹${fmt(s.returnCGST)}`, net: `₹${fmt(s.netCGST)}` },
+                              { label: 'SGST', sale: `₹${fmt(s.saleSGST)}`, ret: `₹${fmt(s.returnSGST)}`, net: `₹${fmt(s.netSGST)}` },
+                            ].map((row, idx) => (
+                              <tr key={idx} className={idx % 2 === 0 ? 'bg-white' : 'bg-slate-50'}>
+                                <td className="p-3 font-medium text-slate-700">{row.label}</td>
+                                <td className="p-3 text-right font-mono text-green-700">{row.sale}</td>
+                                <td className="p-3 text-right font-mono text-red-600">{row.ret}</td>
+                                <td className="p-3 text-right font-mono font-semibold text-slate-800">{row.net}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                      <div className="flex gap-3 text-sm text-slate-600">
+                        <span className="bg-blue-50 border border-blue-200 rounded px-3 py-1">
+                          B2C States: <strong>{verificationData.b2cPivotRows}</strong>
+                        </span>
+                        <span className="bg-purple-50 border border-purple-200 rounded px-3 py-1">
+                          HSN Codes: <strong>{verificationData.hsnPivotRows}</strong>
+                        </span>
+                      </div>
+                    </div>
+                  );
+                })()}
+
+                {!isLimeroad && verificationData?.summary && (() => {
                   const wf = verificationData.summary.workingFile;
                   const pf = verificationData.summary.pivotFile;
                   const pf2 = verificationData.summary.gstrHSNFile;

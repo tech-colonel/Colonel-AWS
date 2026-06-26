@@ -33,6 +33,11 @@ const MONTHS = [
     'January','February','March','April','May','June',
     'July','August','September','October','November','December',
 ];
+// Convert a stored month number (1-12) back to a name for display
+function monthNumToName(n) {
+    const num = parseInt(n);
+    return num >= 1 && num <= 12 ? MONTHS[num - 1] : (n || '—');
+}
 const currentYear = new Date().getFullYear();
 const YEARS = Array.from({ length: 5 }, (_, i) => currentYear - i);
 
@@ -222,7 +227,7 @@ function ReconciliationView({ file, brandId, agentId, onBack, onDownload }) {
                     </button>
                     <div>
                         <h2 className="text-lg font-bold text-slate-900">Reconciliation Report</h2>
-                        <p className="text-xs text-slate-400 mt-0.5">{file.month} {file.year} · {file.filename}</p>
+                        <p className="text-xs text-slate-400 mt-0.5">{monthNumToName(file.month)} {file.year} · {file.filename}</p>
                     </div>
                 </div>
                 <button
@@ -646,7 +651,7 @@ const OrderCycleShopifyWorkspace = ({ agent }) => {
                 {[
                     { label: 'Total Reports',  value: filesLoading ? '—' : files.length,               sub: 'Generated files' },
                     { label: 'Total Rows',     value: filesLoading ? '—' : totalRows.toLocaleString(),  sub: 'Orders processed' },
-                    { label: 'Latest Report',  value: latestFile ? `${latestFile.month} ${latestFile.year}` : '—', sub: latestFile ? formatDate(latestFile.created_at) : 'No reports yet', small: true },
+                    { label: 'Latest Report',  value: latestFile ? `${monthNumToName(latestFile.month)} ${latestFile.year}` : '—', sub: latestFile ? formatDate(latestFile.created_at) : 'No reports yet', small: true },
                 ].map(({ label, value, sub, small }) => (
                     <div key={label} className="bg-white border border-slate-200 rounded-xl p-4">
                         <p className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-1">{label}</p>
@@ -715,7 +720,7 @@ const OrderCycleShopifyWorkspace = ({ agent }) => {
                                     <td className="px-4 py-3.5">
                                         <div className="flex items-center gap-1.5">
                                             <Calendar className="h-3.5 w-3.5 text-slate-400" />
-                                            <span className="text-slate-700 font-medium">{file.month} {file.year}</span>
+                                            <span className="text-slate-700 font-medium">{monthNumToName(file.month)} {file.year}</span>
                                         </div>
                                     </td>
                                     <td className="px-4 py-3.5">

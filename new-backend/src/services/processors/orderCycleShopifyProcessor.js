@@ -12,19 +12,8 @@
  *    Step 12: Reconciliation Status
  *    Steps 13-14: Validation + Exception Report
  *
- *  Input file column mappings (detected from test files):
- *    GST Report   – sheet "Export-Tally GST Report 3.0-flo"
- *                   Sale Order Number | Invoice number | AWB num |
- *                   Shipping Provider | Date | Total | Channel Ledger
- *    Return GST   – sheet "Export-Tally Return GST Report"
- *                   Date | Sale Order Number | Invoice number | Total
- *    Sales Order  – Sale Order Number | Delivery Status
- *    Ekart        – TRACKING_ID | COD_AMOUNT | DUE_DATE_OF_REMITTANCE | ACTUAL_DATE_OF_REMITTANCE
- *    Delhivery    – waybill_num | cod_amount | status_date
- *    Xpressbees   – Shipping Id | Net Payment | Delivery Date | Transaction Date
- *    Snapmint     – Shopify Order No._2 (numeric) | Merchant Settlement Date | Settlement Value
- *    BharatX      – Order id by Vlook | Ledger Timestamp | Ledger Amount
- *    Razorpay     – Order ID | settled_at | Settlement amount
+ *  Output: 25 columns matching Order Cycle.xlsx reference format
+ *    + Razorpay cols (date + amount) after BharatX
  * ============================================================
  */
 
@@ -34,13 +23,21 @@ const { PassThrough } = require('stream');
 
 // ── Utility helpers ───────────────────────────────────────────────────────────
 
+// Unwrap ExcelJS formula cell objects: {formula: '...', result: <value>} → <value>
+function unwrap(v) {
+    if (typeof v === 'object' && v !== null && !(v instanceof Date) && 'result' in v) return v.result;
+    return v;
+}
+
 function safeStr(v) {
+    v = unwrap(v);
     if (v === null || v === undefined) return '';
     if (v instanceof Date) return v.toISOString();
     return String(v).trim();
 }
 
 function safeNum(v) {
+    v = unwrap(v);
     if (v === null || v === undefined || v === '') return 0;
     const s = String(v).replace(/[,\s₹$%]/g, '');
     const n = parseFloat(s);
@@ -48,8 +45,19 @@ function safeNum(v) {
 }
 
 function safeDate(v) {
+    v = unwrap(v);
     if (!v) return null;
     if (v instanceof Date) return isNaN(v.getTime()) ? null : v;
+
+    // Excel serial date numbers (roughly year 2010–2040 → serial 40179–73050)
+    if (typeof v === 'number' && v > 40000 && v < 80000) {
+        // Excel epoch = 1 Jan 1900 (with a leap-year-1900 bug, serial 60 treated as Feb 29 1900)
+        // Unix epoch = 1 Jan 1970 = Excel serial 25569
+        const ms = (v - 25569) * 86400 * 1000;
+        const d = new Date(ms);
+        return isNaN(d.getTime()) ? null : d;
+    }
+
     const s = String(v).trim();
     if (!s) return null;
     const d = new Date(s);
@@ -68,7 +76,7 @@ function safeDate(v) {
 // Return first non-null/empty value from a row matching any candidate column name
 function getCol(row, ...candidates) {
     for (const name of candidates) {
-        const v = row[name];
+        let v = unwrap(row[name]); // unwrap formula cells before checking
         if (v !== undefined && v !== null && String(v).trim() !== '') return v;
     }
     return null;
@@ -84,9 +92,10 @@ function normalizeOrderNum(v) {
 
 function normalizeDeliveryStatus(s) {
     const upper = safeStr(s).toUpperCase().replace(/[-_\s]/g, '');
-    if (['DELIVERED', 'DLDELIVERED', 'SHIPMENTDELIVERED'].includes(upper)) return 'DELIVERED';
+    if (['DELIVERED', 'DLDELIVERED', 'SHIPMENTDELIVERED', 'FULFILLED'].includes(upper)) return 'DELIVERED';
     if (['RTO', 'DLRTO'].includes(upper)) return 'RTO';
     if (['CANCELLED', 'CANCELED'].includes(upper)) return 'CANCELLED';
+    if (upper === 'UNFULFILLED') return null; // not yet delivered — no status
     return safeStr(s).trim() || null;
 }
 
@@ -240,14 +249,20 @@ function buildReturnLookup(rows) {
 function buildSalesOrderLookup(rows) {
     const map = {};
     for (const row of rows) {
+        // Combined SO uses "Order No" (col 1 = numeric Shopify order number)
         const orderNo = normalizeOrderNum(
-            getCol(row, 'Sale Order Number', 'Order Number', 'Order No', 'Order ID', 'SaleOrderNumber')
+            getCol(row, 'Order No', 'Sale Order Number', 'Order Number', 'Order ID', 'SaleOrderNumber')
         );
         if (!orderNo) continue;
-        const raw = getCol(row, 'Delivery Status', 'Status', 'Order Status',
-            'Fulfillment Status', 'Delivery Status Description', 'delivery_status');
+        const raw = getCol(row, 'Fulfillment Status', 'Delivery Status', 'Status', 'Order Status',
+            'Delivery Status Description', 'delivery_status');
         const normalized = normalizeDeliveryStatus(raw);
-        if (normalized) map[orderNo] = normalized;
+
+        // Also treat orders with a valid "Cancelled at" date as cancelled
+        const cancelledAt = safeDate(getCol(row, 'Cancelled at', 'Cancelled At', 'cancelled_at'));
+        const status = cancelledAt ? 'CANCELLED' : normalized;
+
+        if (status) map[orderNo] = status;
     }
     return map;
 }
@@ -324,31 +339,70 @@ function buildSnapmintLookup(rows) {
 function buildBharatXLookup(rows) {
     const map = {};
     for (const row of rows) {
-        const orderNo = normalizeOrderNum(getCol(row, 'Order id by Vlook', 'Order ID', 'Merchant Transaction Id'));
+        // "Order id by Vlook" = numeric Shopify order number; "Merchant Transaction Id" = receipt hash
+        const orderNo = normalizeOrderNum(getCol(row, 'Order id by Vlook', 'Order ID'));
         if (!orderNo) continue;
         if (!map[orderNo]) {
             map[orderNo] = {
+                // Ledger Timestamp is an Excel serial date
                 settlement_date: safeDate(getCol(row, 'Ledger Timestamp', 'Settlement Timestamp')),
                 settlement_amount: 0
             };
         }
+        // Ledger Amount: positive for TRANSACTION rows, negative for TRANSACTION_MDR (fee deductions)
+        // Summing both gives net settlement received
         map[orderNo].settlement_amount += safeNum(getCol(row, 'Ledger Amount', 'Transaction Amount'));
     }
     return map;
 }
 
-function buildRazorpayLookup(rows) {
+/**
+ * Build a map from Razorpay receipt hash → Shopify order number
+ * using the Combined SO "Payment References" column as the bridge.
+ * Combined SO col "Payment References" contains the same receipt hash as Razorpay's "order_receipt".
+ */
+function buildPaymentRefLookup(salesOrderRows) {
+    const map = {};
+    for (const row of salesOrderRows) {
+        // "Payment References" (col ~74) contains the Razorpay receipt hash for prepaid orders
+        const ref = safeStr(getCol(row, 'Payment References', 'Payment ID'));
+        if (!ref || ref.length < 10 || !isNaN(parseFloat(ref))) continue;
+        const orderNo = normalizeOrderNum(getCol(row, 'Order No', 'Order No_2', 'Order Number'));
+        if (ref && orderNo) map[ref] = orderNo;
+    }
+    return map;
+}
+
+/**
+ * Build Razorpay settlement lookup.
+ * Joins via: Razorpay.order_receipt → Combined SO.Payment References → Combined SO.Order No
+ * Only processes rows with type = 'payment' (individual order settlements).
+ */
+function buildRazorpayLookup(rows, paymentRefLookup = {}) {
     const map = {};
     for (const row of rows) {
-        const orderNo = normalizeOrderNum(getCol(row, 'Order ID', 'order_receipt'));
-        if (!orderNo) continue;
+        // Only process individual payment rows (not refunds, adjustments, or settlement summaries)
+        const type = safeStr(getCol(row, 'type', 'Type', 'entity_type')).toLowerCase();
+        if (type && type !== 'payment') continue;
+
+        // order_receipt = Shopify payment receipt hash (matches Combined SO "Payment References")
+        const receipt = safeStr(getCol(row, 'order_receipt', 'Order Receipt'));
+        if (!receipt) continue;
+
+        const orderNo = paymentRefLookup[receipt];
+        if (!orderNo) continue; // Cannot link to an order without the Combined SO bridge
+
+        // "credit" = amount settled into merchant account for this payment
+        const credit = safeNum(getCol(row, 'credit', 'Credit', 'amount', 'Amount'));
+        if (credit <= 0) continue;
+
         if (!map[orderNo]) {
             map[orderNo] = {
-                settlement_date: safeDate(getCol(row, 'settled_at', 'Settlement Date')),
+                settlement_date: safeDate(getCol(row, 'settled_at', 'Settlement Date', 'settlement_date')),
                 settlement_amount: 0
             };
         }
-        map[orderNo].settlement_amount += safeNum(getCol(row, 'Settlement amount', 'credit'));
+        map[orderNo].settlement_amount += credit;
     }
     return map;
 }
@@ -370,7 +424,7 @@ function styleHeader(row, argb = 'FF1E3A5F') {
  * @param {object}   gatewayData     { 'Razorpay': [...], 'Snapmint': [...], 'BharatX': [...] }
  * @param {object}   logisticsData   { 'Ekart': [...], 'Delhivery': [...], 'Xpressbees': [...] }
  * @param {string}   brandName
- * @param {string}   period
+ * @param {string}   period          e.g. "Oct-2024" or "10-2024"
  */
 async function orderCycleShopifyProcessor(
     gstJson = [],
@@ -415,7 +469,7 @@ async function orderCycleShopifyProcessor(
                 sales_amount: 0,
                 // Step 2
                 return_date: null, srn: '', return_amount: 0, net_amount: 0,
-                // Step 3
+                // Step 3 (internal — not in output sheet but stored in DB for dashboard)
                 delivery_status: null,
                 // Steps 4-6 (logistics)
                 ekart_remittance_date: null, ekart_actual_remittance_date: null, ekart_cod_amount: 0,
@@ -425,7 +479,7 @@ async function orderCycleShopifyProcessor(
                 snapmint_settlement_date: null, snapmint_settlement_amount: 0,
                 bharatx_settlement_date: null, bharatx_settlement_amount: 0,
                 razorpay_settlement_date: null, razorpay_settlement_amount: 0,
-                // Steps 10-12
+                // Steps 10-12 (internal — not in output sheet but stored in DB for dashboard)
                 total_settlement_received: 0, balance_amount_receivable: 0, reconciliation_status: ''
             };
         } else if (invoiceNo) {
@@ -501,7 +555,10 @@ async function orderCycleShopifyProcessor(
 
     const snapmintLookup = buildSnapmintLookup(gatewayTyped.snapmint || []);
     const bharatxLookup = buildBharatXLookup(gatewayTyped.bharatx || []);
-    const razorpayLookup = buildRazorpayLookup(gatewayTyped.razorpay || []);
+
+    // Razorpay joins via Combined SO: order_receipt → Payment References → Order No
+    const paymentRefLookup = buildPaymentRefLookup(salesOrderJson);
+    const razorpayLookup = buildRazorpayLookup(gatewayTyped.razorpay || [], paymentRefLookup);
 
     for (const row of masterRows) {
         const orderNo = row.sale_order_number;
@@ -566,14 +623,14 @@ async function orderCycleShopifyProcessor(
     );
     validations.push({ check: 'Duplicate Invoices', value: duplicateInvoices.length, status: duplicateInvoices.length === 0 ? 'PASS' : 'FAIL' });
 
-    // V4 Duplicate AWBs in master
+    // V4: Duplicate AWBs in master
     const awbCount = {};
     masterRows.forEach(r => { if (r.awb_number) awbCount[r.awb_number] = (awbCount[r.awb_number] || 0) + 1; });
     Object.entries(awbCount).filter(([, c]) => c > 1).forEach(([awb]) =>
         exceptions.push({ type: 'Duplicate AWB', reference: awb, detail: 'Multiple invoices share this AWB' })
     );
 
-    // V5: Settlement without sales record (gateway order numbers not in master)
+    // V5: Settlement without sales record
     const masterOrderNos = new Set(masterRows.map(r => r.sale_order_number).filter(Boolean));
     const masterAWBs = new Set(masterRows.map(r => r.awb_number).filter(Boolean));
 
@@ -585,12 +642,10 @@ async function orderCycleShopifyProcessor(
         .filter(a => a && !masterAWBs.has(a))
         .forEach(a => exceptions.push({ type: 'Missing AWB Match', reference: a, detail: 'Logistics AWB not found in GST report' }));
 
-    // Negative settlement amounts
     masterRows.filter(r => r.total_settlement_received < -0.01).forEach(r =>
         exceptions.push({ type: 'Negative Settlement Amount', reference: r.invoice_number || r.sale_order_number, detail: `Settlement: ${r.total_settlement_received.toFixed(2)}` })
     );
 
-    // Overpaid orders
     masterRows.filter(r => r.balance_amount_receivable < -0.01).forEach(r =>
         exceptions.push({ type: 'Overpaid Order', reference: r.invoice_number || r.sale_order_number, detail: `Balance: ${r.balance_amount_receivable.toFixed(2)}` })
     );
@@ -609,73 +664,93 @@ async function orderCycleShopifyProcessor(
     outputWorkbook.created = new Date();
 
     // ── Sheet 1: Reconciliation Report ───────────────────────────────────────
+    // 25 columns: matching Order Cycle.xlsx reference format + Razorpay cols after BharatX
     const HEADERS = [
-        'Sale Order Number', 'Shopify', 'Invoice Number', 'AWB Number', 'Shipping Partner',
-        'Dispatch Date / Cancellation Date', 'Sales Amount',
-        'Return Date', 'SRN', 'Return Amount', 'Net Amount', 'Delivery Status',
-        'Ekart Remittance Date', 'Ekart Actual Remittance Date', 'Ekart COD Amount',
-        'Delhivery Delivery Date', 'Delhivery COD Amount',
-        'Xpressbees Delivery Date', 'Xpressbees Transaction Date', 'Xpressbees Net Payment',
-        'Snapmint Settlement Date', 'Snapmint Settlement Amount',
-        'BharatX Settlement Date', 'BharatX Settlement Amount',
-        'Razorpay Settlement Date', 'Razorpay Settlement Amount',
-        'Total Settlement Received', 'Balance Amount Receivable', 'Reconciliation Status'
+        'Sale Order Number', 'Shopify', 'Invoice number', 'AWB num', 'Shipping partner',
+        'Dispatch Date/Cancellation Date', 'Sum of Total',
+        'Return Date', 'SRN', 'Return amount', 'Net amount',
+        'Ekart remittance date', 'Ekart Actual Date of Remittance', 'Ekart COD amount',
+        'Delhivery delivery date', 'Delhivery COD amount',
+        'Xpressbees delivery date', 'Xpressbees transaction date', 'Xpressbees net payment',
+        'Snapmint merchant settlement date', 'Snapmint settlement value',
+        'BharatX settlement timestamp', 'BharatX ledger amount',
+        'Razorpay settlement date', 'Razorpay settlement amount',
+    ];
+
+    // Source file labels for Row 0 (matches Order Cycle.xlsx reference format)
+    const periodStr = String(period || '');
+    const yearPart = periodStr.split('-').find(p => /^\d{4}$/.test(p)) || String(new Date().getFullYear());
+    const year = parseInt(yearPart);
+    // Determine FY: Indian FY runs April–March; if month >= April the FY started this year
+    const monthPart = periodStr.split('-').find(p => /^\d{1,2}$/.test(p));
+    const monthNum = monthPart ? parseInt(monthPart)
+        : /^(oct|nov|dec)/i.test(periodStr) ? 10
+        : /^(jul|aug|sep)/i.test(periodStr) ? 7
+        : /^(apr|may|jun)/i.test(periodStr) ? 4
+        : /^(jan|feb|mar)/i.test(periodStr) ? 1
+        : 4;
+    const fyStartYear = monthNum >= 4 ? year : year - 1;
+    const fyLabel = `${String(fyStartYear).slice(-2)}-${String(fyStartYear + 1).slice(-2)}`;
+
+    const SOURCE_ROW = [
+        `Export-Tally GST Report 3.0 ${period}`, '', '', '', '', '', '',
+        `Return GST Report ${period}`, '', '',
+        '(G)-(J)',
+        `Ekart settlement report - ${fyLabel}`, '', '',
+        `Delhivery settlement report - ${fyLabel}`, '',
+        `Xpressbees settlement report - ${fyLabel}`, '', '',
+        `Snapmint settlement report - ${fyLabel}`, '',
+        `BharatX settlement report - ${fyLabel}`, '',
+        `Razorpay settlement report - ${fyLabel}`, '',
     ];
 
     const mainSheet = outputWorkbook.addWorksheet('Reconciliation Report');
-    mainSheet.addRow(HEADERS);
-    styleHeader(mainSheet.getRow(1));
 
-    const STATUS_COLORS = {
-        'RECONCILED': 'FF92D050',
-        'PENDING RECEIVABLE': 'FFFFC000',
-        'OVERPAID / INVESTIGATE': 'FFFF4444',
-        'RTO': 'FFFFAA00',
-        'CANCELLED': 'FFBFBFBF'
-    };
+    // Row 1: source file group labels
+    const sourceRow = mainSheet.addRow(SOURCE_ROW);
+    sourceRow.font = { italic: true, color: { argb: 'FF595959' } };
+    sourceRow.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF2F2F2' } };
+
+    // Row 2: column headers
+    mainSheet.addRow(HEADERS);
+    styleHeader(mainSheet.getRow(2));
 
     for (const r of masterRows) {
         const rowData = [
             r.sale_order_number, r.shopify, r.invoice_number, r.awb_number, r.shipping_partner,
             r.dispatch_date, r.sales_amount,
             r.return_date, r.srn, r.return_amount || '', r.net_amount,
-            r.delivery_status,
             r.ekart_remittance_date, r.ekart_actual_remittance_date, r.ekart_cod_amount || '',
             r.delhivery_delivery_date, r.delhivery_cod_amount || '',
             r.xpressbees_delivery_date, r.xpressbees_transaction_date, r.xpressbees_net_payment || '',
             r.snapmint_settlement_date, r.snapmint_settlement_amount || '',
             r.bharatx_settlement_date, r.bharatx_settlement_amount || '',
             r.razorpay_settlement_date, r.razorpay_settlement_amount || '',
-            r.total_settlement_received, r.balance_amount_receivable, r.reconciliation_status
         ];
-        const exRow = mainSheet.addRow(rowData);
-        const color = STATUS_COLORS[r.reconciliation_status];
-        if (color) {
-            exRow.getCell(29).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: color } };
-        }
+        mainSheet.addRow(rowData);
     }
 
-    // Column widths & formats
+    // Column widths (25 cols)
     const colMeta = [
-        18, 20, 22, 22, 20, // A-E
-        22, 16,              // F-G (date, amount)
-        18, 20, 16, 16, 20, // H-L
-        22, 26, 16,          // M-O (Ekart)
-        22, 16,              // P-Q (Delhivery)
-        22, 24, 16,          // R-T (Xpressbees)
-        22, 16,              // U-V (Snapmint)
-        22, 16,              // W-X (BharatX)
-        22, 16,              // Y-Z (Razorpay)
-        20, 24, 24           // AA-AC
+        18, 20, 22, 22, 20, // A-E  (SaleOrderNo, Shopify, Invoice, AWB, ShippingPartner)
+        22, 16,              // F-G  (DispatchDate, SumOfTotal)
+        18, 20, 16, 16,      // H-K  (ReturnDate, SRN, ReturnAmt, NetAmt)
+        22, 26, 16,          // L-N  (EkartRemitDate, EkartActualDate, EkartCOD)
+        22, 16,              // O-P  (DelhiveryDate, DelhiveryCOD)
+        22, 24, 16,          // Q-S  (XpressbeesDeliveryDate, XpressbeesTransDate, XpressbeesNetPay)
+        22, 16,              // T-U  (SnapmintDate, SnapmintValue)
+        22, 16,              // V-W  (BharatXTimestamp, BharatXLedger)
+        22, 16               // X-Y  (RazorpayDate, RazorpayAmt)
     ];
     mainSheet.columns.forEach((col, i) => { col.width = colMeta[i] || 18; });
 
-    // Date format for date columns (1-based indices)
-    [6, 8, 13, 14, 16, 18, 19, 21, 23, 25].forEach(idx =>
+    // Date format for date columns (1-based, offset by 1 for the source row)
+    // These are column indices in the sheet
+    [6, 8, 12, 13, 15, 17, 18, 20, 22, 24].forEach(idx =>
         mainSheet.getColumn(idx).numFmt = 'dd-mmm-yyyy'
     );
     // Number format for amount columns
-    [7, 10, 11, 15, 17, 20, 22, 24, 26, 27, 28].forEach(idx =>
+    [7, 10, 11, 14, 16, 19, 21, 23, 25].forEach(idx =>
         mainSheet.getColumn(idx).numFmt = '#,##0.00'
     );
 

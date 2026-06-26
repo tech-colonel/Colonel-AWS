@@ -41,6 +41,9 @@ const getWorkingFiles = async (req, res, next) => {
       agent.columns
     );
 
+    // Ensure table exists (agents that have been seeded but never committed won't have a table yet)
+    await WorkingFileModel.sync({ force: false });
+
     const attributes = [
       'id',
       'filename',

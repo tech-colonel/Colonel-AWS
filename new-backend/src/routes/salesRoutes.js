@@ -149,7 +149,36 @@ router.post('/brands/:brandId/agents/:agentId/total-sales-analyzer/generate/comm
 router.post('/brands/:brandId/agents/:agentId/total-sales-analyzer/generate/discard', authenticateToken, totalSalesController.generateDiscard);
 router.post('/brands/:brandId/agents/:agentId/total-sales-analyzer/dashboard', authenticateToken, totalSalesController.getDashboardData);
 
-// NOTE: Mirrow & cread routes removed — their controllers (sales-mirrow / sales-cread)
-// were never committed to the repo and crash the backend on boot. Nykaa is kept above.
+const salesMirrowController = require('../controllers/agents/sales-mirrow/salesMirrowController');
+const salesCreadController = require('../controllers/agents/sales-cread/salesCreadController');
+const salesLimeroadController = require('../controllers/agents/sales-limeroad/salesLimeroadController');
+
+// ─── Mirrow Routes ─────────────────────────────────────────────────────────────
+router.get('/brands/:brandId/agents/:agentId/mirrow/master', authenticateToken, salesMirrowController.getMasterData);
+router.post('/brands/:brandId/agents/:agentId/mirrow/master/sku', authenticateToken, upload.single('file'), salesMirrowController.uploadSkuMaster);
+router.post('/brands/:brandId/agents/:agentId/mirrow/master/ledger', authenticateToken, upload.single('file'), salesMirrowController.uploadLedgerMaster);
+router.post('/brands/:brandId/agents/:agentId/mirrow/generate', authenticateToken, upload.single('file'), salesMirrowController.generate);
+
+router.post('/brands/:brandId/agents/:agentId/mirrow/generate/preview', authenticateToken, upload.single('file'), salesMirrowController.generatePreview);
+router.post('/brands/:brandId/agents/:agentId/mirrow/generate/commit', authenticateToken, salesMirrowController.generateCommit);
+router.post('/brands/:brandId/agents/:agentId/mirrow/generate/discard', authenticateToken, salesMirrowController.generateDiscard);
+
+// ─── cread Routes ─────────────────────────────────────────────────────────────
+router.get('/brands/:brandId/agents/:agentId/cread/master', authenticateToken, salesCreadController.getMasterData);
+router.post('/brands/:brandId/agents/:agentId/cread/master/sku', authenticateToken, upload.single('file'), salesCreadController.uploadSkuMaster);
+router.post('/brands/:brandId/agents/:agentId/cread/master/ledger', authenticateToken, upload.single('file'), salesCreadController.uploadLedgerMaster);
+router.post('/brands/:brandId/agents/:agentId/cread/generate', authenticateToken, upload.single('file'), salesCreadController.generate);
+
+router.post('/brands/:brandId/agents/:agentId/cread/generate/preview', authenticateToken, upload.single('file'), salesCreadController.generatePreview);
+router.post('/brands/:brandId/agents/:agentId/cread/generate/commit', authenticateToken, salesCreadController.generateCommit);
+router.post('/brands/:brandId/agents/:agentId/cread/generate/discard', authenticateToken, salesCreadController.generateDiscard);
+
+// ─── LimeRoad Routes ───────────────────────────────────────────────────────────
+router.get('/brands/:brandId/agents/:agentId/limeroad/master', authenticateToken, salesLimeroadController.getMasterData);
+router.post('/brands/:brandId/agents/:agentId/limeroad/master/sku', authenticateToken, upload.single('file'), salesLimeroadController.uploadSkuMaster);
+router.post('/brands/:brandId/agents/:agentId/limeroad/master/ledger', authenticateToken, upload.single('file'), salesLimeroadController.uploadLedgerMaster);
+router.post('/brands/:brandId/agents/:agentId/limeroad/generate/preview', authenticateToken, upload.single('file'), salesLimeroadController.generatePreview);
+router.post('/brands/:brandId/agents/:agentId/limeroad/generate/commit',  authenticateToken, salesLimeroadController.generateCommit);
+router.post('/brands/:brandId/agents/:agentId/limeroad/generate/discard', authenticateToken, salesLimeroadController.generateDiscard);
 
 module.exports = router;

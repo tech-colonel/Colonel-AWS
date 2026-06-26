@@ -63,14 +63,22 @@ function extractPartnerFiles(reqFiles, gatewayNames, logisticsNames) {
 /**
  * Map a processed summary row to the DB schema columns defined in the seed.
  */
+const MONTH_NAME_TO_NUM = {
+    january:1, february:2, march:3, april:4, may:5, june:6,
+    july:7, august:8, september:9, october:10, november:11, december:12,
+};
+
 function mapRowToSchema(row, month, year, filename) {
     const sN = (v) => { if (v === null || v === undefined || v === '') return 0; const n = Number(v); return isNaN(n) ? 0 : n; };
     const sS = (v) => (v === null || v === undefined ? '' : String(v));
     const sD = (v) => { if (!v) return null; const d = new Date(v); return isNaN(d.getTime()) ? null : d; };
 
+    // month can be a name ("October") or a number string ("10")
+    const monthNum = MONTH_NAME_TO_NUM[String(month).toLowerCase()] || parseInt(month) || 0;
+
     return {
         year: parseInt(year) || new Date().getFullYear(),
-        month: parseInt(month) || 0,
+        month: monthNum,
         filename,
         date: sD(row.dispatch_date),
         sale_order_number: sS(row.sale_order_number),
