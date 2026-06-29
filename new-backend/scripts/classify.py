@@ -1526,6 +1526,9 @@ def load_bank_statement(filepath: str) -> tuple:
             col_map["credit"] = c
         elif "balance" not in col_map and "balance" in cl:
             col_map["balance"] = c
+        elif "chq_ref" not in col_map and any(k in cl for k in
+                ["chq", "cheque", "ref no", "reference no", "chq/ref", "chq / ref", "instrument no", "utr/ref"]):
+            col_map["chq_ref"] = c
 
     # Handle combined Amount + direction-indicator column (e.g. Kotak: "Amount" + "Dr / Cr")
     if "debit" not in col_map and "credit" not in col_map:
@@ -1586,7 +1589,7 @@ def write_output(rows: list, summary: dict, brand: str, output_path: str):
         top=Side(style='thin', color='CCCCCC'),    bottom=Side(style='thin', color='CCCCCC'),
     )
 
-    headers = ["Txn Date", "Description", "Debit", "Credit", "Balance", "Type", "Ledger Name", "Confidence"]
+    headers = ["Txn Date", "Description", "Chq / Ref No.", "Debit", "Credit", "Balance", "Type", "Ledger Name", "Confidence"]
     ws.append(headers)
     ws.row_dimensions[1].height = 25
     for ci, _ in enumerate(headers, 1):
@@ -1598,6 +1601,7 @@ def write_output(rows: list, summary: dict, brand: str, output_path: str):
         ws.append([
             r.get("txn_date", ""),
             r.get("description", ""),
+            r.get("chq_ref", ""),
             r.get("debit") or "",
             r.get("credit") or "",
             r.get("balance") or "",
@@ -1613,14 +1617,14 @@ def write_output(rows: list, summary: dict, brand: str, output_path: str):
         for ci in range(1, len(headers) + 1):
             cell = ws.cell(row=row_num, column=ci)
             cell.font, cell.border = REGULAR, THIN
-            if ci in (3, 4, 5):
+            if ci in (4, 5, 6):
                 cell.number_format = '#,##0.00'
                 cell.alignment = Alignment(horizontal="right", vertical="center")
-            elif ci in (1, 6, 8):
+            elif ci in (1, 7, 9):
                 cell.alignment = Alignment(horizontal="center", vertical="center")
             else:
                 cell.alignment = Alignment(horizontal="left", vertical="center")
-            if ci in (7, 8):
+            if ci in (8, 9):
                 cell.fill = fill
 
     # Auto-width
@@ -1825,6 +1829,7 @@ def main():
     debit_col = col_map.get("debit")
     credit_col = col_map.get("credit")
     bal_col   = col_map.get("balance")
+    chq_col   = col_map.get("chq_ref")
 
     _JUNK_RE = re.compile(
         r'^[*.\-=~_\s]+$'                        # separator lines: ***, ..., ---
@@ -1900,11 +1905,20 @@ def main():
         balance = safe_float(row.get(bal_col))    if bal_col    else 0.0
         desc_str = str(desc).strip() if pd.notna(desc) else ""
 
+        chq_ref_val = ""
+        if chq_col is not None:
+            _cv = row.get(chq_col)
+            if pd.notna(_cv):
+                chq_ref_val = str(_cv).strip()
+                if chq_ref_val.endswith(".0"):
+                    chq_ref_val = chq_ref_val[:-2]
+
         result = classifier.classify(desc_str, debit, credit)
         summary[result["confidence"]] += 1
         rows.append({
             "txn_date":       formatted_date,
             "description":    desc_str,
+            "chq_ref":        chq_ref_val,
             "debit":          debit,
             "credit":         credit,
             "balance":        balance,
