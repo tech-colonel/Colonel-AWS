@@ -1431,5 +1431,130 @@ function removeFile(slotNum){
   updateRunBtn();
 }
 
-async functi
-...
+async function processFile(file,expectedKey,slotNum){
+  try{
+    prog(20);
+    const buf=await file.arrayBuffer();prog(60);
+    const result=parseBuffer(buf,file.name);prog(90);
+    if(!result){prog(100);askUserForType(file,expectedKey,slotNum);return;}
+    let detectedKey=result.type;
+    let useSlot=slotNum;
+
+    // If detection returned null/unknown, trust the slot the user dropped on
+    if(!detectedKey||detectedKey==='unknown'){
+      detectedKey=expectedKey||detectedKey||'unknown';
+      console.log('[Myntra Tool] Detection failed for',file.name,'— using slot key:',detectedKey);
+    } else if(detectedKey!==expectedKey){
+      // Auto-route: find first empty slot matching detected type
+      const matchingDef=DEFS.find(d=>d.key===detectedKey&&!FILES[d.num]);
+      if(matchingDef){
+        useSlot=matchingDef.num;
+        console.log('[Myntra Tool] Auto-routed',file.name,'→ slot',useSlot,'('+detectedKey+')');
+      }
+    }
+    // Multi-upload: store extras array to avoid mutation issues
+    const slotDef=DEFS.find(d=>d.num===useSlot);
+    const existing=FILES[useSlot];
+    const isMultiAppend=!!(slotDef&&slotDef.multi&&existing);
+    console.log('[Myntra Tool] processFile:',file.name,'detectedKey:',detectedKey,'useSlot:',useSlot,'isMultiAppend:',isMultiAppend,'existingKey:',existing&&existing.key);
+    // Show visible alert for debugging
+    const dbg=document.getElementById('dataCounter');
+    if(dbg) dbg.textContent='Loading: '+file.name+' ('+result.rows.length+' rows) → detected as '+detectedKey;
+    if(isMultiAppend){
+      // Store in extras array — avoids any reference/mutation issues
+      if(!existing.extras) existing.extras=[];
+      existing.extras.push(result.rows);
+      const totalRows=existing.rowData.length+existing.extras.reduce((s,e)=>s+e.length,0);
+      existing.rowCount=totalRows;
+      existing.name=existing.name+' + '+file.name;
+      console.log('[Myntra Tool] Merged: totalRows=',totalRows);
+    } else {
+      FILES[useSlot]={key:detectedKey,name:file.name,rowCount:result.rows.length,rowData:result.rows,extras:[],allSheets:result.allSheets||null};
+      console.log('[Myntra Tool] Stored new: slot',useSlot,'rows',result.rows.length);
+    }
+    rebuildAllData();
+    updateSlotUI(useSlot);
+    updateRunBtn();
+    prog(100);
+  }catch(err){console.error(err);alert('Error reading "'+file.name+'": '+err.message);prog(100);}
+}
+
+function askUserForType(file,expectedKey,slotNum){
+  const overlay=document.createElement('div');
+  overlay.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,0.45);z-index:999;display:flex;align-items:center;justify-content:center;';
+  const box=document.createElement('div');
+  box.style.cssText='background:#fff;border-radius:12px;padding:24px;max-width:420px;width:90%;box-shadow:0 20px 60px rgba(0,0,0,0.2);';
+  const opts=[...DEFS].sort((a,b)=>a.num-b.num).map(d=>'<option value="'+d.key+'"'+(d.key===expectedKey?' selected':'')+'>'+d.num+'. '+d.name+'</option>').join('');
+  box.innerHTML='<p style="font-size:14px;font-weight:600;margin-bottom:4px">Could not auto-detect report type</p><p style="font-size:12px;color:#6b7280;margin-bottom:16px">Select what <strong>'+file.name+'</strong> is:</p><select id="manualType" style="width:100%;padding:8px 10px;border:1px solid #d1d5db;border-radius:6px;font-size:13px;margin-bottom:16px;">'+opts+'</select><div style="display:flex;gap:8px;justify-content:flex-end;"><button id="mCancel" style="padding:7px 14px;border:1px solid #d1d5db;border-radius:6px;background:#fff;font-size:13px;cursor:pointer;">Cancel</button><button id="mOK" style="padding:7px 14px;border:none;border-radius:6px;background:#2563eb;color:#fff;font-size:13px;font-weight:600;cursor:pointer;">Load as this report</button></div>';
+  overlay.appendChild(box);document.body.appendChild(overlay);
+  document.getElementById('mCancel').onclick=()=>overlay.remove();
+  document.getElementById('mOK').onclick=async()=>{
+    const key=document.getElementById('manualType').value;overlay.remove();prog(20);
+    try{
+      const buf=await file.arrayBuffer();prog(60);
+      const result=parseBuffer(buf,file.name);prog(90);
+      if(!result){alert('Could not read data from this file.');prog(100);return;}
+      const useSlot=slotNum||(DEFS.find(d=>d.key===key)||{}).num||1;
+      FILES[useSlot]={key,name:file.name,rowCount:result.rows.length,rowData:result.rows,allSheets:result.allSheets||null};
+      rebuildAllData();updateSlotUI(useSlot);updateRunBtn();prog(100);
+    }catch(err){alert('Error: '+err.message);prog(100);}
+  };
+}
+
+// ── BUILD GRID ──
+function buildGrid(){
+  const grid=document.getElementById('reportGrid');
+  if(!grid) return;
+  grid.innerHTML='';
+  const displayDefs=[...DEFS].sort((a,b)=>a.num-b.num);
+  displayDefs.forEach(def=>{
+    const card=document.createElement('div');
+    card.className='report-card'+(def.req?'':' optional');
+    card.id='card_n'+def.num;
+    const inputId='fi_n'+def.num;
+    card.innerHTML=
+      '<div class="rc-header">'+
+        '<div class="rc-num">'+def.num+'</div>'+
+        '<div class="rc-info">'+
+          '<div class="rn">'+def.name+(def.req?' <span style="color:var(--red)">*</span>':'')+' </div>'+
+          '<div class="rp">'+def.desc+'</div>'+
+          '<div class="rpath">'+def.path+'</div>'+
+        '</div>'+
+      '</div>'+
+      '<div class="rc-drop-zone" id="dz_n'+def.num+'">'+
+        '<input class="rc-input" type="file" id="'+inputId+'" accept=".xlsx,.xls,.csv" style="display:none">'+
+        '<label class="upload-btn" for="'+inputId+'" id="lbl_n'+def.num+'">'+
+          '\uD83D\uDCC2 Click to upload'+
+        '</label>'+
+        '<div class="rc-files-list" id="flist_n'+def.num+'"></div>'+
+      '</div>';
+    grid.appendChild(card);
+    const inp=card.querySelector('.rc-input');
+    const lbl=card.querySelector('.upload-btn');
+    const dz=card.querySelector('.rc-drop-zone');
+    // Label's for= attribute opens the file dialog natively — no JS needed
+    inp.addEventListener('change',function(){
+      console.log('[UPLOAD] change fired on slot',def.num,'key=',def.key,'file=',this.files&&this.files[0]&&this.files[0].name);
+      if(this.files&&this.files[0]){
+        processFile(this.files[0],def.key,def.num);
+        setTimeout(()=>{try{this.value='';}catch{}},100);
+      } else {
+        console.log('[UPLOAD] No files in change event');
+      }
+    });
+    dz.addEventListener('dragover',e=>{e.preventDefault();e.stopPropagation();lbl.style.background='#1d4ed8';});
+    dz.addEventListener('dragleave',e=>{e.stopPropagation();lbl.style.background='';});
+    dz.addEventListener('drop',e=>{
+      e.preventDefault();e.stopPropagation();lbl.style.background='';
+      const f=e.dataTransfer&&e.dataTransfer.files&&e.dataTransfer.files[0];
+      if(f) processFile(f,def.key,def.num);
+    });
+  });
+}
+
+
+buildGrid();
+document.getElementById('runBtn').addEventListener('click',run);
+</script>
+</body>
+</html>
