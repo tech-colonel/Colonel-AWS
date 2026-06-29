@@ -1,0 +1,1435 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Myntra Ticket Finder — Colonel</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg2:#f7f8fa;--bg3:#eef0f3;--text:#111827;--text2:#4b5563;--text3:#9ca3af;
+  --border:#e5e7eb;--border2:#d1d5db;
+  --green:#16a34a;--green-bg:#f0fdf4;--green-border:#bbf7d0;
+  --red:#dc2626;--red-bg:#fef2f2;--red-border:#fecaca;
+  --amber:#d97706;--amber-bg:#fffbeb;--amber-border:#fde68a;
+  --blue:#2563eb;--blue-bg:#eff6ff;--blue-border:#bfdbfe;
+  --radius:10px;--radius-sm:6px
+}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:var(--bg2);color:var(--text);min-height:100vh}
+.topbar{background:#fff;border-bottom:1px solid var(--border);padding:14px 32px;display:flex;align-items:center;gap:12px}
+.topbar .logo{font-size:15px;font-weight:700}
+.topbar .tag{font-size:11px;background:var(--blue-bg);color:var(--blue);padding:3px 8px;border-radius:20px;font-weight:600}
+.wrap{max-width:820px;margin:0 auto;padding:32px 24px 64px}
+h1{font-size:22px;font-weight:700;margin-bottom:4px}
+.lead{font-size:14px;color:var(--text2);margin-bottom:28px;line-height:1.6}
+.step-label{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.8px;color:var(--text3);margin-bottom:12px}
+.reports-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:10px;margin-bottom:8px}
+.report-card{background:#fff;border:1.5px solid var(--border);border-radius:var(--radius);overflow:hidden;transition:border-color .15s}
+.report-card.optional{border-style:dashed}
+.report-card.loaded{border-color:var(--green)}
+.rc-header{padding:12px 14px 10px;border-bottom:1px solid var(--border);display:flex;align-items:flex-start;gap:10px}
+.rc-num{width:22px;height:22px;border-radius:50%;background:var(--blue-bg);color:var(--blue);font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center;flex-shrink:0;margin-top:1px}
+.report-card.optional .rc-num{background:var(--bg3);color:var(--text3)}
+.rc-info .rn{font-size:13px;font-weight:600;margin-bottom:2px}
+.rc-info .rp{font-size:11px;color:var(--text3);line-height:1.45}
+.rc-info .rpath{font-size:10px;font-family:monospace;background:var(--bg2);color:var(--text2);padding:2px 6px;border-radius:3px;margin-top:5px;display:inline-block}
+.rc-drop-zone{padding:10px 14px;min-height:44px;display:flex;flex-direction:column;gap:6px;}
+.rc-label{display:flex;align-items:center;gap:8px;cursor:pointer;transition:background .12s;user-select:none;padding:6px 0}
+.rc-label:hover .rc-status{color:var(--blue)}
+.rc-label.dragover{background:var(--blue-bg);border-radius:6px;padding:6px 8px}
+.report-card.loaded .rc-label{cursor:default}
+.rc-input{display:none;}
+.rc-icon{font-size:16px;flex-shrink:0}
+.rc-status{font-size:12px;color:var(--text3);flex:1;line-height:1.4}
+.report-card.loaded .rc-status-primary{color:var(--green);font-weight:500}
+.rc-files-list{display:flex;flex-direction:column;gap:3px}
+.rc-file-item{display:flex;align-items:center;gap:6px;font-size:11px;color:var(--green)}
+.rc-file-remove{background:none;border:none;cursor:pointer;color:var(--text3);font-size:11px;padding:0 2px}
+.rc-file-remove:hover{color:var(--red)}
+.rc-add-more{font-size:11px;color:var(--blue);cursor:pointer;background:none;border:none;padding:2px 0;text-align:left}
+.rc-add-more:hover{text-decoration:underline}
+.req-note{font-size:12px;color:var(--text3);margin-bottom:20px}
+.req-note span{color:var(--red);font-weight:600}
+.progress-wrap{height:4px;background:var(--bg3);border-radius:2px;margin-bottom:16px;display:none;overflow:hidden}
+.progress-bar{height:100%;background:var(--blue);width:0;transition:width .25s}
+.run-btn{width:100%;padding:13px;background:var(--blue);color:#fff;border:none;border-radius:var(--radius);font-size:15px;font-weight:700;cursor:pointer;transition:background .15s;margin-bottom:32px}
+.run-btn:hover:not(:disabled){background:#1d4ed8}
+.run-btn:disabled{background:var(--bg3);color:var(--text3);cursor:not-allowed}
+.results{display:none}
+.results.show{display:block}
+.summary-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:24px}
+.metric{background:#fff;border:1px solid var(--border);border-radius:var(--radius);padding:14px 16px}
+.metric .ml{font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:.6px;margin-bottom:5px}
+.metric .mv{font-size:22px;font-weight:700}
+.mv.g{color:var(--green)}.mv.r{color:var(--red)}.mv.b{color:var(--blue)}.mv.a{color:var(--amber)}
+.t-card{background:#fff;border:1px solid var(--border);border-radius:var(--radius);margin-bottom:12px;overflow:hidden}
+.t-top{display:flex;align-items:center;gap:10px;padding:14px 16px;cursor:pointer;border-bottom:1px solid var(--border);transition:background .1s}
+.t-top:hover{background:var(--bg2)}
+.t-badge{font-size:10px;font-weight:700;padding:3px 9px;border-radius:20px;white-space:nowrap;text-transform:uppercase}
+.bh{background:var(--red-bg);color:var(--red)}.bm{background:var(--amber-bg);color:var(--amber)}.bi{background:var(--blue-bg);color:var(--blue)}
+.t-title{font-size:14px;font-weight:600;flex:1}
+.t-amt{font-size:14px;font-weight:700;color:var(--green);white-space:nowrap}
+.t-chev{color:var(--text3);font-size:12px;transition:transform .2s}
+.t-card.open .t-chev{transform:rotate(180deg)}
+.t-body{padding:16px;display:none}
+.t-card.open .t-body{display:block}
+.t-desc{font-size:13px;color:var(--text2);line-height:1.65;margin-bottom:14px}
+.meta-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:8px;margin-bottom:14px}
+.meta-cell{background:var(--bg2);border-radius:var(--radius-sm);padding:10px 12px}
+.meta-cell .ml{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:.5px;margin-bottom:3px}
+.meta-cell .mv{font-size:13px;font-weight:600}
+.order-section{margin-bottom:14px}
+.order-label{font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px;font-weight:600}
+.order-chips{display:flex;flex-wrap:wrap;gap:5px;max-height:80px;overflow-y:auto}
+.o-chip{font-size:10px;font-family:monospace;background:var(--bg2);color:var(--text2);padding:2px 7px;border-radius:4px}
+.tmpl-box{background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius-sm);padding:14px;margin-bottom:12px}
+.tmpl-head{font-size:11px;color:var(--blue);text-transform:uppercase;letter-spacing:.6px;font-weight:700;margin-bottom:8px}
+.tmpl-box pre{font-size:11px;font-family:monospace;color:var(--text2);line-height:1.65;white-space:pre-wrap;word-break:break-word}
+.btn-row{display:flex;gap:8px;flex-wrap:wrap}
+.btn-sm{font-size:12px;font-weight:600;padding:7px 14px;border:1px solid var(--border2);border-radius:var(--radius-sm);background:#fff;color:var(--text);cursor:pointer;transition:background .1s}
+.btn-sm:hover{background:var(--bg2)}
+.btn-sm.dl{background:var(--green-bg);color:var(--green);border-color:var(--green-border)}
+.btn-sm.dl:hover{background:#dcfce7}
+.no-issues{background:var(--green-bg);border:1px solid var(--green-border);border-radius:var(--radius);padding:16px 20px;font-size:14px;color:var(--green);font-weight:600}
+footer{text-align:center;margin-top:48px;padding-top:24px;border-top:1px solid var(--border);font-size:12px;color:var(--text3)}
+@media(max-width:600px){.reports-grid{grid-template-columns:1fr}.summary-grid{grid-template-columns:repeat(2,1fr)}.meta-grid{grid-template-columns:1fr}.wrap{padding:20px 16px 48px}.topbar{padding:12px 16px}}
+
+.upload-btn{display:inline-flex;align-items:center;gap:6px;padding:8px 16px;background:var(--blue);color:#fff;border:none;border-radius:6px;font-size:12px;font-weight:600;cursor:pointer;margin-top:4px;user-select:none;}
+</style>
+</head>
+<body>
+<div class="topbar"><span class="logo">Colonel × Myntra</span><span class="tag">Ticket Finder</span></div>
+<div class="wrap">
+<h1>Myntra billing error detector</h1>
+<p class="lead">Upload Myntra Seller Hub reports directly — no pre-processing needed. For complete payout analysis upload Sales Reports for all relevant months, since each settlement cycle pays out carry-forward from the previous month.</p>
+<p class="step-label">Step 1 — Upload your Myntra reports</p>
+<div class="reports-grid" id="reportGrid"></div>
+<p class="req-note"><span>*</span> Required &nbsp;·&nbsp; Forward + Reverse + Returns are minimum. Add Sales Report(s) for delivered-not-paid analysis — upload multiple months by clicking "Add another month".</p>
+<div class="progress-wrap" id="progWrap"><div class="progress-bar" id="progBar"></div></div>
+<p class="step-label">Step 2 — Run the analysis</p>
+<button class="run-btn" id="runBtn" disabled>Upload required reports to continue</button>
+<div id="dataCounter" style="text-align:center;font-size:11px;color:var(--text3);margin-top:6px;font-family:monospace;"></div>
+<p id="runStatus" style="text-align:center;font-size:12px;color:var(--text3);min-height:18px;margin-bottom:8px;"></p>
+<div class="results" id="results">
+  <div class="summary-grid" id="summGrid"></div>
+  <p class="step-label">Tickets to raise with Myntra</p>
+  <div id="ticketList"></div>
+</div>
+<footer>Colonel · Myntra Ticket Finder · Raw reports are processed in your browser — only a summary is saved to Colonel</footer>
+</div>
+
+<script>
+document.addEventListener('dragover',e=>e.preventDefault());
+document.addEventListener('drop',e=>e.preventDefault());
+
+// ── REPORT DEFINITIONS ──
+// Detection order: most specific first. Supports both raw Myntra portal (snake_case) and custom 7-sheet formats.
+// multi:true slots merge with existing data of same key
+const DEFS = [
+  { key:'rev', num:4, req:true, multi:true,
+    name:'Settlement — Reverse (Return Payment) · All months',
+    path:'Payments → Sale Payment/Return Payment → Return Payment',
+    desc:'Upload ALL reverse settlement files covering your dispute period. E.g. for April returns: upload May reverse settlement. Upload June if available.',
+    kws:['total_settlement','return_type','return_date','platform_fees',
+         'return_id','reverse_additional_charges',
+         'return net settlement','commission reversed'],
+    nokws:['total_expected_settlement'], minMatch:2 },
+
+  { key:'fwd', num:3, req:true, multi:true,
+    name:'Settlement — Forward (Sale Payment) · All months',
+    path:'Payments → Sale Payment/Return Payment → Sale Payment',
+    desc:'Upload ALL forward settlement files covering your dispute period. E.g. for April orders: upload May forward settlement (April deliveries are paid in May). Upload June too if available.',
+    kws:['total_actual_settlement','commission_percentage','delivery_date','platform_fees',
+         'commission amt','net payout','payout date','logistics total'],
+    nokws:['total_settlement','return_id','reverse_additional_charges'], minMatch:2 },
+
+  { key:'returns', num:5, req:true, multi:true,
+    name:'Returns & RTO Report — Month 1',
+    path:'Returns → MDirect Returns Report (primary month)',
+    desc:'Return mode, return reason, refund status. Upload April returns here.',
+    kws:['return_mode','return_reason','is_refunded','seller_sku_code',
+         'return mode','return reason','is refunded'],
+    nokws:['total_settlement','total_actual_settlement','commission_percentage','order status'], minMatch:2 },
+
+  { key:'returns', num:6, req:false, multi:true,
+    name:'Returns & RTO Report — Month 2',
+    path:'Returns → MDirect Returns Report (additional month)',
+    desc:'Returns for a second month (e.g. May) — merged with Month 1 for complete analysis.',
+    kws:['return_mode','return_reason','is_refunded','seller_sku_code',
+         'return mode','return reason','is refunded'],
+    nokws:['total_settlement','total_actual_settlement','commission_percentage','order status'], minMatch:2 },
+
+  { key:'sales', num:1, req:true, multi:true,
+    name:'Sale Order Report — Month 1',
+    path:'Orders → MIS Reports → Sale Order Report (primary month)',
+    desc:'All orders — status, delivery date, amount. Upload April orders here.',
+    kws:['order release id','order status','final amount','delivered on','seller sku code',
+         'order_release_id','order_status','seller_sku_code'],
+    nokws:['total_settlement','total_actual_settlement','return_mode','commission_percentage'], minMatch:3 },
+
+  { key:'sales', num:2, req:false, multi:true,
+    name:'Sale Order Report — Month 2',
+    path:'Orders → MIS Reports → Sale Order Report (additional month)',
+    desc:'Orders for a second month (e.g. May) — merged with Month 1 for delivered-not-paid analysis.',
+    kws:['order release id','order status','final amount','delivered on','seller sku code',
+         'order_release_id','order_status','seller_sku_code'],
+    nokws:['total_settlement','total_actual_settlement','return_mode','commission_percentage'], minMatch:3 },
+
+  { key:'cogs', num:7, req:false, multi:false,
+    name:'SKU COGS Sheet (internal)',
+    path:'Internal costing file',
+    desc:'Your base cost per Seller SKU — not from Myntra',
+    kws:['base cost/unit','base cost','total cogs'],
+    nokws:['total_settlement','total_actual_settlement'], minMatch:1 },
+
+  { key:'nonorder', num:9, req:false, multi:true,
+    name:'Non-Order Settlement / OTHERS INVOICE',
+    path:'Payments → Financial Reports → Monthly Reports → Non-Order Settlement / OTHERS INVOICE',
+    desc:'Ad spend deductions, campaign charges, non-order invoices. Upload Non-Order Settlement CSV, OTHERS INVOICE, and Non_Order_Deduction_UnSettled.',
+    kws:['settlement_amount','settlement_type','settlement_description','invoice_ref',
+         'deduction','invoice','non order','non-order','settlement amount','charge type'],
+    nokws:['order_release_id','total_actual_settlement','return_mode','is_refunded',
+           'royaltypercent','marketingcharge'], minMatch:1 },
+
+
+
+  { key:'ratecard', num:8, req:false, multi:false,
+    name:'Myntra Rate Card (Seller Terms)',
+    path:'Seller Portal → Seller Terms / Commission Sheet',
+    desc:'Your contracted commission % and fixed fee by article type and price band. Enables exact overcharge detection.',
+    kws:['commission percentage','lower limit','upper limit','master category','commission model','gender'],
+    nokws:['total_settlement','total_actual_settlement','order_release_id','order release id','is_refunded'], minMatch:3 },
+];
+
+// D holds parsed rows per key (merged from all slots with same key)
+// FILES stored by slotNum: FILES[1]={key,name,rows,rowData}, FILES[2]=...
+// For multi slots: all FILES with same key get merged into D[key]
+const D = {};        // D.fwd, D.rev, D.returns, D.sales, D.cogs = rows[]
+const FILES = {};   // FILES[slotNum] = {key, name, rowCount, rowData}
+
+// ── COLUMN MATCHING — normalise underscores, spaces, case ──
+const norm = s => (s||'').toLowerCase().replace(/[_\s]+/g,'');
+
+function col(row,...pats){
+  const keys=Object.keys(row);
+  for(const p of pats){const pn=norm(p);const f=keys.find(k=>norm(k).includes(pn));if(f)return f;}
+  return null;
+}
+function num(row,...pats){const k=col(row,...pats);return k?(parseFloat(row[k])||0):0;}
+function str(row,...pats){const k=col(row,...pats);return k?String(row[k]||''):'';}
+function inr(n){return '₹'+Math.round(n).toLocaleString('en-IN');}
+
+// ── FIELD ACCESSORS — handle both raw portal format and custom 7-sheet format ──
+
+function getOrderId(row){
+  // order_line_id is the universal join key across ALL Myntra files
+  // (Sales, Forward Settlement, Reverse Settlement, Returns Report all share it)
+  const k=col(row,'order_line_id','order line id','order_release_id','order release id','order_id','order id');
+  const v=k?String(row[k]||'').trim():'';
+  return v.endsWith('.0')?v.slice(0,-2):v; // strip .0 from float-parsed CSV values
+}
+
+function getSP(row){
+  // Raw: seller_product_amount | Custom: Selling Price (₹) | Sales: final amount
+  return num(row,'seller_product_amount','seller product amount','selling price','final amount','seller price');
+}
+
+function getCommission(row){
+  // Raw forward: platform_fees (positive) | Custom: Commission Amt (₹) (negative, use abs)
+  // Raw reverse: platform_fees (positive = reversed to seller)
+  const raw=num(row,'platform_fees');
+  if(raw) return Math.abs(raw);
+  return Math.abs(num(row,'commission amt','total_commission'));
+}
+
+function getCommissionRate(row){
+  // Raw: commission_percentage (e.g. 28.32 means 28.32%) | Custom: Commission %
+  const r=num(row,'commission_percentage','commission %');
+  // Raw stores as 28.32, custom may store as 0.2832
+  return r>1?r:r*100;
+}
+
+function getFixedFee(row){return Math.abs(num(row,'fixed_fee','fixed fee'));}
+
+function getNetPayout(row){
+  // Forward: total_actual_settlement | Reverse: total_settlement | Custom: Net Payout
+  return num(row,'total_actual_settlement','total actual settlement','net payout');
+}
+
+function getReturnNetSettlement(row){
+  return num(row,'total_settlement','return net settlement');
+}
+
+function getDeliveryDate(row){
+  const k=col(row,'delivery_date','delivered on','delivery date','order_delivered_date');
+  if(!k)return '';
+  try{const d=new Date(row[k]);return isNaN(d)?String(row[k]):d.toLocaleDateString('en-IN');}
+  catch{return String(row[k]||'');}
+}
+
+function getReturnDate(row){
+  const k=col(row,'return_date','return_created_date','return created date','return date');
+  if(!k)return '';
+  try{const d=new Date(row[k]);return isNaN(d)?String(row[k]):d.toLocaleDateString('en-IN');}
+  catch{return String(row[k]||'');}
+}
+
+function getArticleType(row){return str(row,'article_type','article type');}
+
+function getSKU(row){
+  return str(row,'dchica sku','seller_sku_code','seller sku code','sku_code');
+}
+
+function getMasterSKU(row){
+  const sku=getSKU(row);
+  return sku?sku.replace(/\/[^/]*$/,''):str(row,'master_sku','master sku');
+}
+
+function getOrderStatus(row){return str(row,'order status','order_status','status');}
+
+function isCustomerReturn(row){
+  const isRef=row[col(row,'is_refunded','is refunded')];
+  const st=str(row,'status').toLowerCase();
+  return isRef==1||isRef===true||isRef==='1'||st==='return';
+}
+
+function isDelivered(row){
+  // Sales report: status 'C' (Completed) = delivered in raw Myntra portal
+  const s=getOrderStatus(row).trim().toUpperCase();
+  return s==='C'||s==='D'||s==='DELIVERED'||s==='COMPLETED'||s==='COMPLETE';
+}
+
+// ── BUILD MAPS ──
+function buildRevCommMap(){
+  const map={};
+  (D.rev||[]).forEach(r=>{
+    const id=getOrderId(r);
+    const comm=getCommission(r);
+    if(id) map[id]=(map[id]||0)+comm;
+  });
+  return map;
+}
+
+function buildFwdMap(){
+  const map={};
+  (D.fwd||[]).forEach(r=>{const id=getOrderId(r);if(id)map[id]=r;});
+  return map;
+}
+
+// ── RATE CARD HELPERS ──
+// Rate card has multiple sheets (Commission, Fixed Fee) — parsed from multi-sheet xlsx
+// D.ratecard = {commission: [{art,lo,hi,rate}], fixedFee: [{art,lo,hi,fee}]}
+
+function parseRateCard(rows){
+  if(!rows||!rows.length) return;
+  if(!D.ratecard) D.ratecard={commission:[],fixedFee:[]};
+
+  // Format: column 0 = labels/values, column 1 = second value
+  // Row structure: metadata rows, then "Seller Selling Price" header, then data rows
+  // The key for column 0 is the sheet section title (e.g. "Section: Commission Fee")
+
+  // Extract article type from metadata
+  let artType='Bra'; // default
+  rows.forEach(r=>{
+    const vals=Object.values(r);
+    const v0=String(vals[0]||'');
+    const m=v0.match(/Article Type:\s*(.+)/i);
+    if(m) artType=m[1].trim();
+  });
+
+  // Find header row and parse data
+  let inData=false;
+  let isComm=false, isFixed=false;
+
+  rows.forEach(r=>{
+    const vals=Object.values(r);
+    const v0=String(vals[0]||'').trim();
+    const v1=String(vals[1]||'').trim();
+
+    // Detect header row
+    if(v0.toLowerCase().includes('seller selling price')){
+      inData=true;
+      isComm=v1.toLowerCase().includes('commission');
+      isFixed=v1.toLowerCase().includes('fixed fee')||v1.toLowerCase().includes('fixed');
+      return;
+    }
+
+    if(!inData) return;
+    if(!v0.includes('\u20b9')) return; // must contain ₹
+
+    // Parse price range: "₹0 - ₹300" or "₹2,000 - ₹1,00,00,000"
+    const nums=v0.match(/[\d,]+/g);
+    if(!nums||nums.length<2) return;
+    const lo=parseFloat(nums[0].replace(/,/g,''))||0;
+    const hi=parseFloat(nums[1].replace(/,/g,''))||1e7;
+
+    // Parse value: "9%" or "₹27"
+    const val=parseFloat(v1.replace(/[^\d.]/g,''))||0;
+    if(val===0) return;
+
+    if(isComm) D.ratecard.commission.push({art:artType, lo, hi, rate:val});
+    if(isFixed) D.ratecard.fixedFee.push({art:artType, lo, hi, fee:val});
+  });
+}
+
+
+function getContractedCommRate(art, sp){
+  if(!D.ratecard||!D.ratecard.commission.length) return null;
+  const matching=D.ratecard.commission.filter(b=>b.art===art&&sp>=b.lo&&(sp<b.hi||b.hi>=1e6));
+  return matching.length?Math.max(...matching.map(b=>b.rate)):null;
+}
+
+function getContractedFixedFee(art, sp){
+  if(!D.ratecard||!D.ratecard.fixedFee.length) return null;
+  const matching=D.ratecard.fixedFee.filter(b=>b.art===art&&sp>=b.lo&&(sp<b.hi||b.hi>=1e6));
+  return matching.length?Math.max(...matching.map(b=>b.fee)):null;
+}
+
+function buildSPMap(fwdMap){
+  const map={};
+  Object.entries(fwdMap).forEach(([id,r])=>{const sp=getSP(r);if(sp)map[id]=sp;});
+  (D.sales||[]).forEach(r=>{const id=getOrderId(r);const sp=getSP(r);if(id&&sp&&!map[id])map[id]=sp;});
+  return map;
+}
+
+// ── TICKETS ──
+
+
+// ── MYNTRA PUBLISHED RATE CARDS (hardcoded from official PDFs) ──
+// These are used for return logistics verification — Myntra cannot dispute their own published rates
+const RETURN_FEE_CARDS = {
+  // Effective Apr 13, 2026 (most recent)
+  APR13: {
+    LOCAL:    {1:106, 2:127, 3:157, 4:229, 5:475, def:157},
+    ZONAL:    {1:127, 2:168, 3:209, 4:291, 5:557, def:209},
+    NATIONAL: {1:182, 2:233, 3:274, 4:346, 5:664, def:274},
+  },
+  // Effective Feb 9, 2026
+  FEB9: {
+    LOCAL:    {1:91,  2:112, 3:142, 4:214, 5:460, def:142},
+    ZONAL:    {1:112, 2:153, 3:194, 4:276, 5:542, def:194},
+    NATIONAL: {1:167, 2:218, 3:259, 4:331, 5:649, def:259},
+  },
+  // Effective Nov 14, 2025 (same as Feb 9 for standard levels)
+  NOV25: {
+    LOCAL:    {1:91,  2:112, 3:142, 4:214, 5:460, def:142},
+    ZONAL:    {1:112, 2:153, 3:194, 4:276, 5:542, def:194},
+    NATIONAL: {1:167, 2:218, 3:259, 4:331, 5:649, def:259},
+  },
+};
+
+const FIXED_FEE_CARD = {ranges:[
+  {lo:0,   hi:300,  fee:27},
+  {lo:300, hi:500,  fee:27},
+  {lo:500, hi:1000, fee:27},
+  {lo:1000,hi:2000, fee:45},
+  {lo:2000,hi:1e7,  fee:61},
+]};
+// NOTE per Myntra rate card: "Fixed fee shall not be reversed on reverse logistics effective 15th May 2023"
+// This is the official policy citation for the fixed fee retention ticket
+
+function getApplicableReturnCard(returnDateStr) {
+  try {
+    const d = new Date(returnDateStr);
+    if (d >= new Date('2026-04-13')) return {card: RETURN_FEE_CARDS.APR13, name:'Apr 13, 2026'};
+    if (d >= new Date('2026-02-09')) return {card: RETURN_FEE_CARDS.FEB9,  name:'Feb 9, 2026'};
+    return {card: RETURN_FEE_CARDS.NOV25, name:'Nov 14, 2025'};
+  } catch { return {card: RETURN_FEE_CARDS.APR13, name:'Apr 13, 2026'}; }
+}
+
+function getValidReturnFees(zone, returnDateStr) {
+  const {card, name} = getApplicableReturnCard(returnDateStr);
+  const z = zone.toUpperCase().includes('LOCAL') ? 'LOCAL'
+           : zone.toUpperCase().includes('ZONAL') ? 'ZONAL' : 'NATIONAL';
+  const tier = card[z] || card.NATIONAL;
+  return {validFees: new Set(Object.values(tier)), minFee: tier[1], maxFee: tier[5], cardName: name, zone: z};
+}
+
+function ticket_commNotReversed(){
+  const ret=D.returns||[];
+  if(!D.rev||!ret.length) return null;
+  const revMap=buildRevCommMap();    // {order_release_id: commission_amount}
+  const fwdMap=buildFwdMap();
+
+  // Rev settlement end date — used to filter out too-recent returns
+  let revCutoff=new Date();
+  const revReasonableMax=new Date(revCutoff.getFullYear(), revCutoff.getMonth()+2, 0);
+  (D.rev||[]).forEach(r=>{
+    const k=col(r,'settlement_date_prepaid_payment','settlement_date_postpaid_payment','return_date');
+    if(!k) return;
+    try{const d=new Date(r[k]);if(!isNaN(d)&&d<=revReasonableMax&&d>revCutoff)revCutoff=d;}catch{}
+  });
+
+  // Filter customer returns to only those whose return D+15 falls within settlement coverage
+  const customerRet=ret.filter(r=>{
+    if(!isCustomerReturn(r)) return false;
+    // Find return date — try multiple column names (MDirect has return_created_date)
+    const dk=col(r,'return_created_date','return_date','return_created','refunded_date','return created date');
+    if(!dk) return true; // no date — include
+    try{
+      const rd=new Date(r[dk]);
+      if(isNaN(rd)) return true;
+      const d15=new Date(rd.getTime()+15*24*60*60*1000);
+      return d15<=revCutoff;
+    }catch{return true;}
+  });
+
+  if(!customerRet.length) return null;
+
+  let affected=[], commRevTotal=0, reversedCount=0;
+  customerRet.forEach(r=>{
+    const id=getOrderId(r);
+    // Check for custom 7-sheet format (has 'comm reversed' YES/NO column)
+    const commCol=col(r,'comm reversed','comm reverse','commission reversed');
+    if(commCol){
+      const v=String(r[commCol]||'').toUpperCase().trim();
+      if(v==='NO'||v==='\u274C'||v==='FALSE'||v==='0'){
+        affected.push({id,date:getReturnDate(r)});
+      } else {
+        // Try to get the actual commission amount reversed
+        const amtCol=col(r,'comm reversed amt','commission reversed amount','comm rev amt');
+        const amt=amtCol?Math.abs(parseFloat(r[amtCol])||0):0;
+        commRevTotal+=amt;
+        reversedCount++;
+      }
+      return;
+    }
+    // Raw Myntra portal format: cross-reference with Rev settlement by order ID
+    const revComm=revMap[id]||0;
+    if(revComm>0){
+      commRevTotal+=revComm;
+      reversedCount++;
+    } else {
+      affected.push({id,date:getReturnDate(r)});
+    }
+  });
+
+  if(!affected.length) return null;
+
+  // Average commission from orders that WERE reversed — use as claim estimate for missing ones
+  const avgComm=reversedCount>0?(commRevTotal/reversedCount):123; // ₹123 fallback from May data
+  const claimAmt=Math.round(affected.reduce((s,a)=>{
+    const fr=fwdMap[a.id];
+    return s+(fr?getCommission(fr):avgComm);
+  },0));
+  if(claimAmt<1) return null;
+
+  return{
+    id:'comm_rev',priority:'HIGH',
+    title:'Commission not reversed on '+affected.length+' return orders',
+    amount:claimAmt,count:affected.length,orders:affected.map(a=>a.id),
+    meta:[['Customer returns checked',customerRet.length],['Commission reversed correctly',reversedCount],['Not reversed',affected.length],['Estimated claim',inr(claimAmt)]],
+    desc:affected.length+' customer returns have no commission reversal entry in the Reverse Settlement. Avg commission per return: '+inr(Math.round(avgComm))+'. Total claim: '+inr(claimAmt)+'.',
+    template:'Subject: Commission not reversed on returns — '+affected.length+' orders, '+inr(claimAmt)+'\\n\\nHi Myntra Seller Support,\\n\\n'+affected.length+' customer returns have no commission reversal in our Reverse Settlement (April + May).\\n\\n'+'Returns checked: '+customerRet.length+'\\nReversed correctly: '+reversedCount+'\\nNot reversed: '+affected.length+'\\nClaim: '+inr(claimAmt)+'\\n\\nPREEMPTING STANDARD RESPONSES:'+'\\n\\n1. CHECK JUNE: If reversal was in June, share June Reverse Settlement with these order_line_ids within 5 business days. Do not close citing reversal pending without the export.'+'\\n\\n2. QC REJECTION: All returns in our proof have return_mode = customer return per Myntra own MDirect Returns Report (not warehouse-rejected, not quality-failed). If any order was QC-rejected post-pickup, provide the QC rejection report for that specific order_line_id. Blanket QCF responses without order-level proof will not be accepted.'+'\\n\\n3. IN TRANSIT: Return dates are from Myntra own returns data. If any return is still in transit, provide current logistics status for that order_line_id.'+'\\n\\nFirst 20 order line IDs:\\n'+affected.slice(0,20).map(a=>a.id).join('\\n')+'\\n\\nFull evidence attached.\\n\\nBrand: D\u2019Chica',
+    proof:()=>mkXLSX(affected.map(a=>{const fr=fwdMap[a.id];const comm=(fr?getCommission(fr):avgComm).toFixed(2);return[a.id,a.date||'',comm,'0.00','Commission charged on sale, not reversed on return'];}),
+      ['Order ID','Return Date','Commission Should Reverse (\u20b9)','Reversed (\u20b9)','Issue'],'Proof_1_Comm_Not_Reversed.xlsx')
+  };
+}
+
+function ticket_closedBox(){
+  const ret=D.returns||[];
+  if(!D.rev||!ret.length) return null;
+  const revMap=buildRevCommMap();
+  const fwdMap=buildFwdMap();
+  const avgComm=(D.rev||[]).reduce((s,r)=>s+getCommission(r),0)/Math.max((D.rev||[]).length,1)||123;
+
+  let revCutoff=new Date();
+  const revMax=new Date(revCutoff.getFullYear(),revCutoff.getMonth()+2,0);
+  (D.rev||[]).forEach(r=>{
+    const k=col(r,'settlement_date_prepaid_payment','settlement_date_postpaid_payment','return_date');
+    if(!k) return;
+    try{const d=new Date(r[k]);if(!isNaN(d)&&d<=revMax&&d>revCutoff)revCutoff=d;}catch{}
+  });
+
+  const affected=[];
+  ret.forEach(r=>{
+    if(!isCustomerReturn(r)) return;
+    if(!str(r,'return_mode','return mode').toUpperCase().includes('CLOSED')) return;
+    const dk=col(r,'return_created_date','return_date','return_created','refunded_date');
+    if(dk){
+      try{const rd=new Date(r[dk]);if(!isNaN(rd)){const d15=new Date(rd.getTime()+15*24*60*60*1000);if(d15>revCutoff)return;}}catch{}
+    }
+    const id=getOrderId(r);
+    const commCol=col(r,'comm reversed','comm reverse','commission reversed');
+    if(commCol){const v=String(r[commCol]||'').toUpperCase().trim();if(v!=='NO'&&v!=='❌'&&v!=='FALSE'&&v!=='0')return;}
+    else if((revMap[id]||0)>0) return;
+    const sp=fwdMap[id]?getSP(fwdMap[id]):0;
+    const comm=fwdMap[id]?getCommission(fwdMap[id]):avgComm;
+    affected.push({id,sp,comm,date:getReturnDate(r)});
+  });
+  if(!affected.length) return null;
+  const claim=Math.round(affected.reduce((s,a)=>s+a.comm,0));
+  if(claim<1) return null;
+  return{
+    id:'closed_box',priority:'HIGH',
+    title:'Closed-box returns — commission not reversed ('+affected.length+' orders)',
+    amount:claim,count:affected.length,orders:affected.map(a=>a.id),
+    meta:[['Closed box orders',affected.length],['Commission owed back',inr(claim)],['Policy basis','Product returned sealed — strongest ticket']],
+    desc:affected.length+' returns were CLOSED BOX pickups — sealed product. Commission must be fully reversed per Myntra policy. None appear in Reverse Settlement.',
+    template:'Subject: Closed-box returns — commission reversal mandatory ('+affected.length+' orders, '+inr(claim)+')'+'\\n\\nHi Myntra Seller Support,\\n\\n'+affected.length+' returns picked up as CLOSED_BOX_PICKUP. Commission must be reversed per Myntra policy on sealed returns.\\n\\nOrders: '+affected.length+'\\nClaim: '+inr(claim)+'\\n\\nPREEMPTING STANDARD RESPONSES:'+'\\n\\n1. NOT VERIFIED AS CLOSED BOX: CLOSED_BOX_PICKUP return mode is from Myntra own MDirect Returns Report. This is Myntra classification, not ours.'+'\\n\\n2. CONDITION NOT CONFIRMED: Myntra seller policy mandates commission reversal on sealed returns regardless of condition assessment. Product was never opened. Please cite the specific policy clause if commission is retainable on an unopened return.'+'\\n\\n3. REVERSAL IN JUNE: If reversed in June, provide June Reverse Settlement with these order_line_ids within 5 business days.'+'\\n\\nOrder IDs:\\n'+affected.slice(0,30).map(a=>a.id).join('\\n')+'\\n\\nFull evidence attached.\\n\\nBrand: D\u2019Chica',
+    proof:()=>mkXLSX(affected.map(a=>[a.id,'CLOSED_BOX_PICKUP',a.date||'',a.comm.toFixed(2),'0.00','Sealed return — commission must reverse']),
+      ['Order ID','Return Mode','Return Date','Commission Owed (₹)','Reversed (₹)','Issue'],'Proof_2_Closed_Box.xlsx')
+  };
+}
+
+function ticket_commRate(){
+  const fwd=D.fwd||[];
+  if(!fwd.length) return null;
+  const useRateCard=!!(D.ratecard&&D.ratecard.commission.length);
+  const byType={};
+  fwd.forEach(r=>{
+    const art=getArticleType(r);const sp=getSP(r);const rate=getCommissionRate(r);
+    if(!art||sp===0||rate===0) return;
+    if(!byType[art]) byType[art]={spTotal:0,commTotal:0};
+    byType[art].spTotal+=sp;byType[art].commTotal+=rate*sp/100;
+  });
+  const avgByType={};
+  Object.entries(byType).forEach(([k,v])=>{avgByType[k]=v.spTotal>0?v.commTotal/v.spTotal*100:0;});
+  const affected=[];let totalExcess=0;
+  fwd.forEach(r=>{
+    const art=getArticleType(r);const sp=getSP(r);const rate=getCommissionRate(r);
+    if(!art||sp===0||rate===0) return;
+    let contractedRate=null;
+    if(useRateCard) contractedRate=getContractedCommRate(art,sp);
+    if(contractedRate==null){
+      contractedRate=avgByType[art]||0;
+      if(rate<=contractedRate+5) return;
+    } else {
+      if(rate<=contractedRate) return;
+    }
+    const excess=sp*(rate-contractedRate)/100;
+    if(excess<1) return;
+    totalExcess+=excess;
+    affected.push({id:getOrderId(r),sku:getSKU(r),art,sp,rate,contractedRate,excess,method:useRateCard?'Rate Card':'Statistical'});
+  });
+  if(!affected.length||totalExcess<100) return null;
+  return{
+    id:'comm_rate',priority:'HIGH',
+    title:'Commission overcharge on '+affected.length+' orders',
+    amount:Math.round(totalExcess),count:affected.length,orders:affected.map(a=>a.id),
+    meta:[['Orders overcharged',affected.length],['Excess commission',inr(totalExcess)],['Detection',useRateCard?'Contracted rate card':'Statistical avg'],['Evidence strength',useRateCard?'Strong \u2014 contract breach':'Medium \u2014 pattern based']],
+    desc:affected.length+' orders charged commission above '+(useRateCard?'contracted rate':'category average')+'. Total excess: '+inr(totalExcess)+'.',
+    template:'Subject: Commission overcharge vs Seller Terms — '+affected.length+' orders, '+inr(Math.round(totalExcess))+(useRateCard?' [Rate Card Attached]':'')+'\\n\\nHi Myntra Billing Team,\\n\\n'+affected.length+' orders show commission above contracted Seller Terms rate.\\n\\n'+'Total excess: '+inr(Math.round(totalExcess))+'\\nDetection: '+(useRateCard?'Rate card (Seller Terms, effective 26-Jun-2026)':'Statistical >5pp above category average')+'\\n\\nSample:\\n'+affected.slice(0,8).map(a=>a.id+' | '+a.art+' | ₹'+a.sp.toFixed(0)+' | Charged: '+a.rate.toFixed(1)+'% | Contracted: '+a.contractedRate.toFixed(1)+'% | Excess: ₹'+a.excess.toFixed(0)).join('\\n')+'\\n\\nPREEMPTING STANDARD RESPONSES:'+'\\n\\n1. WRONG CATEGORY / LISTING ERROR: Article type in our proof is from Myntra OWN Forward Settlement (article_type column). We have not inferred any category. To dispute: provide (a) order_line_id, (b) correct article_type from your catalogue, (c) applicable rate under our Seller Terms for that category. Each order addressed individually. Blanket listing error response not accepted.'+'\\n\\n2. RATE CARD NOT APPLICABLE TO APRIL-MAY: Our rate card is effective 26-Jun-2026. If a different rate applied for April-May 2026, share that rate card within 5 business days. Without a counter rate card, current contracted rate is the reference. Note: our statistical analysis shows 5+ pp anomalies above same article type average within the same settlement cycle, which holds regardless of rate card version.'+'\\n\\n3. PROMOTIONAL CAMPAIGN OVERRIDE: If any orders were under a campaign with different commission, provide: campaign name, applicable rate, and list of order_line_ids covered. Campaign rate overrides must be pre-communicated to the seller.'+'\\n\\nWe request credit of '+inr(Math.round(totalExcess))+' within 7 business days.\\n\\nBrand: D\u2019Chica',
+    proof:()=>mkXLSX(affected.map(a=>{
+      let cite=a.method;
+      if(a.method==='Rate Card'&&D.ratecard&&D.ratecard.commission.length){
+        const b=D.ratecard.commission.find(b=>b.art===a.art&&a.sp>=b.lo&&(a.sp<b.hi||b.hi>=1e6));
+        if(b) cite='Seller Terms — '+b.art+' ₹'+b.lo.toLocaleString('en-IN')+'-₹'+(b.hi>=1e6?(b.lo+'+'):b.hi.toLocaleString('en-IN'))+': contracted '+b.rate+'%, charged '+a.rate.toFixed(1)+'%';
+      }
+      return[a.id,a.sku,a.art,a.sp.toFixed(2),a.rate.toFixed(2)+'%',a.contractedRate.toFixed(2)+'%',(a.rate-a.contractedRate).toFixed(2)+'pp',a.excess.toFixed(2),cite];
+    }),
+      ['Order ID','SKU','Article Type','Selling Price (₹)','Comm % Charged','Contracted % (Rate Card)','Overcharge (pp)','Excess (₹)','Rate Card Basis'],'Proof_Commission_Overcharge.xlsx')
+  };
+}
+
+function ticket_fixedFeeOvercharge(){
+  const fwd=D.fwd||[];
+  if(!fwd.length||!D.ratecard||!D.ratecard.fixedFee.length) return null;
+  const affected=[];let totalExcess=0;
+  fwd.forEach(r=>{
+    const art=getArticleType(r);const sp=getSP(r);const actualFee=getFixedFee(r);
+    const contracted=getContractedFixedFee(art,sp);
+    if(contracted==null||actualFee<=contracted) return;
+    const excess=actualFee-contracted;
+    totalExcess+=excess;
+    affected.push({id:getOrderId(r),sku:getSKU(r),art,sp,actualFee,contracted,excess});
+  });
+  if(!affected.length||totalExcess<50) return null;
+  return{
+    id:'fixed_overcharge',priority:'MEDIUM',
+    title:'Fixed fee overcharge on '+affected.length+' orders vs rate card',
+    amount:Math.round(totalExcess),count:affected.length,orders:affected.map(a=>a.id),
+    meta:[['Orders overcharged',affected.length],['Total excess',inr(totalExcess)],['Source','Contracted rate card'],['Type','Contract breach']],
+    desc:affected.length+' orders charged fixed fee above contracted rate. Total: '+inr(totalExcess)+'. Rate card is definitive proof.',
+    template:'Subject: Fixed fee overcharge vs contracted rate \u2014 '+affected.length+' orders, '+inr(Math.round(totalExcess))+'\n\nHi Myntra Billing Team,\n\n'+affected.length+' orders show fixed fee above our contracted rate card.\n\nTotal excess: '+inr(Math.round(totalExcess))+'\nBrand: D\u2019Chica',
+    proof:()=>mkXLSX(affected.map(a=>[a.id,a.sku,a.art,a.sp.toFixed(2),a.actualFee.toFixed(2),a.contracted.toFixed(2),(a.excess).toFixed(2),'Fixed fee exceeds contracted rate']),
+      ['Order ID','SKU','Article Type','Selling Price (\u20b9)','Fixed Fee Charged (\u20b9)','Contracted (\u20b9)','Excess (\u20b9)','Issue'],'Proof_Fixed_Fee_Overcharge.xlsx')
+  };
+}
+
+function ticket_highReturn(){
+  const ret=D.returns||[],sales=D.sales||[];
+  if(!ret.length) return null;
+  const delMap={},retMap={},retReasons={};
+  sales.filter(isDelivered).forEach(r=>{
+    const sku=getMasterSKU(r);if(sku)delMap[sku]=(delMap[sku]||0)+1;
+  });
+  ret.forEach(r=>{
+    const sku=getMasterSKU(r);if(!sku)return;
+    retMap[sku]=(retMap[sku]||0)+1;
+    if(!retReasons[sku])retReasons[sku]={};
+    const reason=str(r,'return_reason','return reason')||'Unknown';
+    retReasons[sku][reason]=(retReasons[sku][reason]||0)+1;
+  });
+  const high=[];
+  Object.entries(delMap).forEach(([sku,d])=>{
+    if(d<3)return;const rv=retMap[sku]||0;const rate=rv/d*100;if(rate<40)return;
+    const top=Object.entries(retReasons[sku]||{}).sort((a,b)=>b[1]-a[1])[0];
+    high.push({sku,d,rv,rate,topReason:top?top[0]:'Unknown'});
+  });
+  high.sort((a,b)=>b.rate-a.rate);
+  if(!high.length) return null;
+  return{
+    id:'high_ret',priority:'INFO',
+    title:high.length+' SKUs with \u226540% return rate \u2014 pause ads + catalogue correction',
+    amount:0,count:high.length,orders:[],skus:high,
+    meta:[['High-return SKUs',high.length],['Threshold','\u226540% (min 3 delivered)'],['Ticket type','Catalogue correction'],['Escalate to','Myntra catalogue team']],
+    desc:'These SKUs are loss-making once return clawback (~\u20b9661/return) is included. Pause Myntra ads. For SKUs with size/fit as top return reason, raise catalogue correction \u2014 incorrect size chart is Myntra\u2019s responsibility.',
+    template:'Subject: High return rates \u2014 size chart correction request\n\nHi Myntra Catalogue Team,\n\nSKUs with \u226540% return rate:\n'+high.slice(0,15).map(s=>s.sku+': '+s.rv+'/'+s.d+' returned ('+s.rate.toFixed(0)+'%) \u2014 top reason: '+s.topReason).join('\n')+(high.length>15?'\n\u2026and '+(high.length-15)+' more':'')+'\n\nPlease review and correct size charts.\n\nBrand: D\u2019Chica',
+    proof:()=>mkXLSX(high.map(s=>[s.sku,s.d,s.rv,s.rate.toFixed(1)+'%',s.topReason,'Pause ads. Request catalogue correction.']),
+      ['Master SKU','Units Delivered','Units Returned','Return Rate','Top Return Reason','Action'],'Proof_High_Return_SKUs.xlsx')
+  };
+}
+
+
+function ticket_returnLogistics() {
+  const rev = D.rev||[];
+  if (!rev.length) return null;
+
+  const overcharged=[], wrongRate=[], clean=[];
+
+  rev.forEach(r => {
+    const fee = Math.abs(num(r, 'shipping_fee', 'shipping fee'));
+    if (fee === 0) return;
+    const zone = str(r, 'shipment_zone_classification', 'zone', 'shipping_case');
+    const rdate = str(r, 'return_date', 'return date');
+    const id = getOrderId(r);
+    const {validFees, minFee, maxFee, cardName, zone: z} = getValidReturnFees(zone, rdate);
+
+    if (!validFees.has(fee)) {
+      // Fee doesn't match any published rate for this zone+date
+      if (fee > maxFee) {
+        // Clear overcharge — above max possible level
+        const excess = fee - maxFee;
+        overcharged.push({id, zone:z, rdate, fee, minFee, maxFee, excess, cardName, issue:'Above maximum contracted rate'});
+      } else if (fee > minFee) {
+        // Higher than Level 1 but not matching any level — might be wrong rate
+        wrongRate.push({id, zone:z, rdate, fee, minFee, cardName, issue:`₹${fee} not in published rates — possible billing error or wrong rate card`});
+      } else {
+        // Below Level 1 — undercharge in our favour, flag as info
+        wrongRate.push({id, zone:z, rdate, fee, minFee, cardName, issue:`₹${fee} below Level 1 rate (${minFee}) — old rate card applied, Myntra may reclaim difference`});
+      }
+    } else {
+      clean.push(id);
+    }
+  });
+
+  if (!overcharged.length && !wrongRate.length) {
+    // All return fees match published rate card — informational only
+    return {
+      id:'return_logistics_ok', priority:'INFO',
+      title:`Return logistics fees verified — all match Myntra published rate cards`,
+      amount:0, count:clean.length, orders:[],
+      meta:[['Returns checked', rev.length], ['Fees matching rate card', clean.length],
+            ['Rate cards checked','Nov 2025, Feb 2026, Apr 2026'],['Rate card effective from','13 Apr 2026 (most recent)']],
+      desc:`All ${rev.length} return logistics fees in Settlement Reverse match Myntra's published rate cards. No overcharges detected. Rate card versions checked: Nov 14 2025, Feb 9 2026, Apr 13 2026. Any future overcharge will be flagged here.`,
+      template:`Subject: Return logistics fee confirmation
+
+Hi Myntra Seller Support,
+
+We have verified all ${rev.length} return logistics fees in our May 2026 settlement against your published rate cards. All fees match the contracted rates under the Apr 13, 2026 rate card.
+
+Brand: D’Chica`,
+      proof: null
+    };
+  }
+
+  const totalExcess = overcharged.reduce((s,a) => s + a.excess, 0);
+  const allFlagged = [...overcharged, ...wrongRate];
+
+  return {
+    id:'return_logistics', priority: overcharged.length ? 'HIGH' : 'MEDIUM',
+    title: overcharged.length
+      ? `Return logistics overcharge on ${overcharged.length} orders — ${inr(Math.round(totalExcess))} excess`
+      : `Return logistics rate discrepancy on ${wrongRate.length} orders`,
+    amount: Math.round(totalExcess), count: allFlagged.length,
+    orders: allFlagged.map(a => a.id),
+    meta:[['Returns checked', rev.length],['Definite overcharges', overcharged.length],
+          ['Rate discrepancies', wrongRate.length],['Total excess', inr(Math.round(totalExcess))]],
+    desc: `Return logistics fees cross-checked against Myntra's published rate cards (Nov 2025, Feb 2026, Apr 2026). ${overcharged.length} orders charged above the maximum contracted rate. ${wrongRate.length} orders with fees not matching any published rate tier — either wrong rate card applied or billing error. Evidence: Myntra's own published PDFs.`,
+    template: `Subject: Return logistics fee overcharge vs published rate card
+
+Hi Myntra Seller Support,
+
+We have cross-referenced our Settlement Reverse report against your published rate cards and identified return logistics fees that do not match any contracted rate.
+
+Definite overcharges (above max rate): ${overcharged.length}
+Rate discrepancies (no matching tier): ${wrongRate.length}
+Total excess: ${inr(Math.round(totalExcess))}
+
+Affected order IDs: ${allFlagged.slice(0,15).map(a=>a.id).join(', ')}
+
+Evidence: Myntra published rate cards (Nov 14 2025, Feb 9 2026, Apr 13 2026).
+Full proof sheet attached.
+
+Brand: D’Chica`,
+    proof: () => mkXLSX(
+      allFlagged.map(a => [a.id, a.zone, a.rdate, a.fee, a.minFee, a.cardName, a.issue]),
+      ['Order ID','Zone','Return Date','Fee Charged (₹)','Level 1 Rate (₹)','Rate Card Applied','Issue'],
+      'Proof_Return_Logistics_Fee.xlsx')
+  };
+}
+
+function ticket_nonOrderDeductions() {
+  const nonorder = D.nonorder||[];
+  if (!nonorder.length) return null;
+
+  const deductions=[], credits=[], noGSTInvoice=[];
+  let totalDeducted=0, totalCredited=0;
+
+  nonorder.forEach(r => {
+    // Format A: Myntra Non-Order Settlement CSV (Settlement_Amount, Settlement_Type, UTR, Invoice_Ref...)
+    const settlAmt = parseFloat(r[col(r,'settlement_amount','Settlement_Amount')]||0)||0;
+    const settlType = str(r,'settlement_type','Settlement_Type').toLowerCase();
+    const settlDesc = str(r,'settlement_description','Settlement_Description','description','charge type','deduction type');
+    const invoiceRef = str(r,'invoice_ref','Invoice_Ref','invoice number','invoice_number');
+    const utr = str(r,'utr','UTR');
+    const dt = str(r,'settlement_date','Settlement_Date','date');
+    // Format B: generic deduction files
+    const deductAmt = Math.abs(parseFloat(r[col(r,'deduction amount','charge amount','amount')]||0)||0);
+
+    let amt=0, isDebit=false, isCredit=false;
+    if (settlAmt !== 0) {
+      if (settlAmt < 0 || settlType==='debit')  { amt=Math.abs(settlAmt); isDebit=true; }
+      else if (settlAmt > 0 || settlType==='credit') { amt=settlAmt; isCredit=true; }
+    } else if (deductAmt > 0) { amt=deductAmt; isDebit=true; }
+    if (amt < 0.01) return;
+
+    const row = {desc:settlDesc||'Unknown', inv:invoiceRef||'', amt, dt, utr};
+    if (isCredit) { totalCredited+=amt; credits.push(row); return; }
+    totalDeducted += amt;
+
+    // SplitNOD / PCN_ = internal batch ref, NOT a GST invoice with IRN
+    const hasGSTInv = invoiceRef && invoiceRef.length > 0
+      && !invoiceRef.toUpperCase().includes('SPLIT')
+      && !invoiceRef.toUpperCase().includes('NOD')
+      && !invoiceRef.toUpperCase().includes('PCN_');
+    if (!hasGSTInv) noGSTInvoice.push(row);
+    else deductions.push(row);
+  });
+
+  if (totalDeducted===0 && totalCredited===0) return null;
+  const noGSTAmt = noGSTInvoice.reduce((s,r)=>s+r.amt,0);
+  const itcAtRisk = Math.round(noGSTAmt * 0.18);
+  const byType={};
+  [...deductions,...noGSTInvoice].forEach(r=>{const t=r.desc||'Unknown';byType[t]=(byType[t]||0)+r.amt;});
+
+  return {
+    id:'non_order', priority:'HIGH',
+    title:`Non-order deductions: ${inr(Math.round(totalDeducted))} — GST invoice pending, ₹${itcAtRisk.toLocaleString('en-IN')} ITC at risk`,
+    amount:itcAtRisk, count:noGSTInvoice.length, orders:[],
+    meta:[['Total deducted from settlement',inr(Math.round(totalDeducted))],
+          ['Credits from Myntra to you',totalCredited>0?inr(Math.round(totalCredited)):'₹0'],
+          ['Deductions without GST invoice',noGSTInvoice.length],
+          ['ITC at risk (18% of unverified)',inr(itcAtRisk)]],
+    desc:`Myntra deducted ${inr(Math.round(totalDeducted))} in non-order charges from settlement (ad spend, platform fees, campaigns). ${noGSTInvoice.length} deduction(s) totalling ${inr(Math.round(noGSTAmt))} have only an internal batch reference — not a proper GST invoice with IRN. Without a valid GST invoice you cannot claim Input Tax Credit of ~${inr(itcAtRisk)} (18% of deduction). Breakdown: ${Object.entries(byType).map(([k,v])=>`${k} ${inr(Math.round(v))}`).join(', ')}.${totalCredited>0?` Also: ${inr(Math.round(totalCredited))} in Myntra credits — verify these reached your bank.`:''}`,
+    template:`Subject: GST invoice request — non-order settlement deductions ${inr(Math.round(totalDeducted))}
+
+Hi Myntra Seller Support,
+
+We have the following non-order deductions in our May 2026 settlement:
+
+${[...noGSTInvoice,...deductions].map(r=>`${r.dt} | ${r.desc} | ₹${r.amt.toFixed(2)} | Ref: ${r.inv||'NO INVOICE'}`).join('\n')}
+
+Total deducted: ${inr(Math.round(totalDeducted))}
+GST Input Tax Credit at risk: ~${inr(itcAtRisk)}
+
+For each deduction, please provide:
+1. GST tax invoice with valid IRN (mandatory for ITC claim under GST law)
+2. Campaign-wise / SKU-wise spend breakdown for the batch reference
+3. Confirmation each deduction was authorised under our account
+
+Batch reference ${noGSTInvoice[0]?.inv||''} (UTR: ${noGSTInvoice[0]?.utr||''}) covers multiple campaigns — line-item detail required.
+${totalCredited>0?`
+Also confirm credit of ${inr(Math.round(totalCredited))} (seller incentive) was applied to our settlement.
+`:''}Brand: D’Chica`,
+    proof:()=>mkXLSX(
+      [...noGSTInvoice.map(r=>[r.dt,r.desc,r.amt.toFixed(2),r.inv||'NO GST INVOICE',r.utr||'','ITC at risk — request GST invoice with IRN']),
+       ...credits.map(r=>[r.dt,r.desc,r.amt.toFixed(2),r.inv||'',r.utr||'','CREDIT from Myntra — verify bank receipt']),
+       ...deductions.map(r=>[r.dt,r.desc,r.amt.toFixed(2),r.inv,r.utr||'','Has invoice ref — verify against CTA'])],
+      ['Date','Description','Amount (₹)','Invoice Reference','UTR','Status'],
+      'Proof_Non_Order_Deductions.xlsx')
+  };
+}
+
+function ticket_marketingCharges(){
+  // Only check marketing/royalty charges in fwd settlement
+  // Do NOT flag reverseAdditionalCharges (that's a returns field, not marketing)
+  const fwd=D.fwd||[];
+  if(!fwd.length) return null;
+  const MKTG_COLS=['royaltycharges','marketingcharges','royaltypercent'];
+  const affected=[];let totalCharged=0;
+  fwd.forEach(r=>{
+    const keys=Object.keys(r);
+    let mktAmt=0;
+    keys.forEach(k=>{
+      const kn=norm(k);
+      // Only flag actual marketing/royalty columns, NOT reverseAdditionalCharges
+      if(MKTG_COLS.some(m=>kn.includes(m))&&!kn.includes('reverseadditional')){
+        const v=parseFloat(r[k])||0;
+        if(v>0) mktAmt+=v;
+      }
+    });
+    if(mktAmt>0){
+      totalCharged+=mktAmt;
+      affected.push({id:getOrderId(r),sku:getSKU(r),amt:mktAmt});
+    }
+  });
+  if(!affected.length||totalCharged<1) return null;
+  return{
+    id:'mkt_charge',priority:'HIGH',
+    title:'Marketing / royalty charges found — '+inr(Math.round(totalCharged))+' with no agreed rate',
+    amount:Math.round(totalCharged),count:affected.length,orders:affected.map(a=>a.id),
+    meta:[['Orders with charges',affected.length],['Total charged',inr(Math.round(totalCharged))],
+          ['Agreed rate','₹0 (no marketing agreement)'],['Action','Raise ticket immediately']],
+    desc:'Myntra has charged '+inr(Math.round(totalCharged))+' in marketing or royalty fees across '+affected.length+' orders. D\u2019Chica has no marketing fee agreement with Myntra — these charges have no contractual basis and must be reversed.',
+    template:'Subject: Unauthorised marketing/royalty charges — '+inr(Math.round(totalCharged))+'\n\nHi Myntra Billing,\n\nWe have been charged '+inr(Math.round(totalCharged))+' in marketing/royalty fees across '+affected.length+' orders. We have no signed marketing fee agreement with Myntra.\n\nPlease reverse immediately and provide the contract under which these were charged.\n\nBrand: D\u2019Chica',
+    proof:()=>mkXLSX(affected.map(a=>[a.id,a.sku,a.amt.toFixed(2),'No marketing agreement']),
+      ['Order ID','SKU','Marketing Charge (\u20b9)','Issue'],'Proof_Marketing_Charges.xlsx')
+  };
+}
+
+
+function ticket_partialSettlement(){
+  const fwd=D.fwd||[];
+  if(!fwd.length) return null;
+
+  const pending=[];
+  fwd.forEach(r=>{
+    const k=col(r,'amount_pending_settlement','amount pending settlement');
+    if(!k) return;
+    const v=parseFloat(r[k])||0;
+    if(v<=0.01) return;
+    pending.push({
+      id:getOrderId(r),
+      sp:getSP(r),
+      expected:parseFloat(r[col(r,'total_expected_settlement','total expected settlement')]||0),
+      actual:parseFloat(r[col(r,'total_actual_settlement','total actual settlement')]||0),
+      pending:v,
+      art:getArticleType(r),
+      delDate:getDeliveryDate(r)
+    });
+  });
+
+  if(!pending.length) return null;
+  const totalPending=pending.reduce((s,a)=>s+a.pending,0);
+  if(totalPending<10) return null;
+
+  return{
+    id:'partial_settle',priority:'MEDIUM',
+    title:`${pending.length} orders partially settled — ${inr(Math.round(totalPending))} still pending`,
+    amount:Math.round(totalPending),count:pending.length,orders:pending.map(a=>a.id),
+    meta:[['Orders in Forward Settlement',fwd.length],['Partially settled',pending.length],['Amount still pending',inr(Math.round(totalPending))],['Typical reason','COD / postpaid orders pending customer payment']],
+    desc:`${pending.length} orders appear in the Forward Settlement file but show amount_pending_settlement > 0 — meaning Myntra has the order in their settlement cycle but has not released the full payout. This typically occurs for COD (cash on delivery) orders where the customer payment hasn't cleared, or postpaid orders. Total pending: ${inr(Math.round(totalPending))}. If these orders are older than D+30, follow up with Myntra payments team.`,
+    template:`Subject: Partially settled orders — ${pending.length} orders, ${inr(Math.round(totalPending))} pending
+
+Hi Myntra Payments Team,
+
+${pending.length} orders in our May Forward Settlement show amount_pending_settlement > 0, totalling ${inr(Math.round(totalPending))} yet to be released.
+
+Affected order IDs (first 20): ${pending.slice(0,20).map(a=>a.id).join(', ')}
+
+Please confirm when these amounts will be released and whether any customer payment or dispute is holding them.
+
+Brand: D’Chica`,
+    proof:()=>mkXLSX(
+      pending.map(a=>[a.id,a.art,a.delDate,a.sp.toFixed(2),a.expected.toFixed(2),a.actual.toFixed(2),a.pending.toFixed(2),'amount_pending_settlement > 0']),
+      ['Order ID','Article Type','Delivery Date','Selling Price (₹)','Expected Settlement (₹)','Actual Settlement (₹)','Pending (₹)','Issue'],
+      'Proof_Partial_Settlement.xlsx')
+  };
+}
+
+function ticket_deliveredNotPaid(){
+  const sales=D.sales||[], fwd=D.fwd||[];
+  if(!sales.length||!fwd.length) return null;
+
+  // Find settlement coverage end date (max payout date across all uploaded settlements)
+  let settlementEnd=null;
+  const today=new Date();
+  const reasonableMax=new Date(today.getFullYear(), today.getMonth()+1, 0); // end of current month
+  fwd.forEach(r=>{
+    const k=col(r,'settlement_date_prepaid_payment','payout date','payout_date');
+    if(!k) return;
+    try{
+      const d=new Date(r[k]);
+      // Reject obviously wrong dates (future dates > 1 month out = likely CSV parsing artifact)
+      if(!isNaN(d)&&d<=reasonableMax&&(!settlementEnd||d>settlementEnd)) settlementEnd=d;
+    }catch{}
+  });
+  const cutoff=settlementEnd||today;
+
+  // Use order_line_id for cross-reference (universal key across all Myntra files)
+  const fwdIds=new Set(fwd.map(r=>getOrderId(r)));
+  const delivered=sales.filter(isDelivered);
+  if(!delivered.length) return null;
+
+  // Flag any delivered order not in ANY uploaded settlement where D+15 <= cutoff
+  // Note: May settlement covers April orders (verified - 839 April orders ARE settled)
+  // The ones NOT in settlement are genuinely unpaid regardless of D+15 date
+  const notPaid=[], tooRecent=[];
+  delivered.filter(r=>!fwdIds.has(getOrderId(r))).forEach(r=>{
+    const dk=col(r,'delivered on','delivery_date','delivered_on','order_delivered_date');
+    let delDate=null;
+    if(dk){try{delDate=new Date(r[dk]);}catch{}}
+    const d15=delDate?new Date(delDate.getTime()+15*24*60*60*1000):null;
+    // Only flag if D+15 has passed (Myntra had time to pay)
+    if(!d15||d15<=cutoff) notPaid.push({row:r,delDate,d15});
+    else tooRecent.push({row:r,delDate,d15});
+  });
+
+  if(!notPaid.length) return null;
+  // Days-past-D+15 stats
+  const daysList=notPaid.map(({d15})=>d15?Math.round((cutoff-d15)/864e5):0).filter(d=>d>0);
+  const minDays=daysList.length?Math.min(...daysList):0;
+  const maxDays=daysList.length?Math.max(...daysList):0;
+  const avgDays=daysList.length?Math.round(daysList.reduce((s,d)=>s+d,0)/daysList.length):0;
+  const gmv=notPaid.reduce((s,a)=>s+getSP(a.row),0);
+  const byMonth={};
+  notPaid.forEach(({row,delDate})=>{
+    const m=delDate?delDate.getFullYear()+'-'+String(delDate.getMonth()+1).padStart(2,'0'):'Unknown';
+    byMonth[m]=(byMonth[m]||0)+1;
+  });
+  const endStr=settlementEnd?settlementEnd.toLocaleDateString('en-IN'):'today';
+  // Compute settlement start (earliest payout date)
+  let settlementStart=null;
+  fwd.forEach(r=>{
+    const k=col(r,'settlement_date_prepaid_payment','payout date','payout_date');
+    if(!k) return;
+    try{const d=new Date(r[k]);if(!isNaN(d)&&d<=reasonableMax&&(!settlementStart||d<settlementStart))settlementStart=d;}catch{}
+  });
+  const startStr=settlementStart?settlementStart.toLocaleDateString('en-IN'):'start of period';
+  const totalUnmatched=notPaid.length+tooRecent.length;
+
+  return{
+    id:'del_not_paid',priority:'MEDIUM',
+    title:notPaid.length+' delivered orders past D+15 not in any settlement — '+inr(Math.round(gmv))+' GMV',
+    amount:Math.round(gmv),count:notPaid.length,
+    orders:notPaid.map(a=>getOrderId(a.row)).filter(Boolean),
+    meta:[
+      ['Settlement coverage up to',endStr],
+      ['Delivered orders checked',delivered.length],
+      ['Settled & paid',delivered.length-totalUnmatched],
+      ['Not settled — past D+15',notPaid.length],
+      ['Days past D+15 (min / avg / max)',minDays+' / '+avgDays+' / '+maxDays+' days'],
+    ],
+    desc:notPaid.length+' orders confirmed delivered do not appear in any uploaded Forward Settlement. Settlement coverage up to '+endStr+'. Days past D+15: min='+minDays+', avg='+avgDays+', max='+maxDays+'. Delivery breakdown: '+Object.entries(byMonth).sort().map(([m,c])=>m+': '+c).join(', ')+'.'+
+      (tooRecent.length>0?' '+tooRecent.length+' additional orders within D+15 will appear in next settlement cycle.':''  ),
+    template:'Subject: Delivered orders not settled — '+notPaid.length+' orders, '+inr(Math.round(gmv))+' — Response required by 10 July 2026'+'\n\n'+'Hi Myntra Payments Team,'+'\n\n'+notPaid.length+' delivered orders are absent from all Forward Settlement reports. These breach your D+15 SLA by '+minDays+' to '+maxDays+' days (avg: '+avgDays+' days).'+'\n\n'+'Settlement verified: '+startStr+' to '+endStr+'\nOrders not settled (past D+15): '+notPaid.length+'\nGMV outstanding: '+inr(Math.round(gmv))+'\nDays past D+15: min='+minDays+' / avg='+avgDays+' / max='+maxDays+'\n\nDelivery breakdown:\n'+Object.entries(byMonth).sort().map(([m,c])=>m+': '+c).join('\\n')+'\n\nD+15 SLA BREACH \u2014 EXPLANATION REQUIRED:\\nMyntra settlement policy commits to payment within D+15 from delivery confirmation. These orders breached that SLA by '+minDays+' to '+maxDays+' days (avg: '+avgDays+' days). This is a contractual breach independent of eventual payment.\\nWe require written explanation within 5 business days:\\n(a) Why was the D+15 SLA breached for these specific orders?\\n(b) Was there a systemic issue affecting these order_line_ids?\\n(c) What remediation prevents recurrence?\\nEventual payment in a future cycle does NOT close the SLA breach. Both must be addressed separately.\\n\\nPREEMPTING \u201CCHECK JUNE SETTLEMENT\u201D RESPONSE:\n- June 2026 Forward Settlement is expected by 7 July 2026.\n- If any of these orders were paid in June, provide the June Forward Settlement showing the specific order_line_ids with payout dates.\n- This must be provided within 5 business days. Do not close this ticket citing \u201Cthey may be in June\u201D without order-level documentary evidence.\n- If June settlement is not produced by 10 July 2026 with matching order_line_ids, these orders remain outstanding and we will escalate to Seller Support Head.\n\nFirst 20 order line IDs: '+notPaid.slice(0,20).map(a=>getOrderId(a.row)).join(', ')+'\n\nEvidence attached sorted by most overdue.\n\nADDITIONAL PREEMPTIONS:\\n\\n4. RETURNED AFTER DELIVERY: Cross-checked against April and May Returns and RTO Report. None of these order_line_ids appear in returns data. If any was returned post-delivery, provide returns documentation with order_line_id and return date.\\n\\n5. CANCELLED POST-DELIVERY: Status in Myntra own Sale Order Report is Delivered. If subsequently cancelled in Myntra system, provide updated order record with timestamp.\\n\\nBrand: D\u2019Chica',
+    proof:()=>mkXLSX(
+      [...notPaid].sort((a,b)=>(b.d15&&a.d15?(b.d15-a.d15):(b.d15?1:-1))).map(({row,delDate,d15})=>{
+        const id=getOrderId(row);
+        const delStr=delDate?delDate.toLocaleDateString('en-IN'):'Unknown';
+        const d15Str=d15?d15.toLocaleDateString('en-IN'):'Unknown';
+        const daysPast=d15?Math.round((cutoff-d15)/864e5):null;
+        return[id,getSKU(row),getArticleType(row),delStr,d15Str,
+               daysPast!=null?String(daysPast)+' days past D+15':'',
+               getSP(row).toFixed(2),'Not in any Forward Settlement — '+String(daysPast||0)+' days overdue'];
+      }),
+      ['Order ID','SKU','Article Type','Delivery Date','D+15 Date','Days Past D+15','Selling Price (₹)','Issue'],
+      'Proof_Delivered_Not_Paid.xlsx')
+  };
+}
+
+function ticket_creditNoteVerification() {
+  const nonorder = D.nonorder||[];
+  const credits = [];
+  nonorder.forEach(r => {
+    const settlAmt = parseFloat(r[col(r,'settlement_amount','Settlement_Amount')]||0)||0;
+    const settlType = str(r,'settlement_type','Settlement_Type').toLowerCase();
+    if (settlAmt > 0 || settlType === 'credit') {
+      const amt = Math.abs(settlAmt);
+      if (amt < 0.01) return;
+      credits.push({amt, desc:str(r,'settlement_description','Settlement_Description','description'),
+        inv:str(r,'invoice_ref','Invoice_Ref','invoice number'), dt:str(r,'settlement_date','Settlement_Date','date'), utr:str(r,'utr','UTR')});
+    }
+  });
+  if (!credits.length) return null;
+  const total = credits.reduce((s,c)=>s+c.amt,0);
+  return {
+    id:'credit_note', priority:'MEDIUM',
+    title:`Myntra credit of ${inr(Math.round(total))} — verify it reached your bank`,
+    amount:Math.round(total), count:credits.length, orders:[],
+    meta:[['Credits from Myntra',credits.length],['Total credit amount',inr(Math.round(total))],
+          ['Action required','Cross-check bank statement'],['Risk','Myntra owes this — confirm receipt']],
+    desc:`Myntra issued ${credits.length} credit(s) totalling ${inr(Math.round(total))} against your account (seller incentive or credit note). Verify your bank statement confirms this was credited. If absent, raise immediately.`,
+    template:`Subject: Seller credit note — confirm receipt of ${inr(Math.round(total))}
+
+Hi Myntra Seller Support,
+
+${credits.map(c=>`${c.dt} | ${c.desc} | ${inr(Math.round(c.amt))} | Ref: ${c.inv||'N/A'}`).join('\n')}
+
+Please confirm these credits were applied to our settlement account and provide bank UTR confirmation.
+
+Brand: D’Chica`,
+    proof: null
+  };
+}
+
+
+function toggleCard(el){el.parentElement.classList.toggle('open');}
+
+async function run(){
+  const btn=document.getElementById('runBtn');
+  const statusEl=document.getElementById('runStatus');
+  const progWrap=document.getElementById('progWrap');
+  const progBar=document.getElementById('progBar');
+
+  function setStatus(msg){ if(statusEl) statusEl.textContent=msg; }
+  function setProgress(pct){
+    if(progWrap) progWrap.style.display='block';
+    if(progBar) progBar.style.width=pct+'%';
+  }
+
+  try{
+    btn.disabled=true;
+    setProgress(5); setStatus('Starting analysis...');
+    await new Promise(r=>setTimeout(r,30));
+
+    const TICKET_FNS=[
+      ['Commission not reversed',    ()=>ticket_commNotReversed()],
+      ['Closed box returns',         ()=>ticket_closedBox()],
+      ['Commission rate overcharge', ()=>ticket_commRate()],
+      ['Fixed fee overcharge',       ()=>ticket_fixedFeeOvercharge()],
+      ['Partial settlement',         ()=>ticket_partialSettlement()],
+      ['Delivered not paid',         ()=>ticket_deliveredNotPaid()],
+      ['Credit note',                ()=>ticket_creditNoteVerification()],
+      ['High return rate SKUs',      ()=>ticket_highReturn()],
+      ['Marketing charges',          ()=>ticket_marketingCharges()],
+    ];
+
+    const tickets=[];
+    for(let i=0;i<TICKET_FNS.length;i++){
+      const pct=5+Math.round(80*(i/TICKET_FNS.length));
+      setProgress(pct);
+      setStatus('Checking: '+TICKET_FNS[i][0]+' ('+(i+1)+'/'+TICKET_FNS.length+')');
+      await new Promise(r=>setTimeout(r,20));
+      try{
+        const result=TICKET_FNS[i][1]();
+        if(result) tickets.push(result);
+      }catch(err){
+        console.error('Ticket failed ['+TICKET_FNS[i][0]+']:', err);
+        setStatus('Warning: '+TICKET_FNS[i][0]+' skipped ('+err.message+')');
+        await new Promise(r=>setTimeout(r,300));
+      }
+    }
+
+    setProgress(90); setStatus('Rendering results...');
+    await new Promise(r=>setTimeout(r,20));
+    window._tickets=tickets;
+
+    const totalRec=tickets.filter(t=>t&&t.amount>0).reduce((s,t)=>s+t.amount,0);
+    const highCount=tickets.filter(t=>t&&t.priority==='HIGH').length;
+
+    const summGrid=document.getElementById('summGrid');
+    if(summGrid) summGrid.innerHTML=
+      '<div class="metric"><div class="ml">Tickets found</div><div class="mv b">'+tickets.length+'</div></div>'+
+      '<div class="metric"><div class="ml">High priority</div><div class="mv r">'+highCount+'</div></div>'+
+      '<div class="metric"><div class="ml">Total recoverable</div><div class="mv g">'+inr(totalRec)+'</div></div>'+
+      '<div class="metric"><div class="ml">Data loaded</div><div class="mv a" style="font-size:11px;line-height:1.4">'+
+        'Fwd:'+(D.fwd||[]).length+' Rev:'+(D.rev||[]).length+' Ret:'+(D.returns||[]).length+' Sales:'+(D.sales||[]).length+
+      '</div></div>';
+
+    const list=document.getElementById('ticketList');
+    if(list){
+      list.innerHTML='';
+      if(!tickets.length){
+        list.innerHTML='<div class="no-issues">\u2713 No billing anomalies detected.</div>';
+      } else {
+        tickets.forEach((t,i)=>{
+          try{
+            const bc=t.priority==='HIGH'?'bh':t.priority==='MEDIUM'?'bm':'bi';
+            const pl=t.priority==='HIGH'?'High priority':t.priority==='MEDIUM'?'Medium':'Action needed';
+            const metaHtml=(t.meta||[]).map(([l,v])=>'<div class="meta-cell"><div class="ml">'+l+'</div><div class="mv">'+v+'</div></div>').join('');
+            const orders=(t.orders||[]).slice(0,40);
+            const orderHtml=orders.length?
+              '<div class="order-section"><div class="order-label">Affected orders ('+t.orders.length+' total)</div><div class="order-chips">'+
+              orders.map(o=>'<span class="o-chip">'+o+'</span>').join('')+
+              (t.orders.length>40?'<span class="o-chip">+more</span>':'')+
+              '</div></div>':'';
+            const card=document.createElement('div');
+            card.className='t-card';
+            card.innerHTML=
+              '<div class="t-top" onclick="toggleCard(this)">'+
+                '<span class="t-badge '+bc+'">'+pl+'</span>'+
+                '<span class="t-title">'+t.title+'</span>'+
+                (t.amount>0?'<span class="t-amt">'+inr(t.amount)+'</span>':'')+
+                '<span class="t-chev">\u25bc</span>'+
+              '</div>'+
+              '<div class="t-body">'+
+                '<p class="t-desc">'+(t.desc||'')+'</p>'+
+                '<div class="meta-grid">'+metaHtml+'</div>'+
+                orderHtml+
+                '<div class="tmpl-box">'+
+                  '<div class="tmpl-head">\uD83D\uDCCB Ticket template</div>'+
+                  '<pre id="tmpl'+i+'">'+(t.template||'')+'</pre>'+
+                '</div>'+
+                '<div class="btn-row">'+
+                  '<button class="btn-sm" onclick="copyT('+i+')">\uD83D\uDCCB Copy template</button>'+
+                  (t.proof?'<button class="btn-sm dl" onclick="dlProof('+i+')">\u2B07 Download proof</button>':'')+
+                '</div>'+
+              '</div>';
+            list.appendChild(card);
+          }catch(renderErr){
+            console.error('Render error for ticket '+i+':', renderErr);
+          }
+        });
+      }
+    }
+
+    setProgress(100);
+    setStatus('');
+    setTimeout(()=>{ if(progWrap) progWrap.style.display='none'; },400);
+
+    const results=document.getElementById('results');
+    if(results){
+      results.classList.add('show');
+      results.scrollIntoView({behavior:'smooth',block:'start'});
+    }
+
+  }catch(fatalErr){
+    console.error('Fatal run error:', fatalErr);
+    setStatus('Error: '+fatalErr.message+' — check browser console (Cmd+Option+J)');
+  } finally {
+    btn.disabled=false;
+  }
+}
+
+window.copyT=function(i){
+  navigator.clipboard.writeText(document.getElementById('tmpl'+i).textContent).then(()=>{
+    const btns=document.querySelectorAll('.btn-row');const btn=btns[i]?.querySelector('.btn-sm:first-child');
+    if(btn){btn.textContent='✓ Copied!';setTimeout(()=>{btn.textContent='📋 Copy ticket template';},2000);}
+  });
+};
+window.dlProof=function(i){window._tickets?.[i]?.proof?.();};
+
+
+// ── DETECTION ──
+function detectType(headers){
+  const lh=headers.map(h=>norm(h||''));
+  let bestKey=null,bestScore=0;
+  for(const def of DEFS){
+    if((def.nokws||[]).some(w=>lh.some(h=>h.includes(norm(w))))) continue;
+    const score=def.kws.filter(w=>lh.some(h=>h.includes(norm(w)))).length;
+    const needed=def.minMatch||2;
+    if(score>=needed&&score>bestScore){bestScore=score;bestKey=def.key;}
+  }
+  return bestKey;
+}
+
+// ── PARSE BUFFER ──
+function parseBuffer(buf,filename){
+  filename=filename||'';
+  if(filename.toLowerCase().endsWith('.csv')){
+    try{
+      const text=new TextDecoder().decode(new Uint8Array(buf));
+      const lines=text.trim().split('\n').filter(l=>l.trim());
+      if(!lines.length) return null;
+      const hdrs=lines[0].split(',').map(h=>h.replace(/^["']+|["']+$/g,'').trim());
+      const rows=[];
+      for(let i=1;i<lines.length;i++){
+        const vals=[];let cur='',inQ=false;
+        for(let ci=0;ci<lines[i].length;ci++){
+          const ch=lines[i][ci];
+          if(ch==='"'||ch==="'") inQ=!inQ;
+          else if(ch===','&&!inQ){vals.push(cur.trim());cur='';}
+          else cur+=ch;
+        }
+        vals.push(cur.trim());
+        if(vals.every(v=>!v)) continue;
+        const r={};hdrs.forEach((h,j)=>{r[h]=(vals[j]||'').replace(/^["']+|["']+$/g,'').trim();});
+        rows.push(r);
+      }
+      if(!rows.length) return null;
+      // Use EXACT header match (not substring on joined string) to avoid false positives
+      // e.g. royaltyPercent_prepaid in Forward Settlement must NOT match royaltypercent
+      const normHdrs=hdrs.map(h=>h.toLowerCase().replace(/[_\s]+/g,''));
+      const hasExact=s=>normHdrs.some(h=>h===s);
+      const hasCol=s=>normHdrs.some(h=>h.includes(s));
+      // Royalty report: has 'royaltypercent' as EXACT column (not 'royaltypercentprepaid')
+      if(hasExact('royaltypercent')||hasCol('netroyaltycharges')||hasCol('deliveredroyaltycharges')) return{type:'royalty',rows};
+      // Non-order settlement: has Settlement_Amount AND Settlement_Type (both required)
+      if(hasExact('settlementamount')&&hasExact('settlementtype')) return{type:'nonorder',rows};
+      const type=detectType(hdrs);
+      return type?{type,rows}:{type:'unknown',rows};
+    }catch(e){console.error('CSV parse error:',e);}
+  }
+  const wb=XLSX.read(buf,{type:'array'});
+  for(const name of wb.SheetNames){
+    const raw=XLSX.utils.sheet_to_json(wb.Sheets[name],{header:1,defval:null});
+    if(!raw||raw.length<2) continue;
+    let hi=0;
+    for(let i=0;i<Math.min(5,raw.length);i++){if((raw[i]||[]).filter(v=>v!==null&&v!=='').length>3){hi=i;break;}}
+    const hdrs=(raw[hi]||[]).map(h=>(h||'').trim());
+    const rows=[];
+    for(let i=hi+1;i<raw.length;i++){
+      if(!raw[i]||raw[i].every(v=>v===null||v==='')) continue;
+      const r={};hdrs.forEach((h,j)=>{r[h]=raw[i][j];});rows.push(r);
+    }
+    if(!rows.length) continue;
+    const type=detectType(Object.keys(rows[0]));
+    if(type) return{type,rows};
+  }
+  const RC_SHEET_NAMES=['commission','fixed fee','seller marketing','rate card','ratecard'];
+  const RC_COL_SIGNALS=['commissionpercentage','fixedfee','lowerlimit','upperlimit','commissionmodel'];
+  const rcSheets=[];
+  for(const name of wb.SheetNames){
+    const isRCSheet=RC_SHEET_NAMES.some(s=>name.toLowerCase().includes(s));
+    const raw=XLSX.utils.sheet_to_json(wb.Sheets[name],{header:1,defval:null});
+    if(!raw||raw.length<2) continue;
+    let hi=0;
+    for(let i=0;i<Math.min(3,raw.length);i++){if((raw[i]||[]).filter(v=>v!==null&&v!=='').length>2){hi=i;break;}}
+    const rawHdrs=(raw[hi]||[]).map(h=>(h||'').trim());
+    const hdrsN=rawHdrs.map(h=>norm(h));
+    const hasRCCols=RC_COL_SIGNALS.some(s=>hdrsN.some(h=>h.includes(s)));
+    if(isRCSheet||hasRCCols){
+      const rows=[];
+      for(let i=hi+1;i<raw.length;i++){
+        if(!raw[i]||raw[i].every(v=>v===null||v==='')) continue;
+        const r={};rawHdrs.forEach((h,j)=>{r[h]=raw[i][j];});rows.push(r);
+      }
+      if(rows.length) rcSheets.push({sheet:name,rows});
+    }
+  }
+  if(rcSheets.length>0) return{type:'ratecard',rows:rcSheets[0].rows,allSheets:rcSheets};
+  return null;
+}
+
+// ── XLSX EXPORT ──
+function mkXLSX(data,headers,filename){
+  const wb=XLSX.utils.book_new();
+  const ws=XLSX.utils.aoa_to_sheet([headers,...data]);
+  ws['!cols']=headers.map(h=>({wch:Math.max((h||'').length+4,18)}));
+  XLSX.utils.book_append_sheet(wb,ws,'Evidence');
+  XLSX.writeFile(wb,filename);
+}
+
+function prog(pct){
+  const w=document.getElementById('progWrap');w.style.display='block';
+  document.getElementById('progBar').style.width=pct+'%';
+  if(pct>=100)setTimeout(()=>{w.style.display='none';},400);
+}
+
+function updateRunBtn(){
+  const hasMin=!!(D.fwd&&D.fwd.length&&D.rev&&D.rev.length&&D.returns&&D.returns.length&&D.sales&&D.sales.length);
+  const btn=document.getElementById('runBtn');
+  btn.disabled=!hasMin;
+
+  // Always show live data count so user can confirm what's loaded
+  const counter='Fwd:'+(D.fwd||[]).length+' Rev:'+(D.rev||[]).length+' Ret:'+(D.returns||[]).length+' Sales:'+(D.sales||[]).length;
+  const dataEl=document.getElementById('dataCounter');
+  if(dataEl) dataEl.textContent=counter;
+
+  if(hasMin){
+    const loaded=[];
+    if(D.sales&&D.sales.length) loaded.push('Sales ('+D.sales.length.toLocaleString()+' orders)');
+    if(D.ratecard&&D.ratecard.commission.length) loaded.push('Rate card ('+D.ratecard.commission.length+' comm bands)');
+    btn.textContent='Detect tickets'+(loaded.length?' · '+loaded.join(', '):'');
+  } else {
+    const missing=[];
+    if(!D.fwd||!D.fwd.length) missing.push('Forward Settlement');
+    if(!D.rev||!D.rev.length) missing.push('Reverse Settlement');
+    if(!D.returns||!D.returns.length) missing.push('Returns Report');
+    if(!D.sales||!D.sales.length) missing.push('Sales Report');
+    btn.textContent='Still needed: '+missing.join(' + ');
+  }
+}
+
+function rebuildAllData(){
+  const byKey={};
+  Object.entries(FILES).forEach(([num,file])=>{
+    if(!file) return;
+    if(!byKey[file.key]) byKey[file.key]=[];
+    byKey[file.key].push(file.rowData);
+    // Also push any extra months stored in the extras array
+    if(file.extras&&file.extras.length) file.extras.forEach(e=>byKey[file.key].push(e));
+  });
+  ['fwd','rev','returns','sales','cogs','nonorder','royalty'].forEach(k=>delete D[k]);
+  Object.entries(byKey).forEach(([key,arrays])=>{D[key]=arrays.flat();});
+  delete D.ratecard;
+  D.ratecard={commission:[],fixedFee:[]};
+  Object.entries(FILES).forEach(([num,file])=>{
+    if(!file||file.key!=='ratecard') return;
+    if(file.allSheets){
+      file.allSheets.forEach(s=>{
+        // Extract article type from sheet metadata rows
+        const artRow=s.rows.find(r=>Object.values(r).some(v=>String(v||'').toLowerCase().includes('article type')));
+        if(artRow){
+          const artVal=Object.values(artRow).find(v=>v&&String(v).toLowerCase().includes('article type'))||'';
+          D._rcCurrentArt=(String(artVal).match(/Article Type:\s*(.+)/i)||[])[1]||'Bra';
+        }
+        parseRateCard(s.rows);
+      });
+    } else {
+      parseRateCard(file.rowData);
+    }
+  });
+  delete D._rcCurrentArt; // cleanup temp
+}
+
+function updateSlotUI(slotNum){
+  const def=DEFS.find(d=>d.num===slotNum);
+  const card=document.getElementById('card_n'+slotNum);
+  const lbl=document.getElementById('lbl_n'+slotNum);
+  const flist=document.getElementById('flist_n'+slotNum);
+  if(!card||!lbl||!flist) return;
+  const btn=card.querySelector('.upload-btn');
+
+  // Just use the single slot entry (rows are merged into it for multi-upload)
+  const allFiles=FILES[slotNum]?[{key:slotNum, file:FILES[slotNum]}]:[];
+
+  if(!allFiles.length){
+    card.classList.remove('loaded');
+    if(btn){ btn.textContent='\uD83D\uDCC2 Click to upload'; btn.style.background=''; }
+    flist.innerHTML='';
+    return;
+  }
+  card.classList.add('loaded');
+  const totalRows=allFiles.reduce((s,e)=>s+e.file.rowCount,0);
+  if(btn){
+    btn.textContent='✓ '+allFiles.length+(allFiles.length>1?' files':' file')+' · '+totalRows.toLocaleString()+' rows';
+    btn.style.background='#16a34a';
+    btn.style.color='#fff';
+  }
+  flist.innerHTML='';
+  allFiles.forEach(({key,file})=>{
+    const item=document.createElement('div');
+    item.className='rc-file-item';
+    item.innerHTML='<span>✓ '+file.name+' ('+file.rowCount.toLocaleString()+')</span><button class="rc-file-remove" title="Remove">✕</button>';
+    item.querySelector('.rc-file-remove').addEventListener('click',e=>{
+      e.preventDefault();e.stopPropagation();
+      delete FILES[key];
+      rebuildAllData();updateSlotUI(slotNum);updateRunBtn();
+    });
+    flist.appendChild(item);
+  });
+  if(def&&def.multi){
+    const addBtn=document.createElement('button');
+    addBtn.type='button';
+    addBtn.textContent='+ Upload another month';
+    addBtn.style.cssText='font-size:11px;color:var(--blue);background:none;border:none;cursor:pointer;padding:4px 0;display:block;';
+    addBtn.onclick=()=>{
+      const capturedSlot=slotNum; const capturedKey=def.key;
+      const tmpInp=document.createElement('input');
+      tmpInp.type='file'; tmpInp.accept='.xlsx,.xls,.csv';
+      tmpInp.style.cssText='position:fixed;top:-9999px;left:-9999px;';
+      document.body.appendChild(tmpInp);
+      tmpInp.onchange=function(){
+        if(this.files&&this.files[0]) processFile(this.files[0],capturedKey,capturedSlot);
+        setTimeout(()=>{try{document.body.removeChild(tmpInp);}catch{}},500);
+      };
+      tmpInp.click();
+    };
+    flist.appendChild(addBtn);
+  }
+}
+
+function removeFile(slotNum){
+  delete FILES[slotNum];
+  rebuildAllData();
+  updateSlotUI(slotNum);
+  updateRunBtn();
+}
+
+async functi
+...

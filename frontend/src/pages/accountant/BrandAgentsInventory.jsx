@@ -157,6 +157,53 @@ const BrandAgentsInventory = () => {
             const assigned = isAssigned(agent.id);
             const recoMeta = RECO_AGENT_META[agent.name];
 
+            // Myntra Ticket Finder — distinctive cream / monospace card (D'Chica ops-hub style)
+            if (agent.id === 'd0000000-0000-0000-0000-000000000009' || agent.name === 'Myntra Ticket Finder') {
+              return (
+                <div
+                  key={agent.id}
+                  onClick={() => assigned && handleAgentClick(agent)}
+                  data-testid={`agent-inventory-card-${agent.id}`}
+                  style={{
+                    fontFamily: "'JetBrains Mono', ui-monospace, monospace",
+                    background: '#FAF7EC',
+                    border: '2px solid #1A1A1A',
+                    boxShadow: '6px 6px 0 rgba(26,26,26,0.9)',
+                    borderRadius: 4,
+                    padding: '20px 22px',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    cursor: assigned ? 'pointer' : 'not-allowed',
+                    opacity: assigned ? 1 : 0.6,
+                    transition: 'transform .15s ease, box-shadow .15s ease',
+                  }}
+                  onMouseEnter={e => { if (assigned) { e.currentTarget.style.transform = 'translate(-2px,-2px)'; e.currentTarget.style.boxShadow = '8px 8px 0 rgba(26,26,26,0.9)'; } }}
+                  onMouseLeave={e => { e.currentTarget.style.transform = 'none'; e.currentTarget.style.boxShadow = '6px 6px 0 rgba(26,26,26,0.9)'; }}
+                >
+                  <div style={{ fontSize: 11, letterSpacing: '0.12em', color: '#9B2242', fontWeight: 700, textTransform: 'uppercase', marginBottom: 10 }}>
+                    Marketplace · Myntra
+                  </div>
+                  <h3 style={{ fontSize: 20, fontWeight: 800, color: '#1A1A1A', letterSpacing: '0.02em', margin: '0 0 12px', lineHeight: 1.15 }}>
+                    MYNTRA TICKET <span style={{ color: '#9B2242' }}>FINDER</span>
+                  </h3>
+                  <span style={{ alignSelf: 'flex-start', fontSize: 10, fontWeight: 700, letterSpacing: '0.08em', textTransform: 'uppercase', background: '#F3D9E0', color: '#8B1E3F', padding: '4px 9px', borderRadius: 3, marginBottom: 12 }}>
+                    Marketplace Team
+                  </span>
+                  <p style={{ fontSize: 12.5, color: '#555', lineHeight: 1.65, margin: '0 0 16px', flex: 1 }}>
+                    Upload Myntra Seller Hub reports to automatically detect billing errors — commission not reversed,
+                    closed-box return claims, fixed fee retention, commission rate overcharges. Generates proof files
+                    and ticket templates ready to paste into Myntra Seller Support.
+                  </p>
+                  <div style={{ borderTop: '1px solid #D8D2BE', paddingTop: 12, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                    <span style={{ fontSize: 10.5, letterSpacing: '0.08em', textTransform: 'uppercase', color: '#7A7458', fontWeight: 600 }}>
+                      {assigned ? 'Run after each settlement cycle' : 'Not assigned'}
+                    </span>
+                    <span style={{ fontSize: 16, color: '#1A1A1A' }}>→</span>
+                  </div>
+                </div>
+              );
+            }
+
             if (recoMeta) {
               // RECO agent — rich card matching RecoSuite style
               return (
