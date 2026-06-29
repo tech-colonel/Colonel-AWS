@@ -1,8 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import { useParams, useNavigate, useLocation } from 'react-router-dom';
 import DashboardLayout from '../../components/layout/DashboardLayout';
-import { LayoutDashboard, Bot, Upload, FileText, Download, Trash2, Eye, Plus, Loader2, BarChart3, Search, X, GitBranch } from 'lucide-react';
+import { Bot, Upload, FileText, Download, Trash2, Eye, Plus, Loader2, BarChart3, Search, X, GitBranch } from 'lucide-react';
 import CFODashboardLauncher from '../cfo/CFODashboardLauncher';
+import { sidebarFor, isAdminUser } from '../../lib/adminNav';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../../components/ui/card';
 import { Button } from '../../components/ui/button';
 import { Input } from '../../components/ui/input';
@@ -103,11 +104,11 @@ const AgentWorkspace = () => {
     selling_state: ''
   });
 
-  const sidebarItems = [
-    { path: `/brands/${brandId}/dashboard`, label: 'Agent Workspace', icon: LayoutDashboard, testId: 'nav-dashboard' },
-    { path: `/brands/${brandId}/agents`, label: 'Agents', icon: Bot, testId: 'nav-agents' },
-    { path: `/brands/${brandId}/agents`, label: `${agent?.name} Dashboard`, icon: Bot, testId: 'nav-agents' }
-  ];
+  // Use the SAME standard sidebar as the RECO/AWS agent workspaces (full nav for
+  // admin/accountant) + the "All Agents" link — instead of a stripped custom nav.
+  const sidebarItems = sidebarFor([
+    { path: `/brands/${brandId}/agents`, label: 'All Agents', icon: Bot, testId: 'nav-agents' },
+  ]);
 
   useEffect(() => {
     fetchData();
@@ -564,11 +565,11 @@ const AgentWorkspace = () => {
               <Button
                 variant="ghost"
                 size="sm"
-                onClick={() => navigate(`/brands/${brandId}/dashboard`)}
+                onClick={() => navigate(isAdminUser() ? '/admin/agents' : `/brands/${brandId}/agents`)}
                 className="mb-4"
                 data-testid="back-button"
               >
-                ← Back to Dashboard
+                ← Back to Agents
               </Button>
               <h1 className="text-3xl font-bold text-slate-900 tracking-tight">{agent?.name}</h1>
               <p className="text-slate-600 mt-1">{agent?.description}</p>
@@ -591,11 +592,11 @@ const AgentWorkspace = () => {
               <Button
                 variant="ghost"
                 size="sm"
-                onClick={() => navigate(`/brands/${brandId}/dashboard`)}
+                onClick={() => navigate(isAdminUser() ? '/admin/agents' : `/brands/${brandId}/agents`)}
                 className="mb-4"
                 data-testid="back-button"
               >
-                ← Back to Dashboard
+                ← Back to Agents
               </Button>
               <h1 className="text-3xl font-bold text-slate-900 tracking-tight">{agent?.name}</h1>
               <p className="text-slate-600 mt-1">{agent?.description}</p>
@@ -618,11 +619,11 @@ const AgentWorkspace = () => {
               <Button
                 variant="ghost"
                 size="sm"
-                onClick={() => navigate(`/brands/${brandId}/dashboard`)}
+                onClick={() => navigate(isAdminUser() ? '/admin/agents' : `/brands/${brandId}/agents`)}
                 className="mb-4"
                 data-testid="back-button"
               >
-                ← Back to Dashboard
+                ← Back to Agents
               </Button>
               <h1 className="text-3xl font-bold text-slate-900 tracking-tight">{agent?.name}</h1>
               <p className="text-slate-600 mt-1">{agent?.description}</p>
@@ -645,11 +646,11 @@ const AgentWorkspace = () => {
               <Button
                 variant="ghost"
                 size="sm"
-                onClick={() => navigate(`/brands/${brandId}/dashboard`)}
+                onClick={() => navigate(isAdminUser() ? '/admin/agents' : `/brands/${brandId}/agents`)}
                 className="mb-4"
                 data-testid="back-button"
               >
-                ← Back to Dashboard
+                ← Back to Agents
               </Button>
               <h1 className="text-3xl font-bold text-slate-900 tracking-tight">{agent?.name}</h1>
               <p className="text-slate-600 mt-1">{agent?.description}</p>
@@ -673,11 +674,11 @@ const AgentWorkspace = () => {
                 <Button
                   variant="ghost"
                   size="sm"
-                  onClick={() => navigate(`/brands/${brandId}/dashboard`)}
+                  onClick={() => navigate(isAdminUser() ? '/admin/agents' : `/brands/${brandId}/agents`)}
                   className="mb-4"
                   data-testid="back-button"
                 >
-                  ← Back to Dashboard
+                  ← Back to Agents
                 </Button>
                 <h1 className="text-3xl font-bold text-slate-900 tracking-tight">{agent?.name}</h1>
                 <p className="text-slate-600 mt-1">{agent?.description}</p>
