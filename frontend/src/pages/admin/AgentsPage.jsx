@@ -100,6 +100,43 @@ const SimpleAgentCard = ({ agent, onClick }) => (
   </button>
 );
 
+// Myntra Ticket Finder — distinctive cream / monospace card (D'Chica ops-hub style).
+const MyntraCard = ({ onClick }) => (
+  <div
+    onClick={onClick}
+    data-testid="agent-card-myntra"
+    style={{
+      fontFamily: "'JetBrains Mono', ui-monospace, monospace",
+      background: '#FAF7EC', border: '2px solid #1A1A1A', boxShadow: '6px 6px 0 rgba(26,26,26,0.9)',
+      borderRadius: 4, padding: '20px 22px', display: 'flex', flexDirection: 'column', cursor: 'pointer',
+      transition: 'transform .15s ease, box-shadow .15s ease',
+    }}
+    onMouseEnter={e => { e.currentTarget.style.transform = 'translate(-2px,-2px)'; e.currentTarget.style.boxShadow = '8px 8px 0 rgba(26,26,26,0.9)'; }}
+    onMouseLeave={e => { e.currentTarget.style.transform = 'none'; e.currentTarget.style.boxShadow = '6px 6px 0 rgba(26,26,26,0.9)'; }}
+  >
+    <div style={{ fontSize: 11, letterSpacing: '0.12em', color: '#9B2242', fontWeight: 700, textTransform: 'uppercase', marginBottom: 10 }}>
+      Marketplace · Myntra
+    </div>
+    <h3 style={{ fontSize: 20, fontWeight: 800, color: '#1A1A1A', letterSpacing: '0.02em', margin: '0 0 12px', lineHeight: 1.15 }}>
+      MYNTRA TICKET <span style={{ color: '#9B2242' }}>FINDER</span>
+    </h3>
+    <span style={{ alignSelf: 'flex-start', fontSize: 10, fontWeight: 700, letterSpacing: '0.08em', textTransform: 'uppercase', background: '#F3D9E0', color: '#8B1E3F', padding: '4px 9px', borderRadius: 3, marginBottom: 12 }}>
+      Marketplace Team
+    </span>
+    <p style={{ fontSize: 12.5, color: '#555', lineHeight: 1.65, margin: '0 0 16px', flex: 1 }}>
+      Upload Myntra Seller Hub reports to automatically detect billing errors — commission not reversed,
+      closed-box return claims, fixed fee retention, commission rate overcharges. Generates proof files
+      and ticket templates ready to paste into Myntra Seller Support.
+    </p>
+    <div style={{ borderTop: '1px solid #D8D2BE', paddingTop: 12, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+      <span style={{ fontSize: 10.5, letterSpacing: '0.08em', textTransform: 'uppercase', color: '#7A7458', fontWeight: 600 }}>
+        Run after each settlement cycle
+      </span>
+      <span style={{ fontSize: 16, color: '#1A1A1A' }}>→</span>
+    </div>
+  </div>
+);
+
 // ── Analysis tab: platform-wide tool analytics ──────────────────────────────
 // Donut palette for runs-share (per tool). Stable cycle, fintech-muted.
 const DONUT_CYCLE = ['#0748EE', '#7C3AED', '#0F766E', '#D97706', '#E11D48', '#059669', '#2563EB', '#DB2777', '#0891B2', '#CA8A04', '#94A3B8'];
@@ -380,9 +417,11 @@ const AgentsPage = () => {
                 </div>
                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
                   {section.items.map(a => (
-                    RICH_META[a.name]
-                      ? <RichAgentCard key={a.id} meta={RICH_META[a.name]} description={a.description} onClick={() => openAgent(a)} />
-                      : <SimpleAgentCard key={a.id} agent={a} onClick={() => openAgent(a)} />
+                    (a.id === 'd0000000-0000-0000-0000-000000000009' || a.name === 'Myntra Ticket Finder')
+                      ? <MyntraCard key={a.id} onClick={() => openAgent(a)} />
+                      : RICH_META[a.name]
+                        ? <RichAgentCard key={a.id} meta={RICH_META[a.name]} description={a.description} onClick={() => openAgent(a)} />
+                        : <SimpleAgentCard key={a.id} agent={a} onClick={() => openAgent(a)} />
                   ))}
                 </div>
               </div>
