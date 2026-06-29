@@ -1926,6 +1926,7 @@ def main():
             "predicted_ledger": result["ledger"],
             "confidence":     result["confidence"],
             "entity":         result.get("entity", ""),
+            "rule":           result.get("rule", ""),
         })
 
     total = len(rows)
@@ -1986,6 +1987,62 @@ def main():
                 print(f"        → Gemini fallback aborted ({_e}); rows kept as-is")
             print(f"        → Gemini resolved {resolved}/{len(low_idx)} "
                   f"(unresolved stay Suspense A/c / Medium)")
+
+        # ── Gemini ARBITRATION on generic-rule High rows ───────────────────
+        # If a rule marked a row High but its ledger DISAGREES with the best COA
+        # match for the narration (e.g. "EKANEK ... RENT" → generic "6. Rent
+        # Expenses" while the COA has the vendor "Ekanek Networks Private Limited"),
+        # let Gemini arbitrate. Authoritative rules (statutory / contra / learned
+        # corrections) are NEVER second-guessed. Gemini confident → keep High with
+        # its pick; Gemini abstains → demote to Medium so the accountant reviews it.
+        from concurrent.futures import ThreadPoolExecutor as _TPE
+        suspense_label = classifier._suspense_ledger
+        AUTHORITATIVE = ('Stored Correction', 'Payee Directory', 'Own Account', 'OAT',
+                         'Sweep', 'Contra', 'BDP Statutory', 'GSTN', 'TDS', 'EPF',
+                         'ESIC', 'PT ', 'NEFT Return', 'Bank Charges', 'Interest')
+        def _authoritative(rule):
+            rule = str(rule or '')
+            return any(rule.startswith(a) for a in AUTHORITATIVE)
+        arb_idx = []
+        for i, r in enumerate(rows):
+            if r["confidence"] != "High" or _authoritative(r.get("rule", "")):
+                continue
+            entity = r.get("entity", "") or r["description"]
+            assigned = r["predicted_ledger"]
+            top = classifier.top_candidates(entity, k=1) or classifier.top_candidates(r["description"], k=1)
+            if top and top[0] and top[0] != assigned:
+                arb_idx.append(i)
+        if arb_idx:
+            print(f"[3.6/4] Gemini arbitration on {len(arb_idx)} generic-rule High rows "
+                  f"with a competing COA match …")
+            def _arb(i):
+                r = rows[i]; desc = r["description"]; entity = r.get("entity", "") or desc
+                cands = classifier.top_candidates(entity, k=15) or classifier.top_candidates(desc, k=15)
+                assigned = r["predicted_ledger"]
+                if assigned and assigned not in cands:
+                    cands = [assigned] + cands
+                if suspense_label not in cands:
+                    cands = cands + [suspense_label]
+                return i, gemini_classify(desc, cands, gemini_key, args.gemini_model)
+            corrected = 0; flagged = 0
+            try:
+                with _TPE(max_workers=6) as ex:
+                    for i, pick in ex.map(_arb, arb_idx):
+                        if pick and pick != suspense_label:
+                            if pick != rows[i]["predicted_ledger"]:
+                                rows[i]["predicted_ledger"] = pick
+                                corrected += 1
+                            # Gemini confident → row stays High
+                        else:
+                            # Gemini abstained → genuinely ambiguous → flag for review
+                            if rows[i]["confidence"] == "High":
+                                rows[i]["confidence"] = "Medium"
+                                summary["High"] -= 1; summary["Medium"] += 1
+                            flagged += 1
+            except Exception as _e:
+                print(f"        → Gemini arbitration aborted ({_e}); rows kept as-is")
+            print(f"        → arbitration: {corrected} ledger(s) corrected, "
+                  f"{flagged} flagged Medium for review")
 
     print(f"[4/4] Writing output: {args.output}")
     write_output(rows, summary, args.brand, args.output)
