@@ -1973,11 +1973,14 @@ def main():
                         if pick and pick != suspense_label:
                             old_conf = rows[i]["confidence"]
                             rows[i]["predicted_ledger"] = pick
-                            if old_conf == "Low":
-                                rows[i]["confidence"] = "Medium"
-                                summary["Low"] -= 1
-                                summary["Medium"] += 1
-                            # Medium rows: update ledger if different, confidence stays Medium
+                            # Gemini returns a ledger ONLY when it exactly matches a COA
+                            # candidate (temperature 0, abstains→SUSPENSE when unsure). A
+                            # confirmed pick is a strong match → promote the row to High so
+                            # it leaves the Medium/Low review queue.
+                            if old_conf != "High":
+                                rows[i]["confidence"] = "High"
+                                summary[old_conf] = summary.get(old_conf, 0) - 1
+                                summary["High"] += 1
                             resolved += 1
             except Exception as _e:
                 print(f"        → Gemini fallback aborted ({_e}); rows kept as-is")
