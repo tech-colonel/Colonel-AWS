@@ -22,6 +22,36 @@ const withBypass = async (seq, queryFn) => {
 const normalizeNarration = (desc) =>
   (desc || '').trim().toUpperCase().replace(/\s+/g, ' ');
 
+// Extract stable payee identity keys from a bank narration.
+// Mirrors extract_payee_keys() in classify.py — must stay in sync.
+const PHONE_RE = /(?<!\d)(\d{10})(?!\d)/;
+const VPA_RE = /([A-Za-z0-9.\-]+@[A-Za-z]+)/;
+const normKey = (s) => s.toLowerCase().replace(/[^a-z0-9 ]/g, ' ').trim().replace(/\s+/g, ' ');
+
+const extractPayeeKeys = (narration) => {
+  if (!narration) return {};
+  const raw = String(narration).trim();
+  const u = raw.toUpperCase();
+  const keys = { exact: u.replace(/\s+/g, ' ') };
+  const mPh = raw.match(PHONE_RE);
+  if (mPh) keys.phone = mPh[1];
+  if (u.includes('UPI')) {
+    const mVpa = raw.match(VPA_RE);
+    if (mVpa) keys.vpa = mVpa[1].toLowerCase();
+    const mName = u.match(/\s*UPI-(.+?)-/);
+    if (mName) {
+      const nm = normKey(mName[1]);
+      if (nm && !/^\d+$/.test(nm)) keys.name = nm;
+    }
+  }
+  const mNeft = u.match(/(?:NEFT|RTGS)\s+(?:DR|CR)-[A-Z0-9]+-(.+?)-(?:NETBANK|NB[ ,]|NB$)/);
+  if (mNeft) {
+    const nm = normKey(mNeft[1]);
+    if (nm) keys.neft_name = nm;
+  }
+  return keys;
+};
+
 // ─── GET /api/bank-reco/corrections/:brandId ────────────────────────────────
 // Returns all stored corrections for a brand.
 
@@ -85,6 +115,25 @@ const saveCorrections = async (req, res) => {
           { bind: [brandId, description, key, correct_ledger, correct_type || null], transaction: t }
         );
         saved++;
+
+        // Also write identity keys to payee directory so future UPI/NEFT rows
+        // with the same phone/VPA are auto-resolved without needing exact narration match
+        const payeeKeys = extractPayeeKeys(description);
+        for (const [keyType, keyValue] of Object.entries(payeeKeys)) {
+          if (keyType === 'exact') continue; // already in bank_reco_corrections
+          await seq.query(
+            `INSERT INTO bank_payee_directory
+               (brand_id, key_type, key_value, ledger, txn_type, source, updated_at)
+             VALUES ($1, $2, $3, $4, $5, 'correction', NOW())
+             ON CONFLICT (brand_id, key_type, key_value)
+             DO UPDATE SET
+               ledger     = EXCLUDED.ledger,
+               txn_type   = EXCLUDED.txn_type,
+               source     = 'correction',
+               updated_at = NOW()`,
+            { bind: [brandId, keyType, keyValue, correct_ledger, correct_type || null], transaction: t }
+          );
+        }
 
         // Back-fill bank_reco_results for this job if provided
         if (job_id) {
@@ -219,6 +268,7 @@ const uploadCorrectionsExcel = async (req, res) => {
 // ─── POST /api/bank-reco/corrections/:brandId/upload-output ─────────────────
 // Accepts a standard classify.py output Excel (no CHANGES column needed).
 // Imports all High confidence rows as corrections into bank_reco_corrections.
+// Handles: rich-text cells, merged title rows, multi-sheet workbooks, fuzzy headers.
 
 const uploadOutputExcel = async (req, res) => {
   const { brandId } = req.params;
@@ -232,14 +282,7 @@ const uploadOutputExcel = async (req, res) => {
     const workbook = new ExcelJS.Workbook();
     await workbook.xlsx.load(fileBuffer);
 
-    // Collect High-confidence rows across all sheets that look like bank output.
-    // This handles both single-sheet and multi-sheet output Excel files.
-    const toImport = [];
-    let skipped = 0;
-
-    console.log(`[UPLOAD-OUTPUT] brandId=${brandId} fileSize=${fileBuffer.length} sheets=${workbook.worksheets.length}`);
-
-    // Helper: extract text from any cell value (handles plain string, rich text objects, numbers)
+    // Extract text from any cell value — handles plain string, rich text objects, numbers
     const cellText = (val) => {
       if (!val) return '';
       if (typeof val === 'string') return val.trim();
@@ -249,36 +292,36 @@ const uploadOutputExcel = async (req, res) => {
       return String(val).trim();
     };
 
+    const toImport = [];
+    let skipped = 0;
+
+    console.log(`[UPLOAD-OUTPUT] brandId=${brandId} fileSize=${fileBuffer.length} sheets=${workbook.worksheets.length}`);
+
     for (const ws of workbook.worksheets) {
-      // Scan row 1 first; if it looks like a merged title (all [object Object] / empty), try row 2
+      // Fuzzy header detection — try row 1, fall back to row 2 if row 1 is a merged title
       const scanHeaderRow = (rowNum) => {
         const colIndex = {};
         ws.getRow(rowNum).values.forEach((cell, i) => {
           const name = cellText(cell).toLowerCase();
           if (!name) return;
-          // Narration / description
           if (!colIndex.description &&
               (name.includes('description') || name.includes('narration') ||
                name.includes('particulars') || name.includes('transaction detail') ||
-               name.includes('transaction remark') || name.includes('txn remark') ||
                name === 'details' || name === 'remarks' || name === 'cheque details')) {
             colIndex.description = i;
           }
-          // Ledger / account name — "ledger", "tally", "account", "chart of account", "gl account"
           if (!colIndex.ledgerName &&
               (name.includes('ledger') || name.includes('tally') ||
                name.includes('chart of account') || name.includes('gl account') ||
                name === 'account name' || name === 'account' || name === 'gl')) {
             colIndex.ledgerName = i;
           }
-          // Type / voucher type
           if (!colIndex.txnType &&
               (name === 'type' || name.includes('txn type') || name.includes('transaction type') ||
                name.includes('vch type') || name.includes('voucher type') ||
-               name.includes('predicted_type') || name === 'dr/cr' || name === 'dr / cr')) {
+               name === 'dr/cr' || name === 'dr / cr')) {
             colIndex.txnType = i;
           }
-          // Confidence
           if (!colIndex.confidence &&
               (name === 'confidence' || name.includes('confidence') || name === 'score')) {
             colIndex.confidence = i;
@@ -305,9 +348,9 @@ const uploadOutputExcel = async (req, res) => {
       }
 
       ws.eachRow((row, rowNum) => {
-        if (rowNum <= headerRowNum) return; // skip header row(s)
+        if (rowNum <= headerRowNum) return;
         const conf = colIndex.confidence
-          ? row.getCell(colIndex.confidence).text?.trim()
+          ? cellText(row.getCell(colIndex.confidence).value)
           : 'High'; // no confidence column → accountant-prepared file, import all rows
         if (conf && conf !== 'High') { skipped++; return; }
 
@@ -350,6 +393,24 @@ const uploadOutputExcel = async (req, res) => {
           { bind: [brandId, description, key, correct_ledger, correct_type || null], transaction: t }
         );
         saved++;
+
+        // Extract payee identity keys and write to bank_payee_directory
+        const payeeKeys = extractPayeeKeys(description);
+        for (const [keyType, keyValue] of Object.entries(payeeKeys)) {
+          if (keyType === 'exact') continue;
+          await seq.query(
+            `INSERT INTO bank_payee_directory
+               (brand_id, key_type, key_value, ledger, txn_type, source, updated_at)
+             VALUES ($1, $2, $3, $4, $5, 'output_upload', NOW())
+             ON CONFLICT (brand_id, key_type, key_value)
+             DO UPDATE SET
+               ledger     = EXCLUDED.ledger,
+               txn_type   = EXCLUDED.txn_type,
+               source     = 'output_upload',
+               updated_at = NOW()`,
+            { bind: [brandId, keyType, keyValue, correct_ledger, correct_type || null], transaction: t }
+          );
+        }
       }
     });
 
@@ -360,27 +421,77 @@ const uploadOutputExcel = async (req, res) => {
 };
 
 // ─── Utility: load correction map for a brand (used by recoController) ──────
-// Returns { narration_key → { ledger, type } } for all stored corrections.
+// Returns keyed JSON matching classify.py's DIRECTORY_SECTIONS format:
+// { exact:{…}, phone:{…}, vpa:{…}, neft_name:{…}, name:{…} }
+
+const EMPTY_DIRECTORY = () => ({ exact: {}, phone: {}, vpa: {}, neft_name: {}, name: {} });
 
 const loadCorrectionMap = async (brandId, seq) => {
   try {
-    const rows = await withBypass(seq, async (t) => {
-      const [result] = await seq.query(
+    const dir = EMPTY_DIRECTORY();
+
+    await withBypass(seq, async (t) => {
+      // 1. exact corrections from bank_reco_corrections
+      const [corrRows] = await seq.query(
         `SELECT narration_key, correct_ledger, correct_type
          FROM bank_reco_corrections
          WHERE brand_id = $1`,
         { bind: [brandId], transaction: t }
       );
-      return result;
+      corrRows.forEach(r => {
+        dir.exact[r.narration_key] = { ledger: r.correct_ledger, type: r.correct_type };
+      });
+
+      // 2. phone/vpa/neft_name/name keys from bank_payee_directory
+      const [dirRows] = await seq.query(
+        `SELECT key_type, key_value, ledger, txn_type
+         FROM bank_payee_directory
+         WHERE brand_id = $1`,
+        { bind: [brandId], transaction: t }
+      );
+      dirRows.forEach(r => {
+        const section = r.key_type; // 'phone'|'vpa'|'neft_name'|'name'|'exact'
+        if (dir[section] !== undefined) {
+          dir[section][r.key_value] = { ledger: r.ledger, type: r.txn_type };
+        }
+      });
     });
-    const map = {};
-    rows.forEach(r => {
-      map[r.narration_key] = { ledger: r.correct_ledger, type: r.correct_type };
-    });
-    return map;
+
+    return dir;
   } catch {
-    return {}; // fail open — never block classification
+    return EMPTY_DIRECTORY(); // fail open — never block classification
   }
+};
+
+// ─── Utility: bulk-upsert a seeded directory JSON into bank_payee_directory ──
+// Called by the seed endpoint. directoryJson is the keyed JSON from seed_payee_directory.py.
+
+const seedPayeeDirectory = async (brandId, seq, directoryJson) => {
+  let inserted = 0;
+  let updated = 0;
+
+  await withBypass(seq, async (t) => {
+    for (const [keyType, entries] of Object.entries(directoryJson)) {
+      for (const [keyValue, payload] of Object.entries(entries)) {
+        const [, meta] = await seq.query(
+          `INSERT INTO bank_payee_directory
+             (brand_id, key_type, key_value, ledger, txn_type, source, updated_at)
+           VALUES ($1, $2, $3, $4, $5, 'seed', NOW())
+           ON CONFLICT (brand_id, key_type, key_value)
+           DO UPDATE SET
+             ledger     = EXCLUDED.ledger,
+             txn_type   = EXCLUDED.txn_type,
+             source     = 'seed',
+             updated_at = NOW()
+           RETURNING (xmax = 0) AS is_insert`,
+          { bind: [brandId, keyType, keyValue, payload.ledger, payload.type || null], transaction: t }
+        );
+        if (meta?.rows?.[0]?.is_insert) inserted++; else updated++;
+      }
+    }
+  });
+
+  return { inserted, updated };
 };
 
 module.exports = {
@@ -389,5 +500,7 @@ module.exports = {
   uploadCorrectionsExcel,
   uploadOutputExcel,
   loadCorrectionMap,
+  seedPayeeDirectory,
   normalizeNarration,
+  extractPayeeKeys,
 };

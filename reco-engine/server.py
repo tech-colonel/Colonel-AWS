@@ -47,44 +47,19 @@ from recon.gstr_3b_tally_entry import (
     parse_gstr3b,
     build_tally_entries,
     build_gstr3b_tally_workbook,
+    process_multi as gstr3b_process_multi,
+    _load_coa,
+    _load_coa_from_list,
+    _load_voucher_types,
+    _load_voucher_types_from_list,
 )
 
 
-# Cap in-memory jobs AND return transient build memory to the OS after each job.
-# On a small-RAM box this was ballooning to ~370 MB: building large styled
-# workbooks (openpyxl/pandas) allocates hundreds of MB that CPython frees on the
-# heap but does NOT return to the OS — so RSS stays high and the next reco swaps.
-# gc.collect() + malloc_trim(0) hand that memory back, keeping idle RSS ~80 MB.
-import gc as _gc
-import ctypes as _ctypes
-try:
-    _libc = _ctypes.CDLL("libc.so.6")
-except Exception:
-    _libc = None
-
-def _reclaim_memory():
-    _gc.collect()
-    if _libc is not None:
-        try:
-            _libc.malloc_trim(0)
-        except Exception:
-            pass
-
-class _CappedJobs(dict):
-    _CAP = 3
-    def __setitem__(self, key, value):
-        super().__setitem__(key, value)
-        while len(self) > self._CAP:
-            self.pop(next(iter(self)))
-        # Return the workbook-build memory to the OS so RSS doesn't creep up.
-        _reclaim_memory()
-
-JOBS: dict[str, dict] = _CappedJobs()
+JOBS: dict[str, dict] = {}
 
 # Limit simultaneous reconciliation jobs to prevent OOM under heavy load.
 # Each job can hold large DataFrames in memory; 8 concurrent runs is safe
-# for a server with 8+ GB RAM. Override via MAX_CONCURRENT_RECO env var
-# (set to 1 on the 1 GB EC2 box so heavy recos queue instead of thrashing swap).
+# for a server with 8+ GB RAM. Override via MAX_CONCURRENT_RECO env var.
 _MAX_RECO = int(os.environ.get("MAX_CONCURRENT_RECO", "8"))
 _RECO_SEMAPHORE = threading.Semaphore(_MAX_RECO)
 
@@ -333,38 +308,10 @@ class ReconciliationHandler(BaseHTTPRequestHandler):
                 if not bank_file:
                     self.write_json({"error": "Upload Bank Statement file."}, 400)
                     return
-
+                
                 payload = process_bank_statement(bank_file["content"])
                 JOBS[payload["job_id"]] = payload
                 self.write_json(payload)
-                return
-
-            if reco_type == "pdf_bank_extract":
-                from recon.pdf_bank_extractor import extract_bank_statement, build_pdf_bank_excel
-                pdf_file = files.get("bank_pdf")
-                if not pdf_file:
-                    self.write_json({"error": "Upload a bank statement PDF (bank_pdf)."}, 400)
-                    return
-                content = pdf_file["content"] if isinstance(pdf_file, dict) else pdf_file[0]["content"]
-                data = extract_bank_statement(content)
-                xlsx_bytes = build_pdf_bank_excel(data)
-                job_id = uuid4().hex
-                payload = {
-                    "job_id":            job_id,
-                    "reco_type":         "pdf_bank_extract",
-                    "bank_name":         data.get("bank_name", ""),
-                    "account_no":        data.get("account_no", ""),
-                    "account_name":      data.get("account_name", ""),
-                    "period_from":       data.get("period_from", ""),
-                    "period_to":         data.get("period_to", ""),
-                    "transaction_count": data.get("transaction_count", 0),
-                    "validation":        data.get("validation", {}),
-                    "preview_rows":      data.get("preview_rows", []),
-                    "_xlsx_bytes":       xlsx_bytes,
-                }
-                JOBS[job_id] = payload
-                public = {k: v for k, v in payload.items() if not k.startswith("_")}
-                self.write_json(public)
                 return
 
             # GSTR-2B vs Books (Purchase Register + Debit Note Register)
@@ -474,42 +421,143 @@ class ReconciliationHandler(BaseHTTPRequestHandler):
                     # Stash MatchResult objects so export_job can rebuild Remark 3
                     "_results_obj":  results,
                 }
-                # Pre-build workbook now (during upload) so download is instant.
-                # Multi-state rebuilds are heavy (per-state source sheets + Remark 3)
-                # and otherwise blow past the backend's 30s export timeout.
-                try:
-                    from io import BytesIO as _BytesIO
-                    _wb = build_gstr2b_books_multistate_workbook(results, payload=payload)
-                    _buf = _BytesIO()
-                    _wb.save(_buf)
-                    payload["_xlsx_bytes"] = _buf.getvalue()
-                except Exception as _e:
-                    import logging as _log
-                    _log.getLogger(__name__).error("Pre-build multistate workbook failed: %s", _e)
-                    payload["_xlsx_bytes"] = None
+                JOBS[job_id] = payload
+                self.write_json({k: v for k, v in payload.items() if not k.startswith("_")})
+                return
+
+            # E-Invoice Reco — GST Portal E-Invoice Register vs Books (Sales + Credit Note)
+            if reco_type == "einvoice_reco":
+                einvoice_file = files.get("einvoice")
+                books_file = files.get("books")
+                if not einvoice_file or not books_file:
+                    self.write_json({"error": "Upload the E-Invoice Register and the Books (Sales + Credit Note) file."}, 400)
+                    return
+                from recon.einvoice_reco import reconcile_einvoice_top
+                import base64
+                einv_bytes = einvoice_file["content"]
+                books_bytes = books_file["content"]
+                bundle = reconcile_einvoice_top(einv_bytes, books_bytes, tolerance=tolerance)
+                results = bundle["results"]
+                job_id = uuid4().hex
+                payload = {
+                    "job_id": job_id,
+                    "reco_type": reco_type,
+                    "summary": summarize(results),
+                    "counts": {
+                        "einvoice_records": len(bundle["einv_pivot"]),
+                        "books_records": len(bundle["books_pivot"]),
+                        "result_rows": len(results),
+                    },
+                    "results": [result.as_dict() for result in results],
+                    "_bundle": bundle,
+                    "_einvoice_b64": base64.b64encode(einv_bytes).decode("utf-8"),
+                    "_books_b64": base64.b64encode(books_bytes).decode("utf-8"),
+                }
                 JOBS[job_id] = payload
                 self.write_json({k: v for k, v in payload.items() if not k.startswith("_")})
                 return
 
             if reco_type == "gstr_3b_tally_entry":
-                gstr3b_file = files.get("gstr3b")
-                if not gstr3b_file:
-                    self.write_json({"error": "Upload GSTR-3B file."}, 400)
+                # Accept 1–15 gstr3b files (repeated field name) + optional coa file
+                def _gstr3b_file_items(name):
+                    val = files.get(name)
+                    if val is None:
+                        return []
+                    items = val if isinstance(val, list) else [val]
+                    return [item for item in items if item.get("content")]
+
+                gstr3b_files = _gstr3b_file_items("gstr3b")
+                if not gstr3b_files:
+                    self.write_json({"error": "Upload at least one GSTR-3B file."}, 400)
                     return
-                parsed = parse_gstr3b(gstr3b_file["filename"], gstr3b_file["content"])
-                entries = build_tally_entries(parsed)
+
+                coa_file = files.get("coa")
+                if isinstance(coa_file, list):
+                    coa_file = coa_file[0]
+
+                vt_file = files.get("vouchertype")
+                if isinstance(vt_file, list):
+                    vt_file = vt_file[0]
+
+                # COA resolution: uploaded file → DB JSON list → None
+                if coa_file:
+                    coa = _load_coa(coa_file["content"], coa_file["filename"])
+                    coa_parsed_list = list(coa.values())
+                elif fields.get("coa_ledgers"):
+                    try:
+                        coa = _load_coa_from_list(json.loads(fields["coa_ledgers"]))
+                    except Exception:
+                        coa = None
+                    coa_parsed_list = []
+                else:
+                    coa = None
+                    coa_parsed_list = []
+
+                # Voucher Type resolution: uploaded file → DB JSON list → None
+                if vt_file:
+                    vt_master = _load_voucher_types(vt_file["content"], vt_file["filename"])
+                    vt_parsed_list = list(vt_master.values())
+                elif fields.get("vt_ledgers"):
+                    try:
+                        vt_master = _load_voucher_types_from_list(json.loads(fields["vt_ledgers"]))
+                    except Exception:
+                        vt_master = None
+                    vt_parsed_list = []
+                else:
+                    vt_master = None
+                    vt_parsed_list = []
+
+                all_entries, monthly_data, state_summary = gstr3b_process_multi(
+                    gstr3b_files, coa=coa, vt_master=vt_master
+                )
                 job_id = uuid4().hex
                 payload = {
                     "job_id": job_id,
                     "reco_type": reco_type,
+                    "monthly_data": monthly_data,
+                    "state_summary": state_summary,
+                    "coa_ledgers_parsed": coa_parsed_list,
+                    "vt_ledgers_parsed": vt_parsed_list,
                     "summary": {
-                        "gstin": parsed["gstin"],
-                        "state": parsed["state"],
-                        "period": parsed["period"],
+                        "months": len(monthly_data),
+                        "gstin":  monthly_data[0]["gstin"]  if monthly_data else "",
+                        "state":  monthly_data[0]["state"]  if monthly_data else "",
+                        "period": monthly_data[0]["period"] if monthly_data else "",
                     },
-                    "counts": {"entry_rows": len(entries)},
-                    "results": entries,
-                    "_parsed": parsed,
+                    "counts": {"entry_rows": len(all_entries), "months": len(monthly_data)},
+                    "results": all_entries,
+                    "_monthly_data":   monthly_data,
+                    "_state_summary":  state_summary,
+                }
+                JOBS[job_id] = payload
+                self.write_json({k: v for k, v in payload.items() if not k.startswith("_")})
+                return
+
+            if reco_type == "pdf_bank_extract":
+                from recon.pdf_bank_extractor import extract_bank_statement, build_pdf_bank_excel
+                pdf_file = files.get("bank_pdf")
+                if not pdf_file:
+                    self.write_json({"error": "Upload a bank statement PDF (field name: bank_pdf)."}, 400)
+                    return
+                content = pdf_file["content"] if isinstance(pdf_file, dict) else pdf_file[0]["content"]
+                data = extract_bank_statement(content)
+                excel_bytes = build_pdf_bank_excel(data)
+                job_id = uuid4().hex
+                payload = {
+                    "job_id":            job_id,
+                    "reco_type":         reco_type,
+                    "bank_name":         data.get("bank_name", ""),
+                    "account_no":        data.get("account_no", ""),
+                    "account_name":      data.get("account_name", ""),
+                    "period_from":       data.get("period_from", ""),
+                    "period_to":         data.get("period_to", ""),
+                    "transaction_count": data.get("transaction_count", 0),
+                    "validation":        data.get("validation", {}),
+                    "preview_rows":      data.get("preview_rows", []),
+                    "summary":           {"total": data.get("transaction_count", 0)},
+                    "counts":            {"transaction_rows": data.get("transaction_count", 0)},
+                    "results":           [],  # not used — download is via export endpoint
+                    "_xlsx_bytes":       excel_bytes,
                 }
                 JOBS[job_id] = payload
                 self.write_json({k: v for k, v in payload.items() if not k.startswith("_")})
@@ -633,14 +681,17 @@ class ReconciliationHandler(BaseHTTPRequestHandler):
         reco_type = payload.get("reco_type", "gst_2b_purchase")
         if reco_type == "bank_reco":
             filename_prefix = "bank_statement"
-        elif reco_type == "pdf_bank_extract":
-            filename_prefix = "pdf_bank_statement"
         elif reco_type == "gstr_1_vs_books":
             filename_prefix = "gstr1_vs_books"
         elif reco_type == "gstr_2b_books_multistate":
             filename_prefix = "2b_vs_books_multistate"
         elif reco_type == "gstr_3b_tally_entry":
             filename_prefix = "gstr3b_tally_entry"
+        elif reco_type == "einvoice_reco":
+            filename_prefix = "einvoice_reco"
+        elif reco_type == "pdf_bank_extract":
+            acct = payload.get("account_no", "")
+            filename_prefix = f"bank_statement_{acct}" if acct else "bank_statement_pdf"
         else:
             filename_prefix = "reconciliation"
         self.send_header("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
@@ -654,6 +705,9 @@ class ReconciliationHandler(BaseHTTPRequestHandler):
 
 
 def build_workbook(results: list[dict], summary: dict[str, int], counts: dict[str, int], reco_type: str = "gst_2b_purchase", pivot: list[dict] | None = None, payload: dict | None = None) -> Workbook:
+    if reco_type == "einvoice_reco":
+        from recon.einvoice_reco import build_einvoice_workbook
+        return build_einvoice_workbook((payload or {}).get("_bundle") or {})
     if reco_type == "gstr_2b_books":
         from recon.gstr_2b_books import build_gstr2b_books_workbook
         return build_gstr2b_books_workbook(results, payload=payload)
@@ -672,7 +726,9 @@ def build_workbook(results: list[dict], summary: dict[str, int], counts: dict[st
             results, monthly_summary=[], summary=summary, counts=counts, payload=payload
         )
     if reco_type == "gstr_3b_tally_entry":
-        return build_gstr3b_tally_workbook((payload or {}).get("_parsed", {}), results)
+        monthly_data  = (payload or {}).get("_monthly_data",  [])
+        state_summary = (payload or {}).get("_state_summary", [])
+        return build_gstr3b_tally_workbook(monthly_data, results, state_summary=state_summary)
 
     workbook = Workbook()
     summary_sheet = workbook.active
@@ -1114,11 +1170,7 @@ def build_gstr1_workbook(
         current_row += 3  # gap between sections
 
     _auto_col_width(ws, min_width=12, max_width=22)
-    # No freeze panes: this sheet stacks 4 sections vertically (GSTR-1 vs GSTR-3B,
-    # Books vs GSTR-1 All, B2B, B2C). Freezing rows 1-5 kept the first section's
-    # April row stuck on screen while lower sections scrolled — confusing. Let the
-    # whole sheet scroll naturally so each section reads in place.
-    ws.freeze_panes = None
+    ws.freeze_panes = "B6"
 
     # -----------------------------------------------------------------------
     # Sheet 2: GSTR-1 Pivot (only when PDF data present)

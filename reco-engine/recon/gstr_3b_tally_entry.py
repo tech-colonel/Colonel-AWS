@@ -18,6 +18,7 @@ SOP (GSTR-3B_SOP.docx):
 
 from __future__ import annotations
 
+import calendar
 import re
 from io import BytesIO
 from typing import Any
@@ -60,6 +61,7 @@ _PERIOD_RE = re.compile(
 )
 _PERIOD_MM_YYYY = re.compile(r'\b(0[1-9]|1[0-2])[/-](\d{4})\b')
 _GSTIN_LOOSE   = re.compile(r'[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][0-9A-Z]Z[0-9A-Z]')
+_DATE_DDMMYYYY = re.compile(r'\b(\d{2}/\d{2}/\d{4})\b')
 
 
 def _parse_num(val: Any) -> float:
@@ -117,6 +119,103 @@ def _state_info(gstin: str) -> tuple[str, str]:
     full  = GST_STATE_CODES.get(code, code)
     short = GST_STATE_SHORT.get(code, code)
     return full, short
+
+
+# ---------------------------------------------------------------------------
+# COA helpers (for 3B ledger-name matching)
+# ---------------------------------------------------------------------------
+
+def _load_coa(data: bytes, filename: str) -> dict:
+    """Load a 3B COA file (single-column ledger list) → {lower_name: original_name}."""
+    suffix = filename.lower().rsplit('.', 1)[-1] if '.' in filename else ''
+    if data[:8] == b'\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1' or suffix == 'xls':
+        data = _ensure_xlsx(data)
+    try:
+        sheets = pd.read_excel(BytesIO(data), sheet_name=None, dtype=str, header=None)
+        sheet_names = list(sheets.keys())
+        target = None
+        for name in sheet_names:
+            if 'ledger' in name.lower():
+                target = sheets[name]
+                break
+        if target is None:
+            target = sheets[sheet_names[0]]
+        result: dict = {}
+        for _, row in target.iterrows():
+            for cell in row:
+                val = str(cell).strip() if cell is not None else ''
+                low = val.lower()
+                if val and low not in ('nan', '', 'none', 'ledger name', 'name', 'particular', 'particulars'):
+                    result[low] = val
+        return result
+    except Exception:
+        return {}
+
+
+def _load_coa_from_list(ledger_list: list) -> dict:
+    """Build COA dict from a plain list of ledger name strings."""
+    result: dict = {}
+    for name in ledger_list:
+        val = str(name).strip() if name is not None else ''
+        if val:
+            result[val.lower()] = val
+    return result
+
+
+def _match_coa_ledger(generated: str, coa: dict, state_short: str = '') -> str:
+    """Match a generated ledger name to the COA. 3-tier: exact → state-stripped → original."""
+    if not coa:
+        return generated
+    key = generated.lower()
+    if key in coa:
+        return coa[key]
+    if state_short:
+        stripped = re.sub(r'\s+' + re.escape(state_short.lower()) + r'\s*$', '', key).strip()
+        if stripped != key and stripped in coa:
+            return coa[stripped]
+    return generated
+
+
+def _load_voucher_types(data: bytes, filename: str) -> dict:
+    """Load a Voucher Type master (single-column list) → {lower: original}. Reuses _load_coa logic."""
+    return _load_coa(data, filename)
+
+
+def _load_voucher_types_from_list(vt_list: list) -> dict:
+    """Build VT dict from a plain list of voucher type name strings."""
+    return _load_coa_from_list(vt_list)
+
+
+def _match_voucher_type(base: str, vt_master: dict, state_short: str) -> str:
+    """Match base voucher type to state-specific variant. 'Journal' + 'UP' → 'Journal UP' if in master."""
+    if not vt_master:
+        return base
+    candidate = f"{base} {state_short}"
+    if candidate.lower() in vt_master:
+        return vt_master[candidate.lower()]
+    if base.lower() in vt_master:
+        return vt_master[base.lower()]
+    return base
+
+
+def _derive_voucher_date(period: str) -> str:
+    """Convert 'April 2026' → '30-Apr-2026' (last day of month)."""
+    try:
+        parts = period.strip().split()
+        if len(parts) == 2:
+            month_name, year_str = parts
+            month_num = next(
+                (i + 1 for i, m in enumerate(_MONTHS) if m.lower() == month_name.lower()),
+                None
+            )
+            if month_num and year_str.isdigit():
+                year = int(year_str)
+                last_day = calendar.monthrange(year, month_num)[1]
+                month_abbr = month_name[:3].capitalize()
+                return f"{last_day:02d}-{month_abbr}-{year}"
+    except Exception:
+        pass
+    return period
 
 
 # ---------------------------------------------------------------------------
@@ -190,7 +289,7 @@ def _parse_gstr3b_pdf(data: bytes) -> dict:
         )
 
     result = {
-        'gstin': '', 'state': '', 'state_short': '', 'period': '',
+        'gstin': '', 'state': '', 'state_short': '', 'period': '', 'filing_date': '',
         'row_4c':       _empty_tax(),
         'row_4_45':     _empty_tax(),
         'row_61a_tax':         _empty_tax(),  # Tax Amount (output liability) per tax type
@@ -228,6 +327,16 @@ def _parse_gstr3b_pdf(data: bytes) -> dict:
         mm = _PERIOD_MM_YYYY.search(full_text)
         if mm:
             result['period'] = f"{_MONTHS[int(mm.group(1)) - 1]} {mm.group(2)}"
+
+    # ---- Filing Date (ARN date from PDF — DD/MM/YYYY) ----
+    dates_found = _DATE_DDMMYYYY.findall(full_text)
+    if dates_found:
+        try:
+            d, m, y = dates_found[0].split('/')
+            month_abbr = _MONTHS[int(m) - 1][:3].capitalize()
+            result['filing_date'] = f"{d}-{month_abbr}-{y}"
+        except Exception:
+            pass
 
     # ---- Parse table rows ----
     row_4_4 = _empty_tax()
@@ -342,7 +451,7 @@ def _parse_gstr3b_excel(data: bytes, filename: str) -> dict:
         data = _ensure_xlsx(data)
 
     result = {
-        'gstin': '', 'state': '', 'state_short': '', 'period': '',
+        'gstin': '', 'state': '', 'state_short': '', 'period': '', 'filing_date': '',
         'row_4c':       _empty_tax(),
         'row_4_45':     _empty_tax(),
         'row_61a_tax':  _empty_tax(),
@@ -378,6 +487,16 @@ def _parse_gstr3b_excel(data: bytes, filename: str) -> dict:
         mm = _PERIOD_MM_YYYY.search(all_text)
         if mm:
             result['period'] = f"{_MONTHS[int(mm.group(1)) - 1]} {mm.group(2)}"
+
+    # ---- Filing Date (DD/MM/YYYY in Excel cell values) ----
+    dates_found = _DATE_DDMMYYYY.findall(all_text)
+    if dates_found:
+        try:
+            d, m, y = dates_found[0].split('/')
+            month_abbr = _MONTHS[int(m) - 1][:3].capitalize()
+            result['filing_date'] = f"{d}-{month_abbr}-{y}"
+        except Exception:
+            pass
 
     row_4_4 = _empty_tax()
     row_4_5 = _empty_tax()
@@ -488,64 +607,79 @@ def parse_gstr3b(filename: str, data: bytes) -> dict:
 # Tally entry row builder
 # ---------------------------------------------------------------------------
 
-def build_tally_entries(parsed: dict) -> list[dict]:
+def build_tally_entries(
+    parsed: dict,
+    coa: dict | None = None,
+    vt_master: dict | None = None,
+) -> list[dict]:
     """
-    Generate two Tally journal entries matching actual practice (from screenshots):
+    Generate Tally journal entries. When coa dict is provided, ledger names are matched
+    to the brand's Chart of Accounts. When vt_master dict is provided, voucher types are
+    matched to the brand's Voucher Type master (e.g., 'Journal' → 'Journal UP').
 
-    Journal 1 — ITC Availed (Part 1 of SOP, combined with RCM credit):
-      Dr Credit Ledger IGST/CGST/SGST  ← Row 4(C) Net ITC Available
-      Cr Input IGST/CGST/SGST          ← Row 4(4+5) regular ITC
-      Cr RCM IGST/CGST/SGST            ← Row 6.1(B) RCM amounts (if any)
+    Journal 1 — ITC Availed:
+      Dr Credit Ledger IGST/CGST/SGST  ← Row 4(C)
+      Cr Input IGST/CGST/SGST          ← Row 4(4+5)
+      Cr RCM IGST/CGST/SGST            ← Row 6.1(B) if any
 
-    Journal 2 — ITC Utilized (Part 2 of SOP):
-      Dr Output IGST/CGST/SGST         ← Row 6.1(A) Tax Amount per tax type
-      Cr Credit Ledger IGST            ← TOTAL ITC used (sum of all tax types)
-      Cr Electronic Cash Ledger        ← Total cash paid (if any, for non-RCM)
+    Journal 2 — ITC Utilized:
+      Dr Output IGST/CGST/SGST         ← Row 6.1(A) tax amount
+      Cr Credit Ledger IGST/CGST/SGST  ← ITC used
+      Cr Electronic Cash Ledger        ← cash paid
 
-    Journal 3 — RCM Tax Payment (only if row_61b has values):
-      Dr Output IGST/CGST/SGST         ← Row 6.1(B) tax payable per type
-      Cr Electronic Cash Ledger        ← Total RCM cash paid
+    Journal 3 — RCM Tax Payment (only if row_61b > 0):
+      Dr Output IGST/CGST/SGST         ← Row 6.1(B)
+      Cr Electronic Cash Ledger        ← total RCM cash
     """
-    st        = parsed.get('state_short', parsed.get('state', ''))
-    r4c       = parsed['row_4c']
-    r4_45     = parsed['row_4_45']
-    r61a_tax  = parsed.get('row_61a_tax', _empty_tax())
+    st               = parsed.get('state_short', parsed.get('state', ''))
+    period           = parsed.get('period', '')
+    voucher_date     = parsed.get('filing_date') or _derive_voucher_date(period)
+    r4c              = parsed['row_4c']
+    r4_45            = parsed['row_4_45']
+    r61a_tax         = parsed.get('row_61a_tax', _empty_tax())
     r61a_itc         = parsed['row_61a_itc']
     r61a_cash        = parsed['row_61a_cash']
     r61a_credit_type = parsed.get('row_61a_credit_type', _empty_tax())
-    r61b      = parsed['row_61b']
+    r61b             = parsed['row_61b']
 
     entries: list[dict] = []
 
+    def _name(raw: str) -> str:
+        return _match_coa_ledger(raw, coa, st) if coa else raw
+
+    def _vt(base: str) -> str:
+        return _match_voucher_type(base, vt_master, st) if vt_master else base
+
     def section(title: str):
-        entries.append({'_type': 'section', 'sno': '', 'particulars': title, 'debit': '', 'credit': ''})
+        entries.append({'_type': 'section', 'sno': '', 'particulars': title,
+                        'debit': '', 'credit': '', 'date': '', 'voucher_type': ''})
 
     def col_header():
         entries.append({'_type': 'header', 'sno': 'S.No', 'particulars': 'Particulars',
-                        'debit': 'Debit (₹)', 'credit': 'Credit (₹)'})
+                        'debit': 'Debit (₹)', 'credit': 'Credit (₹)',
+                        'date': 'Date', 'voucher_type': 'Voucher Type'})
 
     def row(sno: str, particular: str, debit='', credit=''):
-        entries.append({'_type': 'data', 'sno': sno, 'particulars': particular,
-                        'debit': debit, 'credit': credit})
+        entries.append({'_type': 'data', 'sno': sno, 'particulars': _name(particular),
+                        'debit': debit, 'credit': credit,
+                        'date': voucher_date, 'voucher_type': _vt('Journal')})
 
     def blank():
-        entries.append({'_type': 'blank', 'sno': '', 'particulars': '', 'debit': '', 'credit': ''})
+        entries.append({'_type': 'blank', 'sno': '', 'particulars': '',
+                        'debit': '', 'credit': '', 'date': '', 'voucher_type': ''})
 
     TAX = [('IGST', 'igst'), ('CGST', 'cgst'), ('SGST', 'sgst')]
     has_rcm = any(r61b[k] for k in ('igst', 'cgst', 'sgst'))
 
     # ── Journal 1: ITC Availed ─────────────────────────────────────────────
-    # Debit side: Credit Ledger for each tax type (= Net ITC Available, Row 4C)
     section('Journal 1 — ITC Availed (Narration: ITC Availed)')
     col_header()
     sno = 1
     for tax_name, tax_key in TAX:
         row(str(sno), f'Credit Ledger {tax_name} {st}', debit=r4c[tax_key])
         sno += 1
-    # Credit side: Input Ledger (regular ITC from Row 4(4+5))
     for tax_name, tax_key in TAX:
         row('', f'Input {tax_name} {st}', credit=r4_45[tax_key])
-    # Credit side: RCM Ledger (ITC from RCM paid, Row 6.1(B))
     if has_rcm:
         for tax_name, tax_key in TAX:
             amt = r61b[tax_key]
@@ -555,44 +689,36 @@ def build_tally_entries(parsed: dict) -> list[dict]:
     blank()
 
     # ── Journal 2: ITC Utilized ────────────────────────────────────────────
-    # Debit side: Output Ledger per tax type (Tax Amount from Row 6.1(A))
-    # Credit side: Credit Ledger IGST for total ITC used (IGST ITC covers all taxes)
-    section('Journal 2 — ITC Utilized (Narration: ITC Utilization)')
-    col_header()
-
-    # Use Tax Amount (ITC + Cash); fall back to ITC if tax not extracted
     def tax_amt(key):
         t = r61a_tax.get(key, 0.0)
-        if t:
-            return t
-        return r61a_itc.get(key, 0.0) + r61a_cash.get(key, 0.0)
+        return t if t else r61a_itc.get(key, 0.0) + r61a_cash.get(key, 0.0)
 
-    sno = 1
-    for tax_name, tax_key in TAX:
-        row(str(sno), f'Output {tax_name} {st}', debit=tax_amt(tax_key))
-        sno += 1
-
-    # Credit side: one row per ITC credit ledger type (IGST/CGST/SGST), skip if zero.
-    # Use the credit-type breakdown from PDF (col 4/5/6 per output row) when available;
-    # fall back to a single IGST entry for Excel inputs where the breakdown isn't parsed.
     total_cash = sum(r61a_cash[k] for k in ('igst', 'cgst', 'sgst'))
     _credit_total = sum(r61a_credit_type[k] for k in ('igst', 'cgst', 'sgst'))
-    if _credit_total > 0:
-        for _itc_name, _itc_key in TAX:
-            _amt = r61a_credit_type.get(_itc_key, 0.0)
-            if _amt:
-                row('', f'Credit Ledger {_itc_name} {st}', credit=_amt)
-    else:
-        total_itc = sum(r61a_itc[k] for k in ('igst', 'cgst', 'sgst'))
-        row('', f'Credit Ledger IGST {st}', credit=total_itc)
-    if total_cash:
-        row('', f'Electronic Cash Ledger {st}', credit=total_cash)
+    total_itc = sum(r61a_itc[k] for k in ('igst', 'cgst', 'sgst'))
+    _j2_has_data = any(tax_amt(k) != 0.0 for k in ('igst', 'cgst', 'sgst')) or total_cash > 0
 
-    blank()
+    if _j2_has_data:
+        section('Journal 2 — ITC Utilized (Narration: ITC Utilization)')
+        col_header()
+        sno = 1
+        for tax_name, tax_key in TAX:
+            amt = tax_amt(tax_key)
+            if amt != 0.0:
+                row(str(sno), f'Output {tax_name} {st}', debit=amt)
+                sno += 1
+        if _credit_total > 0:
+            for _itc_name, _itc_key in TAX:
+                _amt = r61a_credit_type.get(_itc_key, 0.0)
+                if _amt:
+                    row('', f'Credit Ledger {_itc_name} {st}', credit=_amt)
+        elif total_itc > 0:
+            row('', f'Credit Ledger IGST {st}', credit=total_itc)
+        if total_cash:
+            row('', f'Electronic Cash Ledger {st}', credit=total_cash)
+        blank()
 
     # ── Journal 3: RCM Tax Payment ────────────────────────────────────────
-    # 6.1(B) Reverse Charge: tax payable = cash paid (no ITC offset for RCM).
-    # Dr Output IGST/CGST/SGST per tax type, Cr Electronic Cash Ledger = total.
     if has_rcm:
         section('Journal 3 — RCM Tax Payment (Narration: RCM)')
         col_header()
@@ -609,6 +735,87 @@ def build_tally_entries(parsed: dict) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
+# Multi-file processor
+# ---------------------------------------------------------------------------
+
+def process_multi(
+    files_list: list,
+    coa: dict | None = None,
+    vt_master: dict | None = None,
+) -> tuple[list, list, list]:
+    """
+    Process 1–15 GSTR-3B files in FIFO order.
+
+    files_list: list of {"filename": str, "content": bytes}
+    coa:        pre-built {lower: original} dict from _load_coa / _load_coa_from_list, or None
+    vt_master:  pre-built {lower: original} dict from _load_voucher_types / _load_voucher_types_from_list, or None
+    Returns:    (all_entries, monthly_data, state_summary)
+    """
+    all_entries: list[dict] = []
+    monthly_data: list[dict] = []
+    state_totals: dict[str, dict] = {}
+
+    for idx, finfo in enumerate(files_list):
+        parsed  = parse_gstr3b(finfo['filename'], finfo['content'])
+        entries = build_tally_entries(parsed, coa=coa, vt_master=vt_master)
+
+        period       = parsed.get('period', f'Month {idx + 1}')
+        gstin        = parsed.get('gstin', '')
+        state        = parsed.get('state', '')
+        state_short  = parsed.get('state_short', '')
+        voucher_date = parsed.get('filing_date') or _derive_voucher_date(period)
+
+        total_debit  = sum(e['debit']  for e in entries
+                           if e['_type'] == 'data' and isinstance(e.get('debit'),  float))
+        total_credit = sum(e['credit'] for e in entries
+                           if e['_type'] == 'data' and isinstance(e.get('credit'), float))
+
+        j_debit: dict[int, float] = {}
+        j_idx = 0
+        for e in entries:
+            if e['_type'] == 'section':
+                j_idx += 1
+                j_debit[j_idx] = 0.0
+            elif e['_type'] == 'data' and j_idx > 0:
+                d = e.get('debit', '')
+                if isinstance(d, float):
+                    j_debit[j_idx] = j_debit.get(j_idx, 0.0) + d
+
+        monthly_data.append({
+            'period':       period,
+            'gstin':        gstin,
+            'state':        state,
+            'state_short':  state_short,
+            'voucher_date': voucher_date,
+            'entries':      entries,
+            'total_debit':  total_debit,
+            'total_credit': total_credit,
+            'j1_debit':     j_debit.get(1, 0.0),
+            'j2_debit':     j_debit.get(2, 0.0),
+            'j3_debit':     j_debit.get(3, 0.0),
+        })
+
+        if idx > 0:
+            _sep = {'_type': 'blank', 'sno': '', 'particulars': '',
+                    'debit': '', 'credit': '', 'date': '', 'voucher_type': ''}
+            all_entries.append(_sep.copy())
+            all_entries.append(_sep.copy())
+        all_entries.extend(entries)
+
+        if state_short not in state_totals:
+            state_totals[state_short] = {
+                'state': state, 'months': 0,
+                'total_debit': 0.0, 'total_credit': 0.0,
+            }
+        state_totals[state_short]['months']        += 1
+        state_totals[state_short]['total_debit']   += total_debit
+        state_totals[state_short]['total_credit']  += total_credit
+
+    state_summary = [{'state_short': k, **v} for k, v in state_totals.items()]
+    return all_entries, monthly_data, state_summary
+
+
+# ---------------------------------------------------------------------------
 # Excel Workbook Builder
 # ---------------------------------------------------------------------------
 
@@ -619,106 +826,278 @@ _WHITE_FONT = Font(bold=True, color='FFFFFF', name='Calibri', size=11)
 _SECT_FONT  = Font(bold=True, color='FFFFFF', name='Calibri', size=10)
 _HDR_FONT   = Font(bold=True, color='1E3A5F', name='Calibri', size=10)
 _DATA_FONT  = Font(name='Calibri', size=10)
-_ZERO_FONT  = Font(name='Calibri', size=10, color='888888')
 _NUM_FMT    = '#,##0.00'
 
 _THIN   = Side(style='thin', color='CCCCCC')
 _BORDER = Border(left=_THIN, right=_THIN, top=_THIN, bottom=_THIN)
 
 
-def build_gstr3b_tally_workbook(parsed: dict, entries: list[dict]) -> Workbook:
-    wb = Workbook()
-    ws = wb.active
-    ws.title = 'Tally Entries'
-
-    gstin       = parsed.get('gstin',       'N/A')
-    state_full  = parsed.get('state',       'N/A')  # full name for header display
-    state_short = parsed.get('state_short', 'N/A')  # abbreviation shown alongside
-    period      = parsed.get('period',      'N/A')
+def _write_entries_to_sheet(ws, monthly_data: list, start_row: int = 1) -> None:
+    """Write all months' entries into ws starting at start_row."""
+    COLS = 6  # A–F
 
     ws.column_dimensions['A'].width = 7
     ws.column_dimensions['B'].width = 44
     ws.column_dimensions['C'].width = 20
     ws.column_dimensions['D'].width = 20
+    ws.column_dimensions['E'].width = 16
+    ws.column_dimensions['F'].width = 14
 
-    # Row 1: info header — show both full name and abbreviation
-    ws.merge_cells('A1:D1')
-    ws.row_dimensions[1].height = 28
-    c = ws['A1']
-    c.value = f'GSTIN: {gstin}    |    State: {state_full} ({state_short})    |    Period: {period}'
-    c.font  = _WHITE_FONT
-    c.fill  = _NAV_FILL
-    c.alignment = Alignment(horizontal='center', vertical='center')
+    current_row = start_row
 
-    ws.append(['', '', '', ''])
-    ws.row_dimensions[2].height = 6
+    for m_idx, month_info in enumerate(monthly_data):
+        gstin        = month_info.get('gstin', 'N/A')
+        state_full   = month_info.get('state', 'N/A')
+        state_short  = month_info.get('state_short', '')
+        period       = month_info.get('period', 'N/A')
+        voucher_date = month_info.get('voucher_date', '')
 
-    current_row = 3
-
-    for entry in entries:
-        rtype = entry.get('_type', 'data')
-
-        if rtype == 'blank':
-            ws.append(['', '', '', ''])
-            ws.row_dimensions[current_row].height = 8
-            current_row += 1
-            continue
-
-        if rtype == 'section':
-            ws.merge_cells(f'A{current_row}:D{current_row}')
-            c = ws.cell(row=current_row, column=1, value=entry['particulars'])
-            c.font  = _SECT_FONT
-            c.fill  = _SECT_FILL
-            c.alignment = Alignment(horizontal='left', vertical='center', indent=1)
-            ws.row_dimensions[current_row].height = 22
-            current_row += 1
-            continue
-
-        if rtype == 'header':
-            for col, (key, align) in enumerate([
-                ('sno',         Alignment(horizontal='center', vertical='center')),
-                ('particulars', Alignment(horizontal='left',   vertical='center')),
-                ('debit',       Alignment(horizontal='center', vertical='center')),
-                ('credit',      Alignment(horizontal='center', vertical='center')),
-            ], start=1):
-                c = ws.cell(row=current_row, column=col, value=entry[key])
-                c.font      = _HDR_FONT
-                c.fill      = _HDR_FILL
-                c.border    = _BORDER
-                c.alignment = align
-            ws.row_dimensions[current_row].height = 18
-            current_row += 1
-            continue
-
-        # Data row
-        debit_raw  = entry.get('debit', '')
-        credit_raw = entry.get('credit', '')
-        debit_num  = debit_raw  if isinstance(debit_raw,  (int, float)) else None
-        credit_num = credit_raw if isinstance(credit_raw, (int, float)) else None
-
-        is_zero = (
-            (debit_num  is not None and debit_num  == 0.0) or
-            (credit_num is not None and credit_num == 0.0)
+        # Month banner
+        ws.merge_cells(f'A{current_row}:F{current_row}')
+        c = ws.cell(row=current_row, column=1)
+        c.value = (
+            f'GSTIN: {gstin}    |    State: {state_full} ({state_short})'
+            f'    |    Period: {period}    |    Date: {voucher_date}    |    Voucher Type: Journal'
         )
-        font = _ZERO_FONT if is_zero else _DATA_FONT
-
-        cells_spec = [
-            (1, entry.get('sno', ''),         Alignment(horizontal='center', vertical='center')),
-            (2, entry.get('particulars', ''), Alignment(horizontal='left',   vertical='center', indent=1)),
-            (3, debit_num  if debit_num  is not None else '', Alignment(horizontal='right', vertical='center')),
-            (4, credit_num if credit_num is not None else '', Alignment(horizontal='right', vertical='center')),
-        ]
-
-        for col, val, align in cells_spec:
-            c = ws.cell(row=current_row, column=col, value=val)
-            c.font      = font
-            c.border    = _BORDER
-            c.alignment = align
-            if col in (3, 4) and isinstance(val, (int, float)):
-                c.number_format = _NUM_FMT
-
-        ws.row_dimensions[current_row].height = 16
+        c.font      = _WHITE_FONT
+        c.fill      = _NAV_FILL
+        c.alignment = Alignment(horizontal='center', vertical='center')
+        ws.row_dimensions[current_row].height = 28
         current_row += 1
 
+        # Blank spacer after banner
+        ws.row_dimensions[current_row].height = 6
+        current_row += 1
+
+        for entry in month_info['entries']:
+            rtype = entry.get('_type', 'data')
+
+            if rtype == 'blank':
+                ws.row_dimensions[current_row].height = 8
+                current_row += 1
+                continue
+
+            if rtype == 'section':
+                ws.merge_cells(f'A{current_row}:F{current_row}')
+                c = ws.cell(row=current_row, column=1, value=entry['particulars'])
+                c.font      = _SECT_FONT
+                c.fill      = _SECT_FILL
+                c.alignment = Alignment(horizontal='left', vertical='center', indent=1)
+                ws.row_dimensions[current_row].height = 22
+                current_row += 1
+                continue
+
+            if rtype == 'header':
+                spec = [
+                    ('sno',          Alignment(horizontal='center', vertical='center')),
+                    ('particulars',  Alignment(horizontal='left',   vertical='center')),
+                    ('debit',        Alignment(horizontal='center', vertical='center')),
+                    ('credit',       Alignment(horizontal='center', vertical='center')),
+                    ('date',         Alignment(horizontal='center', vertical='center')),
+                    ('voucher_type', Alignment(horizontal='center', vertical='center')),
+                ]
+                for col, (key, align) in enumerate(spec, start=1):
+                    c = ws.cell(row=current_row, column=col, value=entry.get(key, ''))
+                    c.font      = _HDR_FONT
+                    c.fill      = _HDR_FILL
+                    c.border    = _BORDER
+                    c.alignment = align
+                ws.row_dimensions[current_row].height = 18
+                current_row += 1
+                continue
+
+            # Data row
+            debit_raw  = entry.get('debit', '')
+            credit_raw = entry.get('credit', '')
+            debit_num  = debit_raw  if isinstance(debit_raw,  (int, float)) else None
+            credit_num = credit_raw if isinstance(credit_raw, (int, float)) else None
+            font = _DATA_FONT
+
+            cells_spec = [
+                (1, entry.get('sno', ''),          Alignment(horizontal='center', vertical='center')),
+                (2, entry.get('particulars', ''),  Alignment(horizontal='left',   vertical='center', indent=1)),
+                (3, debit_num  if debit_num  is not None else '', Alignment(horizontal='right', vertical='center')),
+                (4, credit_num if credit_num is not None else '', Alignment(horizontal='right', vertical='center')),
+                (5, entry.get('date', ''),          Alignment(horizontal='center', vertical='center')),
+                (6, entry.get('voucher_type', ''), Alignment(horizontal='center', vertical='center')),
+            ]
+            for col, val, align in cells_spec:
+                c = ws.cell(row=current_row, column=col, value=val)
+                c.font      = font
+                c.border    = _BORDER
+                c.alignment = align
+                if col in (3, 4) and isinstance(val, (int, float)):
+                    c.number_format = _NUM_FMT
+            ws.row_dimensions[current_row].height = 16
+            current_row += 1
+
+        # 2 blank rows between months
+        if m_idx < len(monthly_data) - 1:
+            ws.row_dimensions[current_row].height = 8
+            current_row += 1
+            ws.row_dimensions[current_row].height = 8
+            current_row += 1
+
     ws.freeze_panes = 'A2'
+
+
+def _write_flat_journal_sheet(
+    ws,
+    monthly_data: list,
+    journal_keyword: str,
+    narration: str,
+) -> None:
+    """
+    Write a flat (one-row-per-entry) table for one journal type.
+    journal_keyword: 'ITC Availed' or 'ITC Utilized' — matched against section labels.
+    """
+    HEADERS = ['Period', 'Date', 'GSTIN', 'Voucher Type', 'State', 'Ledger',
+               'Debit (₹)', 'Credit (₹)', 'Narration']
+    col_letters = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I']
+    col_widths  = [18,  16,  30,  14,  22,  40,  18,  18,  18]
+
+    for letter, width in zip(col_letters, col_widths):
+        ws.column_dimensions[letter].width = width
+
+    for col, val in enumerate(HEADERS, start=1):
+        c = ws.cell(row=1, column=col, value=val)
+        c.font      = _HDR_FONT
+        c.fill      = _HDR_FILL
+        c.border    = _BORDER
+        c.alignment = Alignment(horizontal='center', vertical='center')
+    ws.row_dimensions[1].height = 18
+
+    row_num = 2
+    for month in monthly_data:
+        active = False
+        for entry in month['entries']:
+            if entry['_type'] == 'section':
+                active = journal_keyword in entry['particulars']
+            elif active and entry['_type'] == 'data':
+                debit  = entry['debit']  if isinstance(entry['debit'],  (int, float)) else ''
+                credit = entry['credit'] if isinstance(entry['credit'], (int, float)) else ''
+                vals = [
+                    month['period'],
+                    month['voucher_date'],
+                    month['gstin'],
+                    entry.get('voucher_type', 'Journal'),
+                    month['state'],
+                    entry['particulars'],
+                    debit,
+                    credit,
+                    narration,
+                ]
+                for col, val in enumerate(vals, start=1):
+                    c = ws.cell(row=row_num, column=col, value=val)
+                    c.font      = _DATA_FONT
+                    c.border    = _BORDER
+                    c.alignment = Alignment(
+                        horizontal='right'  if col in (7, 8) else
+                        ('left'             if col in (6, 9) else 'center'),
+                        vertical='center',
+                    )
+                    if col in (7, 8) and isinstance(val, (int, float)):
+                        c.number_format = _NUM_FMT
+                ws.row_dimensions[row_num].height = 16
+                row_num += 1
+
+    ws.freeze_panes = 'A2'
+
+
+def build_gstr3b_tally_workbook(
+    monthly_data: list,
+    all_entries: list,
+    state_summary: list | None = None,
+) -> Workbook:
+    """
+    Build Excel workbook from multi-month data.
+    Sheet 1: Tally Entries (all months stacked)
+    Sheet 2: Month-wise Summary
+    Sheet 3: State-wise Summary
+    """
+    wb = Workbook()
+    ws = wb.active
+    ws.title = 'Tally Entries'
+    _write_entries_to_sheet(ws, monthly_data)
+
+    # ── Sheet 2: ITC Availed (flat per-entry table — Journal 1) ────────────
+    ws_av = wb.create_sheet('ITC Availed')
+    _write_flat_journal_sheet(ws_av, monthly_data, 'ITC Availed', 'ITC Availed')
+
+    # ── Sheet 3: ITC Utilized (flat per-entry table — Journal 2) ───────────
+    ws_ut = wb.create_sheet('ITC Utilized')
+    _write_flat_journal_sheet(ws_ut, monthly_data, 'ITC Utilized', 'ITC Utilization')
+
+    # ── Sheet 4: Month-wise Summary ─────────────────────────────────────────
+    ws_m = wb.create_sheet('Month-wise Summary')
+    ws_m.column_dimensions['A'].width = 18
+    ws_m.column_dimensions['B'].width = 32
+    ws_m.column_dimensions['C'].width = 22
+    ws_m.column_dimensions['D'].width = 20
+    ws_m.column_dimensions['E'].width = 20
+    ws_m.column_dimensions['F'].width = 22
+    ws_m.column_dimensions['G'].width = 22
+    ws_m.column_dimensions['H'].width = 16
+
+    m_hdrs = ['Period', 'GSTIN', 'State', 'Total Debit (₹)', 'Total Credit (₹)',
+              'ITC Availed Dr (₹)', 'ITC Utilized Dr (₹)', 'RCM Dr (₹)']
+    for col, val in enumerate(m_hdrs, start=1):
+        c = ws_m.cell(row=1, column=col, value=val)
+        c.font = _HDR_FONT
+        c.fill = _HDR_FILL
+        c.border = _BORDER
+        c.alignment = Alignment(horizontal='center', vertical='center')
+    ws_m.row_dimensions[1].height = 18
+
+    for ri, m in enumerate(monthly_data, start=2):
+        vals = [
+            m.get('period', ''), m.get('gstin', ''), m.get('state', ''),
+            m.get('total_debit', 0.0), m.get('total_credit', 0.0),
+            m.get('j1_debit', 0.0), m.get('j2_debit', 0.0), m.get('j3_debit', 0.0),
+        ]
+        for col, val in enumerate(vals, start=1):
+            c = ws_m.cell(row=ri, column=col, value=val)
+            c.font   = _DATA_FONT
+            c.border = _BORDER
+            c.alignment = Alignment(
+                horizontal='left' if col == 2 else 'center', vertical='center'
+            )
+            if col >= 4 and isinstance(val, float):
+                c.number_format = _NUM_FMT
+        ws_m.row_dimensions[ri].height = 16
+
+    # ── Sheet 3: State-wise Summary ─────────────────────────────────────────
+    ws_s = wb.create_sheet('State-wise Summary')
+    ws_s.column_dimensions['A'].width = 22
+    ws_s.column_dimensions['B'].width = 14
+    ws_s.column_dimensions['C'].width = 10
+    ws_s.column_dimensions['D'].width = 20
+    ws_s.column_dimensions['E'].width = 20
+
+    s_hdrs = ['State', 'State Code', 'Months', 'Total Debit (₹)', 'Total Credit (₹)']
+    for col, val in enumerate(s_hdrs, start=1):
+        c = ws_s.cell(row=1, column=col, value=val)
+        c.font = _HDR_FONT
+        c.fill = _HDR_FILL
+        c.border = _BORDER
+        c.alignment = Alignment(horizontal='center', vertical='center')
+    ws_s.row_dimensions[1].height = 18
+
+    ss = state_summary or []
+    for ri, s in enumerate(ss, start=2):
+        vals = [
+            s.get('state', ''), s.get('state_short', ''), s.get('months', 0),
+            s.get('total_debit', 0.0), s.get('total_credit', 0.0),
+        ]
+        for col, val in enumerate(vals, start=1):
+            c = ws_s.cell(row=ri, column=col, value=val)
+            c.font   = _DATA_FONT
+            c.border = _BORDER
+            c.alignment = Alignment(
+                horizontal='left' if col == 1 else 'center', vertical='center'
+            )
+            if col >= 4 and isinstance(val, float):
+                c.number_format = _NUM_FMT
+        ws_s.row_dimensions[ri].height = 16
+
     return wb

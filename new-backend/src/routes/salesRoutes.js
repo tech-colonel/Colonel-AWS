@@ -123,6 +123,19 @@ router.post('/brands/:brandId/agents/:agentId/zepto/generate/preview', authentic
 router.post('/brands/:brandId/agents/:agentId/zepto/generate/commit', authenticateToken, salesZeptoController.generateCommit);
 router.post('/brands/:brandId/agents/:agentId/zepto/generate/discard', authenticateToken, salesZeptoController.generateDiscard);
 
+const salesNykaaController = require('../controllers/agents/sales-nykaa/salesNykaaController');
+
+// ─── Nykaa Routes ─────────────────────────────────────────────────────────────
+router.get('/brands/:brandId/agents/:agentId/nykaa/master', authenticateToken, salesNykaaController.getMasterData);
+
+// Two-phase generation: upload cycle1File + cycle2File → preview → commit/discard
+router.post('/brands/:brandId/agents/:agentId/nykaa/generate/preview', authenticateToken, upload.fields([
+    { name: 'cycle1File', maxCount: 1 },   // May_01_15 (1–15 cycle)
+    { name: 'cycle2File', maxCount: 1 },   // May_16_30 (16–30 cycle)
+]), salesNykaaController.generatePreview);
+router.post('/brands/:brandId/agents/:agentId/nykaa/generate/commit',  authenticateToken, salesNykaaController.generateCommit);
+router.post('/brands/:brandId/agents/:agentId/nykaa/generate/discard', authenticateToken, salesNykaaController.generateDiscard);
+
 const totalSalesController = require('../controllers/agents/total-sales/totalSalesController');
 
 // ─── Total Sales Routes ────────────────────────────────────────────────────────
@@ -135,5 +148,8 @@ router.post('/brands/:brandId/agents/:agentId/total-sales-analyzer/generate/prev
 router.post('/brands/:brandId/agents/:agentId/total-sales-analyzer/generate/commit', authenticateToken, totalSalesController.generateCommit);
 router.post('/brands/:brandId/agents/:agentId/total-sales-analyzer/generate/discard', authenticateToken, totalSalesController.generateDiscard);
 router.post('/brands/:brandId/agents/:agentId/total-sales-analyzer/dashboard', authenticateToken, totalSalesController.getDashboardData);
+
+// NOTE: Mirrow & cread routes removed — their controllers (sales-mirrow / sales-cread)
+// were never committed to the repo and crash the backend on boot. Nykaa is kept above.
 
 module.exports = router;

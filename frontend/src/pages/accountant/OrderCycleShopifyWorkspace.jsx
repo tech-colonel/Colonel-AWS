@@ -1,43 +1,37 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useParams } from 'react-router-dom';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../../components/ui/card';
-import { Button } from '../../components/ui/button';
-import { Input } from '../../components/ui/input';
-import { Label } from '../../components/ui/label';
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../../components/ui/table';
-import { Badge } from '../../components/ui/badge';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '../../components/ui/modal';
 import {
     Loader2, Plus, Download, Trash2, FileText, RefreshCw,
-    ChevronRight, ChevronLeft, Upload, CheckCircle2,
-    Package, CreditCard, ShoppingBag
+    ChevronRight, ChevronLeft, CheckCircle2, Package, CreditCard,
+    ShoppingBag, UploadCloud, AlertCircle, Calendar, BarChart2,
+    ArrowLeft, Eye, TrendingDown, TrendingUp, XCircle,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { format } from 'date-fns';
 import api from '../../lib/api';
 
-// ─── Fixed partner lists ──────────────────────────────────────────────────────
+// ─── Constants ────────────────────────────────────────────────────────────────
 const LOGISTICS_PARTNERS = [
-    { id: 'delhivery',   label: 'Delhivery' },
-    { id: 'xpressbees',  label: 'Xpressbees (Busybees)' },
-    { id: 'ekart',       label: 'Instakart (Ekart)' },
-    { id: 'bluedart',    label: 'Bluedart' },
+    { id: 'delhivery',  label: 'Delhivery',            color: '#6366f1' },
+    { id: 'xpressbees', label: 'Xpressbees (Busybees)', color: '#f59e0b' },
+    { id: 'ekart',      label: 'Instakart (Ekart)',     color: '#10b981' },
+    { id: 'bluedart',   label: 'Bluedart',              color: '#ef4444' },
 ];
 
 const PAYMENT_GATEWAYS = [
-    { id: 'razorpay',  label: 'Razorpay' },
-    { id: 'snapmint',  label: 'Snapmint' },
-    { id: 'bharatx',   label: 'BharatX (AuroraX)' },
+    { id: 'razorpay', label: 'Razorpay',         color: '#3b82f6' },
+    { id: 'snapmint', label: 'Snapmint',          color: '#8b5cf6' },
+    { id: 'bharatx',  label: 'BharatX (AuroraX)', color: '#ec4899' },
 ];
 
-// ─── Step constants ───────────────────────────────────────────────────────────
-const STEP_SELECT  = 1;   // choose gateways & logistics from list
-const STEP_UPLOAD  = 2;   // upload shopify + one file per selection
-const STEP_PREVIEW = 3;   // summary before commit
+const STEP_SELECT  = 1;
+const STEP_UPLOAD  = 2;
+const STEP_PREVIEW = 3;
 
 const MONTHS = [
     'January','February','March','April','May','June',
-    'July','August','September','October','November','December'
+    'July','August','September','October','November','December',
 ];
 const currentYear = new Date().getFullYear();
 const YEARS = Array.from({ length: 5 }, (_, i) => currentYear - i);
@@ -49,837 +43,974 @@ function formatDate(d) {
     catch { return d; }
 }
 
+function fmtINR(n) {
+    if (n === null || n === undefined) return '—';
+    const abs = Math.abs(n);
+    let str;
+    if (abs >= 1e7)      str = (n / 1e7).toFixed(2) + ' Cr';
+    else if (abs >= 1e5) str = (n / 1e5).toFixed(2) + ' L';
+    else                 str = abs.toLocaleString('en-IN', { maximumFractionDigits: 2 });
+    return `₹${n < 0 ? '-' : ''}${str}`;
+}
+
+function fmtFull(n) {
+    if (n === null || n === undefined) return '—';
+    return '₹' + Number(n).toLocaleString('en-IN', { maximumFractionDigits: 2 });
+}
+
 const initModal = () => ({
     open: false,
     step: STEP_SELECT,
     month: MONTHS[new Date().getMonth()],
     year: String(currentYear),
-    selectedGateways:  [],   // array of ids
-    selectedLogistics: [],   // array of ids
+    selectedGateways:  [],
+    selectedLogistics: [],
     unicommerceFile: null,
     salesOrderReportFile: null,
-    gatewayFiles:  {},    // { [id]: File }
-    logisticsFiles: {},   // { [id]: File }
+    gatewayFiles:  {},
+    logisticsFiles: {},
 });
+
+// ─── SVG Donut Chart ──────────────────────────────────────────────────────────
+function DonutChart({ pct, size = 100, stroke = 10, color = '#10b981', label, sublabel }) {
+    const r    = (size - stroke) / 2;
+    const circ = 2 * Math.PI * r;
+    const dash = Math.min(pct, 100) / 100 * circ;
+    return (
+        <div className="relative inline-flex items-center justify-center" style={{ width: size, height: size }}>
+            <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`}>
+                <circle cx={size/2} cy={size/2} r={r}
+                    fill="none" stroke="#e2e8f0" strokeWidth={stroke} />
+                <circle cx={size/2} cy={size/2} r={r}
+                    fill="none" stroke={color} strokeWidth={stroke}
+                    strokeDasharray={`${dash} ${circ}`}
+                    strokeLinecap="round"
+                    transform={`rotate(-90 ${size/2} ${size/2})`} />
+            </svg>
+            {label && (
+                <div className="absolute inset-0 flex flex-col items-center justify-center">
+                    <span className="font-bold text-slate-900 leading-none" style={{ fontSize: size * 0.15 }}>
+                        {label}
+                    </span>
+                    {sublabel && (
+                        <span className="text-slate-400 leading-none mt-0.5" style={{ fontSize: size * 0.09 }}>
+                            {sublabel}
+                        </span>
+                    )}
+                </div>
+            )}
+        </div>
+    );
+}
+
+// ─── Drag-drop file zone ──────────────────────────────────────────────────────
+function FileDropZone({ id, label, icon: Icon, accept, value, onChange, color = '#64748b' }) {
+    const inputRef = useRef();
+    const [dragging, setDragging] = useState(false);
+    const handleDrop = (e) => {
+        e.preventDefault(); setDragging(false);
+        const file = e.dataTransfer.files?.[0];
+        if (file) onChange(file);
+    };
+    return (
+        <div
+            onClick={() => inputRef.current?.click()}
+            onDragOver={e => { e.preventDefault(); setDragging(true); }}
+            onDragLeave={() => setDragging(false)}
+            onDrop={handleDrop}
+            className={`relative flex flex-col items-center justify-center gap-2 rounded-xl border-2 border-dashed cursor-pointer transition-all select-none py-5 px-4
+                ${dragging ? 'border-emerald-400 bg-emerald-50' : value ? 'border-emerald-300 bg-emerald-50/60' : 'border-slate-200 bg-slate-50 hover:border-slate-300 hover:bg-white'}`}
+        >
+            <input ref={inputRef} id={id} type="file" accept={accept} className="hidden"
+                onChange={e => onChange(e.target.files?.[0] || null)} />
+            {value ? (
+                <>
+                    <CheckCircle2 className="h-7 w-7 text-emerald-500" />
+                    <div className="text-center">
+                        <p className="text-sm font-semibold text-emerald-700 truncate max-w-[180px]">{value.name}</p>
+                        <p className="text-xs text-slate-500 mt-0.5">Click to replace</p>
+                    </div>
+                </>
+            ) : (
+                <>
+                    <div className="w-10 h-10 rounded-full flex items-center justify-center bg-white border border-slate-200 shadow-sm">
+                        <Icon className="h-5 w-5" style={{ color }} />
+                    </div>
+                    <div className="text-center">
+                        <p className="text-sm font-semibold text-slate-700">{label}</p>
+                        <p className="text-xs text-slate-400 mt-0.5">Drop or click · xlsx / csv</p>
+                    </div>
+                </>
+            )}
+        </div>
+    );
+}
+
+// ─── Provider Segment Donut (multi-color) ─────────────────────────────────────
+function SegmentDonut({ segments, size = 160, stroke = 18 }) {
+    const r    = (size - stroke) / 2;
+    const circ = 2 * Math.PI * r;
+    const total = segments.reduce((s, sg) => s + sg.value, 0);
+    let offset = 0;
+    const slices = segments.map(sg => {
+        const len = total > 0 ? (sg.value / total) * circ : 0;
+        const slice = { ...sg, dash: len, offset };
+        offset += len + 1;
+        return slice;
+    });
+    return (
+        <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`}>
+            <circle cx={size/2} cy={size/2} r={r} fill="none" stroke="#f1f5f9" strokeWidth={stroke} />
+            {slices.map((sl, i) => (
+                <circle key={i}
+                    cx={size/2} cy={size/2} r={r} fill="none"
+                    stroke={sl.color} strokeWidth={stroke}
+                    strokeDasharray={`${sl.dash} ${circ}`}
+                    strokeDashoffset={-sl.offset}
+                    strokeLinecap="butt"
+                    transform={`rotate(-90 ${size/2} ${size/2})`}
+                />
+            ))}
+        </svg>
+    );
+}
+
+// ─── Reconciliation Visualization Panel ───────────────────────────────────────
+function ReconciliationView({ file, brandId, agentId, onBack, onDownload }) {
+    const [data, setData]   = useState(null);
+    const [loading, setLoading] = useState(true);
+    const [tab, setTab]     = useState('settled');       // 'settled' | 'unsettled'
+
+    useEffect(() => {
+        let cancelled = false;
+        setLoading(true);
+        api.get(`/api/brands/${brandId}/agents/${agentId}/order-cycle-shopify/files/${encodeURIComponent(file.filename)}/report`)
+            .then(r => { if (!cancelled) { setData(r.data); setLoading(false); } })
+            .catch(() => { if (!cancelled) { toast.error('Failed to load report data'); setLoading(false); } });
+        return () => { cancelled = true; };
+    }, [file.filename, brandId, agentId]);
+
+    if (loading) return (
+        <div className="flex flex-col items-center justify-center py-32 gap-4">
+            <Loader2 className="h-10 w-10 animate-spin text-slate-300" />
+            <p className="text-sm text-slate-400">Loading reconciliation data…</p>
+        </div>
+    );
+
+    if (!data) return (
+        <div className="flex flex-col items-center justify-center py-32 gap-3">
+            <XCircle className="h-10 w-10 text-red-300" />
+            <p className="text-sm text-slate-500">Could not load data for this report</p>
+            <button onClick={onBack} className="text-sm text-slate-600 underline">Go back</button>
+        </div>
+    );
+
+    const { summary, reconciliation, providers, totalSettled, couriers } = data;
+
+    const codProviders     = providers.filter(p => p.type === 'COD');
+    const prepaidProviders = providers.filter(p => p.type === 'Prepaid');
+    const providerSegments = providers.map(p => ({ value: p.amount, color: p.color, name: p.name }));
+
+    return (
+        <div className="space-y-5">
+            {/* ── Header ── */}
+            <div className="flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                    <button onClick={onBack}
+                        className="inline-flex items-center gap-1.5 px-3 py-2 text-sm border border-slate-200 rounded-lg bg-white hover:bg-slate-50 text-slate-600 transition-colors">
+                        <ArrowLeft className="h-4 w-4" /> Back
+                    </button>
+                    <div>
+                        <h2 className="text-lg font-bold text-slate-900">Reconciliation Report</h2>
+                        <p className="text-xs text-slate-400 mt-0.5">{file.month} {file.year} · {file.filename}</p>
+                    </div>
+                </div>
+                <button
+                    onClick={() => onDownload(file.filename)}
+                    className="inline-flex items-center gap-2 px-4 py-2 text-sm font-semibold border border-slate-200 rounded-lg bg-white hover:bg-slate-50 text-slate-700 transition-colors"
+                >
+                    <Download className="h-4 w-4" /> Download Excel
+                </button>
+            </div>
+
+            {/* ── Reconciliation Summary ── */}
+            <div className="bg-white border border-slate-200 rounded-xl p-5">
+                <h3 className="text-sm font-bold text-slate-800 mb-4">Reconciliation Summary</h3>
+                <div className="flex items-stretch gap-0 flex-wrap">
+                    {/* NET SALES */}
+                    <div className="flex-1 min-w-[140px] pr-6">
+                        <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Net Sales</p>
+                        <p className="text-2xl font-bold text-slate-900 mt-1 leading-none">{fmtINR(summary.netSales)}</p>
+                        <p className="text-xs text-slate-400 mt-1">{reconciliation.total.toLocaleString()} orders</p>
+                    </div>
+
+                    <div className="flex items-center text-slate-300 font-light text-2xl mr-6">=</div>
+
+                    {/* GROSS SALES */}
+                    <div className="flex-1 min-w-[140px] pr-6">
+                        <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Gross Sales</p>
+                        <p className="text-2xl font-bold text-slate-900 mt-1 leading-none">{fmtINR(summary.grossSales)}</p>
+                        <p className="text-xs text-slate-400 mt-1">{reconciliation.total.toLocaleString()} orders</p>
+                    </div>
+
+                    <div className="flex items-center text-slate-300 font-light text-2xl mr-6">−</div>
+
+                    {/* RETURNS */}
+                    <div className="flex-1 min-w-[120px] pr-6">
+                        <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Returns</p>
+                        <p className="text-2xl font-bold text-slate-900 mt-1 leading-none">{fmtINR(summary.totalReturns)}</p>
+                        <p className="text-xs text-slate-400 mt-1">—</p>
+                    </div>
+
+                    <div className="flex items-center text-slate-300 font-light text-2xl mr-6">−</div>
+
+                    {/* CANCELLATIONS */}
+                    <div className="flex-1 min-w-[120px]">
+                        <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Cancellations</p>
+                        <p className="text-2xl font-bold text-slate-900 mt-1 leading-none">{fmtINR(summary.cancelledAmount)}</p>
+                        <p className="text-xs text-slate-400 mt-1">{summary.cancelledCount.toLocaleString()} orders</p>
+                    </div>
+
+                    {/* Reconciliation Status donut */}
+                    <div className="ml-auto flex items-center gap-6 border-l border-slate-100 pl-6">
+                        <div className="text-right">
+                            <p className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-3">Reconciliation Status</p>
+                            <div className="flex items-center gap-6">
+                                <div>
+                                    <p className="text-[10px] text-slate-400 uppercase tracking-wide">Matched</p>
+                                    <p className="text-lg font-bold text-slate-900">{reconciliation.reconciled.toLocaleString()}</p>
+                                </div>
+                                <div className="relative">
+                                    <DonutChart
+                                        pct={reconciliation.matchPct}
+                                        size={90} stroke={10} color="#10b981"
+                                        label={`${reconciliation.matchPct}%`}
+                                    />
+                                </div>
+                                <div>
+                                    <p className="text-[10px] text-slate-400 uppercase tracking-wide">Total</p>
+                                    <p className="text-lg font-bold text-slate-900">{reconciliation.total.toLocaleString()}</p>
+                                </div>
+                            </div>
+                            <div className="flex gap-5 mt-3">
+                                <div>
+                                    <p className="text-[10px] text-slate-400">Mismatched</p>
+                                    <p className="text-sm font-bold text-orange-600">{(reconciliation.pending + reconciliation.overpaid).toLocaleString()}</p>
+                                </div>
+                                <div>
+                                    <p className="text-[10px] text-slate-400">RTO</p>
+                                    <p className="text-sm font-bold text-red-500">{reconciliation.rto.toLocaleString()}</p>
+                                </div>
+                                <div>
+                                    <p className="text-[10px] text-slate-400">Cancelled</p>
+                                    <p className="text-sm font-bold text-slate-500">{reconciliation.cancelled.toLocaleString()}</p>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            {/* ── Settlements by Providers + Provider Breakdown ── */}
+            <div className="grid grid-cols-5 gap-4">
+                {/* Provider list */}
+                <div className="col-span-3 bg-white border border-slate-200 rounded-xl overflow-hidden">
+                    {/* Tabs */}
+                    <div className="flex border-b border-slate-100">
+                        {['settled','unsettled'].map(t => (
+                            <button key={t} onClick={() => setTab(t)}
+                                className={`flex-1 py-3 text-sm font-semibold transition-colors capitalize
+                                    ${tab === t ? 'border-b-2 border-emerald-500 text-emerald-700 bg-white' : 'text-slate-400 hover:text-slate-600'}`}>
+                                {t}
+                            </button>
+                        ))}
+                    </div>
+
+                    <div className="px-5 py-3 border-b border-slate-50">
+                        <div className="flex items-baseline gap-3">
+                            <p className="text-2xl font-bold text-slate-900">{fmtFull(totalSettled)}</p>
+                            <p className="text-xs text-slate-400">{reconciliation.reconciled.toLocaleString()} Orders Matched</p>
+                            <div className="ml-auto text-right">
+                                <p className="text-xs text-slate-400">Gross Sales</p>
+                                <p className="text-sm font-bold text-slate-700">{fmtFull(summary.grossSales)}</p>
+                                <p className="text-[10px] text-slate-400">{reconciliation.total.toLocaleString()} Orders</p>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div className="p-4">
+                        <p className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-3">Settlements by Providers</p>
+                        <div className="space-y-3">
+                            {providers.length === 0 ? (
+                                <p className="text-sm text-slate-400 text-center py-4">No provider settlement data</p>
+                            ) : providers.map(p => (
+                                <div key={p.name} className="flex items-center justify-between py-2 border-b border-slate-50 last:border-0">
+                                    <div className="flex items-center gap-2.5 min-w-0">
+                                        <span className="w-2 h-2 rounded-full shrink-0" style={{ background: p.color }} />
+                                        <div>
+                                            <div className="flex items-center gap-2">
+                                                <span className="text-sm font-semibold text-slate-800">{p.name}</span>
+                                                <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded-full ${p.type === 'COD' ? 'bg-orange-50 text-orange-600' : 'bg-blue-50 text-blue-600'}`}>
+                                                    {p.type}
+                                                </span>
+                                            </div>
+                                            <div className="flex items-center gap-3 mt-0.5">
+                                                <span className="text-xs text-slate-500">{p.orders.toLocaleString()} orders</span>
+                                                <span className="text-xs font-semibold text-emerald-600">{p.matchPct}% matched</span>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <div className="text-right ml-4 shrink-0">
+                                        <p className="text-sm font-bold text-slate-900">{fmtFull(p.amount)}</p>
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+                    </div>
+                </div>
+
+                {/* Provider breakdown donut */}
+                <div className="col-span-2 bg-white border border-slate-200 rounded-xl p-4">
+                    <p className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-4">Provider Breakdown</p>
+                    {providers.length === 0 ? (
+                        <div className="flex items-center justify-center h-32 text-slate-300 text-sm">No data</div>
+                    ) : (
+                        <>
+                            <div className="flex justify-center mb-4">
+                                <SegmentDonut segments={providerSegments} size={140} stroke={20} />
+                            </div>
+                            <div className="space-y-2">
+                                {providers.map(p => (
+                                    <div key={p.name} className="flex items-center gap-2">
+                                        <span className="w-2 h-2 rounded-full shrink-0" style={{ background: p.color }} />
+                                        <span className="text-xs text-slate-600 flex-1 truncate">{p.name}</span>
+                                        <span className="text-xs font-semibold text-slate-800">{fmtINR(p.amount)}</span>
+                                    </div>
+                                ))}
+                            </div>
+                        </>
+                    )}
+                </div>
+            </div>
+
+            {/* ── Party Composition (Courier Breakdown) ── */}
+            <div className="bg-white border border-slate-200 rounded-xl p-5">
+                <h3 className="text-sm font-bold text-slate-800 mb-4">Party Composition</h3>
+                <div className="grid grid-cols-5 gap-6">
+                    {/* Donut */}
+                    <div className="col-span-2 flex items-center justify-center">
+                        {couriers.length > 0 ? (
+                            <SegmentDonut
+                                segments={couriers.slice(0, 8).map((c, i) => ({
+                                    value: c.sales,
+                                    color: ['#6366f1','#f59e0b','#10b981','#ef4444','#3b82f6','#8b5cf6','#ec4899','#64748b'][i % 8],
+                                    name: c.name,
+                                }))}
+                                size={180} stroke={24}
+                            />
+                        ) : (
+                            <div className="text-slate-300 text-sm">No courier data</div>
+                        )}
+                    </div>
+
+                    {/* Table */}
+                    <div className="col-span-3">
+                        <table className="w-full text-sm">
+                            <thead>
+                                <tr className="border-b border-slate-100">
+                                    <th className="text-left text-[10px] font-bold text-slate-400 uppercase tracking-wider pb-2">Courier</th>
+                                    <th className="text-right text-[10px] font-bold text-slate-400 uppercase tracking-wider pb-2">Orders</th>
+                                    <th className="text-right text-[10px] font-bold text-slate-400 uppercase tracking-wider pb-2">Sales</th>
+                                    <th className="text-right text-[10px] font-bold text-slate-400 uppercase tracking-wider pb-2">Share</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {couriers.length === 0 ? (
+                                    <tr><td colSpan={4} className="text-center text-slate-400 text-sm py-6">No data</td></tr>
+                                ) : couriers.map((c, i) => {
+                                    const color = ['#6366f1','#f59e0b','#10b981','#ef4444','#3b82f6','#8b5cf6','#ec4899','#64748b'][i % 8];
+                                    return (
+                                        <tr key={c.name} className="border-b border-slate-50 hover:bg-slate-50/50">
+                                            <td className="py-2.5">
+                                                <div className="space-y-1">
+                                                    <span className="capitalize font-medium text-slate-700">{c.name}</span>
+                                                    <div className="h-1 rounded-full bg-slate-100 overflow-hidden w-full max-w-[120px]">
+                                                        <div className="h-full rounded-full" style={{ width: `${c.share}%`, background: color }} />
+                                                    </div>
+                                                </div>
+                                            </td>
+                                            <td className="py-2.5 text-right text-slate-700 font-medium">
+                                                {c.orders.toLocaleString()}
+                                            </td>
+                                            <td className="py-2.5 text-right text-slate-700 font-medium">
+                                                {fmtFull(c.sales)}
+                                            </td>
+                                            <td className="py-2.5 text-right">
+                                                <span className="text-slate-500 font-semibold">{c.share}%</span>
+                                            </td>
+                                        </tr>
+                                    );
+                                })}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
+            {/* ── Status Breakdown Cards ── */}
+            <div className="grid grid-cols-4 gap-3">
+                {[
+                    { label: 'Reconciled',    value: reconciliation.reconciled, color: 'text-emerald-600', bg: 'bg-emerald-50', border: 'border-emerald-100', icon: CheckCircle2 },
+                    { label: 'Pending',       value: reconciliation.pending,    color: 'text-amber-600',   bg: 'bg-amber-50',   border: 'border-amber-100',   icon: TrendingUp },
+                    { label: 'Overpaid',      value: reconciliation.overpaid,   color: 'text-purple-600',  bg: 'bg-purple-50',  border: 'border-purple-100',  icon: TrendingDown },
+                    { label: 'RTO',           value: reconciliation.rto,        color: 'text-red-600',     bg: 'bg-red-50',     border: 'border-red-100',     icon: XCircle },
+                ].map(({ label, value, color, bg, border, icon: Icon }) => (
+                    <div key={label} className={`${bg} border ${border} rounded-xl p-4`}>
+                        <div className="flex items-center gap-2 mb-1">
+                            <Icon className={`h-4 w-4 ${color}`} />
+                            <p className="text-xs font-semibold text-slate-500">{label}</p>
+                        </div>
+                        <p className={`text-2xl font-bold ${color}`}>{value.toLocaleString()}</p>
+                        <p className="text-xs text-slate-400 mt-0.5">
+                            {reconciliation.total > 0 ? `${Math.round(value / reconciliation.total * 100)}%` : '—'} of total
+                        </p>
+                    </div>
+                ))}
+            </div>
+        </div>
+    );
+}
 
 // ─── Main Component ───────────────────────────────────────────────────────────
 const OrderCycleShopifyWorkspace = ({ agent }) => {
     const { brandId, agentId } = useParams();
 
-    const [modal, setModal]             = useState(initModal());
+    const [modal, setModal]               = useState(initModal());
     const [isGenerating, setIsGenerating] = useState(false);
     const [previewData, setPreviewData]   = useState(null);
-    const [files, setFiles]             = useState([]);
+    const [files, setFiles]               = useState([]);
     const [filesLoading, setFilesLoading] = useState(true);
+    const [viewingFile, setViewingFile]   = useState(null); // file object being visualized
 
-    // ─── Fetch generated files ──────────────────────────────────────────────
     const fetchFiles = useCallback(async () => {
         setFilesLoading(true);
         try {
-            const res = await api.get(
-                `/api/brands/${brandId}/agents/${agentId}/order-cycle-shopify/files`
-            );
+            const res = await api.get(`/api/brands/${brandId}/agents/${agentId}/order-cycle-shopify/files`);
             setFiles(res.data || []);
-        } catch (err) {
-            console.error('Failed to fetch order cycle files:', err);
-            setFiles([]);
-        } finally {
-            setFilesLoading(false);
-        }
+        } catch { setFiles([]); }
+        finally { setFilesLoading(false); }
     }, [brandId, agentId]);
 
     useEffect(() => { fetchFiles(); }, [fetchFiles]);
 
-    // ─── Modal open / close ─────────────────────────────────────────────────
-    const openModal = () => setModal({ ...initModal(), open: true });
+    const openModal  = () => setModal({ ...initModal(), open: true });
+    const closeModal = () => { if (isGenerating) return; setModal(initModal()); setPreviewData(null); };
 
-    const closeModal = () => {
-        if (isGenerating) return;
-        setModal(initModal());
-        setPreviewData(null);
-    };
+    const setField        = (k, v) => setModal(p => ({ ...p, [k]: v }));
+    const toggleGateway   = (id) => setModal(p => {
+        const has = p.selectedGateways.includes(id);
+        return { ...p, selectedGateways: has ? p.selectedGateways.filter(g => g !== id) : [...p.selectedGateways, id],
+            gatewayFiles: has ? { ...p.gatewayFiles, [id]: null } : p.gatewayFiles };
+    });
+    const toggleLogistics = (id) => setModal(p => {
+        const has = p.selectedLogistics.includes(id);
+        return { ...p, selectedLogistics: has ? p.selectedLogistics.filter(l => l !== id) : [...p.selectedLogistics, id],
+            logisticsFiles: has ? { ...p.logisticsFiles, [id]: null } : p.logisticsFiles };
+    });
+    const setGatewayFile   = (id, f) => setModal(p => ({ ...p, gatewayFiles:  { ...p.gatewayFiles,  [id]: f } }));
+    const setLogisticsFile = (id, f) => setModal(p => ({ ...p, logisticsFiles: { ...p.logisticsFiles, [id]: f } }));
 
-    const setField = (key, value) =>
-        setModal(prev => ({ ...prev, [key]: value }));
-
-    // ─── Toggle selection helpers ───────────────────────────────────────────
-    const toggleGateway = (id) => {
-        setModal(prev => {
-            const exists = prev.selectedGateways.includes(id);
-            return {
-                ...prev,
-                selectedGateways: exists
-                    ? prev.selectedGateways.filter(g => g !== id)
-                    : [...prev.selectedGateways, id],
-                // Clear any uploaded file if deselected
-                gatewayFiles: exists
-                    ? { ...prev.gatewayFiles, [id]: null }
-                    : prev.gatewayFiles,
-            };
-        });
-    };
-
-    const toggleLogistics = (id) => {
-        setModal(prev => {
-            const exists = prev.selectedLogistics.includes(id);
-            return {
-                ...prev,
-                selectedLogistics: exists
-                    ? prev.selectedLogistics.filter(l => l !== id)
-                    : [...prev.selectedLogistics, id],
-                logisticsFiles: exists
-                    ? { ...prev.logisticsFiles, [id]: null }
-                    : prev.logisticsFiles,
-            };
-        });
-    };
-
-    const setGatewayFile  = (id, file) => setModal(prev => ({
-        ...prev, gatewayFiles: { ...prev.gatewayFiles, [id]: file }
-    }));
-    const setLogisticsFile = (id, file) => setModal(prev => ({
-        ...prev, logisticsFiles: { ...prev.logisticsFiles, [id]: file }
-    }));
-
-    // ─── Validations ────────────────────────────────────────────────────────
     const validateStep1 = () => {
-        if (!modal.month) { toast.error('Please select a month'); return false; }
-        if (!modal.year)  { toast.error('Please select a year');  return false; }
-        if (modal.selectedGateways.length === 0) {
-            toast.error('Select at least one payment gateway'); return false;
-        }
-        if (modal.selectedLogistics.length === 0) {
-            toast.error('Select at least one logistics partner'); return false;
-        }
+        if (!modal.month)                    { toast.error('Select a month'); return false; }
+        if (!modal.year)                     { toast.error('Select a year');  return false; }
+        if (!modal.selectedGateways.length)  { toast.error('Select at least one payment gateway'); return false; }
+        if (!modal.selectedLogistics.length) { toast.error('Select at least one logistics partner'); return false; }
         return true;
     };
-
     const validateStep2 = () => {
-        if (!modal.unicommerceFile) {
-            toast.error('Please upload the Unicommerce file'); return false;
-        }
-        if (!modal.salesOrderReportFile) {
-            toast.error('Please upload the Sales Order Report file'); return false;
-        }
-        for (const id of modal.selectedGateways) {
-            if (!modal.gatewayFiles[id]) {
-                const label = PAYMENT_GATEWAYS.find(g => g.id === id)?.label || id;
-                toast.error(`Upload file for ${label}`); return false;
-            }
-        }
-        for (const id of modal.selectedLogistics) {
-            if (!modal.logisticsFiles[id]) {
-                const label = LOGISTICS_PARTNERS.find(l => l.id === id)?.label || id;
-                toast.error(`Upload file for ${label}`); return false;
-            }
-        }
+        if (!modal.unicommerceFile)      { toast.error('Upload the Unicommerce file'); return false; }
+        if (!modal.salesOrderReportFile) { toast.error('Upload the Sales Order Report'); return false; }
+        for (const id of modal.selectedGateways)
+            if (!modal.gatewayFiles[id]) { toast.error(`Upload file for ${PAYMENT_GATEWAYS.find(g => g.id === id)?.label}`); return false; }
+        for (const id of modal.selectedLogistics)
+            if (!modal.logisticsFiles[id]) { toast.error(`Upload file for ${LOGISTICS_PARTNERS.find(l => l.id === id)?.label}`); return false; }
         return true;
     };
 
-    // ─── Step navigation ────────────────────────────────────────────────────
-    const nextStep = () => {
-        if (modal.step === STEP_SELECT && !validateStep1()) return;
-        setModal(prev => ({ ...prev, step: prev.step + 1 }));
-    };
+    const nextStep = () => { if (modal.step === STEP_SELECT && !validateStep1()) return; setModal(p => ({ ...p, step: p.step + 1 })); };
+    const prevStep = () => { if (modal.step > STEP_SELECT) setModal(p => ({ ...p, step: p.step - 1 })); };
 
-    const prevStep = () => {
-        if (modal.step > STEP_SELECT)
-            setModal(prev => ({ ...prev, step: prev.step - 1 }));
-    };
-
-    // ─── Phase 1: Generate Preview ──────────────────────────────────────────
     const handleGeneratePreview = async () => {
         if (!validateStep2()) return;
-
-        const gwNames = modal.selectedGateways.map(
-            id => PAYMENT_GATEWAYS.find(g => g.id === id)?.label || id
-        );
-        const lpNames = modal.selectedLogistics.map(
-            id => LOGISTICS_PARTNERS.find(l => l.id === id)?.label || id
-        );
-
-        // Build FormData
-        const formData = new FormData();
-        formData.append('month', modal.month);
-        formData.append('year',  modal.year);
-        formData.append('gatewayNames',  JSON.stringify(gwNames));
-        formData.append('logisticsNames', JSON.stringify(lpNames));
-        formData.append('unicommerceFile', modal.unicommerceFile);
-        formData.append('salesOrderReportFile', modal.salesOrderReportFile);
-
-        modal.selectedGateways.forEach((id, i) => {
-            if (modal.gatewayFiles[id])
-                formData.append(`paymentGateway_${i}`, modal.gatewayFiles[id]);
-        });
-        modal.selectedLogistics.forEach((id, i) => {
-            if (modal.logisticsFiles[id])
-                formData.append(`logistics_${i}`, modal.logisticsFiles[id]);
-        });
-
+        const gwNames = modal.selectedGateways.map(id => PAYMENT_GATEWAYS.find(g => g.id === id)?.label || id);
+        const lpNames = modal.selectedLogistics.map(id => LOGISTICS_PARTNERS.find(l => l.id === id)?.label || id);
+        const fd = new FormData();
+        fd.append('month', modal.month); fd.append('year', modal.year);
+        fd.append('gatewayNames', JSON.stringify(gwNames));
+        fd.append('logisticsNames', JSON.stringify(lpNames));
+        fd.append('unicommerceFile', modal.unicommerceFile);
+        fd.append('salesOrderReportFile', modal.salesOrderReportFile);
+        modal.selectedGateways.forEach((id, i) => { if (modal.gatewayFiles[id]) fd.append(`paymentGateway_${i}`, modal.gatewayFiles[id]); });
+        modal.selectedLogistics.forEach((id, i) => { if (modal.logisticsFiles[id]) fd.append(`logistics_${i}`, modal.logisticsFiles[id]); });
         setIsGenerating(true);
         try {
-            const res = await api.post(
-                `/api/brands/${brandId}/agents/${agentId}/order-cycle-shopify/generate/preview`,
-                formData,
-                { headers: { 'Content-Type': 'multipart/form-data' } }
-            );
+            const res = await api.post(`/api/brands/${brandId}/agents/${agentId}/order-cycle-shopify/generate/preview`, fd, { headers: { 'Content-Type': 'multipart/form-data' } });
             setPreviewData(res.data);
-            setModal(prev => ({ ...prev, step: STEP_PREVIEW }));
-        } catch (err) {
-            toast.error(err.response?.data?.error || 'Failed to process files');
-        } finally {
-            setIsGenerating(false);
-        }
+            setModal(p => ({ ...p, step: STEP_PREVIEW }));
+        } catch (err) { toast.error(err.response?.data?.error || 'Failed to process files'); }
+        finally { setIsGenerating(false); }
     };
 
-    // ─── Phase 2a: Commit ───────────────────────────────────────────────────
     const handleCommit = async () => {
         if (!previewData?.taskId) return;
         setIsGenerating(true);
         try {
-            await api.post(
-                `/api/brands/${brandId}/agents/${agentId}/order-cycle-shopify/generate/commit`,
-                { taskId: previewData.taskId }
-            );
-            toast.success('Order Cycle file saved successfully ✅');
-            closeModal();
-            fetchFiles();
-        } catch (err) {
-            toast.error(err.response?.data?.error || 'Failed to save file');
-        } finally {
-            setIsGenerating(false);
-        }
+            await api.post(`/api/brands/${brandId}/agents/${agentId}/order-cycle-shopify/generate/commit`, { taskId: previewData.taskId });
+            toast.success('Reconciliation report saved successfully');
+            closeModal(); fetchFiles();
+        } catch (err) { toast.error(err.response?.data?.error || 'Failed to save'); }
+        finally { setIsGenerating(false); }
     };
 
-    // ─── Phase 2b: Discard ──────────────────────────────────────────────────
     const handleDiscard = async () => {
         if (previewData?.taskId) {
-            try {
-                await api.post(
-                    `/api/brands/${brandId}/agents/${agentId}/order-cycle-shopify/generate/discard`,
-                    { taskId: previewData.taskId }
-                );
-            } catch { /* TTL cleans up */ }
+            try { await api.post(`/api/brands/${brandId}/agents/${agentId}/order-cycle-shopify/generate/discard`, { taskId: previewData.taskId }); }
+            catch { /* TTL cleans up */ }
         }
-        toast.info('Generation discarded');
-        closeModal();
+        toast.info('Generation discarded'); closeModal();
     };
 
-    // ─── Download ───────────────────────────────────────────────────────────
     const handleDownload = async (filename) => {
         try {
-            const safe = encodeURIComponent(filename);
             const res = await api.get(
-                `/api/brands/${brandId}/agents/${agentId}/order-cycle-shopify/files/${safe}/download`,
+                `/api/brands/${brandId}/agents/${agentId}/order-cycle-shopify/files/${encodeURIComponent(filename)}/download`,
                 { responseType: 'blob' }
             );
             const url = window.URL.createObjectURL(new Blob([res.data]));
-            const a = document.createElement('a');
-            a.href = url;
-            a.setAttribute('download', filename);
-            document.body.appendChild(a);
-            a.click();
-            a.remove();
+            const a = document.createElement('a'); a.href = url;
+            a.setAttribute('download', filename); document.body.appendChild(a); a.click(); a.remove();
             toast.success('Downloaded');
         } catch { toast.error('Download failed'); }
     };
 
-    // ─── Delete ─────────────────────────────────────────────────────────────
     const handleDelete = async (filename) => {
         if (!window.confirm(`Delete "${filename}"? This cannot be undone.`)) return;
         try {
-            await api.delete(
-                `/api/brands/${brandId}/agents/${agentId}/order-cycle-shopify/files`,
-                { data: { filename } }
-            );
-            toast.success('File deleted');
+            await api.delete(`/api/brands/${brandId}/agents/${agentId}/order-cycle-shopify/files`, { data: { filename } });
+            toast.success('Report deleted');
+            if (viewingFile?.filename === filename) setViewingFile(null);
             fetchFiles();
         } catch { toast.error('Delete failed'); }
     };
 
-    // ─── Step labels ────────────────────────────────────────────────────────
+    const totalRows  = files.reduce((s, f) => s + (f.row_count || 0), 0);
+    const latestFile = files[0] || null;
     const stepLabels = ['Select Partners', 'Upload Files', 'Preview & Save'];
 
-    // ─── Render ──────────────────────────────────────────────────────────────
-    return (
-        <div className="space-y-6">
+    // ─── Visualization view ───────────────────────────────────────────────────
+    if (viewingFile) {
+        return (
+            <ReconciliationView
+                file={viewingFile}
+                brandId={brandId}
+                agentId={agentId}
+                onBack={() => setViewingFile(null)}
+                onDownload={handleDownload}
+            />
+        );
+    }
 
-            {/* Top Action Bar */}
-            <div className="flex items-center gap-3">
-                <Button
-                    onClick={openModal}
-                    data-testid="oc-generate-button"
-                >
-                    <Plus className="mr-2 h-4 w-4" />
-                    Generate File
-                </Button>
-                <Button variant="outline" onClick={fetchFiles} disabled={filesLoading}>
-                    <RefreshCw className={`mr-2 h-4 w-4 ${filesLoading ? 'animate-spin' : ''}`} />
-                    Refresh
-                </Button>
+    // ─── Files list view ──────────────────────────────────────────────────────
+    return (
+        <div className="space-y-0">
+            {/* Header */}
+            <div className="flex items-center justify-between mb-6">
+                <div>
+                    <h2 className="text-xl font-bold text-slate-900">Reconciliation Summary</h2>
+                    <p className="text-sm text-slate-500 mt-0.5">{agent?.name} · Shopify Order Cycle</p>
+                </div>
+                <div className="flex items-center gap-2">
+                    <button onClick={fetchFiles} disabled={filesLoading}
+                        className="inline-flex items-center gap-1.5 px-3 py-2 text-sm border border-slate-200 rounded-lg bg-white hover:bg-slate-50 text-slate-600 transition-colors">
+                        <RefreshCw className={`h-4 w-4 ${filesLoading ? 'animate-spin' : ''}`} /> Refresh
+                    </button>
+                    <button onClick={openModal} data-testid="oc-generate-button"
+                        className="inline-flex items-center gap-2 px-4 py-2 text-sm font-semibold rounded-lg bg-slate-900 text-white hover:bg-slate-700 transition-colors">
+                        <Plus className="h-4 w-4" /> Generate Report
+                    </button>
+                </div>
             </div>
 
-            {/* Generated Files Table */}
-            <Card>
-                <CardHeader>
-                    <CardTitle className="flex items-center gap-2">
-                        <FileText className="h-5 w-5" />
-                        Generated Files
+            {/* KPI Cards */}
+            <div className="grid grid-cols-3 gap-4 mb-6">
+                {[
+                    { label: 'Total Reports',  value: filesLoading ? '—' : files.length,               sub: 'Generated files' },
+                    { label: 'Total Rows',     value: filesLoading ? '—' : totalRows.toLocaleString(),  sub: 'Orders processed' },
+                    { label: 'Latest Report',  value: latestFile ? `${latestFile.month} ${latestFile.year}` : '—', sub: latestFile ? formatDate(latestFile.created_at) : 'No reports yet', small: true },
+                ].map(({ label, value, sub, small }) => (
+                    <div key={label} className="bg-white border border-slate-200 rounded-xl p-4">
+                        <p className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-1">{label}</p>
+                        <p className={`font-bold text-slate-900 ${small ? 'text-lg' : 'text-3xl'}`}>{value}</p>
+                        <p className="text-xs text-slate-400 mt-1">{sub}</p>
+                    </div>
+                ))}
+            </div>
+
+            {/* Files table */}
+            <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
+                <div className="flex items-center justify-between px-5 py-4 border-b border-slate-100">
+                    <div className="flex items-center gap-2">
+                        <FileText className="h-4 w-4 text-slate-400" />
+                        <span className="text-sm font-semibold text-slate-800">Report History</span>
                         {!filesLoading && (
-                            <Badge variant="secondary" className="ml-1">{files.length}</Badge>
+                            <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold bg-slate-100 text-slate-600">
+                                {files.length}
+                            </span>
                         )}
-                    </CardTitle>
-                    <CardDescription>
-                        Order Cycle output files for {agent?.name}
-                    </CardDescription>
-                </CardHeader>
-                <CardContent>
-                    {filesLoading ? (
-                        <div className="flex items-center justify-center py-16">
-                            <Loader2 className="h-8 w-8 animate-spin text-slate-400" />
-                            <span className="ml-3 text-slate-500 text-sm">Loading…</span>
+                    </div>
+                    <span className="text-xs text-slate-400">Click View to see reconciliation data</span>
+                </div>
+
+                {filesLoading ? (
+                    <div className="flex items-center justify-center py-16 gap-3">
+                        <Loader2 className="h-6 w-6 animate-spin text-slate-300" />
+                        <span className="text-sm text-slate-400">Loading reports…</span>
+                    </div>
+                ) : files.length === 0 ? (
+                    <div className="flex flex-col items-center justify-center py-16 gap-3">
+                        <div className="w-14 h-14 rounded-full bg-slate-50 border border-slate-200 flex items-center justify-center">
+                            <BarChart2 className="h-6 w-6 text-slate-300" />
                         </div>
-                    ) : files.length === 0 ? (
-                        <div className="flex flex-col items-center justify-center py-16 text-slate-500">
-                            <FileText className="h-12 w-12 text-slate-300 mb-4" />
-                            <p className="text-base font-medium">No files generated yet</p>
-                            <p className="text-sm text-slate-400 mt-1">
-                                Click "Generate File" to begin
-                            </p>
+                        <div className="text-center">
+                            <p className="text-sm font-semibold text-slate-600">No reports generated yet</p>
+                            <p className="text-xs text-slate-400 mt-1">Click "Generate Report" to process your first reconciliation</p>
                         </div>
-                    ) : (
-                        <div className="border border-slate-200 rounded-lg overflow-hidden">
-                            <Table>
-                                <TableHeader>
-                                    <TableRow className="bg-slate-50">
-                                        <TableHead className="font-semibold">Filename</TableHead>
-                                        <TableHead className="font-semibold">Month</TableHead>
-                                        <TableHead className="font-semibold">Year</TableHead>
-                                        <TableHead className="font-semibold">Rows</TableHead>
-                                        <TableHead className="font-semibold">Created</TableHead>
-                                        <TableHead className="text-right font-semibold">Actions</TableHead>
-                                    </TableRow>
-                                </TableHeader>
-                                <TableBody>
-                                    {files.map((file, idx) => (
-                                        <TableRow key={idx} className="hover:bg-slate-50">
-                                            <TableCell
-                                                className="font-mono text-xs text-slate-600 max-w-[260px] truncate"
-                                                title={file.filename}
-                                            >
+                        <button onClick={openModal}
+                            className="mt-2 inline-flex items-center gap-1.5 px-4 py-2 text-sm font-medium rounded-lg bg-slate-900 text-white hover:bg-slate-700 transition-colors">
+                            <Plus className="h-4 w-4" /> Generate Report
+                        </button>
+                    </div>
+                ) : (
+                    <table className="w-full text-sm">
+                        <thead>
+                            <tr className="bg-slate-50 border-b border-slate-100">
+                                {['File', 'Period', 'Rows', 'Generated', 'Actions'].map((h, i) => (
+                                    <th key={h} className={`text-xs font-semibold text-slate-500 uppercase tracking-wider px-5 py-3 ${i === 4 ? 'text-right' : 'text-left'}`}>{h}</th>
+                                ))}
+                            </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-50">
+                            {files.map((file, idx) => (
+                                <tr key={idx} className="hover:bg-slate-50/70 transition-colors group">
+                                    <td className="px-5 py-3.5">
+                                        <div className="flex items-center gap-2.5">
+                                            <div className="w-8 h-8 rounded-lg bg-emerald-50 border border-emerald-100 flex items-center justify-center shrink-0">
+                                                <FileText className="h-4 w-4 text-emerald-600" />
+                                            </div>
+                                            <span className="font-mono text-xs text-slate-600 max-w-[200px] truncate" title={file.filename}>
                                                 {file.filename}
-                                            </TableCell>
-                                            <TableCell>{file.month}</TableCell>
-                                            <TableCell>{file.year}</TableCell>
-                                            <TableCell>
-                                                <Badge variant="secondary">{file.row_count ?? '—'}</Badge>
-                                            </TableCell>
-                                            <TableCell className="text-sm text-slate-500">
-                                                {formatDate(file.created_at)}
-                                            </TableCell>
-                                            <TableCell className="text-right">
-                                                <div className="flex items-center justify-end gap-2">
-                                                    <Button
-                                                        size="sm" variant="secondary"
-                                                        onClick={() => handleDownload(file.filename)}
-                                                        data-testid={`oc-download-${idx}`}
-                                                    >
-                                                        <Download className="h-4 w-4" />
-                                                    </Button>
-                                                    <Button
-                                                        size="sm" variant="destructive"
-                                                        onClick={() => handleDelete(file.filename)}
-                                                        data-testid={`oc-delete-${idx}`}
-                                                    >
-                                                        <Trash2 className="h-4 w-4" />
-                                                    </Button>
-                                                </div>
-                                            </TableCell>
-                                        </TableRow>
-                                    ))}
-                                </TableBody>
-                            </Table>
-                        </div>
-                    )}
-                </CardContent>
-            </Card>
-
-            {/* ─── Multi-Step Generate Modal ────────────────────────────────── */}
-            <Dialog
-                open={modal.open}
-                onOpenChange={(open) => { if (!open) closeModal(); }}
-            >
-                <DialogContent
-                    onClose={closeModal}
-                    className="max-w-2xl max-h-[90vh] flex flex-col overflow-hidden"
-                >
-                    <DialogHeader>
-                        <DialogTitle>Generate Order Cycle File</DialogTitle>
-                        <DialogDescription>
-                            {agent?.name} — {modal.month} {modal.year}
-                        </DialogDescription>
-                    </DialogHeader>
-
-                    {/* ── Step indicator ──────────────────────────────────── */}
-                    <div className="flex items-center gap-0 mb-2 select-none shrink-0">
-                        {stepLabels.map((label, i) => {
-                            const stepNum = i + 1;
-                            const isActive = modal.step === stepNum;
-                            const isDone   = modal.step > stepNum;
-                            return (
-                                <React.Fragment key={label}>
-                                    <div className="flex flex-col items-center min-w-[60px]">
-                                        <div className={`
-                                            flex items-center justify-center w-8 h-8 rounded-full
-                                            text-xs font-bold transition-colors
-                                            ${isDone   ? 'bg-green-600 text-white' : ''}
-                                            ${isActive ? 'bg-slate-900 text-white' : ''}
-                                            ${!isActive && !isDone ? 'bg-slate-200 text-slate-500' : ''}
-                                        `}>
-                                            {isDone
-                                                ? <CheckCircle2 className="h-4 w-4" />
-                                                : stepNum}
+                                            </span>
                                         </div>
-                                        <span className={`
-                                            text-[10px] mt-1 font-medium text-center leading-tight
-                                            ${isActive ? 'text-slate-900' : 'text-slate-400'}
-                                        `}>
-                                            {label}
+                                    </td>
+                                    <td className="px-4 py-3.5">
+                                        <div className="flex items-center gap-1.5">
+                                            <Calendar className="h-3.5 w-3.5 text-slate-400" />
+                                            <span className="text-slate-700 font-medium">{file.month} {file.year}</span>
+                                        </div>
+                                    </td>
+                                    <td className="px-4 py-3.5">
+                                        <span className="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-semibold bg-emerald-50 text-emerald-700 border border-emerald-100">
+                                            {(file.row_count ?? 0).toLocaleString()} rows
                                         </span>
-                                    </div>
-                                    {i < stepLabels.length - 1 && (
-                                        <div className={`
-                                            flex-1 h-0.5 mx-2 mb-4 transition-colors
-                                            ${modal.step > stepNum ? 'bg-green-500' : 'bg-slate-200'}
-                                        `} />
-                                    )}
-                                </React.Fragment>
-                            );
-                        })}
+                                    </td>
+                                    <td className="px-4 py-3.5 text-slate-500 text-xs">{formatDate(file.created_at)}</td>
+                                    <td className="px-5 py-3.5">
+                                        <div className="flex items-center justify-end gap-1.5">
+                                            <button
+                                                onClick={() => setViewingFile(file)}
+                                                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg bg-slate-900 text-white hover:bg-slate-700 transition-colors"
+                                                data-testid={`oc-view-${idx}`}
+                                            >
+                                                <Eye className="h-3.5 w-3.5" /> View
+                                            </button>
+                                            <button
+                                                onClick={() => handleDownload(file.filename)}
+                                                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-slate-600 transition-colors"
+                                                data-testid={`oc-download-${idx}`}
+                                            >
+                                                <Download className="h-3.5 w-3.5" />
+                                            </button>
+                                            <button
+                                                onClick={() => handleDelete(file.filename)}
+                                                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border border-red-100 bg-red-50 hover:bg-red-100 text-red-600 transition-colors"
+                                                data-testid={`oc-delete-${idx}`}
+                                            >
+                                                <Trash2 className="h-3.5 w-3.5" />
+                                            </button>
+                                        </div>
+                                    </td>
+                                </tr>
+                            ))}
+                        </tbody>
+                    </table>
+                )}
+            </div>
+
+            {/* ════ GENERATE MODAL ════ */}
+            <Dialog open={modal.open} onOpenChange={open => { if (!open) closeModal(); }}>
+                <DialogContent onClose={closeModal} className="max-w-2xl max-h-[92vh] flex flex-col overflow-hidden p-0">
+                    {/* Modal header */}
+                    <div className="px-6 pt-6 pb-4 border-b border-slate-100 shrink-0">
+                        <DialogTitle className="text-base font-bold text-slate-900">Generate Reconciliation Report</DialogTitle>
+                        <DialogDescription className="text-xs text-slate-500 mt-0.5">{agent?.name} · {modal.month} {modal.year}</DialogDescription>
+                        {/* Step indicator */}
+                        <div className="flex items-center mt-4">
+                            {stepLabels.map((label, i) => {
+                                const n = i + 1, active = modal.step === n, done = modal.step > n;
+                                return (
+                                    <React.Fragment key={label}>
+                                        <div className="flex items-center gap-2">
+                                            <div className={`w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold transition-all
+                                                ${done ? 'bg-emerald-500 text-white' : active ? 'bg-slate-900 text-white' : 'bg-slate-100 text-slate-400'}`}>
+                                                {done ? <CheckCircle2 className="h-3.5 w-3.5" /> : n}
+                                            </div>
+                                            <span className={`text-xs font-medium ${active ? 'text-slate-900' : 'text-slate-400'}`}>{label}</span>
+                                        </div>
+                                        {i < stepLabels.length - 1 && (
+                                            <div className={`flex-1 h-px mx-3 ${modal.step > n ? 'bg-emerald-400' : 'bg-slate-200'}`} />
+                                        )}
+                                    </React.Fragment>
+                                );
+                            })}
+                        </div>
                     </div>
 
-                    {/* ══════════════════════════════════════════════════════
-                        STEP 1 — Select Partners
-                    ══════════════════════════════════════════════════════ */}
+                    {/* STEP 1 */}
                     {modal.step === STEP_SELECT && (
-                        <div className="flex-1 overflow-y-auto space-y-5 py-2 pr-1">
-
-                            {/* Period */}
-                            <div className="grid grid-cols-2 gap-4">
-                                <div>
-                                    <Label htmlFor="oc-month" className="text-sm font-medium">
-                                        Month *
-                                    </Label>
-                                    <select
-                                        id="oc-month"
-                                        className="mt-1 w-full border border-slate-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-slate-400 bg-white"
-                                        value={modal.month}
-                                        onChange={e => setField('month', e.target.value)}
-                                    >
-                                        <option value="">— Select Month —</option>
-                                        {MONTHS.map(m => <option key={m} value={m}>{m}</option>)}
-                                    </select>
-                                </div>
-                                <div>
-                                    <Label htmlFor="oc-year" className="text-sm font-medium">
-                                        Year *
-                                    </Label>
-                                    <select
-                                        id="oc-year"
-                                        className="mt-1 w-full border border-slate-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-slate-400 bg-white"
-                                        value={modal.year}
-                                        onChange={e => setField('year', e.target.value)}
-                                    >
-                                        {YEARS.map(y => (
-                                            <option key={y} value={String(y)}>{y}</option>
-                                        ))}
-                                    </select>
-                                </div>
+                        <div className="flex-1 overflow-y-auto px-6 py-5 space-y-5">
+                            <div className="grid grid-cols-2 gap-3">
+                                {[['month','Month',MONTHS.map(m => ({ v: m, l: m }))], ['year','Year',YEARS.map(y => ({ v: String(y), l: y }))]].map(([key, label, opts]) => (
+                                    <div key={key}>
+                                        <label className="block text-xs font-semibold text-slate-600 mb-1.5">{label} *</label>
+                                        <select value={modal[key]} onChange={e => setField(key, e.target.value)}
+                                            className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-slate-300">
+                                            {key === 'month' && <option value="">— Select Month —</option>}
+                                            {opts.map(o => <option key={o.v} value={o.v}>{o.l}</option>)}
+                                        </select>
+                                    </div>
+                                ))}
                             </div>
 
-                            {/* Payment Gateways */}
-                            <div className="border border-blue-200 rounded-xl p-4 bg-blue-50/50">
-                                <div className="flex items-center gap-2 mb-3">
-                                    <CreditCard className="h-5 w-5 text-blue-600" />
-                                    <p className="font-semibold text-slate-800">
-                                        Payment Gateways
-                                    </p>
-                                    {modal.selectedGateways.length > 0 && (
-                                        <Badge className="ml-auto bg-blue-600 text-white text-xs">
-                                            {modal.selectedGateways.length} selected
-                                        </Badge>
-                                    )}
+                            {[
+                                { title: 'Payment Gateways', icon: CreditCard, color: 'text-blue-500', items: PAYMENT_GATEWAYS,
+                                  selected: modal.selectedGateways, toggle: toggleGateway,
+                                  badgeClass: 'text-blue-600 bg-blue-50', selClass: 'border-blue-400 bg-blue-50 text-blue-900', chkClass: 'bg-blue-500 border-blue-500' },
+                                { title: 'Logistics Partners', icon: Package, color: 'text-orange-500', items: LOGISTICS_PARTNERS,
+                                  selected: modal.selectedLogistics, toggle: toggleLogistics,
+                                  badgeClass: 'text-orange-600 bg-orange-50', selClass: 'border-orange-400 bg-orange-50 text-orange-900', chkClass: 'bg-orange-500 border-orange-500' },
+                            ].map(({ title, icon: Icon, color, items, selected, toggle, badgeClass, selClass, chkClass }) => (
+                                <div key={title}>
+                                    <div className="flex items-center gap-2 mb-2">
+                                        <Icon className={`h-4 w-4 ${color}`} />
+                                        <span className="text-xs font-semibold text-slate-700 uppercase tracking-wider">{title}</span>
+                                        {selected.length > 0 && (
+                                            <span className={`ml-auto text-xs font-semibold ${badgeClass} px-2 py-0.5 rounded-full`}>{selected.length} selected</span>
+                                        )}
+                                    </div>
+                                    <div className="grid grid-cols-1 gap-2">
+                                        {items.map(item => {
+                                            const sel = selected.includes(item.id);
+                                            return (
+                                                <button key={item.id} type="button" onClick={() => toggle(item.id)}
+                                                    className={`flex items-center gap-3 w-full px-4 py-3 rounded-xl border-2 text-left text-sm font-medium transition-all
+                                                        ${sel ? selClass : 'border-slate-150 bg-slate-50 text-slate-600 hover:border-slate-300 hover:bg-white'}`}
+                                                    data-testid={`toggle-${item.id}`}>
+                                                    <span className={`w-4 h-4 rounded shrink-0 flex items-center justify-center border-2 transition-colors ${sel ? chkClass : 'border-slate-300 bg-white'}`}>
+                                                        {sel && <svg className="w-2.5 h-2.5 text-white" viewBox="0 0 12 12" fill="none"><path d="M2 6l3 3 5-5" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"/></svg>}
+                                                    </span>
+                                                    <span className="w-2 h-2 rounded-full shrink-0" style={{ background: item.color }} />
+                                                    {item.label}
+                                                </button>
+                                            );
+                                        })}
+                                    </div>
                                 </div>
-                                <div className="grid grid-cols-1 gap-2">
-                                    {PAYMENT_GATEWAYS.map(gw => {
-                                        const selected = modal.selectedGateways.includes(gw.id);
-                                        return (
-                                            <button
-                                                key={gw.id}
-                                                type="button"
-                                                onClick={() => toggleGateway(gw.id)}
-                                                className={`
-                                                    flex items-center gap-3 w-full px-4 py-3 rounded-lg border-2
-                                                    text-left text-sm font-medium transition-all
-                                                    ${selected
-                                                        ? 'border-blue-500 bg-blue-100 text-blue-900'
-                                                        : 'border-slate-200 bg-white text-slate-600 hover:border-blue-300 hover:bg-blue-50'
-                                                    }
-                                                `}
-                                                data-testid={`gw-toggle-${gw.id}`}
-                                            >
-                                                <span className={`
-                                                    w-5 h-5 rounded shrink-0 flex items-center justify-center
-                                                    border-2 transition-colors
-                                                    ${selected ? 'bg-blue-600 border-blue-600' : 'border-slate-300 bg-white'}
-                                                `}>
-                                                    {selected && (
-                                                        <svg className="w-3 h-3 text-white" viewBox="0 0 12 12" fill="none">
-                                                            <path d="M2 6l3 3 5-5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
-                                                        </svg>
-                                                    )}
-                                                </span>
-                                                {gw.label}
-                                            </button>
-                                        );
-                                    })}
-                                </div>
-                            </div>
-
-                            {/* Logistics Partners */}
-                            <div className="border border-orange-200 rounded-xl p-4 bg-orange-50/50">
-                                <div className="flex items-center gap-2 mb-3">
-                                    <Package className="h-5 w-5 text-orange-600" />
-                                    <p className="font-semibold text-slate-800">
-                                        Logistics Partners
-                                    </p>
-                                    {modal.selectedLogistics.length > 0 && (
-                                        <Badge className="ml-auto bg-orange-500 text-white text-xs">
-                                            {modal.selectedLogistics.length} selected
-                                        </Badge>
-                                    )}
-                                </div>
-                                <div className="grid grid-cols-1 gap-2">
-                                    {LOGISTICS_PARTNERS.map(lp => {
-                                        const selected = modal.selectedLogistics.includes(lp.id);
-                                        return (
-                                            <button
-                                                key={lp.id}
-                                                type="button"
-                                                onClick={() => toggleLogistics(lp.id)}
-                                                className={`
-                                                    flex items-center gap-3 w-full px-4 py-3 rounded-lg border-2
-                                                    text-left text-sm font-medium transition-all
-                                                    ${selected
-                                                        ? 'border-orange-500 bg-orange-100 text-orange-900'
-                                                        : 'border-slate-200 bg-white text-slate-600 hover:border-orange-300 hover:bg-orange-50'
-                                                    }
-                                                `}
-                                                data-testid={`lp-toggle-${lp.id}`}
-                                            >
-                                                <span className={`
-                                                    w-5 h-5 rounded shrink-0 flex items-center justify-center
-                                                    border-2 transition-colors
-                                                    ${selected ? 'bg-orange-500 border-orange-500' : 'border-slate-300 bg-white'}
-                                                `}>
-                                                    {selected && (
-                                                        <svg className="w-3 h-3 text-white" viewBox="0 0 12 12" fill="none">
-                                                            <path d="M2 6l3 3 5-5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
-                                                        </svg>
-                                                    )}
-                                                </span>
-                                                {lp.label}
-                                            </button>
-                                        );
-                                    })}
-                                </div>
-                            </div>
+                            ))}
                         </div>
                     )}
 
-                    {/* ══════════════════════════════════════════════════════
-                        STEP 2 — Upload Files
-                    ══════════════════════════════════════════════════════ */}
+                    {/* STEP 2 */}
                     {modal.step === STEP_UPLOAD && (
-                        <div className="flex-1 overflow-y-auto space-y-4 py-2 pr-1">
-
-                            {/* Unicommerce File */}
-                            <div className="border-2 border-slate-200 rounded-xl p-4">
-                                <div className="flex items-center gap-2 mb-3">
-                                    <ShoppingBag className="h-5 w-5 text-slate-600" />
-                                    <p className="font-semibold text-slate-800 text-sm">
-                                        Upload Unicommerce File *
-                                    </p>
-                                    {modal.unicommerceFile && (
-                                        <Badge className="ml-auto bg-green-100 text-green-700 border border-green-300 text-xs">
-                                            <CheckCircle2 className="h-3 w-3 mr-1 inline" />
-                                            {modal.unicommerceFile.name}
-                                        </Badge>
-                                    )}
+                        <div className="flex-1 overflow-y-auto px-6 py-5 space-y-4">
+                            <div>
+                                <p className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-3">Core Files</p>
+                                <div className="grid grid-cols-2 gap-3">
+                                    <FileDropZone id="oc-unicommerce" label="Unicommerce File" icon={ShoppingBag} color="#475569"
+                                        accept=".xlsx,.xls,.csv" value={modal.unicommerceFile} onChange={f => setField('unicommerceFile', f)} />
+                                    <FileDropZone id="oc-sales-order" label="Sales Order Report" icon={FileText} color="#475569"
+                                        accept=".xlsx,.xls,.csv" value={modal.salesOrderReportFile} onChange={f => setField('salesOrderReportFile', f)} />
                                 </div>
-                                <Input
-                                    id="oc-unicommerce-file"
-                                    type="file"
-                                    accept=".xlsx,.xls,.csv"
-                                    onChange={e => setField('unicommerceFile', e.target.files[0] || null)}
-                                    className="h-9 text-sm"
-                                />
                             </div>
-
-                            {/* Sales Order Report File */}
-                            <div className="border-2 border-slate-200 rounded-xl p-4 mt-4">
-                                <div className="flex items-center gap-2 mb-3">
-                                    <FileText className="h-5 w-5 text-slate-600" />
-                                    <p className="font-semibold text-slate-800 text-sm">
-                                        Upload Sales Order Report *
-                                    </p>
-                                    {modal.salesOrderReportFile && (
-                                        <Badge className="ml-auto bg-green-100 text-green-700 border border-green-300 text-xs">
-                                            <CheckCircle2 className="h-3 w-3 mr-1 inline" />
-                                            {modal.salesOrderReportFile.name}
-                                        </Badge>
-                                    )}
-                                </div>
-                                <Input
-                                    id="oc-sales-order-file"
-                                    type="file"
-                                    accept=".xlsx,.xls,.csv"
-                                    onChange={e => setField('salesOrderReportFile', e.target.files[0] || null)}
-                                    className="h-9 text-sm"
-                                />
-                            </div>
-
-                            {/* Payment Gateway Files */}
                             {modal.selectedGateways.length > 0 && (
                                 <div>
-                                    <div className="flex items-center gap-2 mb-2">
-                                        <CreditCard className="h-4 w-4 text-blue-600" />
-                                        <p className="text-sm font-semibold text-slate-700 uppercase tracking-wide">
-                                            Payment Gateway Files
-                                        </p>
+                                    <div className="flex items-center gap-2 mb-3">
+                                        <CreditCard className="h-3.5 w-3.5 text-blue-500" />
+                                        <p className="text-xs font-semibold text-slate-500 uppercase tracking-wider">Payment Gateway Files</p>
                                     </div>
-                                    <div className="space-y-3">
+                                    <div className="grid grid-cols-2 gap-3">
                                         {modal.selectedGateways.map(id => {
                                             const gw = PAYMENT_GATEWAYS.find(g => g.id === id);
-                                            const file = modal.gatewayFiles[id];
-                                            return (
-                                                <div
-                                                    key={id}
-                                                    className="border-2 border-blue-100 rounded-xl p-3 bg-blue-50/40"
-                                                >
-                                                    <div className="flex items-center justify-between mb-2">
-                                                        <Label
-                                                            htmlFor={`gw-file-${id}`}
-                                                            className="text-sm font-medium text-blue-800 flex items-center gap-2"
-                                                        >
-                                                            <span className="inline-flex items-center justify-center w-5 h-5 rounded-full bg-blue-200 text-blue-800 text-xs font-bold">
-                                                                {modal.selectedGateways.indexOf(id) + 1}
-                                                            </span>
-                                                            {gw?.label} *
-                                                        </Label>
-                                                        {file && (
-                                                            <span className="text-xs text-green-700 font-medium flex items-center gap-1">
-                                                                <CheckCircle2 className="h-3 w-3" />
-                                                                {file.name}
-                                                            </span>
-                                                        )}
-                                                    </div>
-                                                    <Input
-                                                        id={`gw-file-${id}`}
-                                                        type="file"
-                                                        accept=".xlsx,.xls,.csv"
-                                                        onChange={e => setGatewayFile(id, e.target.files[0] || null)}
-                                                        className="h-9 text-sm"
-                                                    />
-                                                </div>
-                                            );
+                                            return <FileDropZone key={id} id={`gw-file-${id}`} label={gw?.label} icon={CreditCard} color={gw?.color}
+                                                accept=".xlsx,.xls,.csv" value={modal.gatewayFiles[id]} onChange={f => setGatewayFile(id, f)} />;
                                         })}
                                     </div>
                                 </div>
                             )}
-
-                            {/* Logistics Partner Files */}
                             {modal.selectedLogistics.length > 0 && (
                                 <div>
-                                    <div className="flex items-center gap-2 mb-2">
-                                        <Package className="h-4 w-4 text-orange-600" />
-                                        <p className="text-sm font-semibold text-slate-700 uppercase tracking-wide">
-                                            Logistics Partner Files
-                                        </p>
+                                    <div className="flex items-center gap-2 mb-3">
+                                        <Package className="h-3.5 w-3.5 text-orange-500" />
+                                        <p className="text-xs font-semibold text-slate-500 uppercase tracking-wider">Logistics Partner Files</p>
                                     </div>
-                                    <div className="space-y-3">
+                                    <div className="grid grid-cols-2 gap-3">
                                         {modal.selectedLogistics.map(id => {
                                             const lp = LOGISTICS_PARTNERS.find(l => l.id === id);
-                                            const file = modal.logisticsFiles[id];
-                                            return (
-                                                <div
-                                                    key={id}
-                                                    className="border-2 border-orange-100 rounded-xl p-3 bg-orange-50/40"
-                                                >
-                                                    <div className="flex items-center justify-between mb-2">
-                                                        <Label
-                                                            htmlFor={`lp-file-${id}`}
-                                                            className="text-sm font-medium text-orange-800 flex items-center gap-2"
-                                                        >
-                                                            <span className="inline-flex items-center justify-center w-5 h-5 rounded-full bg-orange-200 text-orange-800 text-xs font-bold">
-                                                                {modal.selectedLogistics.indexOf(id) + 1}
-                                                            </span>
-                                                            {lp?.label} *
-                                                        </Label>
-                                                        {file && (
-                                                            <span className="text-xs text-green-700 font-medium flex items-center gap-1">
-                                                                <CheckCircle2 className="h-3 w-3" />
-                                                                {file.name}
-                                                            </span>
-                                                        )}
-                                                    </div>
-                                                    <Input
-                                                        id={`lp-file-${id}`}
-                                                        type="file"
-                                                        accept=".xlsx,.xls,.csv"
-                                                        onChange={e => setLogisticsFile(id, e.target.files[0] || null)}
-                                                        className="h-9 text-sm"
-                                                    />
-                                                </div>
-                                            );
+                                            return <FileDropZone key={id} id={`lp-file-${id}`} label={lp?.label} icon={Package} color={lp?.color}
+                                                accept=".xlsx,.xls,.csv" value={modal.logisticsFiles[id]} onChange={f => setLogisticsFile(id, f)} />;
                                         })}
                                     </div>
                                 </div>
                             )}
+                            <p className="text-xs text-slate-400 flex items-center gap-1.5 pt-1">
+                                <AlertCircle className="h-3.5 w-3.5" /> All files must be Excel (.xlsx / .xls) or CSV format
+                            </p>
                         </div>
                     )}
 
-                    {/* ══════════════════════════════════════════════════════
-                        STEP 3 — Preview & Confirm
-                    ══════════════════════════════════════════════════════ */}
+                    {/* STEP 3 */}
                     {modal.step === STEP_PREVIEW && (
-                        <div className="flex-1 overflow-y-auto space-y-4 py-2 pr-1">
+                        <div className="flex-1 overflow-y-auto px-6 py-5">
                             {isGenerating ? (
                                 <div className="flex flex-col items-center justify-center py-16 gap-4">
-                                    <Loader2 className="h-10 w-10 animate-spin text-slate-500" />
-                                    <p className="text-slate-600 font-medium">Processing all files…</p>
-                                    <p className="text-xs text-slate-400">This may take a moment</p>
+                                    <div className="w-16 h-16 rounded-full border-4 border-slate-100 flex items-center justify-center">
+                                        <Loader2 className="h-7 w-7 animate-spin text-slate-400" />
+                                    </div>
+                                    <div className="text-center">
+                                        <p className="text-sm font-semibold text-slate-700">Processing files…</p>
+                                        <p className="text-xs text-slate-400 mt-1">Reconciling order data across all partners</p>
+                                    </div>
                                 </div>
                             ) : previewData ? (
-                                <>
-                                    {/* Unicommerce rows */}
-                                    <div className="flex items-center justify-between px-4 py-3 bg-slate-50 rounded-lg border border-slate-200">
-                                        <span className="flex items-center gap-2 text-sm font-medium text-slate-700">
-                                            <ShoppingBag className="h-4 w-4 text-slate-500" />
-                                            Unicommerce Rows Parsed
-                                        </span>
-                                        <Badge variant="secondary" className="text-base font-bold px-3 py-1">
-                                            {previewData.summary?.unicommerceRows ?? '—'}
-                                        </Badge>
-                                    </div>
-
-                                    {/* Sales Order Report rows */}
-                                    <div className="flex items-center justify-between px-4 py-3 bg-slate-50 rounded-lg border border-slate-200 mt-2">
-                                        <span className="flex items-center gap-2 text-sm font-medium text-slate-700">
-                                            <FileText className="h-4 w-4 text-slate-500" />
-                                            Sales Order Rows Parsed
-                                        </span>
-                                        <Badge variant="secondary" className="text-base font-bold px-3 py-1">
-                                            {previewData.summary?.salesOrderRows ?? '—'}
-                                        </Badge>
-                                    </div>
-
-                                    {/* Gateway breakdowns */}
-                                    {previewData.summary?.gateways &&
-                                        Object.entries(previewData.summary.gateways).map(([name, count]) => (
-                                            <div key={name} className="flex items-center justify-between px-4 py-3 bg-blue-50 rounded-lg border border-blue-200">
-                                                <span className="flex items-center gap-2 text-sm font-medium text-blue-700">
-                                                    <CreditCard className="h-4 w-4" /> {name}
-                                                </span>
-                                                <Badge className="bg-blue-600 text-white px-3 py-1">
-                                                    {count} rows
-                                                </Badge>
+                                <div className="space-y-4">
+                                    {/* Status ring */}
+                                    <div className="flex items-center gap-6 p-5 bg-slate-50 rounded-xl border border-slate-200">
+                                        <div className="relative shrink-0">
+                                            <DonutChart pct={previewData.rowCount && previewData.summary?.unicommerceRows
+                                                ? Math.round((previewData.rowCount / previewData.summary.unicommerceRows) * 100) : 100}
+                                                size={96} stroke={10} color="#10b981"
+                                                label={previewData.rowCount && previewData.summary?.unicommerceRows
+                                                    ? `${Math.round((previewData.rowCount / previewData.summary.unicommerceRows) * 100)}%` : '100%'} />
+                                        </div>
+                                        <div className="flex-1 grid grid-cols-2 gap-4">
+                                            <div>
+                                                <p className="text-xs text-slate-400 font-medium uppercase tracking-wide">Output Rows</p>
+                                                <p className="text-2xl font-bold text-slate-900">{(previewData.rowCount ?? 0).toLocaleString()}</p>
+                                                <p className="text-xs text-emerald-600 font-medium mt-0.5">Order Cycle records</p>
                                             </div>
-                                        ))
-                                    }
-
-                                    {/* Logistics breakdowns */}
-                                    {previewData.summary?.logistics &&
-                                        Object.entries(previewData.summary.logistics).map(([name, count]) => (
-                                            <div key={name} className="flex items-center justify-between px-4 py-3 bg-orange-50 rounded-lg border border-orange-200">
-                                                <span className="flex items-center gap-2 text-sm font-medium text-orange-700">
-                                                    <Package className="h-4 w-4" /> {name}
-                                                </span>
-                                                <Badge className="bg-orange-500 text-white px-3 py-1">
-                                                    {count} rows
-                                                </Badge>
+                                            <div>
+                                                <p className="text-xs text-slate-400 font-medium uppercase tracking-wide">Source Rows</p>
+                                                <p className="text-2xl font-bold text-slate-900">{(previewData.summary?.unicommerceRows ?? 0).toLocaleString()}</p>
+                                                <p className="text-xs text-slate-400 font-medium mt-0.5">Unicommerce rows</p>
                                             </div>
-                                        ))
-                                    }
-
-                                    {/* Output rows */}
-                                    <div className="flex items-center justify-between px-4 py-3 bg-green-50 rounded-lg border border-green-200">
-                                        <span className="flex items-center gap-2 text-sm font-medium text-green-700">
-                                            <CheckCircle2 className="h-4 w-4" />
-                                            Output Rows (Order Cycle)
-                                        </span>
-                                        <Badge className="bg-green-600 text-white text-base font-bold px-3 py-1">
-                                            {previewData.rowCount ?? '—'}
-                                        </Badge>
+                                        </div>
                                     </div>
-
+                                    {/* Sales order row */}
+                                    <div className="flex items-center justify-between px-4 py-3 bg-white rounded-xl border border-slate-200">
+                                        <div className="flex items-center gap-2.5">
+                                            <div className="w-8 h-8 rounded-lg bg-slate-100 flex items-center justify-center">
+                                                <FileText className="h-4 w-4 text-slate-500" />
+                                            </div>
+                                            <span className="text-sm font-medium text-slate-700">Sales Order Report</span>
+                                        </div>
+                                        <span className="text-sm font-bold text-slate-900">{(previewData.summary?.salesOrderRows ?? 0).toLocaleString()} rows</span>
+                                    </div>
+                                    {/* Gateways */}
+                                    {previewData.summary?.gateways && Object.entries(previewData.summary.gateways).map(([name, count]) => {
+                                        const gw = PAYMENT_GATEWAYS.find(g => g.label === name || g.id === name.toLowerCase());
+                                        return (
+                                            <div key={name} className="flex items-center justify-between px-4 py-3 bg-white rounded-xl border border-slate-200">
+                                                <div className="flex items-center gap-2.5">
+                                                    <span className="w-2.5 h-2.5 rounded-full" style={{ background: gw?.color || '#6366f1' }} />
+                                                    <span className="text-sm font-medium text-slate-700">{name}</span>
+                                                </div>
+                                                <span className="text-sm font-bold text-slate-900">{Number(count).toLocaleString()} rows</span>
+                                            </div>
+                                        );
+                                    })}
+                                    {/* Logistics */}
+                                    {previewData.summary?.logistics && Object.entries(previewData.summary.logistics).map(([name, count]) => {
+                                        const lp = LOGISTICS_PARTNERS.find(l => l.label === name || l.id === name.toLowerCase());
+                                        const total = Object.values(previewData.summary.logistics).reduce((s, v) => s + Number(v), 0);
+                                        const pct   = total ? Math.round((Number(count) / total) * 100) : 0;
+                                        return (
+                                            <div key={name} className="px-4 py-3 bg-white rounded-xl border border-slate-200">
+                                                <div className="flex items-center justify-between mb-1.5">
+                                                    <div className="flex items-center gap-2.5">
+                                                        <span className="w-2.5 h-2.5 rounded-full" style={{ background: lp?.color || '#f59e0b' }} />
+                                                        <span className="text-sm font-medium text-slate-700">{name}</span>
+                                                    </div>
+                                                    <div className="flex items-center gap-2">
+                                                        <span className="text-xs text-slate-400">{pct}%</span>
+                                                        <span className="text-sm font-bold text-slate-900">{Number(count).toLocaleString()} rows</span>
+                                                    </div>
+                                                </div>
+                                                <div className="h-1.5 bg-slate-100 rounded-full overflow-hidden">
+                                                    <div className="h-full rounded-full" style={{ width: `${pct}%`, background: lp?.color || '#f59e0b' }} />
+                                                </div>
+                                            </div>
+                                        );
+                                    })}
                                     <p className="text-xs text-slate-400 text-center pt-1">
-                                        Review the file parse counts above. Click{' '}
-                                        <strong>Confirm &amp; Save</strong> to write the file,
-                                        or <strong>Discard</strong> to cancel.
+                                        Review the counts · Click <strong>Confirm &amp; Save</strong> to write the Excel file
                                     </p>
-                                </>
+                                </div>
                             ) : null}
                         </div>
                     )}
 
-                    {/* ── Footer ──────────────────────────────────────────── */}
-                    <div className="flex items-center justify-between pt-4 border-t mt-2 shrink-0">
-                        {/* Back */}
+                    {/* Footer */}
+                    <div className="flex items-center justify-between px-6 py-4 border-t border-slate-100 shrink-0 bg-slate-50/50">
                         <div>
                             {modal.step > STEP_SELECT && !isGenerating && (
-                                <Button variant="outline" onClick={prevStep}>
-                                    <ChevronLeft className="mr-1 h-4 w-4" /> Back
-                                </Button>
+                                <button onClick={prevStep}
+                                    className="inline-flex items-center gap-1.5 px-3 py-2 text-sm font-medium rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-slate-600 transition-colors">
+                                    <ChevronLeft className="h-4 w-4" /> Back
+                                </button>
                             )}
                         </div>
-
                         <div className="flex gap-2">
-                            {/* Step 1 → Next */}
                             {modal.step === STEP_SELECT && (
-                                <Button onClick={nextStep} data-testid="oc-next-btn">
-                                    Next <ChevronRight className="ml-1 h-4 w-4" />
-                                </Button>
+                                <button onClick={nextStep} data-testid="oc-next-btn"
+                                    className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-semibold rounded-lg bg-slate-900 text-white hover:bg-slate-700 transition-colors">
+                                    Next <ChevronRight className="h-4 w-4" />
+                                </button>
                             )}
-
-                            {/* Step 2 → Generate (call preview API) */}
                             {modal.step === STEP_UPLOAD && (
-                                <Button
-                                    onClick={handleGeneratePreview}
-                                    disabled={isGenerating}
-                                    data-testid="oc-generate-preview-btn"
-                                >
-                                    {isGenerating
-                                        ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" />Processing…</>
-                                        : <><Upload className="mr-2 h-4 w-4" />Generate</>
-                                    }
-                                </Button>
+                                <button onClick={handleGeneratePreview} disabled={isGenerating} data-testid="oc-generate-preview-btn"
+                                    className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-semibold rounded-lg bg-slate-900 text-white hover:bg-slate-700 disabled:opacity-50 transition-colors">
+                                    {isGenerating ? <><Loader2 className="h-4 w-4 animate-spin" /> Processing…</> : <><UploadCloud className="h-4 w-4" /> Generate Preview</>}
+                                </button>
                             )}
-
-                            {/* Step 3 → Discard / Confirm */}
                             {modal.step === STEP_PREVIEW && previewData && !isGenerating && (
                                 <>
-                                    <Button variant="outline" onClick={handleDiscard}>
+                                    <button onClick={handleDiscard}
+                                        className="inline-flex items-center gap-1.5 px-3 py-2 text-sm font-medium rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-slate-600 transition-colors">
                                         Discard
-                                    </Button>
-                                    <Button
-                                        onClick={handleCommit}
-                                        className="bg-green-700 hover:bg-green-800"
-                                        data-testid="oc-confirm-btn"
-                                    >
-                                        <CheckCircle2 className="mr-2 h-4 w-4" />
-                                        Confirm &amp; Save
-                                    </Button>
+                                    </button>
+                                    <button onClick={handleCommit} data-testid="oc-confirm-btn"
+                                        className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-semibold rounded-lg bg-emerald-600 text-white hover:bg-emerald-700 transition-colors">
+                                        <CheckCircle2 className="h-4 w-4" /> Confirm &amp; Save
+                                    </button>
                                 </>
                             )}
                         </div>

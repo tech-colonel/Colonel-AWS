@@ -85,6 +85,11 @@ def _extract_gstin(rec) -> str:
 # Helpers
 # ---------------------------------------------------------------------------
 
+def _norm_gstin(v: Any) -> str:
+    """Normalise a GSTIN string to 15-char uppercase alphanumeric (strips spaces/dashes)."""
+    return re.sub(r"[^0-9A-Z]", "", str(v or "").upper().strip())
+
+
 def convert_xls_to_xlsx(xls_bytes: bytes) -> bytes:
     import pandas as pd
     from io import BytesIO
@@ -654,7 +659,9 @@ def parse_books(purchase_data: bytes, debit_data: bytes) -> list[NormalizedInvoi
             rec = NormalizedInvoice(
                 source=source,
                 row_id=f"{source}-{index}",
-                supplier_gstin="",           # Tally doesn't export GSTIN
+                supplier_gstin=_norm_gstin(
+                    row.get("GSTIN/UIN") or row.get("GSTIN") or row.get("gstin/uin") or row.get("gstin") or ""
+                ),
                 supplier_name=supplier_name,
                 doc_type=default_type,
                 doc_no=doc_no,
@@ -712,15 +719,23 @@ def reconcile_by_invoice_no(
 ) -> list[MatchResult]:
     """
     Match GSTR-2B records to Books records using normalised invoice number as the
-    primary key. GSTIN is not checked because Tally registers don't contain it.
+    primary key. When both sides carry a GSTIN (Purchase Register exports GSTIN/UIN),
+    a compound (invoice_no + GSTIN) key is used first to prevent false matches across
+    different vendors that happen to share the same invoice number (Pass 1A).
+    Invoice-only matching is the fallback for Books rows without a GSTIN (Pass 1B).
     Falls back to supplier name + core-digit matching for minor year-suffix differences.
     """
     # Build books indexes
     books_by_no: dict[str, list[int]] = {}
     books_by_core: dict[str, list[int]] = {}
+    # Compound index: (normalized_doc_no, normalized_gstin) → [indices] — only for rows with GSTIN
+    books_by_compound: dict[tuple, list[int]] = {}
     for idx, rec in enumerate(books):
         books_by_no.setdefault(rec.normalized_doc_no, []).append(idx)
         books_by_core.setdefault(_core_digits(rec.normalized_doc_no), []).append(idx)
+        if rec.normalized_doc_no and rec.supplier_gstin:
+            key = (rec.normalized_doc_no, rec.supplier_gstin)
+            books_by_compound.setdefault(key, []).append(idx)
 
     results: list[MatchResult] = []
     used_books: set[int] = set()
@@ -756,9 +771,30 @@ def reconcile_by_invoice_no(
             explanation=explanation,
         )
 
-    # Pass 1 — exact normalised invoice number match
+    # Pass 1A — compound key: invoice_no + GSTIN (definitive — no false positives across vendors)
     for g_idx, g_rec in enumerate(gstr2b):
-        candidates = [i for i in books_by_no.get(g_rec.normalized_doc_no, []) if i not in used_books]
+        inv  = g_rec.normalized_doc_no
+        gstn = g_rec.supplier_gstin
+        if not inv or not gstn:
+            continue
+        comp_candidates = [i for i in books_by_compound.get((inv, gstn), []) if i not in used_books]
+        if not comp_candidates:
+            continue
+        best_idx = comp_candidates[0]
+        used_gstr2b.add(g_idx)
+        used_books.add(best_idx)
+        results.append(_make_result(g_rec, books[best_idx]))
+
+    # Pass 1B — invoice-only fallback (Books rows without GSTIN — old file format)
+    for g_idx, g_rec in enumerate(gstr2b):
+        if g_idx in used_gstr2b:
+            continue
+        inv = g_rec.normalized_doc_no
+        if not inv:
+            continue
+        # Only match Books rows that have NO GSTIN (so they were skipped in the compound index)
+        candidates = [i for i in books_by_no.get(inv, [])
+                      if i not in used_books and not books[i].supplier_gstin]
         if not candidates:
             continue
         best_idx = candidates[0]
@@ -776,10 +812,16 @@ def reconcile_by_invoice_no(
             continue
         # Pick best name similarity
         best_idx = max(candidates, key=lambda i: _name_sim(g_rec.supplier_name, books[i].supplier_name))
-        if _name_sim(g_rec.supplier_name, books[best_idx].supplier_name) >= 0.5:
-            used_gstr2b.add(g_idx)
-            used_books.add(best_idx)
-            results.append(_make_result(g_rec, books[best_idx], category_override="Matched"))
+        if _name_sim(g_rec.supplier_name, books[best_idx].supplier_name) < 0.5:
+            continue
+        # GSTIN guard: if both sides carry a GSTIN and they differ, skip — definitely different vendors
+        g_gstin = g_rec.supplier_gstin or ""
+        b_gstin = books[best_idx].supplier_gstin or ""
+        if g_gstin and b_gstin and g_gstin != b_gstin:
+            continue
+        used_gstr2b.add(g_idx)
+        used_books.add(best_idx)
+        results.append(_make_result(g_rec, books[best_idx], category_override="Matched"))
 
     # Pass 2.5 — CN (GSTR-2B) ↔ DN (Books) cross-type match
     # A supplier's Credit Note number (e.g. LCN-38/24-25) and the buyer's Debit Note

@@ -64,51 +64,51 @@ function extractPartnerFiles(reqFiles, gatewayNames, logisticsNames) {
  * Map a processed summary row to the DB schema columns defined in the seed.
  */
 function mapRowToSchema(row, month, year, filename) {
-    const safeNum = (v) => {
-        if (v === null || v === undefined || v === '') return 0;
-        const n = Number(v);
-        return isNaN(n) ? 0 : n;
-    };
-    const safeStr = (v) => (v === null || v === undefined ? '' : String(v));
-    const safeDate = (v) => {
-        if (!v) return null;
-        const d = new Date(v);
-        return isNaN(d.getTime()) ? null : d;
-    };
+    const sN = (v) => { if (v === null || v === undefined || v === '') return 0; const n = Number(v); return isNaN(n) ? 0 : n; };
+    const sS = (v) => (v === null || v === undefined ? '' : String(v));
+    const sD = (v) => { if (!v) return null; const d = new Date(v); return isNaN(d.getTime()) ? null : d; };
 
     return {
         year: parseInt(year) || new Date().getFullYear(),
         month: parseInt(month) || 0,
         filename,
-        date: safeDate(row.date || row['Date']),
-        sale_order_number: safeStr(row.sale_order_number || row['Order ID'] || row['Name']),
-        platform: safeStr(row.platform || 'Shopify'),
-        invoice_number: safeStr(row.invoice_number || row['Invoice Number']),
-        awb_number: safeStr(row.awb_number || row['AWB'] || row['Tracking Number']),
-        shipping_partner: safeStr(row.shipping_partner),
-        dispatch_or_cancellation_date: safeDate(row.dispatch_or_cancellation_date),
-        return_date: safeDate(row.return_date),
-        total_amount: safeNum(row.total_amount || row['Total']),
-        return_amount: safeNum(row.return_amount),
-        net_amount: safeNum(row.net_amount || row['Net Sales']),
-        srn: safeStr(row.srn || row['SRN']),
+        date: sD(row.dispatch_date),
+        sale_order_number: sS(row.sale_order_number),
+        platform: sS(row.shopify || 'Shopify'),
+        invoice_number: sS(row.invoice_number),
+        awb_number: sS(row.awb_number),
+        shipping_partner: sS(row.shipping_partner),
+        dispatch_or_cancellation_date: sD(row.dispatch_date),
+        return_date: sD(row.return_date),
+        total_amount: sN(row.sales_amount),
+        return_amount: sN(row.return_amount),
+        net_amount: sN(row.net_amount),
+        srn: sS(row.srn),
+        delivery_status: sS(row.delivery_status),
         // Ekart
-        ekart_remittance_date: safeDate(row.ekart_remittance_date),
-        ekart_actual_remittance_date: safeDate(row.ekart_actual_remittance_date),
-        ekart_cod_amount: safeNum(row.ekart_cod_amount),
+        ekart_remittance_date: sD(row.ekart_remittance_date),
+        ekart_actual_remittance_date: sD(row.ekart_actual_remittance_date),
+        ekart_cod_amount: sN(row.ekart_cod_amount),
         // Delhivery
-        delhivery_delivery_date: safeDate(row.delhivery_delivery_date),
-        delhivery_cod_amount: safeNum(row.delhivery_cod_amount),
+        delhivery_delivery_date: sD(row.delhivery_delivery_date),
+        delhivery_cod_amount: sN(row.delhivery_cod_amount),
         // Xpressbees
-        xpressbees_delivery_date: safeDate(row.xpressbees_delivery_date),
-        xpressbees_transaction_date: safeDate(row.xpressbees_transaction_date),
-        xpressbees_net_payment: safeNum(row.xpressbees_net_payment),
+        xpressbees_delivery_date: sD(row.xpressbees_delivery_date),
+        xpressbees_transaction_date: sD(row.xpressbees_transaction_date),
+        xpressbees_net_payment: sN(row.xpressbees_net_payment),
         // Snapmint
-        snapmint_settlement_date: safeDate(row.snapmint_settlement_date),
-        snapmint_settlement_value: safeNum(row.snapmint_settlement_value),
+        snapmint_settlement_date: sD(row.snapmint_settlement_date),
+        snapmint_settlement_value: sN(row.snapmint_settlement_amount),
         // BharatX
-        bharatx_settlement_timestamp: safeDate(row.bharatx_settlement_timestamp),
-        bharatx_ledger_amount: safeNum(row.bharatx_ledger_amount),
+        bharatx_settlement_timestamp: sD(row.bharatx_settlement_date),
+        bharatx_ledger_amount: sN(row.bharatx_settlement_amount),
+        // Razorpay
+        razorpay_settlement_date: sD(row.razorpay_settlement_date),
+        razorpay_settlement_amount: sN(row.razorpay_settlement_amount),
+        // Totals
+        total_settlement_received: sN(row.total_settlement_received),
+        balance_amount_receivable: sN(row.balance_amount_receivable),
+        reconciliation_status: sS(row.reconciliation_status),
     };
 }
 
@@ -131,16 +131,18 @@ const generatePreview = async (req, res, next) => {
         const month = req.body.month || '';
         const year = req.body.year || new Date().getFullYear().toString();
 
-        // Validate Unicommerce + Sales Order files
-        const unicommerceArr = req.files?.unicommerceFile;
-        const salesOrderArr = req.files?.salesOrderReportFile;
+        // Validate required files
+        const unicommerceArr = req.files?.unicommerceFile;       // Export-Tally GST Report
+        const returnGSTArr = req.files?.returnGSTFile;           // Return GST Report
+        const salesOrderArr = req.files?.salesOrderReportFile;   // Sales Order Combined Report
         if (!unicommerceArr || !unicommerceArr[0]) {
-            return res.status(400).json({ error: 'Unicommerce file is required (field: unicommerceFile)' });
+            return res.status(400).json({ error: 'Export-Tally GST file is required (field: unicommerceFile)' });
         }
         if (!salesOrderArr || !salesOrderArr[0]) {
             return res.status(400).json({ error: 'Sales Order Report file is required (field: salesOrderReportFile)' });
         }
         const unicommerceBuffer = unicommerceArr[0].buffer;
+        const returnGSTBuffer = returnGSTArr?.[0]?.buffer || null;
         const salesOrderBuffer = salesOrderArr[0].buffer;
 
         // Validate Brand + Agent
@@ -161,8 +163,11 @@ const generatePreview = async (req, res, next) => {
         }
 
         // Parse all files to JSON
-        const unicommerceJson = await parseExcelBuffer(unicommerceBuffer, 'Unicommerce File');
-        const salesOrderJson = await parseExcelBuffer(salesOrderBuffer, 'Sales Order Report');
+        const unicommerceJson = await parseExcelBuffer(unicommerceBuffer, 'Export-Tally GST Report');
+        const returnGSTJson = returnGSTBuffer
+            ? await parseExcelBuffer(returnGSTBuffer, 'Return GST Report')
+            : [];
+        const salesOrderJson = await parseExcelBuffer(salesOrderBuffer, 'Sales Order Combined Report');
         const gatewayDataJson = {};
         for (const gw of paymentGatewayFiles) {
             gatewayDataJson[gw.name] = await parseExcelBuffer(gw.buffer, `Payment Gateway: ${gw.name}`);
@@ -175,6 +180,7 @@ const generatePreview = async (req, res, next) => {
         // Run processor
         const result = await orderCycleShopifyProcessor(
             unicommerceJson,
+            returnGSTJson,
             salesOrderJson,
             gatewayDataJson,
             logisticsDataJson,
@@ -213,7 +219,8 @@ const generatePreview = async (req, res, next) => {
             rowCount: result.rowCount,
             parseStats: result.parseStats,
             summary: {
-                unicommerceRows: result.parseStats.unicommerce,
+                gstReportRows: result.parseStats.gstReport,
+                returnGSTRows: result.parseStats.returnGST,
                 salesOrderRows: result.parseStats.salesOrder,
                 gateways: result.parseStats.gateways,
                 logistics: result.parseStats.logistics,
@@ -294,13 +301,14 @@ const getGeneratedFiles = async (req, res, next) => {
         await Model.sync();
 
         // Get distinct filenames with metadata
+        // MIN(id::text) because id is UUID — PostgreSQL has no MIN() for UUID natively
         const { Sequelize } = require('sequelize');
         const rows = await Model.findAll({
             attributes: [
                 'filename', 'month', 'year',
                 [Sequelize.fn('COUNT', Sequelize.col('filename')), 'row_count'],
                 [Sequelize.fn('MIN', Sequelize.col('created_at')), 'created_at'],
-                [Sequelize.fn('MIN', Sequelize.col('id')), 'id'],
+                [Sequelize.literal('MIN(id::text)'), 'id'],
             ],
             group: ['filename', 'month', 'year'],
             order: [['year', 'DESC'], ['month', 'DESC']],
@@ -372,6 +380,145 @@ const deleteFile = async (req, res, next) => {
     }
 };
 
+// ─── Get Report Visualization Data ───────────────────────────────────────────
+
+const getReportData = async (req, res, next) => {
+    try {
+        const { brandId, agentId, filename } = req.params;
+        const decodedFilename = decodeURIComponent(filename);
+
+        const brand = await Brand.findByPk(brandId);
+        const agent = await Agent.findByPk(agentId);
+        if (!brand || !agent) return res.status(404).json({ error: 'Brand or Agent not found' });
+
+        const brandDb = getBrandConnection(brand.db_name);
+        const tableName = agent.name.replace(/[^a-zA-Z0-9]/g, '_').toLowerCase();
+        const Model = getDynamicModel(brandDb, tableName, agent.columns);
+        await Model.sync();
+
+        const rows = await Model.findAll({ where: { filename: decodedFilename }, raw: true });
+        if (!rows.length) return res.status(404).json({ error: 'No data found for this file' });
+
+        const toNum = v => { const n = Number(v); return isNaN(n) ? 0 : n; };
+
+        // Aggregation accumulators
+        let grossSales = 0, totalReturns = 0, netSales = 0;
+        let cancelledCount = 0, rtoCount = 0, cancelledAmount = 0;
+        let reconciledCount = 0, pendingCount = 0, overpaidCount = 0;
+
+        const providers = {
+            'Ekart COD':     { type: 'COD',     amount: 0, orders: 0, matched: 0, color: '#10b981' },
+            'Delhivery COD': { type: 'COD',     amount: 0, orders: 0, matched: 0, color: '#6366f1' },
+            'Xpressbees':    { type: 'COD',     amount: 0, orders: 0, matched: 0, color: '#f59e0b' },
+            'Snapmint':      { type: 'Prepaid', amount: 0, orders: 0, matched: 0, color: '#8b5cf6' },
+            'BharatX':       { type: 'Prepaid', amount: 0, orders: 0, matched: 0, color: '#ec4899' },
+            'Razorpay':      { type: 'Prepaid', amount: 0, orders: 0, matched: 0, color: '#3b82f6' },
+        };
+
+        const courierMap = {};
+
+        for (const row of rows) {
+            const status = (row.reconciliation_status || '').toUpperCase();
+            const ds     = (row.delivery_status      || '').toUpperCase();
+
+            const ga = toNum(row.total_amount);
+            const ra = toNum(row.return_amount);
+            const na = toNum(row.net_amount);
+
+            grossSales   += ga;
+            totalReturns += ra;
+            netSales     += na;
+
+            if (ds === 'CANCELLED') { cancelledCount++; cancelledAmount += ga; }
+            if (ds === 'RTO')       rtoCount++;
+
+            if (status === 'RECONCILED')            reconciledCount++;
+            else if (status === 'PENDING RECEIVABLE') pendingCount++;
+            else if (status === 'OVERPAID / INVESTIGATE') overpaidCount++;
+
+            // Provider amounts
+            const ekAmt = toNum(row.ekart_cod_amount);
+            if (ekAmt > 0) { providers['Ekart COD'].amount += ekAmt; providers['Ekart COD'].orders++; if (status === 'RECONCILED') providers['Ekart COD'].matched++; }
+
+            const delAmt = toNum(row.delhivery_cod_amount);
+            if (delAmt > 0) { providers['Delhivery COD'].amount += delAmt; providers['Delhivery COD'].orders++; if (status === 'RECONCILED') providers['Delhivery COD'].matched++; }
+
+            const xpAmt = toNum(row.xpressbees_net_payment);
+            if (xpAmt > 0) { providers['Xpressbees'].amount += xpAmt; providers['Xpressbees'].orders++; if (status === 'RECONCILED') providers['Xpressbees'].matched++; }
+
+            const snAmt = toNum(row.snapmint_settlement_value);
+            if (snAmt > 0) { providers['Snapmint'].amount += snAmt; providers['Snapmint'].orders++; if (status === 'RECONCILED') providers['Snapmint'].matched++; }
+
+            const bhAmt = toNum(row.bharatx_ledger_amount);
+            if (bhAmt > 0) { providers['BharatX'].amount += bhAmt; providers['BharatX'].orders++; if (status === 'RECONCILED') providers['BharatX'].matched++; }
+
+            const rzAmt = toNum(row.razorpay_settlement_amount);
+            if (rzAmt > 0) { providers['Razorpay'].amount += rzAmt; providers['Razorpay'].orders++; if (status === 'RECONCILED') providers['Razorpay'].matched++; }
+
+            // Courier map
+            const courier = (row.shipping_partner || 'Unknown').toLowerCase().trim();
+            if (!courierMap[courier]) courierMap[courier] = { orders: 0, sales: 0 };
+            courierMap[courier].orders++;
+            courierMap[courier].sales += na;
+        }
+
+        const totalOrders = rows.length;
+        const matchPct = totalOrders > 0
+            ? Math.round((reconciledCount / totalOrders) * 1000) / 10
+            : 0;
+
+        const providerList = Object.entries(providers)
+            .filter(([, v]) => v.orders > 0)
+            .map(([name, v]) => ({
+                name,
+                type: v.type,
+                amount: Math.round(v.amount * 100) / 100,
+                orders: v.orders,
+                matchPct: v.orders > 0 ? Math.round((v.matched / v.orders) * 1000) / 10 : 0,
+                color: v.color,
+            }));
+
+        const totalSettled = providerList.reduce((s, p) => s + p.amount, 0);
+
+        const couriers = Object.entries(courierMap)
+            .sort((a, b) => b[1].sales - a[1].sales)
+            .map(([name, v]) => ({
+                name,
+                orders: v.orders,
+                sales: Math.round(v.sales * 100) / 100,
+                share: totalOrders > 0 ? Math.round((v.orders / totalOrders) * 1000) / 10 : 0,
+            }));
+
+        res.json({
+            totalOrders,
+            summary: {
+                grossSales: Math.round(grossSales * 100) / 100,
+                totalReturns: Math.round(totalReturns * 100) / 100,
+                netSales: Math.round(netSales * 100) / 100,
+                cancelledCount,
+                cancelledAmount: Math.round(cancelledAmount * 100) / 100,
+                rtoCount,
+            },
+            reconciliation: {
+                total: totalOrders,
+                reconciled: reconciledCount,
+                pending: pendingCount,
+                overpaid: overpaidCount,
+                rto: rtoCount,
+                cancelled: cancelledCount,
+                matchPct,
+            },
+            providers: providerList,
+            totalSettled: Math.round(totalSettled * 100) / 100,
+            couriers,
+        });
+
+    } catch (error) {
+        console.error('[OrderCycle] ReportData Error:', error);
+        next(error);
+    }
+};
+
 module.exports = {
     generatePreview,
     generateCommit,
@@ -379,4 +526,5 @@ module.exports = {
     getGeneratedFiles,
     downloadFile,
     deleteFile,
+    getReportData,
 };

@@ -109,10 +109,12 @@ const AGENT_CONFIG = {
     name: 'GSTR-3B Tally Entry',
     slug: 'GSTR-3B · JOURNAL ENTRY',
     icon: BookOpen,
-    description: 'Extracts liability and ITC values from a GSTR-3B file and formats them as a ready-to-paste Tally journal entry.',
+    description: 'Extracts liability and ITC values from GSTR-3B files and generates ready-to-paste Tally journal entries. Upload 1–15 months in one shot.',
     color: '#0F766E', bg: 'rgba(15,118,110,0.08)', border: 'rgba(15,118,110,0.2)',
     files: [
-      { key: 'gstr3b', label: 'GSTR-3B File', hint: '.pdf / .xlsx / .xls', accept: '.pdf,.xlsx,.xls', required: true },
+      { key: 'gstr3b', label: 'GSTR-3B Files', hint: '.pdf / .xlsx / .xls — up to 15 files (one per month)', accept: '.pdf,.xlsx,.xls', required: true, multiple: true, maxFiles: 15 },
+      { key: 'coa', label: 'Chart of Accounts (Optional)', hint: '.xlsx / .xls — upload once, auto-applies to future runs', accept: '.xlsx,.xls', required: false },
+      { key: 'vouchertype', label: 'Voucher Type Master (Optional)', hint: '.xls / .xlsx — upload once to map Journal → Journal UP etc.', accept: '.xlsx,.xls', required: false },
     ],
   },
 };
@@ -250,6 +252,115 @@ const FileDropzone = ({ fileConfig, file, onChange, disabled, stepIndex }) => {
   );
 };
 
+// ── Multi-File Dropzone (for gstr3b slot) ────────────────────────────────────
+const MultiFileDropzone = ({ fileConfig, files, onChange, disabled, stepIndex }) => {
+  const inputRef = useRef(null);
+  const [dragging, setDragging] = useState(false);
+  const [hovered, setHovered] = useState(false);
+  const maxFiles = fileConfig.maxFiles || 15;
+  const list = files || [];
+  const active = !disabled && (dragging || hovered);
+  const stepNum = String(stepIndex + 1).padStart(2, '0');
+
+  const addFiles = (newFiles) => {
+    const combined = [...list, ...Array.from(newFiles)].slice(0, maxFiles);
+    onChange(combined);
+  };
+
+  const removeFile = (e, idx) => {
+    e.stopPropagation();
+    onChange(list.filter((_, i) => i !== idx));
+  };
+
+  return (
+    <div>
+      <div
+        role="button"
+        tabIndex={disabled ? -1 : 0}
+        onClick={() => { if (!disabled) inputRef.current?.click(); }}
+        onKeyDown={e => { if (!disabled && (e.key === 'Enter' || e.key === ' ')) inputRef.current?.click(); }}
+        onMouseEnter={() => setHovered(true)}
+        onMouseLeave={() => setHovered(false)}
+        onDragOver={(e) => { e.preventDefault(); if (!disabled) setDragging(true); }}
+        onDragLeave={() => setDragging(false)}
+        onDrop={(e) => { e.preventDefault(); if (!disabled) { setDragging(false); addFiles(e.dataTransfer.files); } }}
+        style={{
+          position: 'relative', padding: '14px 16px 14px 20px', borderRadius: '10px',
+          cursor: disabled ? 'not-allowed' : 'pointer', opacity: disabled ? 0.5 : 1,
+          background: list.length > 0 ? 'rgba(5,150,105,0.06)' : active ? 'rgba(7,72,238,0.05)' : 'var(--surface)',
+          border: `1px solid ${list.length > 0 ? 'rgba(5,150,105,0.25)' : active ? 'rgba(7,72,238,0.35)' : 'var(--card-border)'}`,
+          borderLeft: `3px solid ${list.length > 0 ? '#059669' : active ? '#0748EE' : 'transparent'}`,
+          transition: 'all 0.18s ease',
+        }}
+      >
+        <span style={{
+          position: 'absolute', right: 12, top: '50%', transform: 'translateY(-50%)',
+          fontFamily: 'Barlow', fontWeight: 700, fontSize: 40, lineHeight: 1,
+          color: list.length > 0 ? 'rgba(5,150,105,0.1)' : 'rgba(0,0,0,0.04)',
+          pointerEvents: 'none', userSelect: 'none',
+        }}>{stepNum}</span>
+        <input ref={inputRef} type="file" accept={fileConfig.accept || '.xlsx,.xls'} multiple className="hidden"
+          disabled={disabled} onChange={e => { addFiles(e.target.files); e.target.value = ''; }} />
+        <div className="flex items-center gap-3">
+          <div style={{
+            width: 34, height: 34, borderRadius: 8, flexShrink: 0,
+            background: list.length > 0 ? 'rgba(5,150,105,0.12)' : active ? 'rgba(7,72,238,0.1)' : 'var(--page-bg)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center', transition: 'all 0.18s ease',
+          }}>
+            {list.length > 0
+              ? <FileSpreadsheet style={{ width: 16, height: 16, color: '#059669' }} />
+              : <Upload style={{ width: 15, height: 15, color: active ? '#0748EE' : 'var(--text-muted)' }} />
+            }
+          </div>
+          <div className="flex-1 min-w-0">
+            {list.length > 0 ? (
+              <p className="text-sm font-semibold" style={{ color: '#059669', fontFamily: 'Barlow', margin: 0 }}>
+                {list.length} file{list.length > 1 ? 's' : ''} selected
+                {list.length < maxFiles && <span style={{ fontWeight: 400, fontSize: 11, marginLeft: 8, opacity: 0.7 }}>+ drop more</span>}
+              </p>
+            ) : (
+              <>
+                <p className="text-sm font-semibold" style={{ color: 'var(--text-heading)', fontFamily: 'Barlow', margin: 0 }}>
+                  {fileConfig.label}<span style={{ color: '#E11D48', marginLeft: 4, fontWeight: 400 }}>*</span>
+                </p>
+                <p className="text-xs font-mono mt-0.5" style={{ color: 'var(--text-muted)' }}>{fileConfig.hint}</p>
+              </>
+            )}
+          </div>
+          {list.length > 0 && <CheckCircle2 style={{ width: 16, height: 16, flexShrink: 0, color: '#059669' }} />}
+        </div>
+      </div>
+      {list.length > 0 && (
+        <div style={{ marginTop: 6, display: 'flex', flexDirection: 'column', gap: 4 }}>
+          {list.map((f, idx) => (
+            <div key={idx} style={{
+              display: 'flex', alignItems: 'center', gap: 8, padding: '5px 10px',
+              borderRadius: 7, background: 'var(--page-bg)', border: '1px solid var(--card-border)',
+            }}>
+              <span style={{ fontSize: 11, color: 'var(--text-muted)', fontFamily: 'monospace', minWidth: 20 }}>
+                {String(idx + 1).padStart(2, '0')}
+              </span>
+              <span style={{ fontSize: 12, color: 'var(--text-body)', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {f.name}
+              </span>
+              <span style={{ fontSize: 10, color: 'var(--text-muted)', fontFamily: 'monospace', flexShrink: 0 }}>
+                {(f.size / 1024).toFixed(0)} KB
+              </span>
+              <button onClick={e => removeFile(e, idx)} disabled={disabled} style={{
+                width: 18, height: 18, borderRadius: 4, border: 'none', cursor: 'pointer',
+                background: 'rgba(225,29,72,0.08)', color: '#E11D48', flexShrink: 0,
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+              }}>
+                <X style={{ width: 10, height: 10 }} />
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};
+
 // ── Stat Card (post-run) ──────────────────────────────────────────────────────
 const StatCard = ({ status, count, active, onClick, cfg }) => {
   const Icon = cfg.icon;
@@ -300,6 +411,11 @@ const RecoWorkspace = ({ agentTypeProp } = {}) => {
   const [showMonthly, setShowMonthly] = useState(true);
   const [ledgerStatus, setLedgerStatus] = useState(null);
 
+  // GSTR-3B Tally Entry specific state
+  const [active3bMonth, setActive3bMonth] = useState(0);    // index into monthly_data
+  const [active3bSummaryTab, setActive3bSummaryTab] = useState('entries'); // 'entries'|'month'|'state'
+  const is3b = agentType === 'gstr_3b_tally_entry';
+
   const isUniversal = agentType === 'universal_bank_statement';
   const [brands, setBrands] = useState([]);
   const [selectedBrand, setSelectedBrand] = useState(brandId && brandId !== 'other' ? brandId : '');
@@ -344,7 +460,7 @@ const RecoWorkspace = ({ agentTypeProp } = {}) => {
   }, [editedLedgers, editsKey]);
 
   useEffect(() => {
-    if (agentType === 'bank_statement' && !isDemo && brandId !== 'demo') checkLedgerMaster(brandId);
+    if ((agentType === 'bank_statement' || agentType === 'gstr_3b_tally_entry') && !isDemo && brandId !== 'demo') checkLedgerMaster(brandId);
     api.get('/api/brands').then(r => {
       const list = r.data?.brands || r.data || [];
       setBrands(list);
@@ -362,9 +478,9 @@ const RecoWorkspace = ({ agentTypeProp } = {}) => {
 
   // Re-check saved CoA when brand changes for universal bank statement
   useEffect(() => {
-    if (isUniversal && effectiveBrandId && effectiveBrandId !== 'other' && !isDemo) {
+    if ((isUniversal || agentType === 'gstr_3b_tally_entry') && effectiveBrandId && effectiveBrandId !== 'other' && !isDemo) {
       checkLedgerMaster(effectiveBrandId);
-    } else if (isUniversal) {
+    } else if (isUniversal || agentType === 'gstr_3b_tally_entry') {
       setLedgerStatus(null);
     }
   }, [effectiveBrandId]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -418,23 +534,35 @@ const RecoWorkspace = ({ agentTypeProp } = {}) => {
 
   const AgentIcon = config.icon;
 
-  const handleFileChange = (key, file) => setUploadedFiles(prev => ({ ...prev, [key]: file }));
+  const handleFileChange = (key, fileOrArray) => setUploadedFiles(prev => ({ ...prev, [key]: fileOrArray }));
 
   const handleRun = async () => {
-    const missing = activeFiles.filter(f => f.required && !uploadedFiles[f.key]);
+    const missing = activeFiles.filter(f => {
+      if (!f.required) return false;
+      const v = uploadedFiles[f.key];
+      return f.multiple ? (!v || (Array.isArray(v) && v.length === 0)) : !v;
+    });
     if (missing.length > 0) { toast.error(`Please upload: ${missing.map(f => f.label).join(', ')}`); return; }
     if (agentType === 'bank_statement' && isDemo && !uploadedFiles['ledger_master']) {
       toast.error('In demo mode, please upload the Ledger Master file'); return;
     }
     setRunning(true); setResult(null); setEditedLedgers({}); setUploadProgress(0);
     setPhase('uploading');
+    setActive3bMonth(0); setActive3bSummaryTab('entries');
     try {
       const formData = new FormData();
       formData.append('reco_type', agentType);
       formData.append('tolerance', tolerance);
       formData.append('brand_id', effectiveBrandId || brandId);
       formData.append('is_demo', isDemo ? 'true' : 'false');
-      for (const [key, file] of Object.entries(uploadedFiles)) { if (file) formData.append(key, file); }
+      for (const [key, val] of Object.entries(uploadedFiles)) {
+        if (!val) continue;
+        if (Array.isArray(val)) {
+          for (const f of val) formData.append(key, f);
+        } else {
+          formData.append(key, val);
+        }
+      }
       const response = await api.post('/api/reco/run', formData, {
         headers: { 'Content-Type': 'multipart/form-data' },
         onUploadProgress: (evt) => {
@@ -453,6 +581,9 @@ const RecoWorkspace = ({ agentTypeProp } = {}) => {
       setUploadProgress(null);
       setPhase('done');
       setResult(response.data);
+      if (agentType === 'gstr_3b_tally_entry' && uploadedFiles['coa'] && effectiveBrandId && effectiveBrandId !== 'other') {
+        checkLedgerMaster(effectiveBrandId);
+      }
       try { sessionStorage.setItem(cacheKey, JSON.stringify(slimResultForCache(response.data))); } catch (_) {}
       toast.success(`Reconciliation complete! ${response.data.results?.length || 0} records processed.`);
     } catch (err) {
@@ -908,11 +1039,19 @@ const RecoWorkspace = ({ agentTypeProp } = {}) => {
                 {/* File slots */}
                 {activeFiles.map((f, idx) => (
                   <React.Fragment key={f.key}>
-                    <FileDropzone
-                      fileConfig={f} file={uploadedFiles[f.key]}
-                      onChange={(file) => handleFileChange(f.key, file)}
-                      disabled={running} stepIndex={idx}
-                    />
+                    {f.multiple ? (
+                      <MultiFileDropzone
+                        fileConfig={f} files={uploadedFiles[f.key] || []}
+                        onChange={(arr) => handleFileChange(f.key, arr)}
+                        disabled={running} stepIndex={idx}
+                      />
+                    ) : (
+                      <FileDropzone
+                        fileConfig={f} file={uploadedFiles[f.key]}
+                        onChange={(file) => handleFileChange(f.key, file)}
+                        disabled={running} stepIndex={idx}
+                      />
+                    )}
                     {f.isDemo && (
                       <div style={{
                         display: 'flex', alignItems: 'flex-start', gap: 8,
@@ -945,6 +1084,26 @@ const RecoWorkspace = ({ agentTypeProp } = {}) => {
                           : ledgerStatus === 'missing'
                           ? 'No ledger master found. Please upload one via the Admin panel first.'
                           : "Checking your brand's ledger master..."}
+                      </p>
+                    </div>
+                  </div>
+                )}
+
+                {agentType === 'gstr_3b_tally_entry' && !isDemo && ledgerStatus && (
+                  <div style={{
+                    display: 'flex', alignItems: 'flex-start', gap: 10, padding: '10px 14px', borderRadius: 10,
+                    background: ledgerStatus === 'loaded' ? 'rgba(15,118,110,0.06)' : 'rgba(100,116,139,0.05)',
+                    border: `1px solid ${ledgerStatus === 'loaded' ? 'rgba(15,118,110,0.2)' : 'var(--card-border)'}`,
+                  }}>
+                    <Database style={{ width: 14, height: 14, flexShrink: 0, marginTop: 1, color: ledgerStatus === 'loaded' ? '#0F766E' : 'var(--text-muted)' }} />
+                    <div>
+                      <p style={{ fontSize: 12, fontWeight: 700, fontFamily: 'Barlow', margin: '0 0 2px', color: ledgerStatus === 'loaded' ? '#0F766E' : 'var(--text-muted)' }}>
+                        {ledgerStatus === 'loaded' ? '✓ COA saved — ledger names will be auto-matched' : 'No COA saved yet — upload optional COA above to enable ledger matching'}
+                      </p>
+                      <p style={{ fontSize: 11, color: 'var(--text-muted)', margin: 0, lineHeight: 1.5 }}>
+                        {ledgerStatus === 'loaded'
+                          ? 'Tally ledger names will be matched to your saved Chart of Accounts.'
+                          : 'Without COA, default generated ledger names are used (no matching).'}
                       </p>
                     </div>
                   </div>
@@ -1105,8 +1264,208 @@ const RecoWorkspace = ({ agentTypeProp } = {}) => {
           </div>
         )}
 
+        {/* ── GSTR-3B Tally Entry Results ─────────────────────────────── */}
+        {result && is3b && (() => {
+          const monthly = result.monthly_data || [];
+          const stateSum = result.state_summary || [];
+          const activeMon = monthly[active3bMonth] || monthly[0] || {};
+          const allMonEntries = activeMon.entries || [];
+          const fmt = (n) => typeof n === 'number' ? n.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '—';
+
+          return (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+              {/* Download + Reset row */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                <button onClick={handleDownload} disabled={downloading} style={{
+                  display: 'flex', alignItems: 'center', gap: 6, padding: '8px 16px',
+                  borderRadius: 8, fontSize: 13, fontWeight: 700, fontFamily: 'Barlow',
+                  background: '#0F766E', color: '#fff', border: 'none', cursor: 'pointer',
+                }}>
+                  {downloading ? <Loader2 style={{ width: 14, height: 14 }} className="animate-spin" /> : <Download style={{ width: 14, height: 14 }} />}
+                  Download Excel
+                </button>
+                <button onClick={handleReset} style={{
+                  display: 'flex', alignItems: 'center', gap: 6, padding: '8px 14px',
+                  borderRadius: 8, fontSize: 12, fontWeight: 600, fontFamily: 'Barlow',
+                  background: 'var(--page-bg)', border: '1px solid var(--card-border)',
+                  color: 'var(--text-muted)', cursor: 'pointer',
+                }}>
+                  <RotateCcw style={{ width: 13, height: 13 }} /> Reset
+                </button>
+                <div style={{ marginLeft: 'auto', display: 'flex', gap: 8 }}>
+                  <div style={{ padding: '6px 14px', borderRadius: 8, background: 'rgba(15,118,110,0.06)', border: '1px solid rgba(15,118,110,0.18)', fontSize: 12, color: '#0F766E', fontWeight: 700, fontFamily: 'Barlow' }}>
+                    {monthly.length} month{monthly.length !== 1 ? 's' : ''} processed
+                  </div>
+                  {result.coa_ledgers_parsed?.length > 0 && (
+                    <div style={{ padding: '6px 14px', borderRadius: 8, background: 'rgba(5,150,105,0.06)', border: '1px solid rgba(5,150,105,0.18)', fontSize: 12, color: '#059669', fontWeight: 700, fontFamily: 'Barlow' }}>
+                      ✓ COA matched ({result.coa_ledgers_parsed.length} ledgers saved)
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* Month tabs */}
+              {monthly.length > 1 && (
+                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                  {monthly.map((m, idx) => (
+                    <button key={idx} onClick={() => setActive3bMonth(idx)} style={{
+                      padding: '6px 14px', borderRadius: 20, fontSize: 12, fontWeight: 700,
+                      fontFamily: 'Barlow', cursor: 'pointer',
+                      background: active3bMonth === idx ? '#0F766E' : 'var(--surface)',
+                      color: active3bMonth === idx ? '#fff' : 'var(--text-muted)',
+                      border: `1px solid ${active3bMonth === idx ? '#0F766E' : 'var(--card-border)'}`,
+                      transition: 'all 0.15s',
+                    }}>
+                      {m.period || `Month ${idx + 1}`}
+                    </button>
+                  ))}
+                </div>
+              )}
+
+              {/* Active month info + stat cards */}
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(160px, 1fr))', gap: 12 }}>
+                {[
+                  { label: 'GSTIN', value: activeMon.gstin || '—', raw: true },
+                  { label: 'State', value: activeMon.state || '—', raw: true },
+                  { label: 'Period', value: activeMon.period || '—', raw: true },
+                  { label: 'Voucher Date', value: activeMon.voucher_date || '—', raw: true },
+                  { label: 'Total Debit', value: `₹${fmt(activeMon.total_debit)}`, raw: true },
+                  { label: 'Total Credit', value: `₹${fmt(activeMon.total_credit)}`, raw: true },
+                ].map(({ label, value }) => (
+                  <div key={label} style={{
+                    background: 'var(--surface)', border: '1px solid var(--card-border)',
+                    borderLeft: '4px solid #0F766E', borderRadius: 10, padding: '12px 16px',
+                  }}>
+                    <p style={{ fontSize: 10, fontWeight: 700, letterSpacing: '0.08em', textTransform: 'uppercase', color: '#0F766E', fontFamily: 'DM Sans', margin: '0 0 4px' }}>{label}</p>
+                    <p style={{ fontSize: 14, fontWeight: 800, fontFamily: 'Barlow', color: 'var(--text-heading)', margin: 0, wordBreak: 'break-all' }}>{value}</p>
+                  </div>
+                ))}
+              </div>
+
+              {/* Sub-tab bar */}
+              <div style={{ display: 'flex', gap: 4, borderBottom: '1px solid var(--card-border)', paddingBottom: 0 }}>
+                {[['entries', 'Journal Entries'], ['month', 'Month Summary'], ['state', 'State Summary']].map(([key, label]) => (
+                  <button key={key} onClick={() => setActive3bSummaryTab(key)} style={{
+                    padding: '8px 16px', fontSize: 12, fontWeight: 700, fontFamily: 'Barlow',
+                    background: 'none', border: 'none', cursor: 'pointer',
+                    borderBottom: `2px solid ${active3bSummaryTab === key ? '#0F766E' : 'transparent'}`,
+                    color: active3bSummaryTab === key ? '#0F766E' : 'var(--text-muted)',
+                    transition: 'all 0.15s',
+                  }}>{label}</button>
+                ))}
+              </div>
+
+              {/* Journal Entries tab */}
+              {active3bSummaryTab === 'entries' && (
+                <div className="glass-card" style={{ overflowX: 'auto' }}>
+                  <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+                    <colgroup>
+                      <col style={{ width: 50 }} /><col /><col style={{ width: 160 }} />
+                      <col style={{ width: 160 }} /><col style={{ width: 120 }} /><col style={{ width: 100 }} />
+                    </colgroup>
+                    <tbody>
+                      {allMonEntries.map((entry, i) => {
+                        if (entry._type === 'blank') return <tr key={i}><td colSpan={6} style={{ height: 8 }} /></tr>;
+                        if (entry._type === 'section') return (
+                          <tr key={i}>
+                            <td colSpan={6} style={{ padding: '8px 16px', fontWeight: 800, fontFamily: 'Barlow', fontSize: 13, background: 'rgba(15,118,110,0.08)', color: '#0F766E', borderRadius: 6 }}>
+                              {entry.particulars}
+                            </td>
+                          </tr>
+                        );
+                        if (entry._type === 'header') return (
+                          <tr key={i} style={{ background: 'var(--page-bg)' }}>
+                            {['sno', 'particulars', 'debit', 'credit', 'date', 'voucher_type'].map(k => (
+                              <th key={k} style={{ padding: '8px 12px', fontSize: 11, fontWeight: 700, color: 'var(--text-muted)', textAlign: k === 'particulars' ? 'left' : 'right', borderBottom: '1px solid var(--card-border)', letterSpacing: '0.04em', textTransform: 'uppercase', fontFamily: 'DM Sans' }}>
+                                {entry[k]}
+                              </th>
+                            ))}
+                          </tr>
+                        );
+                        const isZero = entry.debit === 0 || entry.credit === 0;
+                        return (
+                          <tr key={i} style={{ opacity: isZero ? 0.5 : 1, borderBottom: '1px solid var(--card-border)' }}>
+                            <td style={{ padding: '6px 12px', textAlign: 'center', color: 'var(--text-muted)', fontSize: 12 }}>{entry.sno}</td>
+                            <td style={{ padding: '6px 12px', color: 'var(--text-heading)', fontFamily: 'Barlow', fontWeight: 600 }}>{entry.particulars}</td>
+                            <td style={{ padding: '6px 12px', textAlign: 'right', fontFamily: 'monospace', color: typeof entry.debit === 'number' && entry.debit > 0 ? '#059669' : 'var(--text-muted)' }}>
+                              {typeof entry.debit === 'number' ? `₹${fmt(entry.debit)}` : ''}
+                            </td>
+                            <td style={{ padding: '6px 12px', textAlign: 'right', fontFamily: 'monospace', color: typeof entry.credit === 'number' && entry.credit > 0 ? '#E11D48' : 'var(--text-muted)' }}>
+                              {typeof entry.credit === 'number' ? `₹${fmt(entry.credit)}` : ''}
+                            </td>
+                            <td style={{ padding: '6px 12px', textAlign: 'right', fontSize: 12, color: 'var(--text-muted)', fontFamily: 'monospace' }}>{entry.date || ''}</td>
+                            <td style={{ padding: '6px 12px', textAlign: 'right', fontSize: 12, color: 'var(--text-muted)' }}>{entry.voucher_type || ''}</td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+
+              {/* Month Summary tab */}
+              {active3bSummaryTab === 'month' && (
+                <div className="glass-card" style={{ overflowX: 'auto' }}>
+                  <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+                    <thead>
+                      <tr style={{ background: 'var(--page-bg)' }}>
+                        {['Period', 'GSTIN', 'State', 'Total Debit', 'Total Credit', 'J1 Debit', 'J2 Debit', 'J3 Debit'].map(h => (
+                          <th key={h} style={{ padding: '10px 14px', fontSize: 11, fontWeight: 700, color: 'var(--text-muted)', textAlign: h === 'GSTIN' || h === 'Period' || h === 'State' ? 'left' : 'right', borderBottom: '1px solid var(--card-border)', textTransform: 'uppercase', letterSpacing: '0.04em', fontFamily: 'DM Sans' }}>{h}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {monthly.map((m, idx) => (
+                        <tr key={idx} style={{ borderBottom: '1px solid var(--card-border)', background: idx === active3bMonth ? 'rgba(15,118,110,0.04)' : 'transparent' }}>
+                          <td style={{ padding: '8px 14px', fontWeight: 700, fontFamily: 'Barlow', color: '#0F766E' }}>{m.period}</td>
+                          <td style={{ padding: '8px 14px', fontFamily: 'monospace', fontSize: 12, color: 'var(--text-muted)' }}>{m.gstin}</td>
+                          <td style={{ padding: '8px 14px', color: 'var(--text-body)' }}>{m.state}</td>
+                          {['total_debit', 'total_credit', 'j1_debit', 'j2_debit', 'j3_debit'].map(k => (
+                            <td key={k} style={{ padding: '8px 14px', textAlign: 'right', fontFamily: 'monospace', fontSize: 12, color: 'var(--text-heading)' }}>₹{fmt(m[k] || 0)}</td>
+                          ))}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+
+              {/* State Summary tab */}
+              {active3bSummaryTab === 'state' && (
+                <div className="glass-card" style={{ overflowX: 'auto' }}>
+                  {stateSum.length === 0
+                    ? <p style={{ padding: '24px', textAlign: 'center', color: 'var(--text-muted)', fontSize: 13 }}>No state data available</p>
+                    : (
+                      <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+                        <thead>
+                          <tr style={{ background: 'var(--page-bg)' }}>
+                            {['State', 'Code', 'Months', 'Total Debit', 'Total Credit'].map(h => (
+                              <th key={h} style={{ padding: '10px 14px', fontSize: 11, fontWeight: 700, color: 'var(--text-muted)', textAlign: h === 'State' ? 'left' : 'right', borderBottom: '1px solid var(--card-border)', textTransform: 'uppercase', letterSpacing: '0.04em', fontFamily: 'DM Sans' }}>{h}</th>
+                            ))}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {stateSum.map((s, idx) => (
+                            <tr key={idx} style={{ borderBottom: '1px solid var(--card-border)' }}>
+                              <td style={{ padding: '8px 14px', fontWeight: 700, fontFamily: 'Barlow', color: 'var(--text-heading)' }}>{s.state}</td>
+                              <td style={{ padding: '8px 14px', textAlign: 'right', fontFamily: 'monospace', fontSize: 12, color: '#0F766E', fontWeight: 700 }}>{s.state_short}</td>
+                              <td style={{ padding: '8px 14px', textAlign: 'right', color: 'var(--text-body)' }}>{s.months}</td>
+                              <td style={{ padding: '8px 14px', textAlign: 'right', fontFamily: 'monospace', fontSize: 12, color: 'var(--text-heading)' }}>₹{fmt(s.total_debit || 0)}</td>
+                              <td style={{ padding: '8px 14px', textAlign: 'right', fontFamily: 'monospace', fontSize: 12, color: 'var(--text-heading)' }}>₹{fmt(s.total_credit || 0)}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    )
+                  }
+                </div>
+              )}
+            </div>
+          );
+        })()}
+
         {/* ── Results ─────────────────────────────────────────────────── */}
-        {result && (
+        {result && !is3b && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
 
             {/* Monthly Summary */}

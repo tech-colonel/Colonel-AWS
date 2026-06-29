@@ -417,13 +417,14 @@ const RECO_TYPE_MAP = {
  * Uses execFile (not exec) — no shell expansion, safe with arbitrary file paths.
  * Path resolved from BANK_CLASSIFIER_PATH env var or project-relative default.
  */
-const runUniversalClassifier = (ledgerPath, bankPath, outputPath, correctionsPath) => {
+const runUniversalClassifier = (ledgerPath, bankPath, outputPath, correctionsPath, brandName) => {
   return new Promise((resolve, reject) => {
     const geminiKey = process.env.GEMINI_API_KEY;
     const geminiModel = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
-    console.log(`[RECO] Executing standalone classifier (gemini=${geminiKey ? 'on' : 'off'}): ${CLASSIFIER_PATH}`);
+    console.log(`[RECO] Executing standalone classifier (gemini=${geminiKey ? 'on' : 'off'}, brand=${brandName || 'none'}): ${CLASSIFIER_PATH}`);
     const args = ['--ledger', ledgerPath, '--bank', bankPath, '--output', outputPath];
     if (correctionsPath) args.push('--corrections', correctionsPath);
+    if (brandName) args.push('--brand', brandName);
     // Gemini fallback: candidate-constrained LLM pass over Low/Suspense rows only.
     if (geminiKey) args.push('--gemini-key', geminiKey, '--gemini-model', geminiModel);
     execFile('python3', [CLASSIFIER_PATH, ...args], { timeout: 600000 },
@@ -661,23 +662,22 @@ const runReco = async (req, res) => {
       // 3. Write Layer 0 corrections to temp JSON so classify.py checks DB first
       //    Order inside classify.py: Layer 0 → CoA fuzzy → keywords → Suspense A/c
       let correctionsPath = null;
+      let brandName = '';
       if (brandId && brandId !== 'demo' && !isDemo) {
         try {
           const { Brand } = require('../models/master');
           const { getBrandConnection } = require('../config/database');
           const corrBrand = await Brand.findByPk(brandId);
           if (corrBrand) {
+            brandName = corrBrand.name || '';
             const corrSeq = getBrandConnection(corrBrand.db_name);
             const corrMap = await loadCorrectionMap(brandId, corrSeq);
-            if (Object.keys(corrMap).length > 0) {
-              // Convert to classify.py format: {NARRATION_KEY: {ledger, type}}
-              const corrJson = {};
-              for (const [key, val] of Object.entries(corrMap)) {
-                corrJson[key] = { ledger: val.ledger, type: val.type || null };
-              }
+            // corrMap is keyed: { exact:{…}, phone:{…}, vpa:{…}, neft_name:{…}, name:{…} }
+            const totalKeys = Object.values(corrMap).reduce((s, v) => s + Object.keys(v).length, 0);
+            if (totalKeys > 0) {
               correctionsPath = path.join(jobDir, 'corrections.json');
-              fs.writeFileSync(correctionsPath, JSON.stringify(corrJson));
-              console.log(`[RECO-CORRECTIONS] Wrote ${Object.keys(corrJson).length} Layer 0 corrections for classify.py`);
+              fs.writeFileSync(correctionsPath, JSON.stringify(corrMap));
+              console.log(`[RECO-CORRECTIONS] Wrote ${totalKeys} Layer 0 corrections for classify.py`);
             }
           }
         } catch (corrErr) {
@@ -687,7 +687,7 @@ const runReco = async (req, res) => {
 
       // 4. Execute Standalone Classifier Script
       const outputPath = path.join(jobDir, 'output.xlsx');
-      await runUniversalClassifier(ledgerPath, bankPath, outputPath, correctionsPath);
+      await runUniversalClassifier(ledgerPath, bankPath, outputPath, correctionsPath, brandName);
 
       if (!fs.existsSync(outputPath)) {
         throw new Error('Standalone classifier failed to generate output spreadsheet.');
@@ -785,7 +785,7 @@ const runReco = async (req, res) => {
             let corrected = 0;
             results.forEach(row => {
               const key = normalizeNarration(row.description);
-              const fix = corrMap[key];
+              const fix = corrMap.exact ? corrMap.exact[key] : corrMap[key];
               if (!fix) return;
               // Safeguard: skip if ledger was deleted/renamed from CoA
               if (ledgerSet.size > 0 && !ledgerSet.has(fix.ledger)) return;

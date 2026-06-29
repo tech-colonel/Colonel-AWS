@@ -53,10 +53,10 @@ const markProcessing = (brandId, agentId) => {
 };
 
 /** Mark processing as done and notify clients */
-const markDone = (brandId, agentId, count) => {
+const markDone = (brandId, agentId, processed = 0, corrupted = 0) => {
   const key = getKey(brandId, agentId);
-  processingState.set(key, { status: 'done', count, timestamp: new Date() });
-  pushEvent(brandId, agentId, { status: 'done', count });
+  processingState.set(key, { status: 'done', processed, corrupted, count: processed, timestamp: new Date() });
+  pushEvent(brandId, agentId, { status: 'done', processed, corrupted, count: processed });
 };
 
 /** Get current state (for new SSE connections to replay last known state) */

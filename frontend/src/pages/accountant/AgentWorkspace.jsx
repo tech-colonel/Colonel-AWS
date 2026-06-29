@@ -12,13 +12,13 @@ import { Badge } from '../../components/ui/badge';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../../components/ui/modal';
 import api from '../../lib/api';
 import { toast } from 'sonner';
-import { sidebarFor } from '../../lib/adminNav';
 import { format } from 'date-fns';
 import * as XLSX from 'xlsx';
 import InvoiceAgentWorkspace from './InvoiceAgentWorkspace';
 import OrderCycleShopifyWorkspace from './OrderCycleShopifyWorkspace';
 import SettlementAmazonWorkspace from './SettlementAmazonWorkspace';
 import TotalSalesAnalyzerModal from './TotalSalesAnalyzerModal';
+import NykaaWorkspace from './NykaaWorkspace';
 
 const AgentWorkspace = () => {
   const { brandId, agentId } = useParams();
@@ -100,11 +100,11 @@ const AgentWorkspace = () => {
     selling_state: ''
   });
 
-  const sidebarItems = sidebarFor([
+  const sidebarItems = [
     { path: `/brands/${brandId}/dashboard`, label: 'Agent Workspace', icon: LayoutDashboard, testId: 'nav-dashboard' },
     { path: `/brands/${brandId}/agents`, label: 'Agents', icon: Bot, testId: 'nav-agents' },
     { path: `/brands/${brandId}/agents`, label: `${agent?.name} Dashboard`, icon: Bot, testId: 'nav-agents' }
-  ]);
+  ];
 
   useEffect(() => {
     fetchData();
@@ -112,37 +112,43 @@ const AgentWorkspace = () => {
 
   const fetchData = async () => {
     try {
-      const agentType = await detectAgentType();
-      const [agentRes, masterRes, filesRes] = await Promise.all([
-        api.get(`/api/agents`),
-        api.get(`/api/brands/${brandId}/agents/${agentId}/${agentType}/master`),
-        api.get(`/api/brands/${brandId}/agents/${agentId}/working-files`)
-      ]);
-
+      // Load the agent first — this alone must succeed for the workspace to render.
+      const agentRes = await api.get(`/api/agents`);
       const currentAgent = agentRes.data.find(a => a.id.toString() === agentId.toString());
-      console.log("currect agent", currentAgent);
       setAllAgents(agentRes.data);
       setAgent(currentAgent);
-      setMasterData(masterRes.data);
 
-      const monthOrder = {
-        'January': 1, 'February': 2, 'March': 3, 'April': 4,
-        'May': 5, 'June': 6, 'July': 7, 'August': 8,
-        'September': 9, 'October': 10, 'November': 11, 'December': 12
-      };
+      // Master data + working files are optional. Agents like invoice, order-cycle,
+      // settlement and CFO have no /master endpoint — their failure must NOT crash the page.
+      const agentType = await detectAgentType();
+      try {
+        const [masterRes, filesRes] = await Promise.all([
+          api.get(`/api/brands/${brandId}/agents/${agentId}/${agentType}/master`),
+          api.get(`/api/brands/${brandId}/agents/${agentId}/working-files`)
+        ]);
+        setMasterData(masterRes.data);
 
-      const sortedFiles = filesRes.data.sort((a, b) => {
-        const yearA = parseInt(a.year) || 0;
-        const yearB = parseInt(b.year) || 0;
-        if (yearA !== yearB) {
-          return yearB - yearA;
-        }
-        const monthA = monthOrder[a.month] || 0;
-        const monthB = monthOrder[b.month] || 0;
-        return monthB - monthA;
-      });
+        const monthOrder = {
+          'January': 1, 'February': 2, 'March': 3, 'April': 4,
+          'May': 5, 'June': 6, 'July': 7, 'August': 8,
+          'September': 9, 'October': 10, 'November': 11, 'December': 12
+        };
 
-      setFiles(sortedFiles);
+        const sortedFiles = filesRes.data.sort((a, b) => {
+          const yearA = parseInt(a.year) || 0;
+          const yearB = parseInt(b.year) || 0;
+          if (yearA !== yearB) {
+            return yearB - yearA;
+          }
+          const monthA = monthOrder[a.month] || 0;
+          const monthB = monthOrder[b.month] || 0;
+          return monthB - monthA;
+        });
+
+        setFiles(sortedFiles);
+      } catch (e) {
+        console.warn('master/working-files not applicable for this agent:', e?.message);
+      }
     } catch (error) {
       console.error('Failed to load data:', error);
       toast.error('Failed to load workspace data. Please refresh the page.');
@@ -164,6 +170,8 @@ const AgentWorkspace = () => {
       if (currentAgent?.name?.toLowerCase().includes('jiomart')) return 'jiomart';
       if (currentAgent?.name?.toLowerCase().includes('shopify')) return 'shopify';
       if (currentAgent?.name?.toLowerCase().includes('total-sales')) return 'total-sales-analyzer';
+      if (currentAgent?.name?.toLowerCase().includes('mirrow')) return 'mirrow';
+      if (currentAgent?.name?.toLowerCase().includes('cread')) return 'cread';
       return 'amazon';
     } catch (error) {
       return 'amazon';
@@ -529,6 +537,9 @@ const AgentWorkspace = () => {
     agent?.name?.toLowerCase().includes('order cycle');
   const isSettlement = agent?.name?.toLowerCase().includes('settlement');
   const isTotalSalesAnalyzer = agent?.name?.toLowerCase().includes('total-sales');
+  const isNykaa = agent?.name?.toLowerCase().includes('nykaa');
+  const isMirrow = agent?.name?.toLowerCase().includes('mirrow');
+  const isCread = agent?.name?.toLowerCase().includes('cread');
 
   return (
     <DashboardLayout sidebarItems={sidebarItems}>
@@ -578,6 +589,25 @@ const AgentWorkspace = () => {
             </div>
           </div>
           <OrderCycleShopifyWorkspace agent={agent} />
+        </div>
+      ) : isNykaa ? (
+        <div className="p-6" data-testid="nykaa-workspace">
+          <div className="mb-8 flex justify-between items-start">
+            <div>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => navigate(`/brands/${brandId}/dashboard`)}
+                className="mb-4"
+                data-testid="back-button"
+              >
+                ← Back to Dashboard
+              </Button>
+              <h1 className="text-3xl font-bold text-slate-900 tracking-tight">{agent?.name}</h1>
+              <p className="text-slate-600 mt-1">{agent?.description}</p>
+            </div>
+          </div>
+          <NykaaWorkspace agent={agent} />
         </div>
       ) : isSettlement ? (
         <div className="p-6" data-testid="settlement-amazon-workspace">
@@ -1366,6 +1396,12 @@ const AgentWorkspace = () => {
                     pfTitle = 'GSTR B2C';
                     pf2Title = 'GSTR HSN';
                   } else if (isZepto) {
+                    wfTitle = 'Working';
+                    pfTitle = 'Pivot';
+                  } else if (isMirrow) {
+                    wfTitle = 'Working';
+                    pfTitle = 'Pivot';
+                  } else if (isCread) {
                     wfTitle = 'Working';
                     pfTitle = 'Pivot';
                   }

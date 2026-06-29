@@ -302,14 +302,101 @@ def _parse_indusind_bill(text: str) -> str:
 # Core classifier
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Payee-identity extraction — produces STABLE keys for the per-brand payee
+# directory (learned ledger memory). The same payee changes payment rail and
+# reference number every month, so we key on identity, not the raw narration:
+#   exact narration (machine strings) → phone (UPI) → vpa → payee name.
+# Validated on Zyden April+May: phone 98% purity / 82% coverage,
+# NEFT-name 100% purity (40/41 agree across months).
+# ---------------------------------------------------------------------------
+DIRECTORY_SECTIONS = ('exact', 'phone', 'vpa', 'neft_name', 'name')
+_PHONE_RE = re.compile(r'(?<!\d)(\d{10})(?!\d)')   # standalone 10-digit (won't slice a 12-digit ref)
+_VPA_RE = re.compile(r'([A-Za-z0-9.\-]+@[A-Za-z]+)')
+
+
+def _norm_key(s) -> str:
+    """Lowercase, strip punctuation, collapse spaces — stable comparison key."""
+    return ' '.join(re.sub(r'[^a-z0-9 ]', ' ', str(s).lower()).split())
+
+
+def extract_payee_keys(narration) -> dict:
+    """Return the stable identity keys extractable from a bank narration.
+    Any subset of: exact, phone, vpa, name (UPI payee), neft_name."""
+    if not narration:
+        return {}
+    raw = str(narration).strip()
+    u = raw.upper()
+    keys = {'exact': ' '.join(u.split())}            # normalized full narration
+    mph = _PHONE_RE.search(raw)
+    if mph:
+        keys['phone'] = mph.group(1)
+    if 'UPI' in u:
+        mv = _VPA_RE.search(raw)
+        if mv:
+            keys['vpa'] = mv.group(1).lower()
+        mn = re.match(r'\s*UPI-(.+?)-', u)           # first segment after "UPI-"
+        if mn:
+            nm = _norm_key(mn.group(1))
+            if nm and not nm.isdigit():
+                keys['name'] = nm
+    mnft = re.search(r'(?:NEFT|RTGS)\s+(?:DR|CR)-[A-Z0-9]+-(.+?)-(?:NETBANK|NB[ ,]|NB$)', u)
+    if mnft:                                          # NEFT/RTGS payee, between IFSC and NETBANK tail
+        nm = _norm_key(mnft.group(1))
+        if nm:
+            keys['neft_name'] = nm
+    return keys
+
+
 class BankClassifier:
-    def __init__(self, master_ledgers: list, corrections: dict | None = None):
+    def __init__(self, master_ledgers: list, corrections: dict | None = None,
+                 brand_name: str = ""):
         self.master_ledgers = [str(l).strip() for l in master_ledgers
                                if pd.notna(l) and str(l).strip()]
-        # corrections: {normalized_narration_key → {"ledger": str, "type": str|None}}
-        # Loaded from <brand>_corrections.json sidecar. Applied before any fuzzy step.
-        self.corrections = corrections or {}
+        # Per-brand learned payee directory. Accepts either the legacy flat
+        # {normalized_narration → {"ledger","type"}} dict (treated as the 'exact'
+        # section) or a keyed dict {section → {key → {"ledger","type"}}}.
+        self.directory = self._normalize_directory(corrections or {})
+        self.corrections = self.directory['exact']   # back-compat alias
+        self._brand_name = brand_name
         self._build_indices()
+
+    @staticmethod
+    def _normalize_directory(corr: dict) -> dict:
+        out = {s: {} for s in DIRECTORY_SECTIONS}
+        if not isinstance(corr, dict) or not corr:
+            return out
+        keyed = all(k in DIRECTORY_SECTIONS and isinstance(v, dict) for k, v in corr.items())
+        if keyed:
+            for s in DIRECTORY_SECTIONS:
+                out[s] = dict(corr.get(s, {}))
+        else:
+            out['exact'] = dict(corr)               # legacy flat → exact section
+        # normalize the exact-section keys (uppercase, collapse whitespace)
+        out['exact'] = {' '.join(str(k).upper().split()): v for k, v in out['exact'].items()}
+        return out
+
+    def _directory_lookup(self, narration: str, txn_type: str):
+        """Look up the row's payee identity in the learned directory.
+        Most-specific-first: exact → phone → vpa → neft_name → name. Only returns
+        a ledger that still exists in the current COA (stale corrections are skipped)."""
+        if not any(self.directory.values()):
+            return None
+        keys = extract_payee_keys(narration)
+        for section in DIRECTORY_SECTIONS:
+            kv = keys.get(section)
+            if not kv:
+                continue
+            fix = self.directory.get(section, {}).get(kv)
+            if fix and fix.get('ledger') and fix['ledger'] in self.master_ledgers:
+                return {
+                    "ledger": fix['ledger'],
+                    "type": fix.get('type') or txn_type,
+                    "confidence": "High",
+                    "rule": "Stored Correction" if section == 'exact' else f"Payee Directory ({section})",
+                    "entity": kv,
+                }
+        return None
 
     def _build_indices(self):
         """Pre-compute filtered ledger subsets for fast routing."""
@@ -375,6 +462,26 @@ class BankClassifier:
             or "Suspense A/c"
         )
 
+        # Own-brand guard: identify which COA ledger IS the brand's own company account.
+        # Narrations like "INDIAIDEAS.COM LIMITED-PA ESCROW-ZAYDN SNEAKERS PVTLIM" embed
+        # the brand's name as a beneficiary label, not the counterparty. We find this ledger
+        # once and exclude it from fuzzy candidates so it can never win a contested match.
+        self._own_brand_ledger = None
+        if self._brand_name:
+            _stop = {'private', 'limited', 'pvt', 'ltd', 'llp', 'and', 'co',
+                     'company', 'india', 'the', 'of', 'for'}
+            _brand_toks = {w for w in re.sub(r'[^a-z0-9 ]', ' ',
+                           self._brand_name.lower()).split()
+                           if len(w) >= 3 and w not in _stop}
+            if _brand_toks:
+                best_l, best_n = None, 0
+                for l in self.master_ledgers:
+                    l_toks = set(re.sub(r'[^a-z0-9 ]', ' ', l.lower()).split())
+                    n = len(_brand_toks & l_toks)
+                    if n > best_n and n >= max(2, len(_brand_toks) - 1):
+                        best_n, best_l = n, l
+                self._own_brand_ledger = best_l
+
         # Rent
         self.rent_ledgers = [l for l in ml
                              if ('rent' in l.lower() or 'godown' in l.lower() or 'lease' in l.lower())
@@ -420,10 +527,14 @@ class BankClassifier:
 
     # ------------------------------------------------------------------
     def _fuzzy_match(self, query: str, choices: list, threshold: int = 72,
-                     guard_generic: bool = False) -> tuple:
+                     guard_generic: bool = False,
+                     exclude: str | None = None) -> tuple:
         """
         Returns (matched_ledger, confidence_band, score).
         confidence_band: 'High' (≥87), 'Medium' (72–86), 'Low' (<72).
+
+        exclude: if set, this ledger is removed from candidates before scoring — used
+        by the own-brand guard to prevent the brand's own company ledger from winning.
 
         Scoring strategy:
         - Expands common abbreviations (PVT→PRIVATE, LTD→LIMITED) before matching so
@@ -435,6 +546,8 @@ class BankClassifier:
           The blend preserves token_set's ability to handle word-order variation while
           giving enough weight to token_sort to penalise size mismatches.
         """
+        if exclude:
+            choices = [c for c in choices if c != exclude]
         if not choices or not query.strip():
             return "Suspense A/c", "Low", 0.0
         query_up = query.upper().strip()
@@ -578,24 +691,30 @@ class BankClassifier:
         txn_type   = "Receipt" if is_credit else "Payment"
 
         # ------------------------------------------------------------------
-        # STEP 0 — Per-brand accountant corrections (highest priority)
-        # Loaded from <brand>_corrections.json sidecar at startup.
-        # Checked before any fuzzy logic — 100% accurate for known narrations.
-        # CoA validation: skip stale corrections if ledger no longer in master.
+        # STEP 0 — Per-brand learned payee directory (highest priority)
+        # Matches the row's payee identity (phone / vpa / payee-name / exact
+        # narration) against ledgers learned from corrected history. This is what
+        # resolves UPI/NEFT payments to individuals (Amit→Salary Payable, etc.)
+        # whose correct ledger is NOT inferable from the narration alone.
+        # CoA validation: skips entries whose ledger no longer exists in master.
         # ------------------------------------------------------------------
-        if self.corrections:
-            key = orig.strip().upper()
-            key = ' '.join(key.split())  # collapse whitespace
-            fix = self.corrections.get(key)
-            if fix and fix.get('ledger'):
-                # Verify ledger still exists in the current CoA
-                if fix['ledger'] in self.master_ledgers:
-                    return {
-                        "ledger": fix['ledger'],
-                        "type": fix.get('type') or txn_type,
-                        "confidence": "High",
-                        "rule": "Stored Correction",
-                    }
+        hit = self._directory_lookup(orig, txn_type)
+        if hit:
+            return hit
+
+        # ------------------------------------------------------------------
+        # STEP 0.5 — PA-ESCROW aggregator counterparty routing
+        # Narrations like "NEFT CR-CITI0100000-INDIAIDEAS.COM LIMITED-PA ESCROW-<BRAND>"
+        # contain the brand's own legal name as the beneficiary label, NOT the counterparty.
+        # India Ideas is the payment gateway — route to their COA ledger immediately.
+        # This runs before entity extraction so the brand's own-name tokens never reach
+        # the fuzzy matcher and never win a contested match.
+        # ------------------------------------------------------------------
+        if "INDIAIDEAS" in orig_upper or "INDIA IDEAS" in orig_upper:
+            india_ideas = self._find_master(['india ideas'])
+            if india_ideas:
+                return {"ledger": india_ideas, "type": txn_type, "confidence": "High",
+                        "rule": "PA-ESCROW India Ideas"}
 
         # ------------------------------------------------------------------
         # STEP 1 — Own-account transfers → Contra
@@ -1029,6 +1148,11 @@ class BankClassifier:
                 anchored = [l for l in self.master_ledgers if _fw_pat.search(l)]
             else:
                 anchored = []
+            # Own-brand guard: remove the brand's own company ledger from anchored
+            # candidates so it can't win when the narration embeds the brand's name
+            # as a beneficiary/escrow label rather than as the actual counterparty.
+            if self._own_brand_ledger:
+                anchored = [c for c in anchored if c != self._own_brand_ledger]
             if anchored:
                 # Use a slightly lower threshold (68) for anchored matches — the first-word
                 # constraint already filters out unrelated ledgers, so a score of 68+ within
@@ -1147,14 +1271,16 @@ class BankClassifier:
         # STEP 14 — General fuzzy: try entity first, then full cleaned narration
         # ------------------------------------------------------------------
         if entity and len(entity) > 2:
-            ledger, conf, _ = self._fuzzy_match(entity, self.master_ledgers, guard_generic=True)
+            ledger, conf, _ = self._fuzzy_match(entity, self.master_ledgers, guard_generic=True,
+                                                 exclude=self._own_brand_ledger)
             if conf != "Low":
                 return {"ledger": ledger, "type": txn_type, "confidence": conf,
                         "rule": "Fuzzy Entity Match"}
 
         generic = clean_narration(orig)
         if generic and len(generic) > 3:
-            ledger, conf, _ = self._fuzzy_match(generic, self.master_ledgers, guard_generic=True)
+            ledger, conf, _ = self._fuzzy_match(generic, self.master_ledgers, guard_generic=True,
+                                                 exclude=self._own_brand_ledger)
             if conf != "Low":
                 return {"ledger": ledger, "type": txn_type, "confidence": conf,
                         "rule": "Fuzzy Generic Match"}
@@ -1329,17 +1455,32 @@ def load_bank_statement(filepath: str) -> tuple:
     Auto-detect the bank statement sheet and header row.
     Returns (DataFrame, col_map dict, sheet_name).
     col_map keys: txn_date, description, debit, credit, balance.
+    Supports .xlsx, .xls, and .csv formats.
     """
-    xl = pd.ExcelFile(filepath)
+    ext = str(filepath).rsplit('.', 1)[-1].lower()
 
-    # Prefer sheet with 'od acc', 'raw', 'statement', 'bank', 'transactions' in name
-    target = next(
-        (s for s in xl.sheet_names
-         if any(k in s.lower() for k in ["od acc", "raw", "statement", "bank", "transactions", "account"])),
-        xl.sheet_names[0]
-    )
-
-    df_raw = pd.read_excel(filepath, sheet_name=target, header=None)
+    if ext == 'csv':
+        # CSV path: try common encodings; no sheet selection needed
+        df_raw = None
+        for enc in ('utf-8', 'latin-1', 'cp1252'):
+            try:
+                df_raw = pd.read_csv(filepath, header=None, encoding=enc, dtype=str)
+                break
+            except UnicodeDecodeError:
+                continue
+        if df_raw is None:
+            raise ValueError(f"Cannot read CSV {filepath} — tried utf-8, latin-1, cp1252")
+        target = 'CSV'
+    else:
+        # Excel path (unchanged)
+        xl = pd.ExcelFile(filepath)
+        # Prefer sheet with 'od acc', 'raw', 'statement', 'bank', 'transactions' in name
+        target = next(
+            (s for s in xl.sheet_names
+             if any(k in s.lower() for k in ["od acc", "raw", "statement", "bank", "transactions", "account"])),
+            xl.sheet_names[0]
+        )
+        df_raw = pd.read_excel(filepath, sheet_name=target, header=None)
 
     header_idx = None
     for i, row in df_raw.iterrows():
@@ -1347,8 +1488,8 @@ def load_bank_statement(filepath: str) -> tuple:
             break
         vals = [str(v).lower().strip() for v in row.values if pd.notna(v)]
         has_date  = any("date" in v or "txn" in v for v in vals)
-        has_desc  = any("desc" in v or "narration" in v or "particulars" in v for v in vals)
-        has_amt   = any(any(k in v for k in ["debit", "credit", "withdrawal", "deposit", "amount"]) for v in vals)
+        has_desc  = any("desc" in v or "narration" in v or "particulars" in v or "details" in v for v in vals)
+        has_amt   = any(any(k in v for k in ["debit", "credit", "withdrawal", "withdrawl", "deposit", "amount"]) for v in vals)
         if (has_date and has_desc) or (has_desc and has_amt):
             header_idx = i
             break
@@ -1357,6 +1498,18 @@ def load_bank_statement(filepath: str) -> tuple:
         header_idx = 0
 
     df_raw.columns = df_raw.iloc[header_idx]
+    # Deduplicate column names (e.g. Kotak CSV has two "Dr / Cr" columns)
+    _seen = {}
+    _deduped = []
+    for _c in df_raw.columns:
+        _k = str(_c).strip()
+        if _k in _seen:
+            _seen[_k] += 1
+            _deduped.append(f"{_k}.{_seen[_k]}")
+        else:
+            _seen[_k] = 0
+            _deduped.append(_k)
+    df_raw.columns = _deduped
     df = df_raw.iloc[header_idx + 1:].reset_index(drop=True)
     cols = [str(c).strip() for c in df.columns]
 
@@ -1367,12 +1520,40 @@ def load_bank_statement(filepath: str) -> tuple:
             col_map["txn_date"] = c
         elif "description" not in col_map and any(k in cl for k in ["description", "narration", "particulars", "details"]):
             col_map["description"] = c
-        elif "debit" not in col_map and any(k in cl for k in ["withdrawal", "debit", "dr amount"]):
+        elif "debit" not in col_map and any(k in cl for k in ["withdrawal", "withdrawl", "debit", "dr amount"]):
             col_map["debit"] = c
         elif "credit" not in col_map and any(k in cl for k in ["deposit", "credit", "cr amount"]):
             col_map["credit"] = c
         elif "balance" not in col_map and "balance" in cl:
             col_map["balance"] = c
+
+    # Handle combined Amount + direction-indicator column (e.g. Kotak: "Amount" + "Dr / Cr")
+    if "debit" not in col_map and "credit" not in col_map:
+        amt_col = next(
+            (c for c in df.columns if str(c).strip().lower() in ('amount', 'amt')),
+            None
+        )
+        dir_col = next(
+            (c for c in df.columns
+             if str(c).strip().lower() in ('dr / cr', 'dr/cr', 'type', 'txn type', 'dr.cr', 'cr/dr')),
+            None
+        )
+        if amt_col and dir_col:
+            def _to_num(v):
+                try:
+                    return float(str(v).replace(',', '').strip()) if pd.notna(v) else 0.0
+                except (ValueError, TypeError):
+                    return 0.0
+            df['__debit'] = df.apply(
+                lambda r: _to_num(r[amt_col]) if str(r[dir_col]).strip().upper().startswith('DR') else 0.0,
+                axis=1
+            )
+            df['__credit'] = df.apply(
+                lambda r: _to_num(r[amt_col]) if str(r[dir_col]).strip().upper().startswith('CR') else 0.0,
+                axis=1
+            )
+            col_map['debit'] = '__debit'
+            col_map['credit'] = '__credit'
 
     return df, col_map, target
 
@@ -1636,7 +1817,7 @@ def main():
             print(f"      → Warning: could not load corrections file: {_e}")
 
     print("[3/4] Classifying transactions …")
-    classifier = BankClassifier(ledgers, corrections=corrections)
+    classifier = BankClassifier(ledgers, corrections=corrections, brand_name=args.brand)
     rows, summary = [], {"High": 0, "Medium": 0, "Low": 0}
 
     date_col  = col_map.get("txn_date")
@@ -1645,10 +1826,40 @@ def main():
     credit_col = col_map.get("credit")
     bal_col   = col_map.get("balance")
 
+    _JUNK_RE = re.compile(
+        r'^[*.\-=~_\s]+$'                        # separator lines: ***, ..., ---
+        r'|^-+\s*end\s+of\s+statement\s*-+$'     # --- End Of Statement ---
+        r'|statement\s+summary'                   # STATEMENT SUMMARY :-
+        r'|opening\s+balance'                     # Opening Balance
+        r'|closing\s+balance'                     # Closing Balance (footer)
+        r'|generated\s+on'                        # Generated On: ...
+        r'|state\s+account\s+branch'              # State account branch GSTIN
+        r'|bank\s+gstin\s+number'                 # Bank GSTIN number details...
+        r'|lower\s+parel'                         # FC Bank House, ...Lower Parel
+        r'|senapati\s+bapat'                      # bank address line
+        r'|www\.'                                 # URL rows
+        r'|payment.*goods.*service.*tax',         # GSTIN URL path fragment
+        re.IGNORECASE,
+    )
+
     for _, row in df_bank.iterrows():
         txn_date = row.get(date_col, "") if date_col else ""
         desc     = row.get(desc_col)
         if pd.isna(desc) and pd.isna(txn_date):
+            continue
+
+        desc_str_check = str(desc).strip() if pd.notna(desc) else ""
+        if not desc_str_check or _JUNK_RE.search(desc_str_check):
+            continue
+
+        # Skip rows with no monetary value — they are metadata/summary lines
+        # (separators, "Generated On", GSTIN lines, bank address lines, etc.)
+        # Real transactions always have a non-zero debit OR credit.
+        def _to_float(v):
+            try: return float(v) if pd.notna(v) and str(v).strip() not in ('', '-') else 0.0
+            except (ValueError, TypeError): return 0.0
+        if _to_float(row.get(debit_col) if debit_col else None) == 0.0 and \
+           _to_float(row.get(credit_col) if credit_col else None) == 0.0:
             continue
 
         def format_excel_date(val):
@@ -1710,15 +1921,15 @@ def main():
     print(f"         Low:    {summary['Low']}  ({summary['Low']/total*100:.1f}%)")
 
     # ------------------------------------------------------------------
-    # Gemini LLM fallback — only on rows the rule engine left Low/Suspense.
-    # Pure recall gain: confident rows are never touched. The model can only
-    # pick a real COA ledger; on any failure the row stays "Suspense A/c".
+    # Gemini LLM fallback — fires on Low AND Medium rows (Medium may be
+    # uncertain; Gemini can confirm or correct). High rows are never touched.
+    # On any failure the row stays unchanged.
     # ------------------------------------------------------------------
     gemini_key = args.gemini_key or os.environ.get("GEMINI_API_KEY")
     if gemini_key and total:
-        low_idx = [i for i, r in enumerate(rows) if r["confidence"] == "Low"]
+        low_idx = [i for i, r in enumerate(rows) if r["confidence"] in ("Low", "Medium")]
         if low_idx:
-            print(f"[3.5/4] Gemini fallback on {len(low_idx)} low-confidence rows "
+            print(f"[3.5/4] Gemini fallback on {len(low_idx)} low/medium-confidence rows "
                   f"(model {args.gemini_model}) …")
             from concurrent.futures import ThreadPoolExecutor
             suspense_label = classifier._suspense_ledger
@@ -1746,15 +1957,18 @@ def main():
                 with ThreadPoolExecutor(max_workers=6) as ex:
                     for i, pick in ex.map(_resolve, low_idx):
                         if pick and pick != suspense_label:
+                            old_conf = rows[i]["confidence"]
                             rows[i]["predicted_ledger"] = pick
-                            rows[i]["confidence"] = "Medium"
-                            summary["Low"] -= 1
-                            summary["Medium"] += 1
+                            if old_conf == "Low":
+                                rows[i]["confidence"] = "Medium"
+                                summary["Low"] -= 1
+                                summary["Medium"] += 1
+                            # Medium rows: update ledger if different, confidence stays Medium
                             resolved += 1
             except Exception as _e:
-                print(f"        → Gemini fallback aborted ({_e}); rows kept as Suspense A/c")
+                print(f"        → Gemini fallback aborted ({_e}); rows kept as-is")
             print(f"        → Gemini resolved {resolved}/{len(low_idx)} "
-                  f"(unresolved stay Suspense A/c)")
+                  f"(unresolved stay Suspense A/c / Medium)")
 
     print(f"[4/4] Writing output: {args.output}")
     write_output(rows, summary, args.brand, args.output)

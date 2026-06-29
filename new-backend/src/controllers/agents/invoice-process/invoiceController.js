@@ -2,6 +2,7 @@ const { Brand, Agent } = require('../../../models/master');
 const { getBrandConnection } = require('../../../config/database');
 const { getDynamicModel } = require('../../../models/brand');
 const { markProcessing, markDone } = require('../../../utils/invoiceEvents');
+const { setExecution, getExecution, clearExecution } = require('../../../utils/executionStore');
 
 // ─── Helper: parse dates in DD/MM/YYYY or DD-MM-YYYY format ─────────────────
 const parseDate = (dString) => {
@@ -17,8 +18,8 @@ const parseDate = (dString) => {
 // ─── POST /api/brands/:brandId/agents/:agentId/invoice/process ───────────────
 const processInvoice = async (req, res, next) => {
   try {
-    const brandId = req.body.brandId || req.params.brandId;
-    const agentId = req.body.agentId || req.params.agentId;
+    const brandId = req.params.brandId || (req.body && req.body.brandId);
+    const agentId = req.params.agentId || (req.body && req.body.agentId);
 
     const brand = await Brand.findByPk(brandId);
     const agent = await Agent.findByPk(agentId);
@@ -61,8 +62,18 @@ const processInvoice = async (req, res, next) => {
         throw new Error(`HTTP ${response.status}`);
       }
       
-      // We rely ENTIRELY on n8n calling the /n8n/feed endpoint to store data and call markDone()
-      return res.json({ success: true, message: 'Processing started. Invoices will appear once n8n finishes.', pending: true });
+      try {
+        const n8nRes = await fetch('https://colonel1234.app.n8n.cloud/api/v1/executions?status=running&limit=1', {
+          headers: { 'X-N8N-API-KEY': process.env.n8n_api_key }
+        });
+        const n8nData = await n8nRes.json();
+        const executionId = n8nData?.data?.[0]?.id || null;
+        if (executionId) setExecution(brandId, agentId, executionId);
+        return res.json({ success: true, message: 'Processing started. Invoices will appear once n8n finishes.', pending: true, executionId });
+      } catch (err) {
+        console.error('[Invoice] Could not fetch execution ID:', err.message);
+        return res.json({ success: true, message: 'Processing started. Invoices will appear once n8n finishes.', pending: true, executionId: null });
+      }
 
     } catch (apiError) {
       if (apiError.name === 'TimeoutError' || apiError.name === 'AbortError') {
@@ -159,6 +170,7 @@ const updateInvoice = async (req, res, next) => {
 
     // Whitelist of updatable fields
     const allowed = [
+      'company', 'seller_gstin', 'invoice_number', 'invoice_date', 'due_date',
       'buyer_gstin', 'category', 'product_name',
       'hsn_code', 'quantity', 'unit', 'rate',
       'cgst_rate', 'sgst_rate', 'igst_rate',
@@ -187,9 +199,59 @@ const updateInvoice = async (req, res, next) => {
   }
 };
 
+// ─── POST /api/brands/:brandId/agents/:agentId/invoice/cancel ────────────────
+const cancelInvoice = async (req, res, next) => {
+  try {
+    const brandId = req.params.brandId;
+    const agentId = req.params.agentId;
+
+    const execution = getExecution(brandId, agentId);
+    if (!execution) return res.status(404).json({ error: 'No active processing found' });
+
+    // Step 1 — Stop n8n execution
+    try {
+      await fetch(`https://colonel1234.app.n8n.cloud/api/v1/executions/${execution.executionId}/stop`, {
+        method: 'POST',
+        headers: { 'X-N8N-API-KEY': process.env.n8n_api_key }
+      });
+    } catch (err) {
+      console.error('[Cancel] Could not stop n8n execution:', err.message);
+      // Continue to rollback regardless
+    }
+
+    // Step 2 — Rollback: delete invoice rows saved in this run
+    if (execution.invoiceIds.length > 0) {
+      try {
+        const brand = await Brand.findByPk(brandId);
+        const agent = await Agent.findByPk(agentId);
+        const brandDb = getBrandConnection(brand.db_name);
+        const tableName = agent.name.replace(/[^a-zA-Z0-9]/g, '_').toLowerCase();
+        const InvoiceModel = getDynamicModel(brandDb, tableName, agent.columns);
+        await InvoiceModel.destroy({ where: { id: execution.invoiceIds } });
+      } catch (err) {
+        console.error('[Cancel] Rollback failed:', err.message);
+      }
+    }
+
+    // Step 3 — Clear memory + notify SSE
+    clearExecution(brandId, agentId);
+    markDone(brandId, agentId, 0, 0);
+
+    res.json({
+      success: true,
+      message: 'Processing cancelled and invoices rolled back',
+      rolledBack: execution.invoiceIds.length
+    });
+
+  } catch (error) {
+    next(error);
+  }
+};
+
 module.exports = {
   processInvoice,
   getInvoices,
   getSheetUrl,
-  updateInvoice
+  updateInvoice,
+  cancelInvoice
 };
