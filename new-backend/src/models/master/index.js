@@ -125,6 +125,23 @@ const BrandAgent = masterSequelize.define('brand_agents', {
 Brand.belongsToMany(Agent, { through: BrandAgent, foreignKey: 'brand_id', otherKey: 'agent_id' });
 Agent.belongsToMany(Brand, { through: BrandAgent, foreignKey: 'agent_id', otherKey: 'brand_id' });
 
+// Agent workflows (multi-sheet output templates: filters, master-data lookup, column mapping)
+const AgentWorkflow = masterSequelize.define('AgentWorkflow', {
+  id:             { type: DataTypes.UUID, defaultValue: DataTypes.UUIDV4, primaryKey: true },
+  agent_id:       { type: DataTypes.UUID, allowNull: false },
+  name:           { type: DataTypes.STRING, allowNull: false },
+  description:    { type: DataTypes.TEXT },
+  sample_columns: { type: DataTypes.JSONB, defaultValue: [] },
+  columns:        { type: DataTypes.JSONB, defaultValue: [] },
+  sheets:         { type: DataTypes.JSONB, defaultValue: [] }
+}, {
+  tableName: 'agent_workflows',
+  freezeTableName: true
+});
+
+Agent.hasMany(AgentWorkflow, { foreignKey: 'agent_id', onDelete: 'CASCADE' });
+AgentWorkflow.belongsTo(Agent, { foreignKey: 'agent_id' });
+
 // Visual plan-builder canvases (n8n-style). graph = { nodes, edges }.
 const Plan = masterSequelize.define('plans', {
   id:          { type: DataTypes.UUID, defaultValue: DataTypes.UUIDV4, primaryKey: true },
@@ -193,5 +210,6 @@ module.exports = {
   Plan,
   Integration,
   Conversation,
-  McpServer
+  McpServer,
+  AgentWorkflow
 };

@@ -42,6 +42,7 @@ const mtrRoutes             = require('./routes/mtrRoutes');
 const plansRoutes           = require('./routes/plansRoutes');
 const integrationRoutes     = require('./routes/integrationRoutes');
 const chatRoutes            = require('./routes/chatRoutes');
+const workflowRoutes        = require('./routes/workflowRoutes');
 
 app.use('/api/auth',      authRoutes);
 app.use('/api',           brandRoutes);
@@ -60,6 +61,7 @@ app.use('/api',           mtrRoutes);
 app.use('/api',           plansRoutes);
 app.use('/api',           integrationRoutes);
 app.use('/api',           chatRoutes);
+app.use('/api',           workflowRoutes);
 
 // Error handling middleware
 app.use((err, req, res, next) => {

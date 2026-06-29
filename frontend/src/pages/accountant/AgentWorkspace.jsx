@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useParams, useNavigate, useLocation } from 'react-router-dom';
 import DashboardLayout from '../../components/layout/DashboardLayout';
-import { LayoutDashboard, Bot, Upload, FileText, Download, Trash2, Eye, Plus, Loader2, BarChart3, Search, X } from 'lucide-react';
+import { LayoutDashboard, Bot, Upload, FileText, Download, Trash2, Eye, Plus, Loader2, BarChart3, Search, X, GitBranch } from 'lucide-react';
 import CFODashboardLauncher from '../cfo/CFODashboardLauncher';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../../components/ui/card';
 import { Button } from '../../components/ui/button';
@@ -19,6 +19,7 @@ import OrderCycleShopifyWorkspace from './OrderCycleShopifyWorkspace';
 import SettlementAmazonWorkspace from './SettlementAmazonWorkspace';
 import TotalSalesAnalyzerModal from './TotalSalesAnalyzerModal';
 import NykaaWorkspace from './NykaaWorkspace';
+import WorkflowApplyModal from './WorkflowApplyModal';
 
 const AgentWorkspace = () => {
   const { brandId, agentId } = useParams();
@@ -68,6 +69,7 @@ const AgentWorkspace = () => {
   const [showGenerateModal, setShowGenerateModal] = useState(false);
   const [showInvoicePreviewModal, setShowInvoicePreviewModal] = useState(false);
   const [showTotalSalesAnalyzer, setShowTotalSalesAnalyzer] = useState(false);
+  const [showWorkflowModal, setShowWorkflowModal] = useState(false);
 
   // MIS Modal States
   const [showConfigMISModal, setShowConfigMISModal] = useState(false);
@@ -570,6 +572,14 @@ const AgentWorkspace = () => {
               <h1 className="text-3xl font-bold text-slate-900 tracking-tight">{agent?.name}</h1>
               <p className="text-slate-600 mt-1">{agent?.description}</p>
             </div>
+            <Button
+              onClick={() => setShowWorkflowModal(true)}
+              variant="outline"
+              className="border-indigo-200 text-indigo-700 hover:bg-indigo-50"
+            >
+              <GitBranch className="mr-2 h-4 w-4" />
+              Workflows
+            </Button>
           </div>
           <InvoiceAgentWorkspace agent={agent} />
         </div>
@@ -589,6 +599,14 @@ const AgentWorkspace = () => {
               <h1 className="text-3xl font-bold text-slate-900 tracking-tight">{agent?.name}</h1>
               <p className="text-slate-600 mt-1">{agent?.description}</p>
             </div>
+            <Button
+              onClick={() => setShowWorkflowModal(true)}
+              variant="outline"
+              className="border-indigo-200 text-indigo-700 hover:bg-indigo-50"
+            >
+              <GitBranch className="mr-2 h-4 w-4" />
+              Workflows
+            </Button>
           </div>
           <OrderCycleShopifyWorkspace agent={agent} />
         </div>
@@ -608,6 +626,14 @@ const AgentWorkspace = () => {
               <h1 className="text-3xl font-bold text-slate-900 tracking-tight">{agent?.name}</h1>
               <p className="text-slate-600 mt-1">{agent?.description}</p>
             </div>
+            <Button
+              onClick={() => setShowWorkflowModal(true)}
+              variant="outline"
+              className="border-indigo-200 text-indigo-700 hover:bg-indigo-50"
+            >
+              <GitBranch className="mr-2 h-4 w-4" />
+              Workflows
+            </Button>
           </div>
           <NykaaWorkspace agent={agent} />
         </div>
@@ -627,6 +653,14 @@ const AgentWorkspace = () => {
               <h1 className="text-3xl font-bold text-slate-900 tracking-tight">{agent?.name}</h1>
               <p className="text-slate-600 mt-1">{agent?.description}</p>
             </div>
+            <Button
+              onClick={() => setShowWorkflowModal(true)}
+              variant="outline"
+              className="border-indigo-200 text-indigo-700 hover:bg-indigo-50"
+            >
+              <GitBranch className="mr-2 h-4 w-4" />
+              Workflows
+            </Button>
           </div>
           <SettlementAmazonWorkspace agent={agent} />
         </div>
@@ -674,6 +708,14 @@ const AgentWorkspace = () => {
                 >
                   <BarChart3 className="mr-2 h-4 w-4" />
                   📊 CFO Dashboard
+                </Button>
+                <Button
+                  onClick={() => setShowWorkflowModal(true)}
+                  variant="outline"
+                  className="border-indigo-200 text-indigo-700 hover:bg-indigo-50"
+                >
+                  <GitBranch className="mr-2 h-4 w-4" />
+                  Workflows
                 </Button>
               </div>
             </div>
@@ -1715,6 +1757,12 @@ const AgentWorkspace = () => {
           )}
         </>
       )}
+      <WorkflowApplyModal
+        agentId={agentId}
+        brandId={brandId}
+        open={showWorkflowModal}
+        onClose={() => setShowWorkflowModal(false)}
+      />
     </DashboardLayout>
   );
 };
