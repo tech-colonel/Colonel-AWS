@@ -20,6 +20,7 @@ import SettlementAmazonWorkspace from './SettlementAmazonWorkspace';
 import TotalSalesAnalyzerModal from './TotalSalesAnalyzerModal';
 import NykaaWorkspace from './NykaaWorkspace';
 import WorkflowApplyModal from './WorkflowApplyModal';
+import WorkflowManagerModal from '../admin/WorkflowManagerModal';
 
 const AgentWorkspace = () => {
   const { brandId, agentId } = useParams();
@@ -1757,12 +1758,14 @@ const AgentWorkspace = () => {
           )}
         </>
       )}
-      <WorkflowApplyModal
-        agentId={agentId}
-        brandId={brandId}
-        open={showWorkflowModal}
-        onClose={() => setShowWorkflowModal(false)}
-      />
+      {(() => {
+        let role = '';
+        try { role = JSON.parse(localStorage.getItem('user') || '{}').role || ''; } catch {}
+        // Admins manage (create/edit) workflows; everyone else applies them.
+        return role === 'admin'
+          ? <WorkflowManagerModal agent={agent} open={showWorkflowModal} onClose={() => setShowWorkflowModal(false)} />
+          : <WorkflowApplyModal agentId={agentId} brandId={brandId} open={showWorkflowModal} onClose={() => setShowWorkflowModal(false)} />;
+      })()}
     </DashboardLayout>
   );
 };
