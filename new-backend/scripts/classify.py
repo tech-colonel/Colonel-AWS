@@ -1589,7 +1589,7 @@ def write_output(rows: list, summary: dict, brand: str, output_path: str):
         top=Side(style='thin', color='CCCCCC'),    bottom=Side(style='thin', color='CCCCCC'),
     )
 
-    headers = ["Txn Date", "Description", "Debit", "Credit", "Balance", "Type", "Ledger Name", "Confidence", "Chq / Ref No."]
+    headers = ["Txn Date", "Description", "Chq / Ref No.", "Debit", "Credit", "Balance", "Type", "Ledger Name", "Confidence"]
     ws.append(headers)
     ws.row_dimensions[1].height = 25
     for ci, _ in enumerate(headers, 1):
@@ -1601,13 +1601,13 @@ def write_output(rows: list, summary: dict, brand: str, output_path: str):
         ws.append([
             r.get("txn_date", ""),
             r.get("description", ""),
+            r.get("chq_ref", ""),
             r.get("debit") or "",
             r.get("credit") or "",
             r.get("balance") or "",
             r.get("predicted_type", ""),
             r.get("predicted_ledger", ""),
             r.get("confidence", ""),
-            r.get("chq_ref", ""),
         ])
         row_num = ws.max_row
         ws.row_dimensions[row_num].height = 20
@@ -1617,14 +1617,14 @@ def write_output(rows: list, summary: dict, brand: str, output_path: str):
         for ci in range(1, len(headers) + 1):
             cell = ws.cell(row=row_num, column=ci)
             cell.font, cell.border = REGULAR, THIN
-            if ci in (3, 4, 5):
+            if ci in (4, 5, 6):
                 cell.number_format = '#,##0.00'
                 cell.alignment = Alignment(horizontal="right", vertical="center")
-            elif ci in (1, 6, 8):
+            elif ci in (1, 7, 9):
                 cell.alignment = Alignment(horizontal="center", vertical="center")
             else:
                 cell.alignment = Alignment(horizontal="left", vertical="center")
-            if ci in (7, 8):
+            if ci in (8, 9):
                 cell.fill = fill
 
     # Auto-width

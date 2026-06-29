@@ -720,12 +720,36 @@ const runReco = async (req, res) => {
       let mediumCount = 0;
       let lowCount = 0;
 
+      // Build a header→column-index map from row 1 so column ORDER is irrelevant
+      // (a new column like "Chq / Ref No." can be inserted without shifting reads).
+      const _normH = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+      const colIdx = {};
+      (ws.getRow(1).values || []).forEach((h, i) => {
+        const n = _normH(h);
+        if (!n) return;
+        const set = (k, cond) => { if (cond && colIdx[k] === undefined) colIdx[k] = i; };
+        set('date', n.includes('txndate') || n === 'date');
+        set('description', n.includes('description') || n.includes('narration'));
+        set('chq_ref', n.includes('chq') || n.includes('refno') || n.includes('reference'));
+        set('debit', n === 'debit' || n.includes('withdrawal'));
+        set('credit', n === 'credit' || n.includes('deposit'));
+        set('balance', n.includes('balance'));
+        set('type', n === 'type' || n.includes('vouchertype'));
+        set('ledger_name', n.includes('ledgername') || n === 'ledger');
+        set('confidence', n.includes('confidence'));
+      });
+      // Fallback to current classify.py column order if a header isn't matched.
+      const C = {
+        date: colIdx.date || 1, description: colIdx.description || 2, chq_ref: colIdx.chq_ref || 3,
+        debit: colIdx.debit || 4, credit: colIdx.credit || 5, balance: colIdx.balance || 6,
+        type: colIdx.type || 7, ledger_name: colIdx.ledger_name || 8, confidence: colIdx.confidence || 9,
+      };
+
       // Extract row data (Header is row 1)
       ws.eachRow((row, rowNumber) => {
         if (rowNumber === 1) return; // Skip headers
-        const cells = row.values;
-        // cells[1] is empty padding in ExcelJS, 1-based indexing
-        const rawDate = cells[1];
+        const cells = row.values; // 1-based; cells[0] is undefined
+        const rawDate = cells[C.date];
         let formattedDate = '';
         if (rawDate) {
           if (rawDate instanceof Date) {
@@ -743,13 +767,14 @@ const runReco = async (req, res) => {
 
         const rowData = {
           date: formattedDate,
-          description: cells[2] || '',
-          debit: cells[3] ? parseFloat(cells[3]) : null,
-          credit: cells[4] ? parseFloat(cells[4]) : null,
-          balance: cells[5] ? parseFloat(cells[5]) : null,
-          type: cells[6] || '',
-          ledger_name: cells[7] || '',
-          confidence: cells[8] || 'Low'
+          description: cells[C.description] || '',
+          chq_ref: cells[C.chq_ref] != null ? String(cells[C.chq_ref]) : '',
+          debit: cells[C.debit] ? parseFloat(cells[C.debit]) : null,
+          credit: cells[C.credit] ? parseFloat(cells[C.credit]) : null,
+          balance: cells[C.balance] ? parseFloat(cells[C.balance]) : null,
+          type: cells[C.type] || '',
+          ledger_name: cells[C.ledger_name] || '',
+          confidence: cells[C.confidence] || 'Low'
         };
 
         if (rowData.confidence === 'High') highCount++;
