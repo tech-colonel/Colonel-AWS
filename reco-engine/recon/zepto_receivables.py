@@ -92,3 +92,57 @@ def _get(row: dict, aliases: list[str]) -> str:
             if val != "":
                 return val
     return ""
+
+
+def parse_zepto_payment(data: bytes) -> list[dict]:
+    try:
+        grid = _read_sheet(data, "Zepto Payment track")
+    except Exception:
+        grid = _read_sheet(data, 0)
+    h = _find_header(grid, ["po number", "invoice number"])
+    rows = _rows_as_dicts(grid, h)
+    out = []
+    # Extract the actual column names from the header row for exact matching
+    header_row = grid[h]
+    po_col = None
+    inv_col = None
+    for col in header_row:
+        nk = _norm_key(col)
+        if "ponumber" in nk:
+            po_col = col
+        if "invoicenumber" in nk:
+            inv_col = col
+
+    for r in rows:
+        po = ""
+        inv = ""
+        if po_col:
+            po = norm_po(_get(r, [po_col]))
+        if inv_col:
+            inv = norm_inv(_get(r, [inv_col]))
+        if not po:
+            continue
+        out.append({"po": po, "invoice_number": inv})
+    return out
+
+
+def parse_grn(datas: list[bytes]) -> dict[str, str]:
+    pool: dict[str, str] = {}
+    for data in datas:
+        grid = _read_csv(data)
+        h = _find_header(grid, ["po id"])
+        for r in _rows_as_dicts(grid, h):
+            po = norm_po(_get(r, ["PO ID", "PO Id"]))
+            if po and po not in pool:
+                pool[po] = _get(r, ["Created On", "Created on"])
+    return pool
+
+
+def grn_gate(payments: list[dict], grn: dict[str, str]) -> list[dict]:
+    kept, seen = [], set()
+    for p in payments:
+        po = p["po"]
+        if po in grn and po not in seen:
+            seen.add(po)
+            kept.append(p)
+    return kept
