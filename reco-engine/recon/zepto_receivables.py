@@ -55,6 +55,14 @@ def _read_sheet(data: bytes, sheet: Any = 0) -> list[list]:
     return grid
 
 
+def _has_sheet(data: bytes, name: str) -> bool:
+    try:
+        xls = pd.ExcelFile(BytesIO(_ensure_xlsx(data)))
+        return name in xls.sheet_names
+    except Exception:
+        return False
+
+
 def _clean(v: Any) -> str:
     s = "" if v is None else str(v).strip()
     return "" if s.lower() == "nan" else s
@@ -146,3 +154,26 @@ def grn_gate(payments: list[dict], grn: dict[str, str]) -> list[dict]:
             seen.add(po)
             kept.append(p)
     return kept
+
+
+def parse_invoice_details(data: bytes) -> dict[str, dict]:
+    grid = _read_sheet(data, "Invoice Details") if _has_sheet(data, "Invoice Details") else _read_sheet(data, 0)
+    h = _find_header(grid, ["invoice_number", "customer_name", "bcy_total"])
+    out: dict[str, dict] = {}
+    for r in _rows_as_dicts(grid, h):
+        inv = norm_inv(_get(r, ["invoice_number"]))
+        if not inv:
+            continue
+        out[inv] = {
+            "date": _get(r, ["date"]),
+            "sales_order_no": _get(r, ["reference_number"]),
+            "name": _get(r, ["customer_name"]),
+            "total_invoice_amt": _get(r, ["bcy_total"]),
+            "tax": _get(r, ["tax_amount"]),
+            "invoice_amt_excl_tax": _get(r, ["amount_without_tax"]),
+            "place_of_supply": _get(r, ["place_of_supply"]),
+            "gstin": _get(r, ["gst_no", "gstin"]),
+            "billing_state": _get(r, ["billing_state"]),
+            "shipping_state": _get(r, ["shipping_state"]),
+        }
+    return out

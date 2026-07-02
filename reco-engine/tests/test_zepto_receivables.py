@@ -3,7 +3,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from io import BytesIO
 from recon.zepto_receivables import (norm_po, norm_inv, dn_ref_to_invoice,
                                      _read_csv, _find_header, _rows_as_dicts, _get, _norm_key,
-                                     parse_zepto_payment, parse_grn, grn_gate)
+                                     parse_zepto_payment, parse_grn, grn_gate, parse_invoice_details)
 
 def test_normalizers_and_dn_transform():
     assert norm_po(" p4143483 ") == "P4143483"
@@ -62,8 +62,36 @@ def test_zepto_payment_and_grn_gate():
     assert kept[0]["invoice_number"] == "INV26-27/000101"
     print("test_zepto_payment_and_grn_gate OK")
 
+def test_parse_invoice_details():
+    inv = _xlsx({"Invoice Details": [
+        ["Invoice Details \"Drips ... 01/04/2026 To 30/06/2026\""],  # title row 1
+        ["invoice_id","status","date","txn_posting_date","due_date","invoice_number",
+         "reference_number","customer_name","bcy_total","bcy_balance","fcy_balance",
+         "salesperson_id","tax_amount","sgst","cgst","igst","amount_without_tax",
+         "place_of_supply","gst_no","project_names","currency_code","currency_id",
+         "customer_id","last_modified_time","price_precision","is_emailed","reminders_sent",
+         "exchange_rate","billing_state","shipping_state","gst_treatment"],
+        ["1151","overdue","2026-04-06","","","INV26-27/000101","2026-27/SO-00015",
+         "ZEPTO PRIVATE LIMITED JAIPUR",21369.43,19288.96,19288.96,"115",1017.59,0,0,1017.59,
+         20351.84,"RJ","08AAICK4821A1ZV","","INR","115","115","x",2,"false",0,1,
+         "Rajasthan","Rajasthan","business_gst"],
+    ]})
+    d = parse_invoice_details(inv)
+    row = d["INV26-27/000101"]
+    assert row["date"] == "2026-04-06"
+    assert row["sales_order_no"] == "2026-27/SO-00015"
+    assert row["name"] == "ZEPTO PRIVATE LIMITED JAIPUR"
+    assert float(row["total_invoice_amt"]) == 21369.43
+    assert float(row["tax"]) == 1017.59
+    assert float(row["invoice_amt_excl_tax"]) == 20351.84
+    assert row["place_of_supply"] == "RJ"
+    assert row["gstin"] == "08AAICK4821A1ZV"
+    assert row["billing_state"] == "Rajasthan" and row["shipping_state"] == "Rajasthan"
+    print("test_parse_invoice_details OK")
+
 if __name__ == "__main__":
     test_normalizers_and_dn_transform()
     test_csv_header_detection_and_getter()
     test_zepto_payment_and_grn_gate()
+    test_parse_invoice_details()
     print("ALL TESTS PASSED")
