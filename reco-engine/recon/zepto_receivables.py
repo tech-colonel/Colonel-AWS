@@ -214,3 +214,15 @@ def parse_payment_advice(datas: list[bytes]) -> tuple[dict, dict]:
                     continue
                 debit_notes[inv] = debit_notes.get(inv, 0.0) + _to_float(_get(r, ["Amount"]))
     return payments, debit_notes
+
+
+def parse_credit_notes(data: bytes) -> dict[str, float]:
+    grid = _read_sheet(data, "Credit Note Details") if _has_sheet(data, "Credit Note Details") else _read_sheet(data, 0)
+    h = _find_header(grid, ["invoice_number", "bcy_total"])
+    out: dict[str, float] = {}
+    for r in _rows_as_dicts(grid, h):
+        inv = norm_inv(_get(r, ["invoice_number"]))
+        if not inv:
+            continue
+        out[inv] = out.get(inv, 0.0) + _to_float(_get(r, ["bcy_total"]))
+    return out

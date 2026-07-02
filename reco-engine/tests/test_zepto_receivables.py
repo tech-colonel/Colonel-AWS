@@ -3,7 +3,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from io import BytesIO
 from recon.zepto_receivables import (norm_po, norm_inv, dn_ref_to_invoice,
                                      _read_csv, _find_header, _rows_as_dicts, _get, _norm_key,
-                                     parse_zepto_payment, parse_grn, grn_gate, parse_invoice_details)
+                                     parse_zepto_payment, parse_grn, grn_gate, parse_invoice_details,
+                                     parse_credit_notes)
 
 def test_normalizers_and_dn_transform():
     assert norm_po(" p4143483 ") == "P4143483"
@@ -104,10 +105,24 @@ def test_parse_payment_advice():
     assert round(dn["INV26-27/000007"], 2) == -5299.82
     print("test_parse_payment_advice OK")
 
+def test_parse_credit_notes():
+    cn = _xlsx({"Credit Note Details": [
+        ["Credit Note Details title row"],
+        ["creditnote_number","status","date","reference_number","exchange_rate",
+         "bcy_total","bcy_balance","currency_code","tax_amount","sales_person_id",
+         "sgst","cgst","igst","invoice_number"],
+        ["CN/26-27/0003","closed","2025-05-10","SO1",1,2049.75,0,"INR",97.61,"",0,0,97.61,"INV26-27/000011"],
+        ["CN/26-27/0009","closed","2025-05-10","SO2",1,50.0,0,"INR",7,"",0,0,7,"INV26-27/000011"],
+    ]})
+    d = parse_credit_notes(cn)
+    assert round(d["INV26-27/000011"], 2) == 2099.75    # 2049.75 + 50.0
+    print("test_parse_credit_notes OK")
+
 if __name__ == "__main__":
     test_normalizers_and_dn_transform()
     test_csv_header_detection_and_getter()
     test_zepto_payment_and_grn_gate()
     test_parse_invoice_details()
     test_parse_payment_advice()
+    test_parse_credit_notes()
     print("ALL TESTS PASSED")
