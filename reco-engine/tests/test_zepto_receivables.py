@@ -89,9 +89,25 @@ def test_parse_invoice_details():
     assert row["billing_state"] == "Rajasthan" and row["shipping_state"] == "Rajasthan"
     print("test_parse_invoice_details OK")
 
+def test_parse_payment_advice():
+    from recon.zepto_receivables import parse_payment_advice, _to_float
+    csv1 = (b"Type/Description,Ref Id,Doc No,Amount,TDS,Payment Amount\r\n"
+            b",,,,,427313.6\r\n"                                               # summary -> skip
+            b"Invoice,INV26-27/000007,1900261942,51429.9,48.98,51380.92\r\n"
+            b"Debit Note,V26-27/000007_QD,1700049536,-311.38,0.3,-311.68\r\n"
+            b"Debit Note Price,V26-27/000007_PD,4800006135,-4988.44,5,-4993.44\r\n")
+    pay, dn = parse_payment_advice([csv1])
+    assert _to_float(pay["INV26-27/000007"]["incl"]) == 51380.92
+    assert _to_float(pay["INV26-27/000007"]["excl"]) == 51429.9
+    assert _to_float(pay["INV26-27/000007"]["tds"]) == 48.98
+    # DN = sum of Amount (col D): -311.38 + -4988.44 = -5299.82
+    assert round(dn["INV26-27/000007"], 2) == -5299.82
+    print("test_parse_payment_advice OK")
+
 if __name__ == "__main__":
     test_normalizers_and_dn_transform()
     test_csv_header_detection_and_getter()
     test_zepto_payment_and_grn_gate()
     test_parse_invoice_details()
+    test_parse_payment_advice()
     print("ALL TESTS PASSED")

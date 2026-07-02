@@ -177,3 +177,40 @@ def parse_invoice_details(data: bytes) -> dict[str, dict]:
             "shipping_state": _get(r, ["shipping_state"]),
         }
     return out
+
+
+def _to_float(v: Any) -> float:
+    s = str(v or "").replace(",", "").replace("₹", "").strip()
+    if s in ("", "-", "nan", "None"):
+        return 0.0
+    try:
+        return float(s)
+    except ValueError:
+        return 0.0
+
+
+def parse_payment_advice(datas: list[bytes]) -> tuple[dict, dict]:
+    payments: dict[str, dict] = {}
+    debit_notes: dict[str, float] = {}
+    for data in datas:
+        grid = _read_csv(data)
+        h = _find_header(grid, ["ref id", "amount", "payment amount"])
+        for r in _rows_as_dicts(grid, h):
+            typ = _get(r, ["Type/Description", "Type"]).lower()
+            ref = _get(r, ["Ref Id", "Ref ID"])
+            if not typ:                       # summary/total row
+                continue
+            if typ.startswith("invoice"):
+                inv = norm_inv(ref)
+                if not inv:
+                    continue
+                acc = payments.setdefault(inv, {"incl": 0.0, "excl": 0.0, "tds": 0.0})
+                acc["incl"] += _to_float(_get(r, ["Payment Amount"]))
+                acc["excl"] += _to_float(_get(r, ["Amount"]))
+                acc["tds"] += _to_float(_get(r, ["TDS"]))
+            elif typ.startswith("debit note"):
+                inv = dn_ref_to_invoice(ref)
+                if not inv:
+                    continue
+                debit_notes[inv] = debit_notes.get(inv, 0.0) + _to_float(_get(r, ["Amount"]))
+    return payments, debit_notes
