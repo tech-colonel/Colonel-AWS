@@ -4,7 +4,7 @@ from io import BytesIO
 from recon.zepto_receivables import (norm_po, norm_inv, dn_ref_to_invoice,
                                      _read_csv, _find_header, _rows_as_dicts, _get, _norm_key,
                                      parse_zepto_payment, parse_grn, grn_gate, parse_invoice_details,
-                                     parse_credit_notes)
+                                     parse_credit_notes, reconcile_zepto, summarize_zepto)
 
 def test_normalizers_and_dn_transform():
     assert norm_po(" p4143483 ") == "P4143483"
@@ -118,6 +118,50 @@ def test_parse_credit_notes():
     assert round(d["INV26-27/000011"], 2) == 2099.75    # 2049.75 + 50.0
     print("test_parse_credit_notes OK")
 
+def _file(b): return {"filename": "f", "content": b}
+
+def test_reconcile_end_to_end():
+    pay = _xlsx({"Zepto Payment track": [
+        ["Zepto Payment track PO Number","Invoice Number","Cities"],
+        ["P100","INV26-27/000007","Pune"],
+        ["P200","INV26-27/000101","Jaipur"],
+        ["P900","INV26-27/000999","Delhi"],   # PO not in GRN -> dropped
+    ]})
+    grn = b"GRN ID,PO ID,Created On,Status\r\nG1,P100,4/2/2026,CONFIRMED\r\nG2,P200,4/3/2026,CONFIRMED\r\n"
+    invd = _xlsx({"Invoice Details": [
+        ["title"],
+        ["invoice_number","reference_number","customer_name","date","bcy_total","tax_amount",
+         "amount_without_tax","place_of_supply","gst_no","billing_state","shipping_state"],
+        ["INV26-27/000007","SO-7","ZEPTO PUNE","2026-04-06",56685.0,0,56685.0,"MH","27AAA","Maharashtra","Maharashtra"],
+        ["INV26-27/000101","SO-101","ZEPTO JAIPUR","2026-04-08",21369.43,1017.59,20351.84,"RJ","08AAA","Rajasthan","Rajasthan"],
+    ]})
+    padv = (b"Type/Description,Ref Id,Doc No,Amount,TDS,Payment Amount\r\n"
+            b",,,,,0\r\n"
+            b"Invoice,INV26-27/000007,190,51429.9,48.98,51380.92\r\n"
+            b"Debit Note,V26-27/000007_QD,170,-311.38,0.3,-311.68\r\n"
+            b"Debit Note Price,V26-27/000007_PD,480,-4988.44,5,-4993.44\r\n"
+            b"Invoice,INV26-27/000101,191,0,0,0\r\n")
+    cn = _xlsx({"Credit Note Details": [["t"],
+        ["invoice_number","bcy_total"], ["INV26-27/000101", 100.0]]})
+    files = {"zepto_payment": _file(pay), "grn_list": [_file(grn)],
+             "invoice_details": _file(invd), "payment_advice": [_file(padv)], "credit_note": _file(cn)}
+    res = reconcile_zepto(files)
+    assert len(res) == 2                                  # P900 dropped
+    by_inv = {r["invoice_number"]: r for r in res}
+    a = by_inv["INV26-27/000007"]
+    assert a["name"] == "ZEPTO PUNE"
+    assert round(a["pending_amount"], 2) == 56685.0
+    assert round(a["payment_received_incl_tds"], 2) == 51380.92
+    assert round(a["debit_note_issued"], 2) == -5299.82
+    assert round(a["gross_outstanding"], 2) == round(56685.0 - 51380.92, 2)   # 5304.08
+    assert round(a["net_outstanding"], 2) == round(56685.0 - 51380.92 - 5299.82, 2)  # ~4.26
+    assert a["status"] == "Not Paid"        # gross ~5304 > 100 (both-sides rule)
+    b = by_inv["INV26-27/000101"]
+    assert round(b["credit_note_issued"], 2) == 100.0
+    s = summarize_zepto(res)
+    assert s["total"] == 2 and s["paid"] + s["not_paid"] == 2
+    print("test_reconcile_end_to_end OK")
+
 if __name__ == "__main__":
     test_normalizers_and_dn_transform()
     test_csv_header_detection_and_getter()
@@ -125,4 +169,5 @@ if __name__ == "__main__":
     test_parse_invoice_details()
     test_parse_payment_advice()
     test_parse_credit_notes()
+    test_reconcile_end_to_end()
     print("ALL TESTS PASSED")

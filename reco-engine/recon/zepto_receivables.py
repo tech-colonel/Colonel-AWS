@@ -226,3 +226,79 @@ def parse_credit_notes(data: bytes) -> dict[str, float]:
             continue
         out[inv] = out.get(inv, 0.0) + _to_float(_get(r, ["bcy_total"]))
     return out
+
+
+COLUMN_KEYS = [
+    "date","invoice_number","sales_order_no","name","total_invoice_amt","tax",
+    "invoice_amt_excl_tax","place_of_supply","gstin","billing_state","shipping_state",
+    "pending_amount","payment_received_incl_tds","payment_received_excl_tds","tds",
+    "debit_note_issued","dn_accepted","dn_not_accepted","credit_note_issued",
+    "gross_outstanding","net_outstanding","status","grn_no","grn_date",
+    "invoice_not_in_ledger","pod_no","pod_date","payment_date",
+]
+
+
+def _one(files: dict, field: str) -> bytes | None:
+    v = files.get(field)
+    if v is None:
+        return None
+    if isinstance(v, list):
+        return v[0]["content"] if v else None
+    return v["content"]
+
+
+def _many(files: dict, field: str) -> list[bytes]:
+    v = files.get(field)
+    if v is None:
+        return []
+    items = v if isinstance(v, list) else [v]
+    return [it["content"] for it in items if it.get("content")]
+
+
+def reconcile_zepto(files: dict) -> list[dict]:
+    payments_raw = parse_zepto_payment(_one(files, "zepto_payment") or b"")
+    grn = parse_grn(_many(files, "grn_list"))
+    invoice_details = parse_invoice_details(_one(files, "invoice_details") or b"")
+    pay_map, dn_map = parse_payment_advice(_many(files, "payment_advice"))
+    cn_map = parse_credit_notes(_one(files, "credit_note") or b"")
+
+    kept = grn_gate(payments_raw, grn)
+    results: list[dict] = []
+    for k in kept:
+        inv = k["invoice_number"]
+        row = {key: "" for key in COLUMN_KEYS}
+        row["invoice_number"] = inv
+        det = invoice_details.get(inv)
+        if det:
+            for f in ("date","sales_order_no","name","place_of_supply","gstin","billing_state","shipping_state"):
+                row[f] = det[f]
+            row["total_invoice_amt"] = _to_float(det["total_invoice_amt"])
+            row["tax"] = _to_float(det["tax"])
+            row["invoice_amt_excl_tax"] = _to_float(det["invoice_amt_excl_tax"])
+        else:
+            row["invoice_not_in_ledger"] = "Not found in Invoice Details"
+        pay = pay_map.get(inv, {})
+        row["payment_received_incl_tds"] = round(pay.get("incl", 0.0), 2)
+        row["payment_received_excl_tds"] = round(pay.get("excl", 0.0), 2)
+        row["tds"] = round(pay.get("tds", 0.0), 2)
+        row["debit_note_issued"] = round(dn_map.get(inv, 0.0), 2)
+        row["credit_note_issued"] = round(cn_map.get(inv, 0.0), 2)
+        pending = _to_float(row["total_invoice_amt"])
+        row["pending_amount"] = round(pending, 2)
+        gross = pending - row["payment_received_incl_tds"]
+        net = gross + row["debit_note_issued"]
+        row["gross_outstanding"] = round(gross, 2)
+        row["net_outstanding"] = round(net, 2)
+        row["status"] = "Paid" if (abs(gross) <= 100 and abs(net) <= 100) else "Not Paid"
+        results.append(row)
+    return results
+
+
+def summarize_zepto(results: list[dict]) -> dict:
+    paid = sum(1 for r in results if r["status"] == "Paid")
+    return {
+        "total": len(results),
+        "paid": paid,
+        "not_paid": len(results) - paid,
+        "not_in_invoice_details": sum(1 for r in results if r["invoice_not_in_ledger"]),
+    }
