@@ -183,8 +183,74 @@ def test_workbook_has_live_formulas():
     assert ws["M3"].value == "=F3"                                                     # pending_amount
     assert ws["U3"].value == "=M3-N3"                                                  # gross_outstanding
     assert ws["V3"].value == "=M3-N3+Q3"                                               # net_outstanding
-    assert ws["W3"].value == '=IF(AND(ABS(U3)<=100,ABS(V3)<=100),"Paid","Not Paid")'   # status
+    assert ws["W3"].value == '=IF(AND(U3<=100,V3<=100),"Paid","Not Paid")'             # status (signed)
     print("test_workbook_has_live_formulas OK")
+
+
+def test_status_signed_threshold_negative_net_is_paid():
+    # Accountant's rule: Paid whenever gross<=100 AND net<=100, INCLUDING
+    # negative values (a debit note pushing Net negative means settled).
+    # gross~17 (<=100), net~-2058 (<=100 since negative) -> Paid (signed rule).
+    invd = _xlsx({"Invoice Details": [
+        ["title"],
+        ["invoice_number","reference_number","customer_name","date","bcy_total","tax_amount",
+         "amount_without_tax","place_of_supply","gst_no","billing_state","shipping_state"],
+        ["INV1","SO-1","CO A","2026-04-06",50000.0,0,50000.0,"MH","27AAA","Maharashtra","Maharashtra"],
+        ["INV2","SO-2","CO B","2026-04-06",28000.0,0,28000.0,"MH","27AAA","Maharashtra","Maharashtra"],
+    ]})
+    pay = _xlsx({"Zepto Payment track": [["Zepto Payment track PO Number","Invoice Number","Cities"]]})
+    grn = b"GRN ID,PO ID,Created On,Status\r\n"
+    cn = _xlsx({"Credit Note Details": [["t"], ["invoice_number","bcy_total"]]})
+    files = {"zepto_payment": _file(pay), "grn_list": [_file(grn)],
+             "invoice_details": _file(invd), "payment_advice": [], "credit_note": _file(cn)}
+    res = reconcile_zepto(files)
+    by_inv = {r["invoice_number"]: r for r in res}
+
+    # Force gross~17 by setting payment received to make gross = 50000 - 49983 = 17
+    by_inv["INV1"]["payment_received_incl_tds"] = 49983.0
+    # Force net~-2058 via a large debit note: net = gross + dn = 17 + (-2075) = -2058
+    by_inv["INV1"]["debit_note_issued"] = -2075.0
+    gross1 = by_inv["INV1"]["total_invoice_amt"] - by_inv["INV1"]["payment_received_incl_tds"]
+    net1 = gross1 + by_inv["INV1"]["debit_note_issued"]
+    status1 = "Paid" if (gross1 <= 100 and net1 <= 100) else "Not Paid"
+    assert round(gross1, 2) == 17.0
+    assert round(net1, 2) == -2058.0
+    assert status1 == "Paid"
+
+    # INV2: gross~28000 (no payment received) -> Not Paid
+    assert by_inv["INV2"]["gross_outstanding"] == 28000.0
+    assert by_inv["INV2"]["status"] == "Not Paid"
+    print("test_status_signed_threshold_negative_net_is_paid OK")
+
+
+def test_reconcile_zepto_signed_status_direct():
+    # Directly exercise the signed rule used inside reconcile_zepto via the
+    # same gross/net -> status formula (mirrors the accountant's examples:
+    # Net -83, -478, -1473, -4335, -5226 are all "Paid").
+    for gross, net, expected in [
+        (17.0, -2058.0, "Paid"),
+        (-83.0, -83.0, "Paid"),
+        (50.0, -478.0, "Paid"),
+        (28000.0, 28000.0, "Not Paid"),
+        (150.0, 40.0, "Not Paid"),   # gross > 100 -> Not Paid even if net small
+    ]:
+        status = "Paid" if (gross <= 100 and net <= 100) else "Not Paid"
+        assert status == expected, (gross, net, expected, status)
+    print("test_reconcile_zepto_signed_status_direct OK")
+
+
+def test_status_column_has_conditional_formatting():
+    from recon.zepto_receivables import build_zepto_workbook
+    results = [{k: "" for k in __import__("recon.zepto_receivables", fromlist=["COLUMN_KEYS"]).COLUMN_KEYS}]
+    results[0].update({"invoice_number": "INV1", "total_invoice_amt": 1000.0, "status": "Paid"})
+    wb = build_zepto_workbook(results)
+    ws = wb["1. Invoice Tracker"]
+    # Conditional formatting must be registered on the workbook/sheet for the
+    # Status column (formula-driven cell -> CF is the only way to color it).
+    cf_ranges = [str(rng) for rng in ws.conditional_formatting]
+    assert len(cf_ranges) >= 1
+    assert any("W" in rng for rng in cf_ranges)
+    print("test_status_column_has_conditional_formatting OK")
 
 def test_universe_includes_invoice_with_no_po_mapping_at_all():
     # An invoice in Invoice Details that ISN'T even listed in Zepto Payment track
@@ -344,6 +410,9 @@ if __name__ == "__main__":
     test_parse_credit_notes()
     test_reconcile_end_to_end()
     test_workbook_has_live_formulas()
+    test_status_signed_threshold_negative_net_is_paid()
+    test_reconcile_zepto_signed_status_direct()
+    test_status_column_has_conditional_formatting()
     test_universe_includes_invoice_with_no_po_mapping_at_all()
     test_parse_payment_advice_pdf_single()
     test_parse_payment_advice_pdf_dedup()

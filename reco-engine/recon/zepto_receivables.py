@@ -453,7 +453,10 @@ def reconcile_zepto(files: dict) -> list[dict]:
         net = gross + row["debit_note_issued"]
         row["gross_outstanding"] = round(gross, 2)
         row["net_outstanding"] = round(net, 2)
-        row["status"] = "Paid" if (abs(gross) <= 100 and abs(net) <= 100) else "Not Paid"
+        # Signed threshold (NOT abs()): a negative Gross/Net Outstanding means
+        # the vendor owes Zepto less than paid (e.g. a debit note), which the
+        # accountant's reference sheet treats as settled/"Paid" too.
+        row["status"] = "Paid" if (gross <= 100 and net <= 100) else "Not Paid"
         results.append(row)
     return results
 
@@ -485,21 +488,50 @@ _MONEY_KEYS = {"total_invoice_amt","tax","invoice_amt_excl_tax","pending_amount"
     "payment_received_incl_tds","payment_received_excl_tds","tds","debit_note_issued",
     "credit_note_issued","gross_outstanding","net_outstanding"}
 
+# Per-column widths for "1. Invoice Tracker" — wider for names/refs/GSTIN,
+# tighter for money/date/status columns. Keyed by COLUMN_KEYS.
+_COLUMN_WIDTHS = {
+    "po": 14, "date": 12, "invoice_number": 20, "sales_order_no": 20, "name": 30,
+    "total_invoice_amt": 15, "tax": 12, "invoice_amt_excl_tax": 16,
+    "place_of_supply": 12, "gstin": 18, "billing_state": 14, "shipping_state": 14,
+    "pending_amount": 14, "payment_received_incl_tds": 16, "payment_received_excl_tds": 16,
+    "tds": 11, "debit_note_issued": 14, "dn_accepted": 12, "dn_not_accepted": 12,
+    "credit_note_issued": 14, "gross_outstanding": 15, "net_outstanding": 15,
+    "status": 12, "grn_no": 14, "grn_date": 12, "invoice_not_in_ledger": 16,
+    "pod_no": 12, "pod_date": 12, "payment_date": 12,
+}
+
+# Paid/Not-Paid conditional formatting palette (finance-report standard).
+_PAID_FILL_HEX = "C6EFCE"
+_PAID_FONT_HEX = "006100"
+_NOTPAID_FILL_HEX = "FFC7CE"
+_NOTPAID_FONT_HEX = "9C0006"
+
+
+_KEY_TOTAL_LABELS = {"Net Sales", "Net Receivables"}
+
 
 def build_summary_sheet(wb, results: list[dict]):
     """Add a `Summary` worksheet: auto-computed totals + blank-for-manual lines."""
-    from openpyxl.styles import Font, PatternFill, Alignment
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 
     ws = wb.create_sheet(title="Summary")
+    thin = Side(style="thin", color="D9D9D9")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+
     title_font = Font(bold=True, size=13, color="123C69")
     hdr_font = Font(bold=True, size=10, color="FFFFFF")
-    hdr_fill = PatternFill("solid", fgColor="123C69")
+    hdr_fill = PatternFill("solid", fgColor="1F3864")
     label_font = Font(bold=False, size=10)
+    key_total_font = Font(bold=True, size=10, color="123C69")
+    manual_fill = PatternFill("solid", fgColor="F2F2F2")
     money_fmt = "#,##0.00"
 
     ws["A1"] = "Zepto Receivable Summary"
     ws["A1"].font = title_font
+    ws["A1"].alignment = Alignment(horizontal="left", vertical="center")
     ws.merge_cells("A1:C1")
+    ws.row_dimensions[1].height = 22
 
     ws.append([])   # row 2 blank spacer
     ws.append(["Particular", "Amount", "Remarks"])
@@ -507,7 +539,9 @@ def build_summary_sheet(wb, results: list[dict]):
         c = ws.cell(row=3, column=col)
         c.font = hdr_font
         c.fill = hdr_fill
-        c.alignment = Alignment(horizontal="center", vertical="center")
+        c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        c.border = border
+    ws.row_dimensions[3].height = 20
 
     sales_incl_tax = sum(_to_float(r.get("total_invoice_amt", 0)) for r in results)
     sale_return = sum(_to_float(r.get("credit_note_issued", 0)) for r in results)
@@ -538,34 +572,52 @@ def build_summary_sheet(wb, results: list[dict]):
 
     r = 4
     for label, amount, remark in auto_rows:
-        ws.cell(row=r, column=1, value=label).font = label_font
+        is_key = label in _KEY_TOTAL_LABELS
+        row_font = key_total_font if is_key else label_font
+        ws.cell(row=r, column=1, value=label).font = row_font
         amt_cell = ws.cell(row=r, column=2, value=amount)
         amt_cell.number_format = money_fmt
-        ws.cell(row=r, column=3, value=remark)
+        amt_cell.font = row_font
+        amt_cell.alignment = Alignment(horizontal="right")
+        remark_cell = ws.cell(row=r, column=3, value=remark)
+        remark_cell.font = Font(italic=True, size=9, color="595959")
+        for col in (1, 2, 3):
+            ws.cell(row=r, column=col).border = border
         r += 1
 
     for label, _blank in manual_rows:
         ws.cell(row=r, column=1, value=label).font = label_font
-        ws.cell(row=r, column=2, value=None).number_format = money_fmt
-        ws.cell(row=r, column=3, value="Manual entry")
+        amt_cell = ws.cell(row=r, column=2, value=None)
+        amt_cell.number_format = money_fmt
+        amt_cell.alignment = Alignment(horizontal="right")
+        ws.cell(row=r, column=3, value="Manual entry").font = Font(italic=True, size=9, color="595959")
+        for col in (1, 2, 3):
+            cell = ws.cell(row=r, column=col)
+            cell.fill = manual_fill
+            cell.border = border
         r += 1
 
     ws.column_dimensions["A"].width = 45
     ws.column_dimensions["B"].width = 20
-    ws.column_dimensions["C"].width = 40
+    ws.column_dimensions["C"].width = 45
+    ws.freeze_panes = "A4"
     return ws
 
 
 def build_zepto_workbook(results: list[dict], payload: dict | None = None):
     from openpyxl import Workbook
     from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    from openpyxl.formatting.rule import CellIsRule
     wb = Workbook()
     ws = wb.active
     ws.title = "1. Invoice Tracker"
     thin = Side(style="thin", color="D9D9D9")
     border = Border(left=thin, right=thin, top=thin, bottom=thin)
     hdr_font = Font(bold=True, size=10, color="FFFFFF")
-    hdr_fill = PatternFill("solid", fgColor="123C69")
+    hdr_fill = PatternFill("solid", fgColor="1F3864")
+    group_font = Font(bold=True, size=9, color="123C69")
+    group_fill = PatternFill("solid", fgColor="D9E2F3")
+    zebra_fill = PatternFill("solid", fgColor="F5F7FA")
 
     # Row 1: source-group labels (merged)
     # NEW PO-first layout: PO(A) + From Tally(B-L) | Pending(M, formula) |
@@ -578,8 +630,10 @@ def build_zepto_workbook(results: list[dict], payload: dict | None = None):
     for label, c1, c2 in groups:
         ws.merge_cells(f"{c1}1:{c2}1")
         cell = ws[f"{c1}1"]; cell.value = label
-        cell.font = Font(bold=True, size=9, color="123C69")
-        cell.alignment = Alignment(horizontal="center")
+        cell.font = group_font
+        cell.fill = group_fill
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+    ws.row_dimensions[1].height = 18
 
     # Row 2: column headers
     ws.append(_HEADERS)
@@ -587,10 +641,12 @@ def build_zepto_workbook(results: list[dict], payload: dict | None = None):
         c = ws.cell(row=2, column=i)
         c.font = hdr_font; c.fill = hdr_fill; c.border = border
         c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    ws.row_dimensions[2].height = 30
 
     # Data rows from row 3
     for idx, row in enumerate(results):
         r = idx + 3
+        row_fill = zebra_fill if idx % 2 == 1 else None
         for col_i, key in enumerate(COLUMN_KEYS, start=1):
             letter = _LETTERS[col_i - 1]
             if key == "pending_amount":
@@ -603,7 +659,7 @@ def build_zepto_workbook(results: list[dict], payload: dict | None = None):
                 if row.get("invoice_not_in_ledger"):
                     val = row.get("status", "")
                 else:
-                    val = f'=IF(AND(ABS(U{r})<=100,ABS(V{r})<=100),"Paid","Not Paid")'
+                    val = f'=IF(AND(U{r}<=100,V{r}<=100),"Paid","Not Paid")'
             else:
                 val = row.get(key, "")
                 if val == "" and key in _MONEY_KEYS:
@@ -612,11 +668,38 @@ def build_zepto_workbook(results: list[dict], payload: dict | None = None):
             c.border = border
             if key in _MONEY_KEYS or key in _FORMULA_COLS - {"status"}:
                 c.number_format = "#,##0.00"
+                c.alignment = Alignment(horizontal="right")
+            elif key == "status":
+                c.alignment = Alignment(horizontal="center")
+            if row_fill is not None:
+                c.fill = row_fill
 
-    # Column widths
-    for i, _ in enumerate(_HEADERS, start=1):
-        ws.column_dimensions[_LETTERS[i - 1]].width = 16
-    ws.freeze_panes = "A3"
+    last_row = len(results) + 2   # last data row (header is row 2, data starts row 3)
+
+    # Column widths — wider for names/refs/GSTIN, tighter for money/status.
+    for col_i, key in enumerate(COLUMN_KEYS, start=1):
+        ws.column_dimensions[_LETTERS[col_i - 1]].width = _COLUMN_WIDTHS.get(key, 16)
+
+    # Conditional formatting on the Status column (formula-driven cell, so
+    # color must be applied via CF rules rather than a static fill).
+    if last_row >= 3:
+        status_range = f"W3:W{last_row}"
+        paid_rule = CellIsRule(
+            operator="equal", formula=['"Paid"'],
+            fill=PatternFill("solid", fgColor=_PAID_FILL_HEX),
+            font=Font(color=_PAID_FONT_HEX, bold=True),
+        )
+        not_paid_rule = CellIsRule(
+            operator="equal", formula=['"Not Paid"'],
+            fill=PatternFill("solid", fgColor=_NOTPAID_FILL_HEX),
+            font=Font(color=_NOTPAID_FONT_HEX, bold=True),
+        )
+        ws.conditional_formatting.add(status_range, paid_rule)
+        ws.conditional_formatting.add(status_range, not_paid_rule)
+
+    # Freeze header rows (1-2) + PO/Date/Invoice/Sales-Order columns (A-D)
+    # so key identifiers stay visible when scrolling right/down.
+    ws.freeze_panes = "E3"
 
     build_summary_sheet(wb, results)
     return wb
