@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const multer = require('multer');
 const { authenticateToken, authorize } = require('../middleware/authMiddleware');
-const { runReco, exportReco, openInSheets, checkHealth, getLedgerStatus, deleteRecoJob } = require('../controllers/recoController');
+const { runReco, exportReco, openInSheets, checkHealth, getLedgerStatus, deleteRecoJob, detectZeptoFiles } = require('../controllers/recoController');
 
 // In-memory storage — files forwarded directly to Python
 const upload = multer({
@@ -69,5 +69,8 @@ router.delete(
   flexibleAuthorize,
   deleteRecoJob
 );
+
+// Preview — scan a Zepto Drive folder and return classified file counts (no download)
+router.post('/reco/detect-files', flexibleAuth, flexibleAuthorize, detectZeptoFiles);
 
 module.exports = router;

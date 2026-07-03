@@ -25,6 +25,7 @@ const MAX_CONCURRENT_RECO = parseInt(process.env.MAX_CONCURRENT_RECO || '8', 10)
 
 const { loadCorrectionMap, normalizeNarration } = require('./bankCorrectionsController');
 const drive = require('../services/driveService');
+const zeptoDrive = require('../services/zeptoDrive');
 
 // jobId → Google Sheet URL, so repeat "Open in Sheets" clicks reuse one Sheet.
 const _sheetUrlCache = new Map();
@@ -410,6 +411,7 @@ const RECO_TYPE_MAP = {
   'gstr_3b_tally_entry': 'gstr_3b_tally_entry',
   'gstr_1_vs_books': 'gstr_1_vs_books',
   'gstr_2b_books_multistate': 'gstr_2b_books_multistate', // multi-state variant
+  'zepto_receivables': 'zepto_receivables',
 };
 
 /**
@@ -1243,4 +1245,21 @@ const deleteRecoJob = async (req, res) => {
   }
 };
 
-module.exports = { runReco, exportReco, openInSheets, checkHealth, getLedgerStatus, deleteRecoJob };
+// POST /api/reco/detect-files  { folder_url }
+// Scans a Zepto Drive folder and returns classified file counts (preview only — no download).
+async function detectZeptoFiles(req, res) {
+  try {
+    const folderUrl = req.body.folder_url || req.body.folderLink;
+    if (!folderUrl) return res.status(400).json({ error: 'folder_url is required' });
+    const { counts, ignored, files } = await zeptoDrive.collectZeptoFiles(folderUrl);
+    res.json({
+      counts,
+      ignored: ignored.map(f => f.name),
+      files: files.map(f => ({ name: f.name, type: f.type })),
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message || 'Failed to scan Drive folder' });
+  }
+}
+
+module.exports = { runReco, exportReco, openInSheets, checkHealth, getLedgerStatus, deleteRecoJob, detectZeptoFiles };
