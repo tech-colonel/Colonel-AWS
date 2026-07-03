@@ -360,7 +360,7 @@ def parse_credit_notes(data: bytes) -> dict[str, float]:
 
 
 COLUMN_KEYS = [
-    "date","invoice_number","sales_order_no","name","total_invoice_amt","tax",
+    "po","date","invoice_number","sales_order_no","name","total_invoice_amt","tax",
     "invoice_amt_excl_tax","place_of_supply","gstin","billing_state","shipping_state",
     "pending_amount","payment_received_incl_tds","payment_received_excl_tds","tds",
     "debit_note_issued","dn_accepted","dn_not_accepted","credit_note_issued",
@@ -387,33 +387,41 @@ def _many(files: dict, field: str) -> list[bytes]:
 
 
 def reconcile_zepto(files: dict) -> list[dict]:
+    invoice_details = parse_invoice_details(_one(files, "invoice_details") or b"")
     payments_raw = parse_zepto_payment(_one(files, "zepto_payment") or b"")
     grn = parse_grn(_many(files, "grn_list"))
-    invoice_details = parse_invoice_details(_one(files, "invoice_details") or b"")
-    pay_map, dn_map = parse_payment_advice(_many(files, "payment_advice"))
+    pay_map, dn_map = parse_payment_advice_pdf(_many(files, "payment_advice"))
     cn_map = parse_credit_notes(_one(files, "credit_note") or b"")
 
-    kept = grn_gate(payments_raw, grn)
+    # invoice -> PO map from the Zepto Payment track (first PO wins per invoice)
+    inv_to_po: dict[str, str] = {}
+    for p in payments_raw:
+        inv = p.get("invoice_number", "")
+        po = p.get("po", "")
+        if inv and po and inv not in inv_to_po:
+            inv_to_po[inv] = po
+
     results: list[dict] = []
-    for k in kept:
-        inv = k["invoice_number"]
+    for inv, det in invoice_details.items():
         row = {key: "" for key in COLUMN_KEYS}
         row["invoice_number"] = inv
-        det = invoice_details.get(inv)
-        if det:
-            for f in ("date","sales_order_no","name","place_of_supply","gstin","billing_state","shipping_state"):
-                row[f] = det[f]
-            row["total_invoice_amt"] = _to_float(det["total_invoice_amt"])
-            row["tax"] = _to_float(det["tax"])
-            row["invoice_amt_excl_tax"] = _to_float(det["invoice_amt_excl_tax"])
-        else:
-            row["invoice_not_in_ledger"] = "Not found in Invoice Details"
+
+        po = inv_to_po.get(inv, "")
+        row["po"] = po if po and po in grn else ""
+
+        for f in ("date","sales_order_no","name","place_of_supply","gstin","billing_state","shipping_state"):
+            row[f] = det[f]
+        row["total_invoice_amt"] = _to_float(det["total_invoice_amt"])
+        row["tax"] = _to_float(det["tax"])
+        row["invoice_amt_excl_tax"] = _to_float(det["invoice_amt_excl_tax"])
+
         pay = pay_map.get(inv, {})
         row["payment_received_incl_tds"] = round(pay.get("incl", 0.0), 2)
         row["payment_received_excl_tds"] = round(pay.get("excl", 0.0), 2)
         row["tds"] = round(pay.get("tds", 0.0), 2)
         row["debit_note_issued"] = round(dn_map.get(inv, 0.0), 2)
         row["credit_note_issued"] = round(cn_map.get(inv, 0.0), 2)
+
         pending = _to_float(row["total_invoice_amt"])
         row["pending_amount"] = round(pending, 2)
         gross = pending - row["payment_received_incl_tds"]
@@ -421,8 +429,6 @@ def reconcile_zepto(files: dict) -> list[dict]:
         row["gross_outstanding"] = round(gross, 2)
         row["net_outstanding"] = round(net, 2)
         row["status"] = "Paid" if (abs(gross) <= 100 and abs(net) <= 100) else "Not Paid"
-        if row["invoice_not_in_ledger"]:
-            row["status"] = "Invoice Not in Books"
         results.append(row)
     return results
 
@@ -434,13 +440,18 @@ def summarize_zepto(results: list[dict]) -> dict:
         "total": len(results),
         "paid": paid,
         "not_paid": not_paid,
-        "not_in_invoice_details": sum(1 for r in results if r["invoice_not_in_ledger"]),
+        "not_in_invoice_details": 0,
     }
 
 
-# Excel column letters, 1-based, matching COLUMN_KEYS order (A..AB)
-_LETTERS = ["A","B","C","D","E","F","G","H","I","J","K","L","M","N","O","P","Q","R","S","T","U","V","W","X","Y","Z","AA","AB"]
-_HEADERS = ["Date","Invoice_number","Sales Order No.","Name","Total Invoice Amt","Tax",
+# Excel column letters, 1-based, matching COLUMN_KEYS order (A..AC).
+# NOTE: "PO" was prepended in Task 2 (Invoice-Details universe + PO column).
+# The formula strings below (pending/gross/net/status) still reference the
+# PRE-Task-2 (28-col) letter positions — re-pointing them to the shifted
+# columns is Task 3's job ("workbook PO col + shifted formulas"). Kept as-is
+# here so this task stays scoped to reconcile_zepto/COLUMN_KEYS only.
+_LETTERS = ["A","B","C","D","E","F","G","H","I","J","K","L","M","N","O","P","Q","R","S","T","U","V","W","X","Y","Z","AA","AB","AC"]
+_HEADERS = ["PO","Date","Invoice_number","Sales Order No.","Name","Total Invoice Amt","Tax",
     "Invoice Amt (Excl. Tax)","Place of Supply","GSTIN","Billing State","shipping_state",
     "Pending Amount","Payment Received (Including TDS)","Payment Received (Excluding TDS)","TDS",
     "Debit Note Issued","DN Accepted","DN Not Accepted","Credit Note Issued","Gross Outstanding Amt",

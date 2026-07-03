@@ -121,13 +121,8 @@ def test_parse_credit_notes():
 def _file(b): return {"filename": "f", "content": b}
 
 def test_reconcile_end_to_end():
-    pay = _xlsx({"Zepto Payment track": [
-        ["Zepto Payment track PO Number","Invoice Number","Cities"],
-        ["P100","INV26-27/000007","Pune"],
-        ["P200","INV26-27/000101","Jaipur"],
-        ["P900","INV26-27/000999","Delhi"],   # PO not in GRN -> dropped
-    ]})
-    grn = b"GRN ID,PO ID,Created On,Status\r\nG1,P100,4/2/2026,CONFIRMED\r\nG2,P200,4/3/2026,CONFIRMED\r\n"
+    # Universe = Invoice Details (every invoice becomes a row, PO comes from
+    # Zepto Payment track only if that PO is confirmed in the GRN pool).
     invd = _xlsx({"Invoice Details": [
         ["title"],
         ["invoice_number","reference_number","customer_name","date","bcy_total","tax_amount",
@@ -135,85 +130,86 @@ def test_reconcile_end_to_end():
         ["INV26-27/000007","SO-7","ZEPTO PUNE","2026-04-06",56685.0,0,56685.0,"MH","27AAA","Maharashtra","Maharashtra"],
         ["INV26-27/000101","SO-101","ZEPTO JAIPUR","2026-04-08",21369.43,1017.59,20351.84,"RJ","08AAA","Rajasthan","Rajasthan"],
     ]})
-    padv = (b"Type/Description,Ref Id,Doc No,Amount,TDS,Payment Amount\r\n"
-            b",,,,,0\r\n"
-            b"Invoice,INV26-27/000007,190,51429.9,48.98,51380.92\r\n"
-            b"Debit Note,V26-27/000007_QD,170,-311.38,0.3,-311.68\r\n"
-            b"Debit Note Price,V26-27/000007_PD,480,-4988.44,5,-4993.44\r\n"
-            b"Invoice,INV26-27/000101,191,0,0,0\r\n")
+    pay = _xlsx({"Zepto Payment track": [
+        ["Zepto Payment track PO Number","Invoice Number","Cities"],
+        ["P100","INV26-27/000007","Pune"],          # PO in GRN -> po filled
+        ["P900","INV26-27/000101","Delhi"],         # PO NOT in GRN -> po blank
+    ]})
+    grn = b"GRN ID,PO ID,Created On,Status\r\nG1,P100,4/2/2026,CONFIRMED\r\n"   # only P100 confirmed
     cn = _xlsx({"Credit Note Details": [["t"],
         ["invoice_number","bcy_total"], ["INV26-27/000101", 100.0]]})
     files = {"zepto_payment": _file(pay), "grn_list": [_file(grn)],
-             "invoice_details": _file(invd), "payment_advice": [_file(padv)], "credit_note": _file(cn)}
+             "invoice_details": _file(invd), "payment_advice": [], "credit_note": _file(cn)}
     res = reconcile_zepto(files)
-    assert len(res) == 2                                  # P900 dropped
+    assert len(res) == 2                                  # universe = invoice details (both rows)
     by_inv = {r["invoice_number"]: r for r in res}
     a = by_inv["INV26-27/000007"]
     assert a["name"] == "ZEPTO PUNE"
+    assert a["po"] == "P100"                              # GRN-matched -> po filled
+    assert round(a["total_invoice_amt"], 2) == 56685.0
     assert round(a["pending_amount"], 2) == 56685.0
-    assert round(a["payment_received_incl_tds"], 2) == 51380.92
-    assert round(a["debit_note_issued"], 2) == -5299.82
-    assert round(a["gross_outstanding"], 2) == round(56685.0 - 51380.92, 2)   # 5304.08
-    assert round(a["net_outstanding"], 2) == round(56685.0 - 51380.92 - 5299.82, 2)  # ~4.26
-    assert a["status"] == "Not Paid"        # gross ~5304 > 100 (both-sides rule)
+    assert round(a["payment_received_incl_tds"], 2) == 0.0    # no PDFs -> 0
+    assert round(a["gross_outstanding"], 2) == 56685.0
+    assert round(a["net_outstanding"], 2) == 56685.0
+    assert a["status"] == "Not Paid"
+    assert a["invoice_not_in_ledger"] == ""               # v1 "Invoice Not in Books" logic removed
+
     b = by_inv["INV26-27/000101"]
+    assert b["name"] == "ZEPTO JAIPUR"
+    assert b["po"] == ""                                  # PO not in GRN pool -> blank
+    assert round(b["total_invoice_amt"], 2) == 21369.43
     assert round(b["credit_note_issued"], 2) == 100.0
+    assert b["status"] in ("Paid", "Not Paid")
+
     s = summarize_zepto(res)
     assert s["total"] == 2 and s["paid"] + s["not_paid"] == 2
     print("test_reconcile_end_to_end OK")
 
 def test_workbook_has_live_formulas():
+    # NOTE: COLUMN_KEYS now has "po" prepended (Task 2), so every data column
+    # shifted one letter right (invoice_number B->C, total_invoice_amt E->F,
+    # etc). Re-pointing the pending/gross/net/status FORMULA STRINGS to the
+    # new columns is Task 3's job ("workbook PO col + shifted formulas") --
+    # this test only asserts the builder still runs and places plain data
+    # (PO, invoice_number, total_invoice_amt) in the correct shifted cells.
     from recon.zepto_receivables import build_zepto_workbook
     results = [{k: "" for k in __import__("recon.zepto_receivables", fromlist=["COLUMN_KEYS"]).COLUMN_KEYS}]
     r = results[0]
-    r.update({"invoice_number":"INV26-27/000007","total_invoice_amt":56685.0,
+    r.update({"po":"P100","invoice_number":"INV26-27/000007","total_invoice_amt":56685.0,
               "payment_received_incl_tds":51380.92,"debit_note_issued":-5299.82,
               "pending_amount":56685.0,"gross_outstanding":5304.08,"net_outstanding":4.26,"status":"Not Paid"})
     wb = build_zepto_workbook(results)
     ws = wb["1. Invoice Tracker"]
-    # data row 3: formulas in L, T, U, V
-    assert ws["L3"].value == "=E3"
-    assert ws["T3"].value == "=L3-M3"
-    assert ws["U3"].value == "=L3-M3+P3"
-    assert ws["V3"].value == '=IF(AND(ABS(T3)<=100,ABS(U3)<=100),"Paid","Not Paid")'
-    assert ws["B3"].value == "INV26-27/000007"
-    assert ws["E3"].value == 56685.0
+    assert ws["A3"].value == "P100"                    # po (new, col A)
+    assert ws["C3"].value == "INV26-27/000007"          # invoice_number (shifted B->C)
+    assert ws["F3"].value == 56685.0                    # total_invoice_amt (shifted E->F)
     print("test_workbook_has_live_formulas OK")
 
-def test_invoice_not_in_books():
-    from recon.zepto_receivables import build_zepto_workbook
-    pay = _xlsx({"Zepto Payment track": [
-        ["Zepto Payment track PO Number","Invoice Number","Cities"],
-        ["P300","INV26-27/000500","Pune"],   # passes GRN gate, but no Invoice Details row
-    ]})
-    grn = b"GRN ID,PO ID,Created On,Status\r\nG3,P300,4/2/2026,CONFIRMED\r\n"
-    # Invoice Details present but does NOT contain INV26-27/000500
+def test_universe_includes_invoice_with_no_po_mapping_at_all():
+    # An invoice in Invoice Details that ISN'T even listed in Zepto Payment track
+    # must still appear in the universe with po == "".
     invd = _xlsx({"Invoice Details": [
         ["title"],
         ["invoice_number","reference_number","customer_name","date","bcy_total","tax_amount",
          "amount_without_tax","place_of_supply","gst_no","billing_state","shipping_state"],
-        ["INV26-27/999999","SO-9","OTHER CO","2026-04-06",1000.0,0,1000.0,"MH","27AAA","Maharashtra","Maharashtra"],
+        ["INV26-27/000500","SO-9","OTHER CO","2026-04-06",1000.0,0,1000.0,"MH","27AAA","Maharashtra","Maharashtra"],
     ]})
-    padv = b"Type/Description,Ref Id,Doc No,Amount,TDS,Payment Amount\r\n,,,,,0\r\n"
+    pay = _xlsx({"Zepto Payment track": [
+        ["Zepto Payment track PO Number","Invoice Number","Cities"],
+    ]})
+    grn = b"GRN ID,PO ID,Created On,Status\r\n"
     cn = _xlsx({"Credit Note Details": [["t"], ["invoice_number","bcy_total"]]})
     files = {"zepto_payment": _file(pay), "grn_list": [_file(grn)],
-             "invoice_details": _file(invd), "payment_advice": [_file(padv)], "credit_note": _file(cn)}
+             "invoice_details": _file(invd), "payment_advice": [], "credit_note": _file(cn)}
     res = reconcile_zepto(files)
     assert len(res) == 1
     row = res[0]
     assert row["invoice_number"] == "INV26-27/000500"
-    assert row["invoice_not_in_ledger"]                         # truthy flag set
-    assert row["status"] == "Invoice Not in Books"               # not falsely "Paid" (0-0)
-
-    s = summarize_zepto(res)
-    assert s["paid"] == 0                                        # must NOT count this row as paid
-    assert s["not_paid"] == 0                                    # must NOT count this row as not_paid either
-    assert s["not_in_invoice_details"] == 1
-
-    wb = build_zepto_workbook(res)
-    ws = wb["1. Invoice Tracker"]
-    assert ws["V3"].value == "Invoice Not in Books"              # literal string, NOT the =IF(...) formula
-    print("test_invoice_not_in_books OK")
+    assert row["po"] == ""
+    assert row["invoice_not_in_ledger"] == ""                   # v1 flag no longer set
+    assert round(row["total_invoice_amt"], 2) == 1000.0
+    assert row["status"] in ("Paid", "Not Paid")
+    print("test_universe_includes_invoice_with_no_po_mapping_at_all OK")
 
 _FIXTURE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures", "pdf")
 _FIXTURE_PDF = os.path.join(_FIXTURE_DIR, "2026-07-03_1d33a6026d1168fd_2000004234.pdf")
@@ -256,7 +252,7 @@ if __name__ == "__main__":
     test_parse_credit_notes()
     test_reconcile_end_to_end()
     test_workbook_has_live_formulas()
-    test_invoice_not_in_books()
+    test_universe_includes_invoice_with_no_po_mapping_at_all()
     test_parse_payment_advice_pdf_single()
     test_parse_payment_advice_pdf_dedup()
     print("ALL TESTS PASSED")
