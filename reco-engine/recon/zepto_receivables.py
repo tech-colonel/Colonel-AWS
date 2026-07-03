@@ -290,16 +290,19 @@ def reconcile_zepto(files: dict) -> list[dict]:
         row["gross_outstanding"] = round(gross, 2)
         row["net_outstanding"] = round(net, 2)
         row["status"] = "Paid" if (abs(gross) <= 100 and abs(net) <= 100) else "Not Paid"
+        if row["invoice_not_in_ledger"]:
+            row["status"] = "Invoice Not in Books"
         results.append(row)
     return results
 
 
 def summarize_zepto(results: list[dict]) -> dict:
     paid = sum(1 for r in results if r["status"] == "Paid")
+    not_paid = sum(1 for r in results if r["status"] == "Not Paid")
     return {
         "total": len(results),
         "paid": paid,
-        "not_paid": len(results) - paid,
+        "not_paid": not_paid,
         "not_in_invoice_details": sum(1 for r in results if r["invoice_not_in_ledger"]),
     }
 
@@ -359,7 +362,10 @@ def build_zepto_workbook(results: list[dict], payload: dict | None = None):
             elif key == "net_outstanding":
                 val = f"=L{r}-M{r}+P{r}"
             elif key == "status":
-                val = f'=IF(AND(ABS(T{r})<=100,ABS(U{r})<=100),"Paid","Not Paid")'
+                if row.get("invoice_not_in_ledger"):
+                    val = row.get("status", "")
+                else:
+                    val = f'=IF(AND(ABS(T{r})<=100,ABS(U{r})<=100),"Paid","Not Paid")'
             else:
                 val = row.get(key, "")
                 if val == "" and key in _MONEY_KEYS:

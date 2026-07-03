@@ -180,6 +180,41 @@ def test_workbook_has_live_formulas():
     assert ws["E3"].value == 56685.0
     print("test_workbook_has_live_formulas OK")
 
+def test_invoice_not_in_books():
+    from recon.zepto_receivables import build_zepto_workbook
+    pay = _xlsx({"Zepto Payment track": [
+        ["Zepto Payment track PO Number","Invoice Number","Cities"],
+        ["P300","INV26-27/000500","Pune"],   # passes GRN gate, but no Invoice Details row
+    ]})
+    grn = b"GRN ID,PO ID,Created On,Status\r\nG3,P300,4/2/2026,CONFIRMED\r\n"
+    # Invoice Details present but does NOT contain INV26-27/000500
+    invd = _xlsx({"Invoice Details": [
+        ["title"],
+        ["invoice_number","reference_number","customer_name","date","bcy_total","tax_amount",
+         "amount_without_tax","place_of_supply","gst_no","billing_state","shipping_state"],
+        ["INV26-27/999999","SO-9","OTHER CO","2026-04-06",1000.0,0,1000.0,"MH","27AAA","Maharashtra","Maharashtra"],
+    ]})
+    padv = b"Type/Description,Ref Id,Doc No,Amount,TDS,Payment Amount\r\n,,,,,0\r\n"
+    cn = _xlsx({"Credit Note Details": [["t"], ["invoice_number","bcy_total"]]})
+    files = {"zepto_payment": _file(pay), "grn_list": [_file(grn)],
+             "invoice_details": _file(invd), "payment_advice": [_file(padv)], "credit_note": _file(cn)}
+    res = reconcile_zepto(files)
+    assert len(res) == 1
+    row = res[0]
+    assert row["invoice_number"] == "INV26-27/000500"
+    assert row["invoice_not_in_ledger"]                         # truthy flag set
+    assert row["status"] == "Invoice Not in Books"               # not falsely "Paid" (0-0)
+
+    s = summarize_zepto(res)
+    assert s["paid"] == 0                                        # must NOT count this row as paid
+    assert s["not_paid"] == 0                                    # must NOT count this row as not_paid either
+    assert s["not_in_invoice_details"] == 1
+
+    wb = build_zepto_workbook(res)
+    ws = wb["1. Invoice Tracker"]
+    assert ws["V3"].value == "Invoice Not in Books"              # literal string, NOT the =IF(...) formula
+    print("test_invoice_not_in_books OK")
+
 if __name__ == "__main__":
     test_normalizers_and_dn_transform()
     test_csv_header_detection_and_getter()
@@ -189,4 +224,5 @@ if __name__ == "__main__":
     test_parse_credit_notes()
     test_reconcile_end_to_end()
     test_workbook_has_live_formulas()
+    test_invoice_not_in_books()
     print("ALL TESTS PASSED")
