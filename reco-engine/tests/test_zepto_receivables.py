@@ -244,6 +244,51 @@ def test_parse_payment_advice_pdf_dedup():
     print("test_parse_payment_advice_pdf_dedup OK")
 
 
+def _find_summary_amount(ws, label: str):
+    """Scan column A for `label`; return the value of the adjacent amount cell (col B)."""
+    for row in ws.iter_rows(min_col=1, max_col=1):
+        cell = row[0]
+        if cell.value == label:
+            return ws.cell(row=cell.row, column=2).value
+    raise AssertionError(f"label not found in Summary sheet: {label}")
+
+
+def test_build_zepto_workbook_has_summary_tab():
+    from recon.zepto_receivables import build_zepto_workbook
+
+    def _row(inv, total, cn, dn, tds, incl, net):
+        r = {k: "" for k in __import__("recon.zepto_receivables", fromlist=["COLUMN_KEYS"]).COLUMN_KEYS}
+        r.update({
+            "invoice_number": inv,
+            "total_invoice_amt": total,
+            "credit_note_issued": cn,
+            "debit_note_issued": dn,
+            "tds": tds,
+            "payment_received_incl_tds": incl,
+            "net_outstanding": net,
+            "status": "Not Paid",
+        })
+        return r
+
+    results = [
+        _row("INV1", 56685.0, 100.0, 50.0, 10.0, 40000.0, 16735.0),
+        _row("INV2", 21369.43, 0.0, 0.0, 5.0, 21369.43, 0.0),
+        _row("INV3", 1000.0, 25.0, 0.0, 0.0, 975.0, 0.0),
+    ]
+    wb = build_zepto_workbook(results)
+
+    # Exactly 2 tabs, in order, no stray default "Sheet".
+    assert wb.sheetnames == ["1. Invoice Tracker", "Summary"]
+
+    ws = wb["Summary"]
+    total_sales = sum(r["total_invoice_amt"] for r in results)
+    assert _find_summary_amount(ws, "Sales Including Tax") == total_sales
+
+    # Blank-for-manual line: label present, amount cell empty.
+    assert _find_summary_amount(ws, "Amount Received in Bank") in (None, "")
+    print("test_build_zepto_workbook_has_summary_tab OK")
+
+
 if __name__ == "__main__":
     test_normalizers_and_dn_transform()
     test_csv_header_detection_and_getter()
@@ -256,4 +301,5 @@ if __name__ == "__main__":
     test_universe_includes_invoice_with_no_po_mapping_at_all()
     test_parse_payment_advice_pdf_single()
     test_parse_payment_advice_pdf_dedup()
+    test_build_zepto_workbook_has_summary_tab()
     print("ALL TESTS PASSED")

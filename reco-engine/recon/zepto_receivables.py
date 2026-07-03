@@ -461,6 +461,76 @@ _MONEY_KEYS = {"total_invoice_amt","tax","invoice_amt_excl_tax","pending_amount"
     "credit_note_issued","gross_outstanding","net_outstanding"}
 
 
+def build_summary_sheet(wb, results: list[dict]):
+    """Add a `Summary` worksheet: auto-computed totals + blank-for-manual lines."""
+    from openpyxl.styles import Font, PatternFill, Alignment
+
+    ws = wb.create_sheet(title="Summary")
+    title_font = Font(bold=True, size=13, color="123C69")
+    hdr_font = Font(bold=True, size=10, color="FFFFFF")
+    hdr_fill = PatternFill("solid", fgColor="123C69")
+    label_font = Font(bold=False, size=10)
+    money_fmt = "#,##0.00"
+
+    ws["A1"] = "Zepto Receivable Summary"
+    ws["A1"].font = title_font
+    ws.merge_cells("A1:C1")
+
+    ws.append([])   # row 2 blank spacer
+    ws.append(["Particular", "Amount", "Remarks"])
+    for col in (1, 2, 3):
+        c = ws.cell(row=3, column=col)
+        c.font = hdr_font
+        c.fill = hdr_fill
+        c.alignment = Alignment(horizontal="center", vertical="center")
+
+    sales_incl_tax = sum(_to_float(r.get("total_invoice_amt", 0)) for r in results)
+    sale_return = sum(_to_float(r.get("credit_note_issued", 0)) for r in results)
+    debit_note_issued = sum(_to_float(r.get("debit_note_issued", 0)) for r in results)
+    tds_deducted = sum(_to_float(r.get("tds", 0)) for r in results)
+    payment_received = sum(_to_float(r.get("payment_received_incl_tds", 0)) for r in results)
+    net_sales = sales_incl_tax - sale_return - debit_note_issued
+    receivables = sum(_to_float(r.get("net_outstanding", 0)) for r in results)
+    net_receivables = receivables   # no prior-year adjustment available yet
+
+    auto_rows = [
+        ("Sales Including Tax", round(sales_incl_tax, 2), ""),
+        ("Sale Return (Credit Notes)", round(sale_return, 2), ""),
+        ("Debit Note Issued", round(debit_note_issued, 2), ""),
+        ("TDS Deducted", round(tds_deducted, 2), ""),
+        ("Payment Received (Including TDS)", round(payment_received, 2), ""),
+        ("Net Sales", round(net_sales, 2), "Sales Incl. Tax - Sale Return - Debit Note Issued"),
+        ("Receivables", round(receivables, 2), "Total outstanding (Net Outstanding Amt)"),
+        ("Net Receivables", round(net_receivables, 2), "Receivables (no prior-year adj. available)"),
+    ]
+    manual_rows = [
+        ("Debit Note Accepted", ""),
+        ("Debit Note Not Accepted", ""),
+        ("Amount Received in Bank", ""),
+        ("Expense - PMDDN & AP-AR Adjustment (Marketing)", ""),
+        ("Previous Year Marketing Exp. Invoices", ""),
+    ]
+
+    r = 4
+    for label, amount, remark in auto_rows:
+        ws.cell(row=r, column=1, value=label).font = label_font
+        amt_cell = ws.cell(row=r, column=2, value=amount)
+        amt_cell.number_format = money_fmt
+        ws.cell(row=r, column=3, value=remark)
+        r += 1
+
+    for label, _blank in manual_rows:
+        ws.cell(row=r, column=1, value=label).font = label_font
+        ws.cell(row=r, column=2, value=None).number_format = money_fmt
+        ws.cell(row=r, column=3, value="Manual entry")
+        r += 1
+
+    ws.column_dimensions["A"].width = 45
+    ws.column_dimensions["B"].width = 20
+    ws.column_dimensions["C"].width = 40
+    return ws
+
+
 def build_zepto_workbook(results: list[dict], payload: dict | None = None):
     from openpyxl import Workbook
     from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
@@ -522,4 +592,6 @@ def build_zepto_workbook(results: list[dict], payload: dict | None = None):
     for i, _ in enumerate(_HEADERS, start=1):
         ws.column_dimensions[_LETTERS[i - 1]].width = 16
     ws.freeze_panes = "A3"
+
+    build_summary_sheet(wb, results)
     return wb
