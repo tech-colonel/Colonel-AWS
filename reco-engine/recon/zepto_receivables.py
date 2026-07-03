@@ -302,3 +302,75 @@ def summarize_zepto(results: list[dict]) -> dict:
         "not_paid": len(results) - paid,
         "not_in_invoice_details": sum(1 for r in results if r["invoice_not_in_ledger"]),
     }
+
+
+# Excel column letters, 1-based, matching COLUMN_KEYS order (A..AB)
+_LETTERS = ["A","B","C","D","E","F","G","H","I","J","K","L","M","N","O","P","Q","R","S","T","U","V","W","X","Y","Z","AA","AB"]
+_HEADERS = ["Date","Invoice_number","Sales Order No.","Name","Total Invoice Amt","Tax",
+    "Invoice Amt (Excl. Tax)","Place of Supply","GSTIN","Billing State","shipping_state",
+    "Pending Amount","Payment Received (Including TDS)","Payment Received (Excluding TDS)","TDS",
+    "Debit Note Issued","DN Accepted","DN Not Accepted","Credit Note Issued","Gross Outstanding Amt",
+    "Net Outstanding Amt","Status","GRN No.","GRN Date","Invoice Not Available in Zepto Ledger",
+    "POD No","POD Date","Payment Date"]
+_FORMULA_COLS = {"pending_amount","gross_outstanding","net_outstanding","status"}
+_MONEY_KEYS = {"total_invoice_amt","tax","invoice_amt_excl_tax","pending_amount",
+    "payment_received_incl_tds","payment_received_excl_tds","tds","debit_note_issued",
+    "credit_note_issued","gross_outstanding","net_outstanding"}
+
+
+def build_zepto_workbook(results: list[dict], payload: dict | None = None):
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "1. Invoice Tracker"
+    thin = Side(style="thin", color="D9D9D9")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+    hdr_font = Font(bold=True, size=10, color="FFFFFF")
+    hdr_fill = PatternFill("solid", fgColor="123C69")
+
+    # Row 1: source-group labels (merged)
+    ws.append([""] * len(_HEADERS))
+    groups = [("From Tally","A","K"),("Payment Advice (Zepto Portal)","M","O"),
+              ("From Zepto Ledger / Payment Advice","P","S"),("Computed","T","V"),
+              ("From Zepto Dashboard","W","Y"),("From Courier (Delhivery)","Z","AA")]
+    for label, c1, c2 in groups:
+        ws.merge_cells(f"{c1}1:{c2}1")
+        cell = ws[f"{c1}1"]; cell.value = label
+        cell.font = Font(bold=True, size=9, color="123C69")
+        cell.alignment = Alignment(horizontal="center")
+
+    # Row 2: column headers
+    ws.append(_HEADERS)
+    for i, _ in enumerate(_HEADERS, start=1):
+        c = ws.cell(row=2, column=i)
+        c.font = hdr_font; c.fill = hdr_fill; c.border = border
+        c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+
+    # Data rows from row 3
+    for idx, row in enumerate(results):
+        r = idx + 3
+        for col_i, key in enumerate(COLUMN_KEYS, start=1):
+            letter = _LETTERS[col_i - 1]
+            if key == "pending_amount":
+                val = f"=E{r}"
+            elif key == "gross_outstanding":
+                val = f"=L{r}-M{r}"
+            elif key == "net_outstanding":
+                val = f"=L{r}-M{r}+P{r}"
+            elif key == "status":
+                val = f'=IF(AND(ABS(T{r})<=100,ABS(U{r})<=100),"Paid","Not Paid")'
+            else:
+                val = row.get(key, "")
+                if val == "" and key in _MONEY_KEYS:
+                    val = 0
+            c = ws.cell(row=r, column=col_i, value=val)
+            c.border = border
+            if key in _MONEY_KEYS or key in _FORMULA_COLS - {"status"}:
+                c.number_format = "#,##0.00"
+
+    # Column widths
+    for i, _ in enumerate(_HEADERS, start=1):
+        ws.column_dimensions[_LETTERS[i - 1]].width = 16
+    ws.freeze_panes = "A3"
+    return wb

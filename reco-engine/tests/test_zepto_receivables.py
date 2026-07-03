@@ -162,6 +162,24 @@ def test_reconcile_end_to_end():
     assert s["total"] == 2 and s["paid"] + s["not_paid"] == 2
     print("test_reconcile_end_to_end OK")
 
+def test_workbook_has_live_formulas():
+    from recon.zepto_receivables import build_zepto_workbook
+    results = [{k: "" for k in __import__("recon.zepto_receivables", fromlist=["COLUMN_KEYS"]).COLUMN_KEYS}]
+    r = results[0]
+    r.update({"invoice_number":"INV26-27/000007","total_invoice_amt":56685.0,
+              "payment_received_incl_tds":51380.92,"debit_note_issued":-5299.82,
+              "pending_amount":56685.0,"gross_outstanding":5304.08,"net_outstanding":4.26,"status":"Not Paid"})
+    wb = build_zepto_workbook(results)
+    ws = wb["1. Invoice Tracker"]
+    # data row 3: formulas in L, T, U, V
+    assert ws["L3"].value == "=E3"
+    assert ws["T3"].value == "=L3-M3"
+    assert ws["U3"].value == "=L3-M3+P3"
+    assert ws["V3"].value == '=IF(AND(ABS(T3)<=100,ABS(U3)<=100),"Paid","Not Paid")'
+    assert ws["B3"].value == "INV26-27/000007"
+    assert ws["E3"].value == 56685.0
+    print("test_workbook_has_live_formulas OK")
+
 if __name__ == "__main__":
     test_normalizers_and_dn_transform()
     test_csv_header_detection_and_getter()
@@ -170,4 +188,5 @@ if __name__ == "__main__":
     test_parse_payment_advice()
     test_parse_credit_notes()
     test_reconcile_end_to_end()
+    test_workbook_has_live_formulas()
     print("ALL TESTS PASSED")
