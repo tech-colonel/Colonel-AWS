@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import csv
 import io
+import re
 from io import BytesIO
 from typing import Any
 
@@ -213,6 +214,150 @@ def parse_payment_advice(datas: list[bytes]) -> tuple[dict, dict]:
                 if not inv:
                     continue
                 debit_notes[inv] = debit_notes.get(inv, 0.0) + _to_float(_get(r, ["Amount"]))
+    return payments, debit_notes
+
+
+_HEADER_RE = {
+    "ref_no": re.compile(r"Payment Ref No\.?\s*([^\n]+)"),
+    "doc": re.compile(r"Payment Doc\s*([^\n]+)"),
+}
+
+# fallback line-item regex for when table extraction yields nothing usable, e.g.:
+# "1428 Invoice Payment 1901333067 119,767.53 INR 114.06 119,653.47"
+_LINE_ITEM_RE = re.compile(
+    r"^\s*\d+\s+(Invoice Payment|Invoice|Debit Note(?:\s+\w+)?)\s+(\S+)\s+"
+    r"([\d,]+\.?\d*)\s+([A-Z]{3})\s+([\d,]+\.?\d*)\s+([\d,]+\.?\d*)\s*$"
+)
+
+
+def _parse_header_fields(text: str) -> tuple[str, str, str]:
+    ref_m = _HEADER_RE["ref_no"].search(text)
+    doc_m = _HEADER_RE["doc"].search(text)
+    # "Amount" header line looks like "Amount 381,403.44" and precedes the
+    # amount-in-words line; the table's "Payment Amt." column has a different label.
+    amt_m = re.search(r"^Amount\s+([\d,]+\.\d{2}|[\d,]+)\s*$", text, re.MULTILINE)
+    ref_no = ref_m.group(1).strip() if ref_m else ""
+    doc = doc_m.group(1).strip() if doc_m else ""
+    amount = amt_m.group(1).strip() if amt_m else ""
+    return ref_no, doc, amount
+
+
+def _clean_ref_doc(cell: Any) -> str:
+    return re.sub(r"\s+", "", str(cell or ""))
+
+
+def _find_table_header_row(table: list[list]) -> int | None:
+    for i, row in enumerate(table):
+        keys = {_norm_key(c) for c in row if c}
+        if any("refdoc" in k for k in keys) and any("paymentamt" in k for k in keys):
+            return i
+    return None
+
+
+def _apply_line_item(payments: dict, debit_notes: dict, typ: str, ref_doc: str,
+                      amount: float, tds: float, payment_amt: float) -> None:
+    typ_l = typ.strip().lower()
+    if typ_l.startswith("invoice"):
+        inv = norm_inv(ref_doc)
+        if not inv:
+            return
+        acc = payments.setdefault(inv, {"incl": 0.0, "excl": 0.0, "tds": 0.0})
+        acc["incl"] += payment_amt
+        acc["excl"] += amount
+        acc["tds"] += tds
+    elif typ_l.startswith("debit note"):
+        inv = dn_ref_to_invoice(ref_doc)
+        if not inv:
+            return
+        debit_notes[inv] = debit_notes.get(inv, 0.0) + amount
+
+
+def _extract_line_items_from_table(table: list[list], payments: dict, debit_notes: dict) -> bool:
+    header_idx = _find_table_header_row(table)
+    if header_idx is None:
+        return False
+    header = [_clean(c) for c in table[header_idx]]
+    col_idx = {_norm_key(h): i for i, h in enumerate(header) if h}
+
+    def _col(row: list, *aliases: str):
+        for a in aliases:
+            i = col_idx.get(_norm_key(a))
+            if i is not None and i < len(row):
+                return row[i]
+        return ""
+
+    found_any = False
+    for row in table[header_idx + 1:]:
+        if all(_clean(c) == "" for c in row):
+            continue
+        typ = _clean(_col(row, "Type of Document", "Type"))
+        if not typ:
+            continue
+        ref_doc = _clean_ref_doc(_col(row, "Ref Doc"))
+        amount = _to_float(_col(row, "Amount"))
+        tds = _to_float(_col(row, "TDS"))
+        payment_amt = _to_float(_col(row, "Payment Amt.", "Payment Amt"))
+        _apply_line_item(payments, debit_notes, typ, ref_doc, amount, tds, payment_amt)
+        found_any = True
+    return found_any
+
+
+def _extract_line_items_from_text(text: str, payments: dict, debit_notes: dict) -> None:
+    # Real PDFs wrap the "Ref Doc" cell onto its own line, e.g.:
+    #   1428 Invoice Payment 1901333067 119,767.53 INR 114.06 119,653.47
+    #   INV25-26/001
+    #   463
+    # We scan lines for the numeric pattern, then look at the following
+    # line(s) for the wrapped Ref Doc if it's not embedded inline.
+    lines = text.split("\n")
+    for i, line in enumerate(lines):
+        m = _LINE_ITEM_RE.match(line.strip())
+        if not m:
+            continue
+        typ, ref_doc, amount_s, _ccy, tds_s, pay_amt_s = m.groups()
+        ref_doc = _clean_ref_doc(ref_doc)
+        # Ref Doc may continue wrapping on the next line(s) if it wasn't
+        # fully captured inline (e.g. split across 2 lines before the numbers).
+        amount = _to_float(amount_s)
+        tds = _to_float(tds_s)
+        payment_amt = _to_float(pay_amt_s)
+        _apply_line_item(payments, debit_notes, typ, ref_doc, amount, tds, payment_amt)
+
+
+def parse_payment_advice_pdf(pdf_bytes_list: list[bytes]) -> tuple[dict, dict]:
+    """Parse Zepto PDF payment-advice files with PDF-level header dedup.
+
+    Returns (payments, debit_notes) in the same shape as `parse_payment_advice`.
+    A whole PDF is skipped if its header triple (Payment Ref No., Payment Doc,
+    Amount) was already seen — this prevents double-counting duplicate uploads.
+    """
+    import pdfplumber
+
+    payments: dict[str, dict] = {}
+    debit_notes: dict[str, float] = {}
+    seen: set[tuple[str, str, str]] = set()
+
+    for pdf_bytes in pdf_bytes_list:
+        with pdfplumber.open(BytesIO(pdf_bytes)) as pdf:
+            if not pdf.pages:
+                continue
+            first_text = pdf.pages[0].extract_text() or ""
+            ref_no, doc, amount = _parse_header_fields(first_text)
+            triple = (ref_no, doc, amount)
+            if ref_no and doc and triple in seen:
+                continue   # duplicate PDF — skip entirely
+            if ref_no and doc:
+                seen.add(triple)
+
+            for page in pdf.pages:
+                text = page.extract_text() or ""
+                extracted_any = False
+                for table in page.extract_tables():
+                    if _extract_line_items_from_table(table, payments, debit_notes):
+                        extracted_any = True
+                if not extracted_any:
+                    _extract_line_items_from_text(text, payments, debit_notes)
+
     return payments, debit_notes
 
 

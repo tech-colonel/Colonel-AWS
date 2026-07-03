@@ -215,6 +215,38 @@ def test_invoice_not_in_books():
     assert ws["V3"].value == "Invoice Not in Books"              # literal string, NOT the =IF(...) formula
     print("test_invoice_not_in_books OK")
 
+_FIXTURE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures", "pdf")
+_FIXTURE_PDF = os.path.join(_FIXTURE_DIR, "2026-07-03_1d33a6026d1168fd_2000004234.pdf")
+
+
+def _read_fixture_pdf() -> bytes:
+    with open(_FIXTURE_PDF, "rb") as f:
+        return f.read()
+
+
+def test_parse_payment_advice_pdf_single():
+    from recon.zepto_receivables import parse_payment_advice_pdf
+    pdf_bytes = _read_fixture_pdf()
+    payments, debit_notes = parse_payment_advice_pdf([pdf_bytes])
+    inv = payments["INV25-26/001463"]
+    assert round(inv["excl"], 2) == 119767.53
+    assert round(inv["tds"], 2) == 114.06
+    assert round(inv["incl"], 2) == 119653.47
+    print("test_parse_payment_advice_pdf_single OK")
+
+
+def test_parse_payment_advice_pdf_dedup():
+    from recon.zepto_receivables import parse_payment_advice_pdf
+    pdf_bytes = _read_fixture_pdf()
+    # Same PDF fed twice (e.g. re-uploaded / duplicate in Drive folder) must NOT double-count.
+    payments, debit_notes = parse_payment_advice_pdf([pdf_bytes, pdf_bytes])
+    inv = payments["INV25-26/001463"]
+    assert round(inv["incl"], 2) == 119653.47
+    assert round(inv["excl"], 2) == 119767.53
+    assert round(inv["tds"], 2) == 114.06
+    print("test_parse_payment_advice_pdf_dedup OK")
+
+
 if __name__ == "__main__":
     test_normalizers_and_dn_transform()
     test_csv_header_detection_and_getter()
@@ -225,4 +257,6 @@ if __name__ == "__main__":
     test_reconcile_end_to_end()
     test_workbook_has_live_formulas()
     test_invoice_not_in_books()
+    test_parse_payment_advice_pdf_single()
+    test_parse_payment_advice_pdf_dedup()
     print("ALL TESTS PASSED")
