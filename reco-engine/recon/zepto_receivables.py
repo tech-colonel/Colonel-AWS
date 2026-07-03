@@ -246,14 +246,6 @@ def _clean_ref_doc(cell: Any) -> str:
     return re.sub(r"\s+", "", str(cell or ""))
 
 
-def _find_table_header_row(table: list[list]) -> int | None:
-    for i, row in enumerate(table):
-        keys = {_norm_key(c) for c in row if c}
-        if any("refdoc" in k for k in keys) and any("paymentamt" in k for k in keys):
-            return i
-    return None
-
-
 def _apply_line_item(payments: dict, debit_notes: dict, typ: str, ref_doc: str,
                       amount: float, tds: float, payment_amt: float) -> None:
     typ_l = typ.strip().lower()
@@ -272,42 +264,60 @@ def _apply_line_item(payments: dict, debit_notes: dict, typ: str, ref_doc: str,
         debit_notes[inv] = debit_notes.get(inv, 0.0) + amount
 
 
+def _is_data_row_type(typ: str) -> bool:
+    """True for recognized document types we route (invoice / debit note)."""
+    t = typ.strip().lower()
+    return t.startswith("invoice") or t.startswith("debit note")
+
+
 def _extract_line_items_from_table(table: list[list], payments: dict, debit_notes: dict) -> bool:
-    header_idx = _find_table_header_row(table)
-    if header_idx is None:
-        return False
-    header = [_clean(c) for c in table[header_idx]]
-    col_idx = {_norm_key(h): i for i, h in enumerate(header) if h}
+    """Shape-based row extraction — does NOT require a header row on the page.
 
-    def _col(row: list, *aliases: str):
-        for a in aliases:
-            i = col_idx.get(_norm_key(a))
-            if i is not None and i < len(row):
-                return row[i]
-        return ""
-
+    A row is a DATA row iff it has >= 8 cells and col[1] (Type of Document) is
+    a recognized type (invoice / debit note), matched case-insensitively.
+    This works uniformly on page 1 (which also has header/title rows to skip)
+    and continuation pages (which have data rows only, no header at all).
+    """
     found_any = False
-    for row in table[header_idx + 1:]:
-        if all(_clean(c) == "" for c in row):
+    for row in table:
+        if len(row) < 8:
             continue
-        typ = _clean(_col(row, "Type of Document", "Type"))
-        if not typ:
+        typ = _clean(row[1])
+        if not typ or _norm_key(typ) == _norm_key("Type of Document"):
             continue
-        ref_doc = _clean_ref_doc(_col(row, "Ref Doc"))
-        amount = _to_float(_col(row, "Amount"))
-        tds = _to_float(_col(row, "TDS"))
-        payment_amt = _to_float(_col(row, "Payment Amt.", "Payment Amt"))
+        if not _is_data_row_type(typ):
+            # Recognized-but-unrouted types (e.g. "Credit Memo") or letterhead/
+            # junk rows — skip silently, never crash.
+            continue
+        ref_doc = _clean_ref_doc(row[3])
+        amount = _to_float(row[4])
+        tds = _to_float(row[6])
+        payment_amt = _to_float(row[7])
         _apply_line_item(payments, debit_notes, typ, ref_doc, amount, tds, payment_amt)
         found_any = True
     return found_any
 
 
-def _extract_line_items_from_text(text: str, payments: dict, debit_notes: dict, filename: str = None) -> None:
-    # FAILFAST: text-fallback parsing is not supported because it can mis-key rows
-    # (interpreting wrapped invoice number as Doc No, producing silently-wrong results).
-    # Real PDFs ALWAYS have extractable tables. If we hit this, it's a corrupted or
-    # unusual file format that must not silently produce bad data.
-    raise ValueError("Payment-advice PDF has no extractable table; text-fallback parsing is not supported. File: " + (filename or "<unknown>"))
+def _extract_line_items_from_text(text: str, payments: dict, debit_notes: dict, filename: str = None) -> bool:
+    # Last-resort fallback only: the shape-based table extraction in
+    # `_extract_line_items_from_table` handles both header and header-less
+    # (multi-page continuation) pages on its own. This text-regex path is not
+    # relied upon for normal PDFs and must NEVER raise for the multi-page
+    # case — it simply reports whether it found anything so the caller can
+    # decide, at the whole-PDF level, whether parsing genuinely failed.
+    found_any = False
+    for line in text.splitlines():
+        m = _LINE_ITEM_RE.match(line)
+        if not m:
+            continue
+        typ, ref_doc_raw, amount_s, _ccy, tds_s, payment_amt_s = m.groups()
+        if not _is_data_row_type(typ):
+            continue
+        ref_doc = _clean_ref_doc(ref_doc_raw)
+        _apply_line_item(payments, debit_notes, typ, ref_doc,
+                          _to_float(amount_s), _to_float(tds_s), _to_float(payment_amt_s))
+        found_any = True
+    return found_any
 
 
 def parse_payment_advice_pdf(pdf_bytes_list: list[bytes]) -> tuple[dict, dict]:
@@ -335,14 +345,25 @@ def parse_payment_advice_pdf(pdf_bytes_list: list[bytes]) -> tuple[dict, dict]:
             if ref_no and doc:
                 seen.add(triple)
 
+            # Shape-based extraction across ALL pages — header row is only
+            # ever present (if at all) on page 1; continuation pages have
+            # data rows with no header. A PDF is only unparseable if NOT ONE
+            # recognized data row was found anywhere in it.
+            pdf_found_any = False
             for page in pdf.pages:
-                text = page.extract_text() or ""
-                extracted_any = False
                 for table in page.extract_tables():
                     if _extract_line_items_from_table(table, payments, debit_notes):
-                        extracted_any = True
-                if not extracted_any:
-                    _extract_line_items_from_text(text, payments, debit_notes)
+                        pdf_found_any = True
+                if not pdf_found_any:
+                    text = page.extract_text() or ""
+                    if _extract_line_items_from_text(text, payments, debit_notes):
+                        pdf_found_any = True
+
+            if not pdf_found_any:
+                raise ValueError(
+                    "Payment-advice PDF has no extractable data rows; genuinely "
+                    "unparseable file. Payment Doc: " + (doc or "<unknown>")
+                )
 
     return payments, debit_notes
 

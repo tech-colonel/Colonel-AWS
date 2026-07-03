@@ -244,6 +244,30 @@ def test_parse_payment_advice_pdf_dedup():
     print("test_parse_payment_advice_pdf_dedup OK")
 
 
+_FIXTURE_DIR_ALL = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures", "pdf_all")
+_FIXTURE_PDF_MULTIPAGE = os.path.join(_FIXTURE_DIR_ALL, "06_Payment_Advice_2000017788.PDF")
+
+
+def test_parse_payment_advice_pdf_multipage():
+    # 06_Payment_Advice_2000017788.PDF has 2 pages. Page 2 (continuation) has
+    # invoice DATA rows but NO repeated header row. Row for INV25-26/001632
+    # lives on page 2 only:
+    #   ['5155','Invoice Payment','1901427707','INV25-26/001\n632',
+    #    '28,774.77','INR','27.4','28,747.37']
+    # Confirmed via direct pdfplumber.extract_tables() on the fixture.
+    from recon.zepto_receivables import parse_payment_advice_pdf
+    with open(_FIXTURE_PDF_MULTIPAGE, "rb") as f:
+        pdf_bytes = f.read()
+    payments, debit_notes = parse_payment_advice_pdf([pdf_bytes])
+    inv = payments["INV25-26/001632"]
+    assert round(inv["incl"], 2) == 28747.37
+    assert round(inv["excl"], 2) == 28774.77
+    assert round(inv["tds"], 2) == 27.4
+    # Sanity: page-1-only invoice must also still be present.
+    assert "INV25-26/001585" in payments
+    print("test_parse_payment_advice_pdf_multipage OK")
+
+
 def _find_summary_amount(ws, label: str):
     """Scan column A for `label`; return the value of the adjacent amount cell (col B)."""
     for row in ws.iter_rows(min_col=1, max_col=1):
@@ -301,5 +325,6 @@ if __name__ == "__main__":
     test_universe_includes_invoice_with_no_po_mapping_at_all()
     test_parse_payment_advice_pdf_single()
     test_parse_payment_advice_pdf_dedup()
+    test_parse_payment_advice_pdf_multipage()
     test_build_zepto_workbook_has_summary_tab()
     print("ALL TESTS PASSED")
