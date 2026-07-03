@@ -445,11 +445,9 @@ def summarize_zepto(results: list[dict]) -> dict:
 
 
 # Excel column letters, 1-based, matching COLUMN_KEYS order (A..AC).
-# NOTE: "PO" was prepended in Task 2 (Invoice-Details universe + PO column).
-# The formula strings below (pending/gross/net/status) still reference the
-# PRE-Task-2 (28-col) letter positions — re-pointing them to the shifted
-# columns is Task 3's job ("workbook PO col + shifted formulas"). Kept as-is
-# here so this task stays scoped to reconcile_zepto/COLUMN_KEYS only.
+# "PO" was prepended in Task 2 (Invoice-Details universe + PO column); the
+# live formula strings below (pending/gross/net/status) are re-pointed to
+# these shifted columns in Task 3.
 _LETTERS = ["A","B","C","D","E","F","G","H","I","J","K","L","M","N","O","P","Q","R","S","T","U","V","W","X","Y","Z","AA","AB","AC"]
 _HEADERS = ["PO","Date","Invoice_number","Sales Order No.","Name","Total Invoice Amt","Tax",
     "Invoice Amt (Excl. Tax)","Place of Supply","GSTIN","Billing State","shipping_state",
@@ -475,10 +473,13 @@ def build_zepto_workbook(results: list[dict], payload: dict | None = None):
     hdr_fill = PatternFill("solid", fgColor="123C69")
 
     # Row 1: source-group labels (merged)
+    # NEW PO-first layout: PO(A) + From Tally(B-L) | Pending(M, formula) |
+    # Payment Advice(N-P) | From Zepto Ledger/Payment Advice(Q-T) |
+    # Computed(U-W) | From Zepto Dashboard(X-Z) | From Courier(AA-AC).
     ws.append([""] * len(_HEADERS))
-    groups = [("From Tally","A","K"),("Payment Advice (Zepto Portal)","M","O"),
-              ("From Zepto Ledger / Payment Advice","P","S"),("Computed","T","V"),
-              ("From Zepto Dashboard","W","Y"),("From Courier (Delhivery)","Z","AA")]
+    groups = [("From Tally","B","L"),("Payment Advice (Zepto Portal)","N","P"),
+              ("From Zepto Ledger / Payment Advice","Q","T"),("Computed","U","W"),
+              ("From Zepto Dashboard","X","Z"),("From Courier (Delhivery)","AA","AC")]
     for label, c1, c2 in groups:
         ws.merge_cells(f"{c1}1:{c2}1")
         cell = ws[f"{c1}1"]; cell.value = label
@@ -498,16 +499,16 @@ def build_zepto_workbook(results: list[dict], payload: dict | None = None):
         for col_i, key in enumerate(COLUMN_KEYS, start=1):
             letter = _LETTERS[col_i - 1]
             if key == "pending_amount":
-                val = f"=E{r}"
+                val = f"=F{r}"
             elif key == "gross_outstanding":
-                val = f"=L{r}-M{r}"
+                val = f"=M{r}-N{r}"
             elif key == "net_outstanding":
-                val = f"=L{r}-M{r}+P{r}"
+                val = f"=M{r}-N{r}+Q{r}"
             elif key == "status":
                 if row.get("invoice_not_in_ledger"):
                     val = row.get("status", "")
                 else:
-                    val = f'=IF(AND(ABS(T{r})<=100,ABS(U{r})<=100),"Paid","Not Paid")'
+                    val = f'=IF(AND(ABS(U{r})<=100,ABS(V{r})<=100),"Paid","Not Paid")'
             else:
                 val = row.get(key, "")
                 if val == "" and key in _MONEY_KEYS:

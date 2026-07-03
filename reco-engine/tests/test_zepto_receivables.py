@@ -166,12 +166,9 @@ def test_reconcile_end_to_end():
     print("test_reconcile_end_to_end OK")
 
 def test_workbook_has_live_formulas():
-    # NOTE: COLUMN_KEYS now has "po" prepended (Task 2), so every data column
-    # shifted one letter right (invoice_number B->C, total_invoice_amt E->F,
-    # etc). Re-pointing the pending/gross/net/status FORMULA STRINGS to the
-    # new columns is Task 3's job ("workbook PO col + shifted formulas") --
-    # this test only asserts the builder still runs and places plain data
-    # (PO, invoice_number, total_invoice_amt) in the correct shifted cells.
+    # NEW PO-first column layout (29 cols): PO is col A, invoice_number is
+    # col C, total_invoice_amt is col F. The 4 live formula strings
+    # (pending/gross/net/status) are re-pointed to the shifted columns.
     from recon.zepto_receivables import build_zepto_workbook
     results = [{k: "" for k in __import__("recon.zepto_receivables", fromlist=["COLUMN_KEYS"]).COLUMN_KEYS}]
     r = results[0]
@@ -180,9 +177,13 @@ def test_workbook_has_live_formulas():
               "pending_amount":56685.0,"gross_outstanding":5304.08,"net_outstanding":4.26,"status":"Not Paid"})
     wb = build_zepto_workbook(results)
     ws = wb["1. Invoice Tracker"]
-    assert ws["A3"].value == "P100"                    # po (new, col A)
-    assert ws["C3"].value == "INV26-27/000007"          # invoice_number (shifted B->C)
-    assert ws["F3"].value == 56685.0                    # total_invoice_amt (shifted E->F)
+    assert ws["A3"].value == "P100"                    # po (col A)
+    assert ws["C3"].value == "INV26-27/000007"          # invoice_number (col C)
+    assert ws["F3"].value == 56685.0                    # total_invoice_amt (col F)
+    assert ws["M3"].value == "=F3"                                                     # pending_amount
+    assert ws["U3"].value == "=M3-N3"                                                  # gross_outstanding
+    assert ws["V3"].value == "=M3-N3+Q3"                                               # net_outstanding
+    assert ws["W3"].value == '=IF(AND(ABS(U3)<=100,ABS(V3)<=100),"Paid","Not Paid")'   # status
     print("test_workbook_has_live_formulas OK")
 
 def test_universe_includes_invoice_with_no_po_mapping_at_all():
