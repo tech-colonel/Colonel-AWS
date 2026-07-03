@@ -27,14 +27,24 @@ def norm_po(v: Any) -> str:
 def norm_inv(v: Any) -> str:
     if v is None:
         return ""
-    return str(v).strip().upper()
+    s = str(v).strip().upper()
+    s = s.rstrip("/")   # Zepto sometimes writes refs with a trailing slash
+    return s
 
 
 def dn_ref_to_invoice(ref: str) -> str:
-    """`V26-27/000007_QD` -> `INV26-27/000007` (drop `_...`, `V`->`INV`)."""
+    """`V26-27/000007_QD` -> `INV26-27/000007` (drop `_...`, `V`->`INV`).
+
+    Also handles year-prefixed refs missing the leading V/INV entirely, e.g.
+    `26-27/000039/_QD` -> `INV26-27/000039` (trailing slash stripped by
+    norm_inv). Non-invoice refs (PMDDN/CPMDDN/DC/etc.) are returned unchanged
+    (normalized) so callers can route them separately.
+    """
     base = str(ref or "").split("_")[0].strip()
     if base[:1].upper() == "V":
         base = "INV" + base[1:]
+    elif re.match(r"^\d{2}-\d{2}/", base):
+        base = "INV" + base
     return norm_inv(base)
 
 
@@ -246,7 +256,10 @@ def _clean_ref_doc(cell: Any) -> str:
     return re.sub(r"\s+", "", str(cell or ""))
 
 
-def _apply_line_item(payments: dict, debit_notes: dict, typ: str, ref_doc: str,
+_INVOICE_KEY_RE = re.compile(r"^INV\d{2}-\d{2}/\d+$")
+
+
+def _apply_line_item(payments: dict, debit_notes: dict, pmdn_box: list, typ: str, ref_doc: str,
                       amount: float, tds: float, payment_amt: float) -> None:
     typ_l = typ.strip().lower()
     if typ_l.startswith("invoice"):
@@ -260,27 +273,39 @@ def _apply_line_item(payments: dict, debit_notes: dict, typ: str, ref_doc: str,
     elif typ_l.startswith("debit note") or typ_l.startswith("credit memo"):
         # Zepto's real PDFs label debit notes "Credit Memo" (there are no
         # literal "Debit Note" rows in the data); route both the same way.
+        # Not every "Credit Memo" row is a per-invoice debit note though —
+        # PMDDN/CPMDDN/DC-... refs and similar are marketing/adjustment
+        # entries, not tied to a real invoice. Only route to debit_notes when
+        # the resolved key looks like an actual invoice number; otherwise it
+        # is a PMDDN/AP-AR style adjustment.
         inv = dn_ref_to_invoice(ref_doc)
         if not inv:
             return
-        debit_notes[inv] = debit_notes.get(inv, 0.0) + amount
+        if _INVOICE_KEY_RE.match(inv):
+            debit_notes[inv] = debit_notes.get(inv, 0.0) + amount
+        else:
+            pmdn_box[0] += amount
+    elif typ_l.startswith("ap-ar"):
+        pmdn_box[0] += amount
 
 
 def _is_data_row_type(typ: str) -> bool:
     """True for recognized document types we route (invoice / debit note /
-    credit memo — Zepto's label for debit notes)."""
+    credit memo — Zepto's label for debit notes — / AP-AR adjustment)."""
     t = typ.strip().lower()
-    return t.startswith("invoice") or t.startswith("debit note") or t.startswith("credit memo")
+    return (t.startswith("invoice") or t.startswith("debit note")
+            or t.startswith("credit memo") or t.startswith("ap-ar"))
 
 
-def _extract_line_items_from_table(table: list[list], payments: dict, debit_notes: dict) -> bool:
+def _extract_line_items_from_table(table: list[list], payments: dict, debit_notes: dict,
+                                    pmdn_box: list) -> bool:
     """Shape-based row extraction — does NOT require a header row on the page.
 
     A row is a DATA row iff it has >= 8 cells and col[1] (Type of Document) is
-    a recognized type (invoice / debit note / credit memo), matched
-    case-insensitively. This works uniformly on page 1 (which also has
-    header/title rows to skip) and continuation pages (which have data rows
-    only, no header at all).
+    a recognized type (invoice / debit note / credit memo / ap-ar
+    adjustment), matched case-insensitively. This works uniformly on page 1
+    (which also has header/title rows to skip) and continuation pages (which
+    have data rows only, no header at all).
     """
     found_any = False
     for row in table:
@@ -290,19 +315,20 @@ def _extract_line_items_from_table(table: list[list], payments: dict, debit_note
         if not typ or _norm_key(typ) == _norm_key("Type of Document"):
             continue
         if not _is_data_row_type(typ):
-            # Unrecognized types (e.g. "AP-AR Adjustment") or letterhead/
-            # junk rows — skip silently, never crash.
+            # Unrecognized types or letterhead/junk rows — skip silently,
+            # never crash.
             continue
         ref_doc = _clean_ref_doc(row[3])
         amount = _to_float(row[4])
         tds = _to_float(row[6])
         payment_amt = _to_float(row[7])
-        _apply_line_item(payments, debit_notes, typ, ref_doc, amount, tds, payment_amt)
+        _apply_line_item(payments, debit_notes, pmdn_box, typ, ref_doc, amount, tds, payment_amt)
         found_any = True
     return found_any
 
 
-def _extract_line_items_from_text(text: str, payments: dict, debit_notes: dict, filename: str = None) -> bool:
+def _extract_line_items_from_text(text: str, payments: dict, debit_notes: dict, pmdn_box: list,
+                                   filename: str = None) -> bool:
     # Last-resort fallback only: the shape-based table extraction in
     # `_extract_line_items_from_table` handles both header and header-less
     # (multi-page continuation) pages on its own. This text-regex path is not
@@ -318,16 +344,20 @@ def _extract_line_items_from_text(text: str, payments: dict, debit_notes: dict, 
         if not _is_data_row_type(typ):
             continue
         ref_doc = _clean_ref_doc(ref_doc_raw)
-        _apply_line_item(payments, debit_notes, typ, ref_doc,
+        _apply_line_item(payments, debit_notes, pmdn_box, typ, ref_doc,
                           _to_float(amount_s), _to_float(tds_s), _to_float(payment_amt_s))
         found_any = True
     return found_any
 
 
-def parse_payment_advice_pdf(pdf_bytes_list: list[bytes]) -> tuple[dict, dict]:
+def parse_payment_advice_pdf(pdf_bytes_list: list[bytes]) -> tuple[dict, dict, float]:
     """Parse Zepto PDF payment-advice files with PDF-level header dedup.
 
-    Returns (payments, debit_notes) in the same shape as `parse_payment_advice`.
+    Returns (payments, debit_notes, pmdn_total). `pmdn_total` accumulates
+    "Credit Memo" rows whose ref doesn't resolve to a real invoice number
+    (PMDDN/CPMDDN/DC-... marketing adjustments) plus all "AP-AR Adjustment"
+    rows — these are NOT per-invoice debit notes.
+
     A whole PDF is skipped if its header triple (Payment Ref No., Payment Doc,
     Amount) was already seen — this prevents double-counting duplicate uploads.
     """
@@ -335,6 +365,7 @@ def parse_payment_advice_pdf(pdf_bytes_list: list[bytes]) -> tuple[dict, dict]:
 
     payments: dict[str, dict] = {}
     debit_notes: dict[str, float] = {}
+    pmdn_box = [0.0]
     seen: set[tuple[str, str, str]] = set()
 
     for pdf_bytes in pdf_bytes_list:
@@ -356,11 +387,11 @@ def parse_payment_advice_pdf(pdf_bytes_list: list[bytes]) -> tuple[dict, dict]:
             pdf_found_any = False
             for page in pdf.pages:
                 for table in page.extract_tables():
-                    if _extract_line_items_from_table(table, payments, debit_notes):
+                    if _extract_line_items_from_table(table, payments, debit_notes, pmdn_box):
                         pdf_found_any = True
                 if not pdf_found_any:
                     text = page.extract_text() or ""
-                    if _extract_line_items_from_text(text, payments, debit_notes):
+                    if _extract_line_items_from_text(text, payments, debit_notes, pmdn_box):
                         pdf_found_any = True
 
             if not pdf_found_any:
@@ -369,7 +400,7 @@ def parse_payment_advice_pdf(pdf_bytes_list: list[bytes]) -> tuple[dict, dict]:
                     "unparseable file. Payment Doc: " + (doc or "<unknown>")
                 )
 
-    return payments, debit_notes
+    return payments, debit_notes, pmdn_box[0]
 
 
 def parse_credit_notes(data: bytes) -> dict[str, float]:
@@ -411,11 +442,18 @@ def _many(files: dict, field: str) -> list[bytes]:
     return [it["content"] for it in items if it.get("content")]
 
 
+class _RecoRows(list):
+    """A plain-list subclass so `reconcile_zepto` can carry `pmdn_adjustment`
+    alongside the row data without breaking existing callers/tests (len,
+    iteration, indexing) or server.py's JSON serialization of the result."""
+    pass
+
+
 def reconcile_zepto(files: dict) -> list[dict]:
     invoice_details = parse_invoice_details(_one(files, "invoice_details") or b"")
     payments_raw = parse_zepto_payment(_one(files, "zepto_payment") or b"")
     grn = parse_grn(_many(files, "grn_list"))
-    pay_map, dn_map = parse_payment_advice_pdf(_many(files, "payment_advice"))
+    pay_map, dn_map, pmdn_total = parse_payment_advice_pdf(_many(files, "payment_advice"))
     cn_map = parse_credit_notes(_one(files, "credit_note") or b"")
 
     # invoice -> PO map from the Zepto Payment track (first PO wins per invoice)
@@ -458,7 +496,10 @@ def reconcile_zepto(files: dict) -> list[dict]:
         # accountant's reference sheet treats as settled/"Paid" too.
         row["status"] = "Paid" if (gross <= 100 and net <= 100) else "Not Paid"
         results.append(row)
-    return results
+
+    out = _RecoRows(results)
+    out.pmdn_adjustment = round(pmdn_total, 2)
+    return out
 
 
 def summarize_zepto(results: list[dict]) -> dict:
@@ -562,12 +603,17 @@ def build_summary_sheet(wb, results: list[dict]):
         ("Receivables", round(receivables, 2), "Total outstanding (Net Outstanding Amt)"),
         ("Net Receivables", round(net_receivables, 2), "Receivables (no prior-year adj. available)"),
     ]
+    pmdn = getattr(results, "pmdn_adjustment", 0.0)
+
+    # (label, value_or_None). value=None -> blank "Manual entry" cell (grey
+    # fill). A non-None value -> filled/computed cell, same grey styling
+    # since it's still informational rather than a headline total.
     manual_rows = [
-        ("Debit Note Accepted", ""),
-        ("Debit Note Not Accepted", ""),
-        ("Amount Received in Bank", ""),
-        ("Expense - PMDDN & AP-AR Adjustment (Marketing)", ""),
-        ("Previous Year Marketing Exp. Invoices", ""),
+        ("Debit Note Accepted", None),
+        ("Debit Note Not Accepted", None),
+        ("Amount Received in Bank", None),
+        ("Expense - PMDDN & AP-AR Adjustment (Marketing)", round(pmdn, 2)),
+        ("Previous Year Marketing Exp. Invoices", None),
     ]
 
     r = 4
@@ -585,12 +631,13 @@ def build_summary_sheet(wb, results: list[dict]):
             ws.cell(row=r, column=col).border = border
         r += 1
 
-    for label, _blank in manual_rows:
+    for label, value in manual_rows:
         ws.cell(row=r, column=1, value=label).font = label_font
-        amt_cell = ws.cell(row=r, column=2, value=None)
+        amt_cell = ws.cell(row=r, column=2, value=value)
         amt_cell.number_format = money_fmt
         amt_cell.alignment = Alignment(horizontal="right")
-        ws.cell(row=r, column=3, value="Manual entry").font = Font(italic=True, size=9, color="595959")
+        remark = "Manual entry" if value is None else "Auto-computed from Payment Advice PDFs"
+        ws.cell(row=r, column=3, value=remark).font = Font(italic=True, size=9, color="595959")
         for col in (1, 2, 3):
             cell = ws.cell(row=r, column=col)
             cell.fill = manual_fill

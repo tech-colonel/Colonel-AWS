@@ -16,6 +16,31 @@ def test_normalizers_and_dn_transform():
     assert dn_ref_to_invoice("V25-26/001331_QD") == "INV25-26/001331"
     print("test_normalizers_and_dn_transform OK")
 
+
+def test_norm_inv_strips_trailing_slash():
+    # Zepto sometimes writes invoice refs with a trailing slash:
+    # "INV26-27/000039/" -> "INV26-27/000039". Normal numbers unaffected.
+    assert norm_inv("INV26-27/000039/") == "INV26-27/000039"
+    assert norm_inv("INV26-27/000039") == "INV26-27/000039"
+    print("test_norm_inv_strips_trailing_slash OK")
+
+
+def test_dn_ref_to_invoice_year_prefixed_no_v():
+    # Some Credit Memo refs are year-prefixed but missing the leading V/INV,
+    # AND have a trailing slash before the "_QD" suffix:
+    # "26-27/000039/_QD" -> split("_")[0] = "26-27/000039/" -> year-prefixed
+    # (no V/INV) -> prepend "INV" -> "INV26-27/000039/" -> norm_inv strips the
+    # trailing slash -> "INV26-27/000039".
+    assert dn_ref_to_invoice("26-27/000039/_QD") == "INV26-27/000039"
+    assert dn_ref_to_invoice("26-27/000041/_QD") == "INV26-27/000041"
+    # existing V-prefixed case still works
+    assert dn_ref_to_invoice("V25-26/001322_QD") == "INV25-26/001322"
+    # PMDDN / non-invoice refs must be left unchanged (no V/INV, no year prefix)
+    assert dn_ref_to_invoice("PMDDN-79939") == "PMDDN-79939"
+    assert dn_ref_to_invoice("CPMDDN-24512") == "CPMDDN-24512"
+    assert dn_ref_to_invoice("DC-3214") == "DC-3214"
+    print("test_dn_ref_to_invoice_year_prefixed_no_v OK")
+
 def test_csv_header_detection_and_getter():
     csv_bytes = (b"Some Title,,,\r\n"
                  b"Type/Description,Ref Id,Doc No,Amount,TDS,Payment Amount\r\n"
@@ -290,7 +315,7 @@ def _read_fixture_pdf() -> bytes:
 def test_parse_payment_advice_pdf_single():
     from recon.zepto_receivables import parse_payment_advice_pdf
     pdf_bytes = _read_fixture_pdf()
-    payments, debit_notes = parse_payment_advice_pdf([pdf_bytes])
+    payments, debit_notes, pmdn_total = parse_payment_advice_pdf([pdf_bytes])
     inv = payments["INV25-26/001463"]
     assert round(inv["excl"], 2) == 119767.53
     assert round(inv["tds"], 2) == 114.06
@@ -302,7 +327,7 @@ def test_parse_payment_advice_pdf_dedup():
     from recon.zepto_receivables import parse_payment_advice_pdf
     pdf_bytes = _read_fixture_pdf()
     # Same PDF fed twice (e.g. re-uploaded / duplicate in Drive folder) must NOT double-count.
-    payments, debit_notes = parse_payment_advice_pdf([pdf_bytes, pdf_bytes])
+    payments, debit_notes, pmdn_total = parse_payment_advice_pdf([pdf_bytes, pdf_bytes])
     inv = payments["INV25-26/001463"]
     assert round(inv["incl"], 2) == 119653.47
     assert round(inv["excl"], 2) == 119767.53
@@ -324,7 +349,7 @@ def test_parse_payment_advice_pdf_multipage():
     from recon.zepto_receivables import parse_payment_advice_pdf
     with open(_FIXTURE_PDF_MULTIPAGE, "rb") as f:
         pdf_bytes = f.read()
-    payments, debit_notes = parse_payment_advice_pdf([pdf_bytes])
+    payments, debit_notes, pmdn_total = parse_payment_advice_pdf([pdf_bytes])
     inv = payments["INV25-26/001632"]
     assert round(inv["incl"], 2) == 28747.37
     assert round(inv["excl"], 2) == 28774.77
@@ -350,10 +375,109 @@ def test_parse_payment_advice_pdf_credit_memo_routes_as_debit_note():
     from recon.zepto_receivables import parse_payment_advice_pdf
     with open(_FIXTURE_PDF_CREDIT_MEMO, "rb") as f:
         pdf_bytes = f.read()
-    payments, debit_notes = parse_payment_advice_pdf([pdf_bytes])
+    payments, debit_notes, pmdn_total = parse_payment_advice_pdf([pdf_bytes])
     assert round(debit_notes["INV25-26/001564"], 2) == -5962.15
     assert round(debit_notes["INV25-26/001598"], 2) == -12916.64
     print("test_parse_payment_advice_pdf_credit_memo_routes_as_debit_note OK")
+
+
+_FIXTURE_PDF_SLASH_INVOICE = os.path.join(_FIXTURE_DIR_ALL, "21_Payment_Advice_2000028805.PDF")
+_FIXTURE_PDF_SLASH_INVOICE_2 = os.path.join(_FIXTURE_DIR_ALL, "23_Payment_Advice_2000029871.PDF")
+_FIXTURE_PDF_PMDDN = os.path.join(_FIXTURE_DIR_ALL, "06_Payment_Advice_2000017788.PDF")
+
+
+def test_parse_payment_advice_pdf_trailing_slash_invoice_and_dn():
+    # 21_Payment_Advice_2000028805.PDF: Invoice Payment RefDoc cleans to
+    # "INV26-27/000039/" (Payment Amt 29,843.58) and Credit Memo RefDoc cleans
+    # to "26-27/000039/_QD" (Amount -224.24). Both must key to the SAME
+    # normalized invoice "INV26-27/000039" once norm_inv strips the trailing
+    # slash and dn_ref_to_invoice adds the missing "INV" prefix.
+    from recon.zepto_receivables import parse_payment_advice_pdf
+    with open(_FIXTURE_PDF_SLASH_INVOICE, "rb") as f:
+        pdf_bytes = f.read()
+    payments, debit_notes, pmdn_total = parse_payment_advice_pdf([pdf_bytes])
+    assert round(payments["INV26-27/000039"]["incl"], 2) == 29843.58
+    assert round(debit_notes["INV26-27/000039"], 2) == -224.24
+    print("test_parse_payment_advice_pdf_trailing_slash_invoice_and_dn OK")
+
+
+def test_parse_payment_advice_pdf_trailing_slash_invoice_and_dn_2():
+    # 23_Payment_Advice_2000029871.PDF: same pattern for invoice 000041.
+    from recon.zepto_receivables import parse_payment_advice_pdf
+    with open(_FIXTURE_PDF_SLASH_INVOICE_2, "rb") as f:
+        pdf_bytes = f.read()
+    payments, debit_notes, pmdn_total = parse_payment_advice_pdf([pdf_bytes])
+    assert round(payments["INV26-27/000041"]["incl"], 2) == 37396.14
+    assert round(debit_notes["INV26-27/000041"], 2) == -935.93
+    print("test_parse_payment_advice_pdf_trailing_slash_invoice_and_dn_2 OK")
+
+
+def test_parse_payment_advice_pdf_pmddn_routes_to_pmdn_total_not_debit_notes():
+    # 06_Payment_Advice_2000017788.PDF has a "PMDDN-79939" Credit Memo row
+    # (amount -1,221,755) — a marketing adjustment, NOT a per-invoice debit
+    # note. It must NOT create/pollute any debit_notes["...79939..."] key and
+    # must instead accumulate into pmdn_total.
+    from recon.zepto_receivables import parse_payment_advice_pdf, dn_ref_to_invoice
+    with open(_FIXTURE_PDF_PMDDN, "rb") as f:
+        pdf_bytes = f.read()
+    payments, debit_notes, pmdn_total = parse_payment_advice_pdf([pdf_bytes])
+    pmddn_key = dn_ref_to_invoice("PMDDN-79939")
+    assert pmddn_key not in debit_notes
+    assert not any(k.startswith("PMDDN") for k in debit_notes)
+    assert pmdn_total != 0
+    assert round(pmdn_total, 2) == -1221755.0
+    print("test_parse_payment_advice_pdf_pmddn_routes_to_pmdn_total_not_debit_notes OK")
+
+
+def test_reconcile_zepto_returns_list_subclass_with_pmdn_adjustment():
+    # reconcile_zepto must keep behaving as a plain list (len/iterate/index)
+    # for existing callers/tests and server.py's JSON serialization, while
+    # also carrying the pmdn_adjustment total as an attribute.
+    invd = _xlsx({"Invoice Details": [
+        ["title"],
+        ["invoice_number","reference_number","customer_name","date","bcy_total","tax_amount",
+         "amount_without_tax","place_of_supply","gst_no","billing_state","shipping_state"],
+        ["INV1","SO-1","CO A","2026-04-06",1000.0,0,1000.0,"MH","27AAA","Maharashtra","Maharashtra"],
+    ]})
+    pay = _xlsx({"Zepto Payment track": [["Zepto Payment track PO Number","Invoice Number","Cities"]]})
+    grn = b"GRN ID,PO ID,Created On,Status\r\n"
+    cn = _xlsx({"Credit Note Details": [["t"], ["invoice_number","bcy_total"]]})
+    files = {"zepto_payment": _file(pay), "grn_list": [_file(grn)],
+             "invoice_details": _file(invd), "payment_advice": [], "credit_note": _file(cn)}
+    res = reconcile_zepto(files)
+    assert isinstance(res, list)
+    assert len(res) == 1
+    assert res[0]["invoice_number"] == "INV1"
+    assert hasattr(res, "pmdn_adjustment")
+    assert res.pmdn_adjustment == 0.0   # no payment_advice PDFs -> 0
+    # JSON-serializable exactly like a plain list (server.py relies on this).
+    import json
+    json.dumps(res)
+    print("test_reconcile_zepto_returns_list_subclass_with_pmdn_adjustment OK")
+
+
+def test_build_zepto_workbook_fills_pmddn_summary_line():
+    from recon.zepto_receivables import build_zepto_workbook
+
+    class _RecoRows(list):
+        pass
+
+    results = _RecoRows([{k: "" for k in __import__("recon.zepto_receivables", fromlist=["COLUMN_KEYS"]).COLUMN_KEYS}])
+    results[0].update({"invoice_number": "INV1", "total_invoice_amt": 1000.0, "status": "Not Paid"})
+    results.pmdn_adjustment = -12345.67
+
+    wb = build_zepto_workbook(results)
+    ws = wb["Summary"]
+    amt = _find_summary_amount(ws, "Expense - PMDDN & AP-AR Adjustment (Marketing)")
+    assert amt == -12345.67
+    assert amt not in (None, "")
+
+    # Other manual lines must remain blank.
+    assert _find_summary_amount(ws, "Amount Received in Bank") in (None, "")
+    assert _find_summary_amount(ws, "Previous Year Marketing Exp. Invoices") in (None, "")
+    assert _find_summary_amount(ws, "Debit Note Accepted") in (None, "")
+    assert _find_summary_amount(ws, "Debit Note Not Accepted") in (None, "")
+    print("test_build_zepto_workbook_fills_pmddn_summary_line OK")
 
 
 def _find_summary_amount(ws, label: str):
@@ -403,6 +527,8 @@ def test_build_zepto_workbook_has_summary_tab():
 
 if __name__ == "__main__":
     test_normalizers_and_dn_transform()
+    test_norm_inv_strips_trailing_slash()
+    test_dn_ref_to_invoice_year_prefixed_no_v()
     test_csv_header_detection_and_getter()
     test_zepto_payment_and_grn_gate()
     test_parse_invoice_details()
@@ -418,5 +544,10 @@ if __name__ == "__main__":
     test_parse_payment_advice_pdf_dedup()
     test_parse_payment_advice_pdf_multipage()
     test_parse_payment_advice_pdf_credit_memo_routes_as_debit_note()
+    test_parse_payment_advice_pdf_trailing_slash_invoice_and_dn()
+    test_parse_payment_advice_pdf_trailing_slash_invoice_and_dn_2()
+    test_parse_payment_advice_pdf_pmddn_routes_to_pmdn_total_not_debit_notes()
+    test_reconcile_zepto_returns_list_subclass_with_pmdn_adjustment()
+    test_build_zepto_workbook_fills_pmddn_summary_line()
     test_build_zepto_workbook_has_summary_tab()
     print("ALL TESTS PASSED")
