@@ -82,6 +82,13 @@ export const RECO_AGENT_SPECS = [
       { key: 'gstr3b', label: 'GSTR-3B File', hint: '.pdf / .xlsx / .xls', required: true, accept: '.pdf,.xlsx,.xls' },
     ],
   },
+  {
+    reco_type: 'zepto_receivables',
+    name: 'Zepto Receivables',
+    files: [
+      { key: 'folder_url', label: 'Google Drive Folder URL', hint: 'Paste the shared folder link', required: true },
+    ],
+  },
 ];
 
 export const specByType = (t) => RECO_AGENT_SPECS.find((s) => s.reco_type === t) || null;

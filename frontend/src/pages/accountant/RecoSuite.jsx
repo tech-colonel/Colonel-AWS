@@ -40,6 +40,13 @@ const RECO_AGENTS = [
     fields: ['Bank Statement PDF'], accuracy: 'Auto-detect',
     agentId: 'd0000000-0000-0000-0000-000000000007',
   },
+  {
+    id: 'zepto_receivables', category: 'Bank & Finance',
+    name: 'Zepto Receivables', icon: '💳',
+    color: '#6366F1', bg: '#EEF2FF', border: '#C7D2FE',
+    description: 'Paste a Google Drive folder of Zepto/Tally files — reconcile receivables, download the Invoice Tracker.',
+    fields: ['Google Drive Folder URL'], accuracy: '—',
+  },
 ];
 
 const AgentCard = ({ agent, brandId, navigate, idx }) => {

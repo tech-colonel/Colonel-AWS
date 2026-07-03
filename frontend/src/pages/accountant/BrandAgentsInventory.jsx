@@ -86,6 +86,14 @@ const RECO_AGENT_META = {
     accuracy: 'Auto-detect',
     fields: ['Bank Statement PDF'],
   },
+  zepto_receivables: {
+    displayName: 'Zepto Receivables',
+    icon: '💳',
+    category: 'Receivables',
+    color: '#6366F1', bg: '#EEF2FF', border: '#C7D2FE',
+    accuracy: '—',
+    fields: ['Google Drive Folder URL'],
+  },
 };
 
 const BrandAgentsInventory = () => {

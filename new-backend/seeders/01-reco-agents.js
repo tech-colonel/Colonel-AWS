@@ -65,6 +65,14 @@ const RECO_AGENTS = [
     createdAt: new Date(),
     updatedAt: new Date(),
   },
+  {
+    id: 'd0000000-0000-0000-0000-000000000008',
+    name: 'zepto_receivables',
+    description: 'Zepto receivables tracker — reads a Google Drive folder (Tally + Zepto files), reconciles per-invoice, outputs the Invoice Tracker with live formulas',
+    columns: JSON.stringify([]),
+    createdAt: new Date(),
+    updatedAt: new Date(),
+  },
 ];
 
 module.exports = {
@@ -94,7 +102,8 @@ module.exports = {
         'gstr_3b_tally_entry',
         'universal_bank_statement',
         'amazon_mtr_consolidator',
-        'pdf_bank_extract'
+        'pdf_bank_extract',
+        'zepto_receivables'
       )
       ON CONFLICT DO NOTHING
     `);
