@@ -257,7 +257,9 @@ def _apply_line_item(payments: dict, debit_notes: dict, typ: str, ref_doc: str,
         acc["incl"] += payment_amt
         acc["excl"] += amount
         acc["tds"] += tds
-    elif typ_l.startswith("debit note"):
+    elif typ_l.startswith("debit note") or typ_l.startswith("credit memo"):
+        # Zepto's real PDFs label debit notes "Credit Memo" (there are no
+        # literal "Debit Note" rows in the data); route both the same way.
         inv = dn_ref_to_invoice(ref_doc)
         if not inv:
             return
@@ -265,18 +267,20 @@ def _apply_line_item(payments: dict, debit_notes: dict, typ: str, ref_doc: str,
 
 
 def _is_data_row_type(typ: str) -> bool:
-    """True for recognized document types we route (invoice / debit note)."""
+    """True for recognized document types we route (invoice / debit note /
+    credit memo — Zepto's label for debit notes)."""
     t = typ.strip().lower()
-    return t.startswith("invoice") or t.startswith("debit note")
+    return t.startswith("invoice") or t.startswith("debit note") or t.startswith("credit memo")
 
 
 def _extract_line_items_from_table(table: list[list], payments: dict, debit_notes: dict) -> bool:
     """Shape-based row extraction — does NOT require a header row on the page.
 
     A row is a DATA row iff it has >= 8 cells and col[1] (Type of Document) is
-    a recognized type (invoice / debit note), matched case-insensitively.
-    This works uniformly on page 1 (which also has header/title rows to skip)
-    and continuation pages (which have data rows only, no header at all).
+    a recognized type (invoice / debit note / credit memo), matched
+    case-insensitively. This works uniformly on page 1 (which also has
+    header/title rows to skip) and continuation pages (which have data rows
+    only, no header at all).
     """
     found_any = False
     for row in table:
@@ -286,7 +290,7 @@ def _extract_line_items_from_table(table: list[list], payments: dict, debit_note
         if not typ or _norm_key(typ) == _norm_key("Type of Document"):
             continue
         if not _is_data_row_type(typ):
-            # Recognized-but-unrouted types (e.g. "Credit Memo") or letterhead/
+            # Unrecognized types (e.g. "AP-AR Adjustment") or letterhead/
             # junk rows — skip silently, never crash.
             continue
         ref_doc = _clean_ref_doc(row[3])

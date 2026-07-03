@@ -268,6 +268,28 @@ def test_parse_payment_advice_pdf_multipage():
     print("test_parse_payment_advice_pdf_multipage OK")
 
 
+_FIXTURE_PDF_CREDIT_MEMO = os.path.join(_FIXTURE_DIR_ALL, "04_Payment_Advice_2000013623.PDF")
+
+
+def test_parse_payment_advice_pdf_credit_memo_routes_as_debit_note():
+    # Zepto labels its debit notes "Credit Memo" in the real PDFs (there are NO
+    # literal "Debit Note" rows in the data). Confirmed via direct
+    # pdfplumber.extract_tables() on this fixture:
+    #   ['1804','Credit Memo','1700264647','V25-26/00156\n4_QD',
+    #    '-5,962.15','INR','5.68','-5,956.47']
+    #   ['1805','Credit Memo','1700265247','V25-26/00159\n8_QD',
+    #    '-12,916.64','INR','12.3','-12,904.34']
+    # Ref cleans to "V25-26/001564_QD" -> dn_ref_to_invoice -> "INV25-26/001564"
+    # (and "V25-26/001598_QD" -> "INV25-26/001598"). Amount is col[4].
+    from recon.zepto_receivables import parse_payment_advice_pdf
+    with open(_FIXTURE_PDF_CREDIT_MEMO, "rb") as f:
+        pdf_bytes = f.read()
+    payments, debit_notes = parse_payment_advice_pdf([pdf_bytes])
+    assert round(debit_notes["INV25-26/001564"], 2) == -5962.15
+    assert round(debit_notes["INV25-26/001598"], 2) == -12916.64
+    print("test_parse_payment_advice_pdf_credit_memo_routes_as_debit_note OK")
+
+
 def _find_summary_amount(ws, label: str):
     """Scan column A for `label`; return the value of the adjacent amount cell (col B)."""
     for row in ws.iter_rows(min_col=1, max_col=1):
@@ -326,5 +348,6 @@ if __name__ == "__main__":
     test_parse_payment_advice_pdf_single()
     test_parse_payment_advice_pdf_dedup()
     test_parse_payment_advice_pdf_multipage()
+    test_parse_payment_advice_pdf_credit_memo_routes_as_debit_note()
     test_build_zepto_workbook_has_summary_tab()
     print("ALL TESTS PASSED")
