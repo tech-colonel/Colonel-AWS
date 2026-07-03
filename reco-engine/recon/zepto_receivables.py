@@ -302,26 +302,12 @@ def _extract_line_items_from_table(table: list[list], payments: dict, debit_note
     return found_any
 
 
-def _extract_line_items_from_text(text: str, payments: dict, debit_notes: dict) -> None:
-    # Real PDFs wrap the "Ref Doc" cell onto its own line, e.g.:
-    #   1428 Invoice Payment 1901333067 119,767.53 INR 114.06 119,653.47
-    #   INV25-26/001
-    #   463
-    # We scan lines for the numeric pattern, then look at the following
-    # line(s) for the wrapped Ref Doc if it's not embedded inline.
-    lines = text.split("\n")
-    for i, line in enumerate(lines):
-        m = _LINE_ITEM_RE.match(line.strip())
-        if not m:
-            continue
-        typ, ref_doc, amount_s, _ccy, tds_s, pay_amt_s = m.groups()
-        ref_doc = _clean_ref_doc(ref_doc)
-        # Ref Doc may continue wrapping on the next line(s) if it wasn't
-        # fully captured inline (e.g. split across 2 lines before the numbers).
-        amount = _to_float(amount_s)
-        tds = _to_float(tds_s)
-        payment_amt = _to_float(pay_amt_s)
-        _apply_line_item(payments, debit_notes, typ, ref_doc, amount, tds, payment_amt)
+def _extract_line_items_from_text(text: str, payments: dict, debit_notes: dict, filename: str = None) -> None:
+    # FAILFAST: text-fallback parsing is not supported because it can mis-key rows
+    # (interpreting wrapped invoice number as Doc No, producing silently-wrong results).
+    # Real PDFs ALWAYS have extractable tables. If we hit this, it's a corrupted or
+    # unusual file format that must not silently produce bad data.
+    raise ValueError("Payment-advice PDF has no extractable table; text-fallback parsing is not supported. File: " + (filename or "<unknown>"))
 
 
 def parse_payment_advice_pdf(pdf_bytes_list: list[bytes]) -> tuple[dict, dict]:
