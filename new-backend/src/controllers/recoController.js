@@ -537,6 +537,26 @@ const runReco = async (req, res) => {
     const isDemo = req.body.is_demo === 'true';
     const brandId = req.body.brand_id;
 
+    // --- Zepto Receivables: fetch classified files from Drive folder, proxy to Python engine ---
+    if (recoType === 'zepto_receivables') {
+      const folderUrl = req.body.folder_url || req.body.folderLink;
+      if (!folderUrl) return res.status(400).json({ error: 'folder_url is required for Zepto Receivables' });
+      const grouped = await zeptoDrive.downloadClassified(folderUrl);   // { type: [{filename, buffer}] }
+      const form = new FormData();
+      form.append('reco_type', 'zepto_receivables');
+      form.append('tolerance', String(req.body.tolerance || 100));
+      for (const [type, arr] of Object.entries(grouped)) {
+        for (const { filename, buffer } of arr) {
+          form.append(type, buffer, { filename });   // multi files -> engine reads as list
+        }
+      }
+      const pyResp = await axios.post(`${PYTHON_RECO_URL}/api/reconcile`, form, {
+        headers: { ...form.getHeaders() }, timeout: 600000,
+        maxContentLength: Infinity, maxBodyLength: Infinity,
+      });
+      return res.json(pyResp.data);   // { job_id, summary, counts, results }
+    }
+
     // --- Standalone Decoupled Universal Bank Statement Integration ---
     if (recoType === 'universal_bank_statement') {
       const jobId = crypto.randomUUID();
