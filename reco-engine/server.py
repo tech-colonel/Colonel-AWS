@@ -563,6 +563,27 @@ class ReconciliationHandler(BaseHTTPRequestHandler):
                 self.write_json({k: v for k, v in payload.items() if not k.startswith("_")})
                 return
 
+            if reco_type == "zepto_receivables":
+                from io import BytesIO
+                from recon.zepto_receivables import (
+                    reconcile_zepto, summarize_zepto, build_zepto_workbook,
+                )
+                results = reconcile_zepto(files)
+                wb = build_zepto_workbook(results)
+                _buf = BytesIO(); wb.save(_buf)
+                job_id = uuid4().hex
+                payload = {
+                    "job_id": job_id,
+                    "reco_type": reco_type,
+                    "summary": summarize_zepto(results),
+                    "counts": {"result_rows": len(results)},
+                    "results": results,
+                    "_xlsx_bytes": _buf.getvalue(),
+                }
+                JOBS[job_id] = payload
+                self.write_json({k: v for k, v in payload.items() if not k.startswith("_")})
+                return
+
             # Default two-file reconciliation (gst_2b_purchase)
             gstr2b_file = files.get("gstr2b")
             purchase_file = files.get("purchase")
