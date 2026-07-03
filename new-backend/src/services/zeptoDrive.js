@@ -10,7 +10,7 @@ function classifyZeptoFile(name) {
   if (n.includes('zepto payment')) return 'zepto_payment';
   if (n.startsWith('grn_list') || n.includes('grn_list') || n.includes('grn list')) return 'grn_list';
   if (n.includes('invoice details')) return 'invoice_details';
-  if (n.startsWith('payment_advice') || n.includes('payment_advice') || n.includes('payment advice')) return 'payment_advice';
+  if (n.endsWith('.pdf')) return 'payment_advice';                          // ZEPTO Payment Advice PDFs
   if (n.includes('credit note')) return 'credit_note';
   return null;
 }
