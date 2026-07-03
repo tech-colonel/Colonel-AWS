@@ -17,29 +17,35 @@ def test_normalizers_and_dn_transform():
     print("test_normalizers_and_dn_transform OK")
 
 
-def test_norm_inv_strips_trailing_slash():
-    # Zepto sometimes writes invoice refs with a trailing slash:
-    # "INV26-27/000039/" -> "INV26-27/000039". Normal numbers unaffected.
-    assert norm_inv("INV26-27/000039/") == "INV26-27/000039"
+def test_norm_inv_does_not_strip_trailing_slash():
+    # REVERTED: "INV26-27/000039" (Rs 29,169) and "INV26-27/000039/"
+    # (Rs 29,870) are DIFFERENT invoices in the real data -- norm_inv must
+    # NOT collapse them by stripping the trailing slash. Only strip+upper.
+    assert norm_inv("INV26-27/000039/") == "INV26-27/000039/"
     assert norm_inv("INV26-27/000039") == "INV26-27/000039"
-    print("test_norm_inv_strips_trailing_slash OK")
+    assert norm_inv(" inv26-27/000007 ") == "INV26-27/000007"
+    print("test_norm_inv_does_not_strip_trailing_slash OK")
 
 
-def test_dn_ref_to_invoice_year_prefixed_no_v():
-    # Some Credit Memo refs are year-prefixed but missing the leading V/INV,
-    # AND have a trailing slash before the "_QD" suffix:
-    # "26-27/000039/_QD" -> split("_")[0] = "26-27/000039/" -> year-prefixed
-    # (no V/INV) -> prepend "INV" -> "INV26-27/000039/" -> norm_inv strips the
-    # trailing slash -> "INV26-27/000039".
-    assert dn_ref_to_invoice("26-27/000039/_QD") == "INV26-27/000039"
-    assert dn_ref_to_invoice("26-27/000041/_QD") == "INV26-27/000041"
+def test_dn_ref_to_invoice_primary_transform_only():
+    # dn_ref_to_invoice does ONLY the simple primary transform: split on "_",
+    # V-prefix -> INV, otherwise normalize as-is (upper/strip, no slash
+    # stripping, no year-prefix INV-prepend). Malformed refs that need more
+    # than this are fixed later by the fallback remap in reconcile_zepto.
+    assert dn_ref_to_invoice("V26-27/000007_QD") == "INV26-27/000007"
+    # Year-prefixed ref missing the V/INV entirely + trailing slash: the
+    # primary transform leaves it as-is (uppercased) -- NOT "INV"-prepended,
+    # NOT slash-stripped. The fallback remap (tested via reconcile_zepto)
+    # is what maps this onto the real "INV26-27/000039/" invoice.
+    assert dn_ref_to_invoice("26-27/000039/_QD") == "26-27/000039/"
+    assert dn_ref_to_invoice("26-27/000041/_QD") == "26-27/000041/"
     # existing V-prefixed case still works
     assert dn_ref_to_invoice("V25-26/001322_QD") == "INV25-26/001322"
-    # PMDDN / non-invoice refs must be left unchanged (no V/INV, no year prefix)
+    # PMDDN / non-invoice refs must be left unchanged (no V prefix)
     assert dn_ref_to_invoice("PMDDN-79939") == "PMDDN-79939"
     assert dn_ref_to_invoice("CPMDDN-24512") == "CPMDDN-24512"
     assert dn_ref_to_invoice("DC-3214") == "DC-3214"
-    print("test_dn_ref_to_invoice_year_prefixed_no_v OK")
+    print("test_dn_ref_to_invoice_primary_transform_only OK")
 
 def test_csv_header_detection_and_getter():
     csv_bytes = (b"Some Title,,,\r\n"
@@ -114,6 +120,36 @@ def test_parse_invoice_details():
     assert row["gstin"] == "08AAICK4821A1ZV"
     assert row["billing_state"] == "Rajasthan" and row["shipping_state"] == "Rajasthan"
     print("test_parse_invoice_details OK")
+
+
+_REAL_FIXTURES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures")
+_REAL_INVOICE_DETAILS = os.path.join(_REAL_FIXTURES_DIR, "Invoice Details April 26 to June 26.xlsx")
+
+
+def test_parse_invoice_details_real_fixture_dedup_by_num_amount_date():
+    # Real fixture has 589 raw rows. Some invoice numbers appear twice with a
+    # trailing-slash variant: e.g. "INV26-27/000039" (Rs 29,169) vs
+    # "INV26-27/000039/" (Rs 29,870) -- DIFFERENT amounts -> BOTH must survive
+    # as distinct universe keys (no merging). "INV26-27/000069" vs
+    # "INV26-27/000069/" -- IDENTICAL amount+date -> a true duplicate; only
+    # ONE survives (the slash variant is dropped as a re-export of the same
+    # row). Verified directly against the fixture: 6 such identical pairs
+    # exist, so 589 raw rows -> 583 universe rows (589 - 6 collapsed dupes).
+    with open(_REAL_INVOICE_DETAILS, "rb") as f:
+        data = f.read()
+    universe = parse_invoice_details(data)
+    assert len(universe) == 583
+
+    # Different-amount pair: BOTH keys present, distinct amounts preserved.
+    assert "INV26-27/000039" in universe
+    assert "INV26-27/000039/" in universe
+    assert round(float(universe["INV26-27/000039"]["total_invoice_amt"]), 2) == 29169.0
+    assert round(float(universe["INV26-27/000039/"]["total_invoice_amt"]), 2) == 29870.95
+
+    # Identical pair: base key present once, slash variant collapsed away.
+    assert "INV26-27/000069" in universe
+    assert "INV26-27/000069/" not in universe
+    print("test_parse_invoice_details_real_fixture_dedup_by_num_amount_date OK")
 
 def test_parse_payment_advice():
     from recon.zepto_receivables import parse_payment_advice, _to_float
@@ -388,16 +424,18 @@ _FIXTURE_PDF_PMDDN = os.path.join(_FIXTURE_DIR_ALL, "06_Payment_Advice_200001778
 
 def test_parse_payment_advice_pdf_trailing_slash_invoice_and_dn():
     # 21_Payment_Advice_2000028805.PDF: Invoice Payment RefDoc cleans to
-    # "INV26-27/000039/" (Payment Amt 29,843.58) and Credit Memo RefDoc cleans
-    # to "26-27/000039/_QD" (Amount -224.24). Both must key to the SAME
-    # normalized invoice "INV26-27/000039" once norm_inv strips the trailing
-    # slash and dn_ref_to_invoice adds the missing "INV" prefix.
+    # "INV26-27/000039/" (Payment Amt 29,843.58, slash PRESERVED after the
+    # revert) and Credit Memo RefDoc cleans to "26-27/000039/_QD" -- since it
+    # contains an invoice pattern (\d{2}-\d{2}/\d+), it is routed to
+    # debit_notes under dn_ref_to_invoice's primary-transform key
+    # "26-27/000039/" (no V/INV prefix at this stage -- the fallback remap in
+    # reconcile_zepto is what later reconciles this onto the real invoice).
     from recon.zepto_receivables import parse_payment_advice_pdf
     with open(_FIXTURE_PDF_SLASH_INVOICE, "rb") as f:
         pdf_bytes = f.read()
     payments, debit_notes, pmdn_total = parse_payment_advice_pdf([pdf_bytes])
-    assert round(payments["INV26-27/000039"]["incl"], 2) == 29843.58
-    assert round(debit_notes["INV26-27/000039"], 2) == -224.24
+    assert round(payments["INV26-27/000039/"]["incl"], 2) == 29843.58
+    assert round(debit_notes["26-27/000039/"], 2) == -224.24
     print("test_parse_payment_advice_pdf_trailing_slash_invoice_and_dn OK")
 
 
@@ -407,8 +445,8 @@ def test_parse_payment_advice_pdf_trailing_slash_invoice_and_dn_2():
     with open(_FIXTURE_PDF_SLASH_INVOICE_2, "rb") as f:
         pdf_bytes = f.read()
     payments, debit_notes, pmdn_total = parse_payment_advice_pdf([pdf_bytes])
-    assert round(payments["INV26-27/000041"]["incl"], 2) == 37396.14
-    assert round(debit_notes["INV26-27/000041"], 2) == -935.93
+    assert round(payments["INV26-27/000041/"]["incl"], 2) == 37396.14
+    assert round(debit_notes["26-27/000041/"], 2) == -935.93
     print("test_parse_payment_advice_pdf_trailing_slash_invoice_and_dn_2 OK")
 
 
@@ -427,6 +465,57 @@ def test_parse_payment_advice_pdf_pmddn_routes_to_pmdn_total_not_debit_notes():
     assert pmdn_total != 0
     assert round(pmdn_total, 2) == -1221755.0
     print("test_parse_payment_advice_pdf_pmddn_routes_to_pmdn_total_not_debit_notes OK")
+
+
+import glob
+
+
+def _load_real_files() -> dict:
+    def f(path):
+        with open(path, "rb") as fh:
+            return {"filename": os.path.basename(path), "content": fh.read()}
+
+    grn_files = [f(p) for p in sorted(glob.glob(os.path.join(_REAL_FIXTURES_DIR, "GRN_List*.csv")))]
+    pdf_files = [
+        f(p) for p in
+        sorted(glob.glob(os.path.join(_FIXTURE_DIR_ALL, "*.pdf")))
+        + sorted(glob.glob(os.path.join(_FIXTURE_DIR_ALL, "*.PDF")))
+    ]
+    return {
+        "zepto_payment": f(os.path.join(_REAL_FIXTURES_DIR, "Zepto Payment FY24-25 New 13_05.xlsx")),
+        "grn_list": grn_files,
+        "invoice_details": f(_REAL_INVOICE_DETAILS),
+        "payment_advice": pdf_files,
+        "credit_note": f(os.path.join(_REAL_FIXTURES_DIR, "Credit Note Details (4).xlsx")),
+    }
+
+
+def test_reconcile_zepto_real_fixtures_dn_fallback_and_pmddn():
+    # Full pipeline on the real fixtures (zepto_payment, 3 GRN lists,
+    # invoice_details, all 43 payment_advice PDFs, credit_note). Verifies the
+    # DN fallback remap: the malformed DN ref "26-27/000039/_QD" (routed to
+    # debit_notes["26-27/000039/"] at parse time) gets reassigned onto the
+    # REAL invoice key "INV26-27/000039/" because that's what's actually in
+    # the Invoice Details universe -- NOT onto "INV26-27/000039" (a different,
+    # unrelated invoice with a different amount).
+    files = _load_real_files()
+    res = reconcile_zepto(files)
+    by_inv = {r["invoice_number"]: r for r in res}
+
+    row = by_inv["INV26-27/000039/"]
+    assert row["debit_note_issued"] != 0.0
+    assert round(row["debit_note_issued"], 2) == -224.24
+    assert round(row["payment_received_incl_tds"], 2) == 29843.58
+
+    # The unrelated, differently-amounted invoice must NOT receive the DN.
+    other = by_inv["INV26-27/000039"]
+    assert other["debit_note_issued"] == 0.0
+
+    # PMDDN: a PMDDN- credit-memo ref must never appear as a debit_notes key
+    # anywhere in the pipeline, and the pmdn_adjustment total must be non-zero.
+    assert not any(k.startswith("PMDDN") for k in by_inv)
+    assert res.pmdn_adjustment != 0.0
+    print("test_reconcile_zepto_real_fixtures_dn_fallback_and_pmddn OK")
 
 
 def test_reconcile_zepto_returns_list_subclass_with_pmdn_adjustment():
@@ -527,8 +616,10 @@ def test_build_zepto_workbook_has_summary_tab():
 
 if __name__ == "__main__":
     test_normalizers_and_dn_transform()
-    test_norm_inv_strips_trailing_slash()
-    test_dn_ref_to_invoice_year_prefixed_no_v()
+    test_norm_inv_does_not_strip_trailing_slash()
+    test_dn_ref_to_invoice_primary_transform_only()
+    test_parse_invoice_details_real_fixture_dedup_by_num_amount_date()
+    test_reconcile_zepto_real_fixtures_dn_fallback_and_pmddn()
     test_csv_header_detection_and_getter()
     test_zepto_payment_and_grn_gate()
     test_parse_invoice_details()

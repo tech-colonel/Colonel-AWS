@@ -27,24 +27,23 @@ def norm_po(v: Any) -> str:
 def norm_inv(v: Any) -> str:
     if v is None:
         return ""
-    s = str(v).strip().upper()
-    s = s.rstrip("/")   # Zepto sometimes writes refs with a trailing slash
-    return s
+    return str(v).strip().upper()
 
 
 def dn_ref_to_invoice(ref: str) -> str:
     """`V26-27/000007_QD` -> `INV26-27/000007` (drop `_...`, `V`->`INV`).
 
-    Also handles year-prefixed refs missing the leading V/INV entirely, e.g.
-    `26-27/000039/_QD` -> `INV26-27/000039` (trailing slash stripped by
-    norm_inv). Non-invoice refs (PMDDN/CPMDDN/DC/etc.) are returned unchanged
-    (normalized) so callers can route them separately.
+    Simple primary transform only. Malformed refs that are missing the
+    V/INV prefix (e.g. `26-27/000039/_QD`) or that carry a mismatched
+    trailing slash are NOT special-cased here — that reconciliation against
+    the real invoice universe happens in the fallback remap inside
+    `reconcile_zepto` (see `_dn_fallback_remap`). Non-invoice refs
+    (PMDDN/CPMDDN/DC/etc.) are returned unchanged (normalized) so callers can
+    route them separately.
     """
     base = str(ref or "").split("_")[0].strip()
     if base[:1].upper() == "V":
         base = "INV" + base[1:]
-    elif re.match(r"^\d{2}-\d{2}/", base):
-        base = "INV" + base
     return norm_inv(base)
 
 
@@ -168,15 +167,32 @@ def grn_gate(payments: list[dict], grn: dict[str, str]) -> list[dict]:
 
 
 def parse_invoice_details(data: bytes) -> dict[str, dict]:
+    """Build the invoice universe, keyed by the ORIGINAL invoice number
+    (trailing slash preserved) so genuinely distinct invoices that merely
+    share a base number — e.g. `INV26-27/000039` (Rs 29,169) vs
+    `INV26-27/000039/` (Rs 29,870) — both survive as separate rows.
+
+    A row is dropped as a TRUE duplicate only when a prior row already
+    matched on (base invoice number with trailing slash stripped, amount,
+    date) — this collapses exact re-exports like `INV26-27/000069` /
+    `INV26-27/000069/` (identical amount + date) into one row.
+    """
     grid = _read_sheet(data, "Invoice Details") if _has_sheet(data, "Invoice Details") else _read_sheet(data, 0)
     h = _find_header(grid, ["invoice_number", "customer_name", "bcy_total"])
     out: dict[str, dict] = {}
+    seen: set[tuple[str, float, str]] = set()
     for r in _rows_as_dicts(grid, h):
         inv = norm_inv(_get(r, ["invoice_number"]))
         if not inv:
             continue
+        amount = _to_float(_get(r, ["bcy_total"]))
+        date = _get(r, ["date"])
+        dedup_key = (inv.rstrip("/"), amount, date)
+        if dedup_key in seen:
+            continue   # exact duplicate (same base#, amount, date) — skip
+        seen.add(dedup_key)
         out[inv] = {
-            "date": _get(r, ["date"]),
+            "date": date,
             "sales_order_no": _get(r, ["reference_number"]),
             "name": _get(r, ["customer_name"]),
             "total_invoice_amt": _get(r, ["bcy_total"]),
@@ -257,6 +273,13 @@ def _clean_ref_doc(cell: Any) -> str:
 
 
 _INVOICE_KEY_RE = re.compile(r"^INV\d{2}-\d{2}/\d+$")
+# Matches ANY ref that carries an invoice-shaped year/number pattern, even
+# malformed ones missing the V/INV prefix or carrying an odd trailing slash,
+# e.g. "V25-26/001564_QD", "26-27/000039/_QD", "INV26-27/000039_QD". This is
+# intentionally looser than _INVOICE_KEY_RE — it decides ROUTING (is this an
+# invoice-linked debit note at all?), while the later fallback remap in
+# `reconcile_zepto` fixes up the exact key against the real invoice universe.
+_INVOICE_PATTERN_RE = re.compile(r"\d{2}-\d{2}/\d+")
 
 
 def _apply_line_item(payments: dict, debit_notes: dict, pmdn_box: list, typ: str, ref_doc: str,
@@ -275,13 +298,17 @@ def _apply_line_item(payments: dict, debit_notes: dict, pmdn_box: list, typ: str
         # literal "Debit Note" rows in the data); route both the same way.
         # Not every "Credit Memo" row is a per-invoice debit note though —
         # PMDDN/CPMDDN/DC-... refs and similar are marketing/adjustment
-        # entries, not tied to a real invoice. Only route to debit_notes when
-        # the resolved key looks like an actual invoice number; otherwise it
-        # is a PMDDN/AP-AR style adjustment.
-        inv = dn_ref_to_invoice(ref_doc)
-        if not inv:
-            return
-        if _INVOICE_KEY_RE.match(inv):
+        # entries, not tied to a real invoice. Route by whether the RAW ref
+        # carries an invoice-shaped pattern (\d{2}-\d{2}/\d+) — this catches
+        # malformed refs missing the V/INV prefix (e.g. "26-27/000039/_QD")
+        # that would otherwise be misfiled as PMDDN just because
+        # dn_ref_to_invoice's simple primary transform didn't fully resolve
+        # them. Exact-key reconciliation against the real invoice universe
+        # happens later via the fallback remap in `reconcile_zepto`.
+        if _INVOICE_PATTERN_RE.search(ref_doc):
+            inv = dn_ref_to_invoice(ref_doc)
+            if not inv:
+                return
             debit_notes[inv] = debit_notes.get(inv, 0.0) + amount
         else:
             pmdn_box[0] += amount
@@ -449,12 +476,57 @@ class _RecoRows(list):
     pass
 
 
+def _dn_fallback_remap(debit_notes: dict[str, float], invoice_universe: set[str]) -> dict[str, float]:
+    """Fix up malformed debit-note keys by matching candidate variants
+    against the REAL invoice universe (from Invoice Details).
+
+    For every `debit_notes` key not already present in `invoice_universe`,
+    build candidates by stripping a leading `INV`/`V` (if any) to get a
+    `core`, then trying both WITH and WITHOUT a trailing slash, always with
+    an `INV` prefix, in this priority order (first match wins):
+        1. "INV"+core                    (preserves the ref's own slash-ness)
+        2. "INV"+core.rstrip("/")+"/"
+        3. "INV"+core.rstrip("/")
+        4. "INV"+core+"/"
+    The DN amount is reassigned (merge-added) onto the winning key. If
+    nothing matches, the original key is left untouched (unmatched —
+    harmless).
+    """
+    out: dict[str, float] = {}
+    for key, amount in debit_notes.items():
+        if key in invoice_universe:
+            out[key] = out.get(key, 0.0) + amount
+            continue
+
+        core = key
+        if core[:3].upper() == "INV":
+            core = core[3:]
+        elif core[:1].upper() == "V":
+            core = core[1:]
+
+        ordered_candidates = [
+            "INV" + core,
+            "INV" + core.rstrip("/") + "/",
+            "INV" + core.rstrip("/"),
+            "INV" + core + "/",
+        ]
+        candidates = list(dict.fromkeys(ordered_candidates))   # dedupe, keep order
+        match = next((c for c in candidates if c in invoice_universe), None)
+        if match:
+            out[match] = out.get(match, 0.0) + amount
+        else:
+            out[key] = out.get(key, 0.0) + amount   # unmatched — leave as-is
+    return out
+
+
 def reconcile_zepto(files: dict) -> list[dict]:
     invoice_details = parse_invoice_details(_one(files, "invoice_details") or b"")
     payments_raw = parse_zepto_payment(_one(files, "zepto_payment") or b"")
     grn = parse_grn(_many(files, "grn_list"))
     pay_map, dn_map, pmdn_total = parse_payment_advice_pdf(_many(files, "payment_advice"))
     cn_map = parse_credit_notes(_one(files, "credit_note") or b"")
+
+    dn_map = _dn_fallback_remap(dn_map, set(invoice_details.keys()))
 
     # invoice -> PO map from the Zepto Payment track (first PO wins per invoice)
     inv_to_po: dict[str, str] = {}
