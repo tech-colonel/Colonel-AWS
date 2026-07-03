@@ -9,12 +9,13 @@ import {
   FileSpreadsheet, Loader2, ChevronDown, ChevronUp, Database, Info,
   BarChart3, ArrowRight, Save, Search, X, Scale, ClipboardList,
   FolderOpen, Globe, TrendingUp, Landmark, BookOpen, GitCompare, AlertCircle,
-  Zap,
+  Zap, CreditCard,
 } from 'lucide-react';
 import api from '../../lib/api';
 import { sidebarFor, isAdminUser } from '../../lib/adminNav';
 import { DEMO_SAMPLES, urlToFile } from '../../lib/demoSamples';
 import { toast } from 'sonner';
+import GoogleDriveFolderInput from './GoogleDriveFolderInput';
 
 const AGENT_CONFIG = {
   gstr_2b_vs_purchase: {
@@ -116,6 +117,15 @@ const AGENT_CONFIG = {
       { key: 'coa', label: 'Chart of Accounts (Optional)', hint: '.xlsx / .xls — upload once, auto-applies to future runs', accept: '.xlsx,.xls', required: false },
       { key: 'vouchertype', label: 'Voucher Type Master (Optional)', hint: '.xls / .xlsx — upload once to map Journal → Journal UP etc.', accept: '.xlsx,.xls', required: false },
     ],
+  },
+  zepto_receivables: {
+    name: 'Zepto Receivables',
+    slug: 'GOOGLE DRIVE · RECEIVABLES',
+    icon: CreditCard,
+    description: 'Paste a Google Drive folder URL. We auto-detect Zepto/Tally files, reconcile receivables, and generate the Invoice Tracker with live formulas.',
+    color: '#6366F1', bg: 'rgba(99,102,241,0.08)', border: 'rgba(99,102,241,0.2)',
+    driveMode: true,
+    files: [],
   },
 };
 
@@ -398,7 +408,9 @@ const RecoWorkspace = ({ agentTypeProp } = {}) => {
   const navigate = useNavigate();
   const config = AGENT_CONFIG[agentType];
   const isDemo = localStorage.getItem('token') === 'demo-mode-token';
+  const isDriveMode = !!config?.driveMode;
 
+  const [driveUrl, setDriveUrl] = useState('');
   const [uploadedFiles, setUploadedFiles] = useState({});
   const [tolerance, setTolerance] = useState('1.0');
   const [running, setRunning] = useState(false);
@@ -537,6 +549,29 @@ const RecoWorkspace = ({ agentTypeProp } = {}) => {
   const handleFileChange = (key, fileOrArray) => setUploadedFiles(prev => ({ ...prev, [key]: fileOrArray }));
 
   const handleRun = async () => {
+    if (isDriveMode) {
+      if (!driveUrl) { toast.error('Paste a Google Drive folder URL'); return; }
+      setRunning(true); setResult(null); setEditedLedgers({});
+      setPhase('reconciling');
+      try {
+        const formData = new FormData();
+        formData.append('reco_type', agentType);
+        formData.append('brand_id', effectiveBrandId || brandId);
+        formData.append('folder_url', driveUrl);
+        const { data } = await api.post('/api/reco/run', formData, {
+          headers: { 'Content-Type': 'multipart/form-data' },
+          timeout: 600000,
+        });
+        setPhase('done');
+        setResult(data);
+        try { sessionStorage.setItem(cacheKey, JSON.stringify(slimResultForCache(data))); } catch (_) {}
+        toast.success(`Reconciliation complete! ${data.results?.length || 0} records processed.`);
+      } catch (err) {
+        setPhase(null);
+        toast.error(err.response?.data?.error || 'Reconciliation failed');
+      } finally { setRunning(false); }
+      return;
+    }
     const missing = activeFiles.filter(f => {
       if (!f.required) return false;
       const v = uploadedFiles[f.key];
@@ -1037,7 +1072,10 @@ const RecoWorkspace = ({ agentTypeProp } = {}) => {
                 </div>
 
                 {/* File slots */}
-                {activeFiles.map((f, idx) => (
+                {isDriveMode ? (
+                  <GoogleDriveFolderInput value={driveUrl} onChange={setDriveUrl} />
+                ) : (
+                  activeFiles.map((f, idx) => (
                   <React.Fragment key={f.key}>
                     {f.multiple ? (
                       <MultiFileDropzone
@@ -1065,7 +1103,8 @@ const RecoWorkspace = ({ agentTypeProp } = {}) => {
                       </div>
                     )}
                   </React.Fragment>
-                ))}
+                  ))
+                )}
 
                 {agentType === 'bank_statement' && !isDemo && (
                   <div style={{
