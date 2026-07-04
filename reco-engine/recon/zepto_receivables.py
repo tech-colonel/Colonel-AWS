@@ -144,19 +144,24 @@ def parse_zepto_payment(data: bytes) -> list[dict]:
     return out
 
 
-def parse_grn(datas: list[bytes]) -> dict[str, str]:
-    pool: dict[str, str] = {}
+def parse_grn(datas: list[bytes]) -> dict[str, dict]:
+    """First-win per PO. Each value carries both the GRN ID (for the
+    'GRN No.' column) and the Created On date (for the 'GRN Date' column)."""
+    pool: dict[str, dict] = {}
     for data in datas:
         grid = _read_csv(data)
         h = _find_header(grid, ["po id"])
         for r in _rows_as_dicts(grid, h):
             po = norm_po(_get(r, ["PO ID", "PO Id"]))
             if po and po not in pool:
-                pool[po] = _get(r, ["Created On", "Created on"])
+                pool[po] = {
+                    "grn_id": _get(r, ["GRN ID", "GRN Id", "GRN Code"]),
+                    "created_on": _get(r, ["Created On", "Created on"]),
+                }
     return pool
 
 
-def grn_gate(payments: list[dict], grn: dict[str, str]) -> list[dict]:
+def grn_gate(payments: list[dict], grn: dict[str, dict]) -> list[dict]:
     kept, seen = [], set()
     for p in payments:
         po = p["po"]
@@ -430,15 +435,97 @@ def parse_payment_advice_pdf(pdf_bytes_list: list[bytes]) -> tuple[dict, dict, f
     return payments, debit_notes, pmdn_box[0]
 
 
-def parse_credit_notes(data: bytes) -> dict[str, float]:
+_CN_NUMBER_ALIASES = ["creditnote_number", "credit_note_number", "creditnote number", "Credit Note#", "credit note#"]
+
+
+def parse_credit_notes(data: bytes) -> dict[str, dict]:
+    """Per invoice: sum of `bcy_total` across all its credit notes, plus the
+    list of (deduped, non-empty) credit-note numbers that made up that sum."""
     grid = _read_sheet(data, "Credit Note Details") if _has_sheet(data, "Credit Note Details") else _read_sheet(data, 0)
     h = _find_header(grid, ["invoice_number", "bcy_total"])
-    out: dict[str, float] = {}
+    out: dict[str, dict] = {}
     for r in _rows_as_dicts(grid, h):
         inv = norm_inv(_get(r, ["invoice_number"]))
         if not inv:
             continue
-        out[inv] = out.get(inv, 0.0) + _to_float(_get(r, ["bcy_total"]))
+        acc = out.setdefault(inv, {"amount": 0.0, "numbers": []})
+        acc["amount"] += _to_float(_get(r, ["bcy_total"]))
+        number = _get(r, _CN_NUMBER_ALIASES)
+        if number and number not in acc["numbers"]:
+            acc["numbers"].append(number)
+    return out
+
+
+_LRN_INVOICE_ALIASES = ["invoice numbers drips foods", "invoice_number", "invoice number", "invoice numbers"]
+_LRN_ID_ALIASES = ["LRN/ AWB", "LRN/AWB", "LRN"]
+_LRN_DATE_ALIASES = ["Delivered Date to Destination", "Delivered Date", "Deliver Date"]
+
+
+def _raw_get(row: dict, aliases: list[str]) -> Any:
+    """Like `_get` but returns the RAW cell value (no str() coercion) so
+    datetime/Timestamp objects survive for date formatting."""
+    nk = {_norm_key(k): v for k, v in row.items()}
+    for a in aliases:
+        k = _norm_key(a)
+        if k in nk:
+            v = nk[k]
+            if v is not None and v != "":
+                return v
+    return None
+
+
+def _fmt_lrn_date(v: Any) -> str:
+    if v is None:
+        return ""
+    if hasattr(v, "strftime"):
+        try:
+            return v.strftime("%Y-%m-%d")
+        except Exception:
+            pass
+    s = str(v).strip()
+    return "" if s.lower() in ("nan", "nat", "none") else s
+
+
+def parse_lrn(datas: list[bytes]) -> dict[str, dict]:
+    """Build {norm_inv: {"pod_no": <LRN/AWB>, "pod_date": <delivered date str>}}
+    (first-win per invoice) from one or more LRN/POD tracking sheets.
+
+    A sheet with NO invoice-number column (aliases in `_LRN_INVOICE_ALIASES`)
+    is skipped entirely -- e.g. the courier's own tracking sheet that has no
+    way to link rows back to an invoice.
+
+    A single invoice cell may list MULTIPLE invoices separated by whitespace
+    (spaces or newlines), e.g. "INV24-25/000484 INV24-25/000491" -- the same
+    LRN/AWB + delivered date is applied to every invoice token in that row.
+    """
+    out: dict[str, dict] = {}
+    for data in datas:
+        try:
+            grid = _read_sheet(data, 0)
+        except Exception:
+            continue
+        try:
+            h = _find_header(grid, ["lrn"])
+        except ValueError:
+            continue
+
+        header_keys = {_norm_key(c) for c in grid[h]}
+        inv_alias_keys = {_norm_key(a) for a in _LRN_INVOICE_ALIASES}
+        if not (header_keys & inv_alias_keys):
+            continue   # no invoice-number column on this sheet -> skip entirely
+
+        for r in _rows_as_dicts(grid, h):
+            inv_cell = _get(r, _LRN_INVOICE_ALIASES)
+            if not inv_cell:
+                continue
+            pod_no = _get(r, _LRN_ID_ALIASES)
+            pod_date = _fmt_lrn_date(_raw_get(r, _LRN_DATE_ALIASES))
+            for tok in re.split(r"\s+", inv_cell.strip()):
+                if not tok or "INV" not in tok.upper():
+                    continue
+                inv = norm_inv(tok)
+                if inv and inv not in out:
+                    out[inv] = {"pod_no": pod_no, "pod_date": pod_date}
     return out
 
 
@@ -446,7 +533,7 @@ COLUMN_KEYS = [
     "po","date","invoice_number","sales_order_no","name","total_invoice_amt","tax",
     "invoice_amt_excl_tax","place_of_supply","gstin","billing_state","shipping_state",
     "pending_amount","payment_received_incl_tds","payment_received_excl_tds","tds",
-    "debit_note_issued","dn_accepted","dn_not_accepted","credit_note_issued",
+    "debit_note_issued","dn_accepted","dn_not_accepted","credit_note_issued","credit_note_no",
     "gross_outstanding","net_outstanding","status","grn_no","grn_date",
     "invoice_not_in_ledger","pod_no","pod_date","payment_date",
 ]
@@ -525,6 +612,7 @@ def reconcile_zepto(files: dict) -> list[dict]:
     grn = parse_grn(_many(files, "grn_list"))
     pay_map, dn_map, pmdn_total = parse_payment_advice_pdf(_many(files, "payment_advice"))
     cn_map = parse_credit_notes(_one(files, "credit_note") or b"")
+    lrn_map = parse_lrn(_many(files, "lrn"))
 
     dn_map = _dn_fallback_remap(dn_map, set(invoice_details.keys()))
 
@@ -542,7 +630,12 @@ def reconcile_zepto(files: dict) -> list[dict]:
         row["invoice_number"] = inv
 
         po = inv_to_po.get(inv, "")
-        row["po"] = po if po and po in grn else ""
+        if po and po in grn:
+            row["po"] = po
+            row["grn_no"] = grn[po]["grn_id"]
+            row["grn_date"] = grn[po]["created_on"]
+        else:
+            row["po"] = ""
 
         for f in ("date","sales_order_no","name","place_of_supply","gstin","billing_state","shipping_state"):
             row[f] = det[f]
@@ -555,7 +648,14 @@ def reconcile_zepto(files: dict) -> list[dict]:
         row["payment_received_excl_tds"] = round(pay.get("excl", 0.0), 2)
         row["tds"] = round(pay.get("tds", 0.0), 2)
         row["debit_note_issued"] = round(dn_map.get(inv, 0.0), 2)
-        row["credit_note_issued"] = round(cn_map.get(inv, 0.0), 2)
+
+        cn = cn_map.get(inv)
+        row["credit_note_issued"] = round(cn["amount"], 2) if cn else 0.0
+        row["credit_note_no"] = ", ".join(cn["numbers"]) if cn else ""
+
+        lr = lrn_map.get(inv)
+        row["pod_no"] = lr["pod_no"] if lr else ""
+        row["pod_date"] = lr["pod_date"] if lr else ""
 
         pending = _to_float(row["total_invoice_amt"])
         row["pending_amount"] = round(pending, 2)
@@ -585,21 +685,26 @@ def summarize_zepto(results: list[dict]) -> dict:
     }
 
 
-# Excel column letters, 1-based, matching COLUMN_KEYS order (A..AC).
+# Excel column letters, 1-based, matching COLUMN_KEYS order (A..AD).
 # "PO" was prepended in Task 2 (Invoice-Details universe + PO column); the
 # live formula strings below (pending/gross/net/status) are re-pointed to
-# these shifted columns in Task 3.
-_LETTERS = ["A","B","C","D","E","F","G","H","I","J","K","L","M","N","O","P","Q","R","S","T","U","V","W","X","Y","Z","AA","AB","AC"]
+# these shifted columns in Task 3. "Credit Note No" was inserted after
+# "Credit Note Issued" in the 5-column task, shifting everything after it
+# one letter to the right (U..AC -> V..AD).
+_LETTERS = ["A","B","C","D","E","F","G","H","I","J","K","L","M","N","O","P","Q","R","S","T","U","V","W","X","Y","Z","AA","AB","AC","AD"]
 _HEADERS = ["PO","Date","Invoice_number","Sales Order No.","Name","Total Invoice Amt","Tax",
     "Invoice Amt (Excl. Tax)","Place of Supply","GSTIN","Billing State","shipping_state",
     "Pending Amount","Payment Received (Including TDS)","Payment Received (Excluding TDS)","TDS",
-    "Debit Note Issued","DN Accepted","DN Not Accepted","Credit Note Issued","Gross Outstanding Amt",
-    "Net Outstanding Amt","Status","GRN No.","GRN Date","Invoice Not Available in Zepto Ledger",
-    "POD No","POD Date","Payment Date"]
+    "Debit Note Issued","DN Accepted","DN Not Accepted","Credit Note Issued","Credit Note No",
+    "Gross Outstanding Amt","Net Outstanding Amt","Status","GRN No.","GRN Date",
+    "Invoice Not Available in Zepto Ledger","POD No","POD Date","Payment Date"]
 _FORMULA_COLS = {"pending_amount","gross_outstanding","net_outstanding","status"}
 _MONEY_KEYS = {"total_invoice_amt","tax","invoice_amt_excl_tax","pending_amount",
     "payment_received_incl_tds","payment_received_excl_tds","tds","debit_note_issued",
     "credit_note_issued","gross_outstanding","net_outstanding"}
+# Text (non-money) columns that must NOT get the "#,##0.00" number format even
+# though they sit among money columns in the sheet.
+_TEXT_KEYS = {"credit_note_no", "grn_no", "pod_no", "pod_date", "grn_date"}
 
 # Per-column widths for "1. Invoice Tracker" — wider for names/refs/GSTIN,
 # tighter for money/date/status columns. Keyed by COLUMN_KEYS.
@@ -609,7 +714,7 @@ _COLUMN_WIDTHS = {
     "place_of_supply": 12, "gstin": 18, "billing_state": 14, "shipping_state": 14,
     "pending_amount": 14, "payment_received_incl_tds": 16, "payment_received_excl_tds": 16,
     "tds": 11, "debit_note_issued": 14, "dn_accepted": 12, "dn_not_accepted": 12,
-    "credit_note_issued": 14, "gross_outstanding": 15, "net_outstanding": 15,
+    "credit_note_issued": 14, "credit_note_no": 16, "gross_outstanding": 15, "net_outstanding": 15,
     "status": 12, "grn_no": 14, "grn_date": 12, "invoice_not_in_ledger": 16,
     "pod_no": 12, "pod_date": 12, "payment_date": 12,
 }
@@ -739,13 +844,15 @@ def build_zepto_workbook(results: list[dict], payload: dict | None = None):
     zebra_fill = PatternFill("solid", fgColor="F5F7FA")
 
     # Row 1: source-group labels (merged)
-    # NEW PO-first layout: PO(A) + From Tally(B-L) | Pending(M, formula) |
-    # Payment Advice(N-P) | From Zepto Ledger/Payment Advice(Q-T) |
-    # Computed(U-W) | From Zepto Dashboard(X-Z) | From Courier(AA-AC).
+    # PO-first layout: PO(A) + From Tally(B-L) | Pending(M, formula) |
+    # Payment Advice(N-P) | From Zepto Ledger/Payment Advice(Q-U, now
+    # includes Credit Note No) | Computed(V-X) | From Zepto Dashboard(Y-AA) |
+    # From Courier(AB-AD). Shifted one letter right of the old layout
+    # (U..AC) by the "Credit Note No" column insertion in the 5-col task.
     ws.append([""] * len(_HEADERS))
     groups = [("From Tally","B","L"),("Payment Advice (Zepto Portal)","N","P"),
-              ("From Zepto Ledger / Payment Advice","Q","T"),("Computed","U","W"),
-              ("From Zepto Dashboard","X","Z"),("From Courier (Delhivery)","AA","AC")]
+              ("From Zepto Ledger / Payment Advice","Q","U"),("Computed","V","X"),
+              ("From Zepto Dashboard","Y","AA"),("From Courier (Delhivery)","AB","AD")]
     for label, c1, c2 in groups:
         ws.merge_cells(f"{c1}1:{c2}1")
         cell = ws[f"{c1}1"]; cell.value = label
@@ -778,14 +885,14 @@ def build_zepto_workbook(results: list[dict], payload: dict | None = None):
                 if row.get("invoice_not_in_ledger"):
                     val = row.get("status", "")
                 else:
-                    val = f'=IF(AND(U{r}<=100,V{r}<=100),"Paid","Not Paid")'
+                    val = f'=IF(AND(V{r}<=100,W{r}<=100),"Paid","Not Paid")'
             else:
                 val = row.get(key, "")
                 if val == "" and key in _MONEY_KEYS:
                     val = 0
             c = ws.cell(row=r, column=col_i, value=val)
             c.border = border
-            if key in _MONEY_KEYS or key in _FORMULA_COLS - {"status"}:
+            if key not in _TEXT_KEYS and (key in _MONEY_KEYS or key in _FORMULA_COLS - {"status"}):
                 c.number_format = "#,##0.00"
                 c.alignment = Alignment(horizontal="right")
             elif key == "status":
@@ -802,7 +909,7 @@ def build_zepto_workbook(results: list[dict], payload: dict | None = None):
     # Conditional formatting on the Status column (formula-driven cell, so
     # color must be applied via CF rules rather than a static fill).
     if last_row >= 3:
-        status_range = f"W3:W{last_row}"
+        status_range = f"X3:X{last_row}"
         paid_rule = CellIsRule(
             operator="equal", formula=['"Paid"'],
             fill=PatternFill("solid", fgColor=_PAID_FILL_HEX),

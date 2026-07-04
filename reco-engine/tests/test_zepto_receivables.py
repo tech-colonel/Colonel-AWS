@@ -4,7 +4,7 @@ from io import BytesIO
 from recon.zepto_receivables import (norm_po, norm_inv, dn_ref_to_invoice,
                                      _read_csv, _find_header, _rows_as_dicts, _get, _norm_key,
                                      parse_zepto_payment, parse_grn, grn_gate, parse_invoice_details,
-                                     parse_credit_notes, reconcile_zepto, summarize_zepto)
+                                     parse_credit_notes, parse_lrn, reconcile_zepto, summarize_zepto)
 
 def test_normalizers_and_dn_transform():
     assert norm_po(" p4143483 ") == "P4143483"
@@ -167,6 +167,8 @@ def test_parse_payment_advice():
     print("test_parse_payment_advice OK")
 
 def test_parse_credit_notes():
+    # parse_credit_notes now returns {inv: {"amount": <sum>, "numbers": [...]}}
+    # -- both credit-note numbers must be captured (deduped) alongside the sum.
     cn = _xlsx({"Credit Note Details": [
         ["Credit Note Details title row"],
         ["creditnote_number","status","date","reference_number","exchange_rate",
@@ -176,8 +178,53 @@ def test_parse_credit_notes():
         ["CN/26-27/0009","closed","2025-05-10","SO2",1,50.0,0,"INR",7,"",0,0,7,"INV26-27/000011"],
     ]})
     d = parse_credit_notes(cn)
-    assert round(d["INV26-27/000011"], 2) == 2099.75    # 2049.75 + 50.0
+    assert round(d["INV26-27/000011"]["amount"], 2) == 2099.75    # 2049.75 + 50.0
+    assert d["INV26-27/000011"]["numbers"] == ["CN/26-27/0003", "CN/26-27/0009"]
     print("test_parse_credit_notes OK")
+
+
+def test_parse_credit_notes_real_fixture():
+    with open(os.path.join(_REAL_FIXTURES_DIR, "Credit Note Details (4).xlsx"), "rb") as f:
+        data = f.read()
+    d = parse_credit_notes(data)
+    # INV26-27/000011 has one credit note: CN/26-27/0001, amount 2049.75.
+    row = d["INV26-27/000011"]
+    assert round(row["amount"], 2) == 2049.75
+    assert row["numbers"] == ["CN/26-27/0001"]
+    print("test_parse_credit_notes_real_fixture OK")
+
+
+def test_parse_grn_real_fixture_captures_grn_id_and_created_on():
+    with open(os.path.join(_REAL_FIXTURES_DIR, "GRN_List - April-2026.csv"), "rb") as f:
+        data = f.read()
+    grn = parse_grn([data])
+    row = grn["P3855315"]
+    assert row["grn_id"] == "GrnCode41929315"
+    assert row["created_on"] == "4/2/2026 16:20"
+    print("test_parse_grn_real_fixture_captures_grn_id_and_created_on OK")
+
+
+_LRN_OLD_FIXTURE = os.path.join(_REAL_FIXTURES_DIR, "Drips Foods formate sheet-LRN Old.xlsx")
+_LRN_13MAY_FIXTURE = os.path.join(_REAL_FIXTURES_DIR, "DRIPS FOOD LRN - From 13th MAy.xlsx")
+
+
+def test_parse_lrn_multi_invoice_row():
+    with open(_LRN_OLD_FIXTURE, "rb") as f:
+        data = f.read()
+    lrn_map = parse_lrn([data])
+    for inv in ("INV24-25/000484", "INV24-25/000491"):
+        assert inv in lrn_map, inv
+        assert lrn_map[inv]["pod_no"] == "264895795"
+        assert lrn_map[inv]["pod_date"] != ""
+    print("test_parse_lrn_multi_invoice_row OK")
+
+
+def test_parse_lrn_sheet_without_invoice_column_is_skipped():
+    with open(_LRN_13MAY_FIXTURE, "rb") as f:
+        data = f.read()
+    lrn_map = parse_lrn([data])
+    assert lrn_map == {}
+    print("test_parse_lrn_sheet_without_invoice_column_is_skipped OK")
 
 def _file(b): return {"filename": "f", "content": b}
 
@@ -196,9 +243,9 @@ def test_reconcile_end_to_end():
         ["P100","INV26-27/000007","Pune"],          # PO in GRN -> po filled
         ["P900","INV26-27/000101","Delhi"],         # PO NOT in GRN -> po blank
     ]})
-    grn = b"GRN ID,PO ID,Created On,Status\r\nG1,P100,4/2/2026,CONFIRMED\r\n"   # only P100 confirmed
+    grn = b"GRN ID,PO ID,Created On,Status\r\nGrnCode99,P100,4/2/2026,CONFIRMED\r\n"   # only P100 confirmed
     cn = _xlsx({"Credit Note Details": [["t"],
-        ["invoice_number","bcy_total"], ["INV26-27/000101", 100.0]]})
+        ["invoice_number","bcy_total","creditnote_number"], ["INV26-27/000101", 100.0, "CN/26-27/0099"]]})
     files = {"zepto_payment": _file(pay), "grn_list": [_file(grn)],
              "invoice_details": _file(invd), "payment_advice": [], "credit_note": _file(cn)}
     res = reconcile_zepto(files)
@@ -207,6 +254,8 @@ def test_reconcile_end_to_end():
     a = by_inv["INV26-27/000007"]
     assert a["name"] == "ZEPTO PUNE"
     assert a["po"] == "P100"                              # GRN-matched -> po filled
+    assert a["grn_no"] == "GrnCode99"                     # PO's GRN in GRN pool -> grn_no filled
+    assert a["grn_date"] == "4/2/2026"                    # ... and grn_date filled
     assert round(a["total_invoice_amt"], 2) == 56685.0
     assert round(a["pending_amount"], 2) == 56685.0
     assert round(a["payment_received_incl_tds"], 2) == 0.0    # no PDFs -> 0
@@ -218,8 +267,10 @@ def test_reconcile_end_to_end():
     b = by_inv["INV26-27/000101"]
     assert b["name"] == "ZEPTO JAIPUR"
     assert b["po"] == ""                                  # PO not in GRN pool -> blank
+    assert b["grn_no"] == "" and b["grn_date"] == ""       # no GRN match -> blank
     assert round(b["total_invoice_amt"], 2) == 21369.43
     assert round(b["credit_note_issued"], 2) == 100.0
+    assert b["credit_note_no"] == "CN/26-27/0099"          # new column filled from CN map
     assert b["status"] in ("Paid", "Not Paid")
 
     s = summarize_zepto(res)
@@ -227,9 +278,10 @@ def test_reconcile_end_to_end():
     print("test_reconcile_end_to_end OK")
 
 def test_workbook_has_live_formulas():
-    # NEW PO-first column layout (29 cols): PO is col A, invoice_number is
-    # col C, total_invoice_amt is col F. The 4 live formula strings
-    # (pending/gross/net/status) are re-pointed to the shifted columns.
+    # PO-first column layout (30 cols, after the 5-column task added Credit
+    # Note No): PO is col A, invoice_number is col C, total_invoice_amt is
+    # col F. The 4 live formula strings (pending/gross/net/status) are
+    # re-pointed to the shifted columns (U..W -> V..X).
     from recon.zepto_receivables import build_zepto_workbook
     results = [{k: "" for k in __import__("recon.zepto_receivables", fromlist=["COLUMN_KEYS"]).COLUMN_KEYS}]
     r = results[0]
@@ -241,10 +293,15 @@ def test_workbook_has_live_formulas():
     assert ws["A3"].value == "P100"                    # po (col A)
     assert ws["C3"].value == "INV26-27/000007"          # invoice_number (col C)
     assert ws["F3"].value == 56685.0                    # total_invoice_amt (col F)
+    assert ws["U2"].value == "Credit Note No"                                          # new header
     assert ws["M3"].value == "=F3"                                                     # pending_amount
-    assert ws["U3"].value == "=M3-N3"                                                  # gross_outstanding
-    assert ws["V3"].value == "=M3-N3+Q3"                                               # net_outstanding
-    assert ws["W3"].value == '=IF(AND(U3<=100,V3<=100),"Paid","Not Paid")'             # status (signed)
+    assert ws["V3"].value == "=M3-N3"                                                  # gross_outstanding
+    assert ws["W3"].value == "=M3-N3+Q3"                                               # net_outstanding
+    assert ws["X3"].value == '=IF(AND(V3<=100,W3<=100),"Paid","Not Paid")'             # status (signed)
+    # No #REF!/formula-error leakage -- the 4 live formula strings above are
+    # the exact, complete set and none of them reference a shifted-away cell.
+    for cell_ref in ("M3", "V3", "W3", "X3"):
+        assert "REF" not in str(ws[cell_ref].value)
     print("test_workbook_has_live_formulas OK")
 
 
@@ -310,7 +367,7 @@ def test_status_column_has_conditional_formatting():
     # Status column (formula-driven cell -> CF is the only way to color it).
     cf_ranges = [str(rng) for rng in ws.conditional_formatting]
     assert len(cf_ranges) >= 1
-    assert any("W" in rng for rng in cf_ranges)
+    assert any("X3" in rng for rng in cf_ranges)   # Status is now col X
     print("test_status_column_has_conditional_formatting OK")
 
 def test_universe_includes_invoice_with_no_po_mapping_at_all():
@@ -625,6 +682,10 @@ if __name__ == "__main__":
     test_parse_invoice_details()
     test_parse_payment_advice()
     test_parse_credit_notes()
+    test_parse_credit_notes_real_fixture()
+    test_parse_grn_real_fixture_captures_grn_id_and_created_on()
+    test_parse_lrn_multi_invoice_row()
+    test_parse_lrn_sheet_without_invoice_column_is_skipped()
     test_reconcile_end_to_end()
     test_workbook_has_live_formulas()
     test_status_signed_threshold_negative_net_is_paid()
