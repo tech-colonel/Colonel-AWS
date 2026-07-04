@@ -6,7 +6,8 @@ const FOLDER_MIME = 'application/vnd.google-apps.folder';
 function classifyZeptoFile(name) {
   const n = String(name || '').toLowerCase().trim();
   if (n.startsWith('1.') || n.includes('receivable tracker')) return null; // output file
-  if (n.includes('drips')) return null;                                    // LRN/POD (future)
+  if (n.includes('lrn')) return 'lrn';                                     // Drips/CLS LRN sheets (POD source; engine skips ones w/o invoice#)
+  if (n.includes('drips')) return null;                                    // other DRIPS files (no LRN) — ignore
   if (n.includes('zepto payment')) return 'zepto_payment';
   if (n.startsWith('grn_list') || n.includes('grn_list') || n.includes('grn list')) return 'grn_list';
   if (n.includes('invoice details')) return 'invoice_details';
