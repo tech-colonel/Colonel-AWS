@@ -421,13 +421,18 @@ const RECO_TYPE_MAP = {
  */
 const runUniversalClassifier = (ledgerPath, bankPath, outputPath, correctionsPath, brandName) => {
   return new Promise((resolve, reject) => {
+    const anthropicKey = process.env.ANTHROPIC_API_KEY;
+    const anthropicModel = process.env.ANTHROPIC_MODEL || 'claude-haiku-4-5';
     const geminiKey = process.env.GEMINI_API_KEY;
     const geminiModel = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
-    console.log(`[RECO] Executing standalone classifier (gemini=${geminiKey ? 'on' : 'off'}, brand=${brandName || 'none'}): ${CLASSIFIER_PATH}`);
+    const llmOn = anthropicKey ? `claude(${anthropicModel})` : (geminiKey ? 'gemini' : 'off');
+    console.log(`[RECO] Executing standalone classifier (llm=${llmOn}, brand=${brandName || 'none'}): ${CLASSIFIER_PATH}`);
     const args = ['--ledger', ledgerPath, '--bank', bankPath, '--output', outputPath];
     if (correctionsPath) args.push('--corrections', correctionsPath);
     if (brandName) args.push('--brand', brandName);
-    // Gemini fallback: candidate-constrained LLM pass over Low/Suspense rows only.
+    // LLM fallback: candidate-constrained pass over Low/Medium rows only.
+    // Claude is preferred when its key is present; Gemini is the fallback.
+    if (anthropicKey) args.push('--anthropic-key', anthropicKey, '--anthropic-model', anthropicModel);
     if (geminiKey) args.push('--gemini-key', geminiKey, '--gemini-model', geminiModel);
     execFile('python3', [CLASSIFIER_PATH, ...args], { timeout: 600000 },
       (error, stdout, stderr) => {

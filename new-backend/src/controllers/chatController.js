@@ -1,4 +1,4 @@
-/* ── Colonel AI — Anthropic chat (streaming) ────────────────────────────────
+/* ── Colonel AI — Gemini chat (streaming) ───────────────────────────────────
    POST /api/chat  — auth required.
    Body: { conversationId?, model?, messages: [{role, content}], system? }
 
@@ -8,24 +8,23 @@
      event: done    data: {"text": "<full>"}   ← full assistant text once
      event: error   data: {"error": "..."}
 
-   Claude API is used ONLY for this freeform conversation. File processing,
-   reco runs, and dashboards (Agent mode) go through the Python reco engine and
-   ToolResultDashboard — they never touch this endpoint.                       */
+   Uses Google Gemini (generativelanguage API) via streaming REST — no SDK
+   needed (Node fetch). File processing, reco runs and dashboards (Agent mode)
+   go through the Python reco engine and never touch this endpoint.            */
 
 const { Conversation } = require('../models/master');
 
-// Lazy-load the SDK so the backend still boots if the package isn't installed
-// yet (the /api/chat route then returns a clean 503 instead of crashing boot).
-let Anthropic = null;
-try { Anthropic = require('@anthropic-ai/sdk'); } catch (_) { /* not installed yet */ }
-
-// Models the picker is allowed to use. Default = Sonnet (cost-controlled).
+// Gemini models the picker may use. Anything else (e.g. legacy Claude ids the
+// UI might still send) falls back to the default so chat always works.
+const DEFAULT_MODEL = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
 const MODEL_WHITELIST = new Set([
-  'claude-opus-4-8',
-  'claude-sonnet-4-6',
-  'claude-haiku-4-5-20251001',
+  'gemini-2.5-flash',
+  'gemini-2.5-pro',
+  'gemini-2.0-flash',
+  'gemini-1.5-flash',
+  'gemini-1.5-pro',
 ]);
-const DEFAULT_MODEL = 'claude-sonnet-4-6';
+const GEMINI_BASE = 'https://generativelanguage.googleapis.com/v1beta/models';
 
 const SYSTEM_PROMPT = `You are Colonel AI, the in-app assistant for Colonel — an automation platform built for an Indian Chartered Accountancy firm that manages reconciliation and accounting for multiple D2C / e-commerce brands.
 
@@ -57,42 +56,32 @@ When a CURRENT RECONCILIATION CONTEXT section is present below, the user has jus
 
 Be concise, accurate, and practical. Use Indian accounting terminology. Format with markdown (headings, lists, bold, tables, code) when it helps.`;
 
-const getClient = () => {
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey || !Anthropic) return null;
-  return new Anthropic({ apiKey });
-};
-
-/* Coerce the incoming messages to the Anthropic shape and drop anything empty. */
-const normalizeMessages = (messages) =>
+/* Coerce incoming messages → Gemini "contents" (role: user | model). */
+const toGeminiContents = (messages) =>
   (Array.isArray(messages) ? messages : [])
     .filter((m) => m && (m.role === 'user' || m.role === 'assistant'))
     .map((m) => ({
-      role: m.role,
-      content: typeof m.content === 'string' ? m.content : String(m.content ?? ''),
+      role: m.role === 'assistant' ? 'model' : 'user',
+      parts: [{ text: typeof m.content === 'string' ? m.content : String(m.content ?? '') }],
     }))
-    .filter((m) => m.content.trim().length > 0);
+    .filter((m) => m.parts[0].text.trim().length > 0);
 
 const streamChat = async (req, res, next) => {
-  const client = getClient();
-  if (!client) {
-    return res.status(503).json({
-      error: 'Colonel AI is not configured. Set ANTHROPIC_API_KEY on the backend.',
-    });
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) {
+    return res.status(503).json({ error: 'Colonel AI is not configured. Set GEMINI_API_KEY on the backend.' });
   }
 
   const { conversationId, system, context } = req.body || {};
   const model = MODEL_WHITELIST.has(req.body?.model) ? req.body.model : DEFAULT_MODEL;
-  const messages = normalizeMessages(req.body?.messages);
+  const contents = toGeminiContents(req.body?.messages);
 
-  // Base system prompt (caller override or the Colonel prompt) + optional
-  // run context (the latest Agent run) so the model can explain specific rows.
   let systemPrompt = system && String(system).trim() ? String(system) : SYSTEM_PROMPT;
   if (context && String(context).trim()) {
     systemPrompt += `\n\nCURRENT RECONCILIATION CONTEXT (the user just ran this — use it to answer questions about specific entries):\n${String(context).slice(0, 12000)}`;
   }
 
-  if (messages.length === 0) {
+  if (contents.length === 0) {
     return res.status(400).json({ error: 'messages is required' });
   }
 
@@ -101,7 +90,7 @@ const streamChat = async (req, res, next) => {
     'Content-Type': 'text/event-stream',
     'Cache-Control': 'no-cache, no-transform',
     Connection: 'keep-alive',
-    'X-Accel-Buffering': 'no',           // disable proxy buffering (nginx/ngrok)
+    'X-Accel-Buffering': 'no',
   });
   if (typeof res.flushHeaders === 'function') res.flushHeaders();
 
@@ -112,55 +101,76 @@ const streamChat = async (req, res, next) => {
 
   let fullText = '';
   let aborted = false;
+  let usage = null;
   req.on('close', () => { aborted = true; });
 
   try {
-    const stream = client.messages.stream({
-      model,
-      max_tokens: 4096,
-      system: systemPrompt,
-      messages,
+    const url = `${GEMINI_BASE}/${model}:streamGenerateContent?alt=sse&key=${apiKey}`;
+    const resp = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        systemInstruction: { parts: [{ text: systemPrompt }] },
+        contents,
+        generationConfig: { maxOutputTokens: 4096, temperature: 0.7 },
+      }),
     });
 
-    stream.on('text', (delta) => {
-      if (aborted) return;
-      fullText += delta;
-      send('delta', { text: delta });
-    });
+    if (!resp.ok || !resp.body) {
+      const errText = await resp.text().catch(() => '');
+      let msg = `Gemini error ${resp.status}`;
+      try { msg = JSON.parse(errText)?.error?.message || msg; } catch (_) {}
+      send('error', { error: msg });
+      return res.end();
+    }
 
-    const final = await stream.finalMessage();
+    // Parse the SSE stream from Gemini (data: {chunk}\n\n).
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    for (;;) {
+      if (aborted) { try { await reader.cancel(); } catch (_) {} break; }
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+      for (const line of lines) {
+        const t = line.trim();
+        if (!t.startsWith('data:')) continue;
+        const payload = t.slice(5).trim();
+        if (!payload || payload === '[DONE]') continue;
+        let obj; try { obj = JSON.parse(payload); } catch (_) { continue; }
+        const parts = obj?.candidates?.[0]?.content?.parts || [];
+        for (const p of parts) {
+          if (p && typeof p.text === 'string' && !p.thought) {
+            fullText += p.text;
+            if (!aborted) send('delta', { text: p.text });
+          }
+        }
+        if (obj?.usageMetadata) usage = obj.usageMetadata;
+      }
+    }
 
     if (!aborted) {
-      if (final?.usage) {
-        send('usage', {
-          input_tokens: final.usage.input_tokens,
-          output_tokens: final.usage.output_tokens,
-        });
-      }
+      if (usage) send('usage', { input_tokens: usage.promptTokenCount || 0, output_tokens: usage.candidatesTokenCount || 0 });
       send('done', { text: fullText, model });
     }
 
-    // Persist the completed turn to the owner's conversation (fire-and-forget,
-    // strictly scoped to the caller so it can't write to someone else's chat).
+    // Persist the completed turn to the owner's conversation (fire-and-forget).
     if (conversationId && fullText) {
       setImmediate(async () => {
         try {
-          const convo = await Conversation.findOne({
-            where: { id: conversationId, user_id: req.user.id },
-          });
+          const convo = await Conversation.findOne({ where: { id: conversationId, user_id: req.user.id } });
           if (!convo) return;
           const next = [...(convo.messages || []), { role: 'assistant', content: fullText }];
           await convo.update({ messages: next, model });
-        } catch (e) {
-          console.warn('[chat] persist failed:', e.message);
-        }
+        } catch (e) { console.warn('[chat] persist failed:', e.message); }
       });
     }
   } catch (err) {
     console.error('[chat] stream error:', err);
-    if (!aborted) {
-      try { send('error', { error: err?.message || 'Chat failed' }); } catch (_) {}
-    }
+    if (!aborted) { try { send('error', { error: err?.message || 'Chat failed' }); } catch (_) {} }
   } finally {
     if (!aborted) res.end();
   }

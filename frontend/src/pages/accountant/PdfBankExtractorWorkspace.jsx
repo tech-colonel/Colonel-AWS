@@ -112,19 +112,9 @@ export default function PdfBankExtractorWorkspace() {
   // ── Validation badge ───────────────────────────────────────────
   const ValidationBadge = ({ v }) => {
     if (!v) return null;
-    if (!v.totals_found_in_pdf) {
-      return (
-        <span style={{
-          display: 'inline-flex', alignItems: 'center', gap: 6,
-          padding: '4px 12px', borderRadius: 20,
-          background: 'var(--surface)', border: '1px solid var(--card-border)',
-          fontSize: 12, color: 'var(--text-muted)', fontFamily: 'DM Sans',
-        }}>
-          <AlertCircle size={13} /> PDF totals row not found — verify manually
-        </span>
-      );
-    }
+    // Verified by PDF totals OR by balance reconciliation → green.
     if (v.verified) {
+      const byBalance = v.verify_method === 'balance';
       return (
         <span style={{
           display: 'inline-flex', alignItems: 'center', gap: 6,
@@ -133,8 +123,21 @@ export default function PdfBankExtractorWorkspace() {
           fontSize: 12, color: '#065F46', fontFamily: 'DM Sans', fontWeight: 600,
         }}>
           <CheckCircle2 size={13} color="#10B981" />
-          Totals Verified ✓ &nbsp;—&nbsp;
+          Totals Verified ✓ {byBalance ? '(balance reconciled)' : ''} &nbsp;—&nbsp;
           Debit ₹{fmt(v.computed_total_debit)} | Credit ₹{fmt(v.computed_total_credit)}
+        </span>
+      );
+    }
+    // No PDF totals row and balance didn't reconcile → neutral "verify manually".
+    if (!v.totals_found_in_pdf) {
+      return (
+        <span style={{
+          display: 'inline-flex', alignItems: 'center', gap: 6,
+          padding: '4px 12px', borderRadius: 20,
+          background: 'var(--surface)', border: '1px solid var(--card-border)',
+          fontSize: 12, color: 'var(--text-muted)', fontFamily: 'DM Sans',
+        }}>
+          <AlertCircle size={13} /> Totals: verify manually — Debit ₹{fmt(v.computed_total_debit)} | Credit ₹{fmt(v.computed_total_credit)}
         </span>
       );
     }

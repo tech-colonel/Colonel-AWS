@@ -1,12 +1,23 @@
 """
-pdf_bank_extractor.py — Converts Indian bank statement PDFs to structured Excel.
+pdf_bank_extractor.py — Converts ANY Indian bank statement PDF (digital text
+layer) to structured Excel, reproducing the statement's own columns.
 
-Uses word-level bounding-box extraction (pdfplumber extract_words) so each
-visual row in the PDF maps to exactly one transaction or continuation row.
-This gives 100% accurate amounts and clean narrations with no blending.
+Approach (deterministic — the same path the best open-source parsers use):
+  1. Find the transaction-table header (multi-line aware) by keyword scoring.
+  2. Detect column boundaries by X-projection of the DATA rows — column
+     separators are the vertical whitespace gaps that persist across rows.
+     This is layout-agnostic: it discovers serial-#, Value-Date, MODE, etc.
+     as their own columns instead of forcing a fixed schema.
+  3. Semantically tag columns (date / narration / ref / debit / credit /
+     balance) so we can build rows and the running-balance check points.
+  4. Assemble rows anchor-first: a line with a valid date in the primary date
+     column is a transaction anchor; date-less lines attach to the nearest
+     anchor by Y (handles narration that wraps ABOVE and BELOW the amount line,
+     e.g. ICICI).
 
-Supports: HDFC, ICICI, SBI, Axis, Kotak (auto-detects column layout).
-Output: Txn Date | Description | Chq./Ref.No. | Debit | Credit | Balance | Voucher No.
+Output Excel = every source column, verbatim + Check Point 1 / Check Point 2 +
+a Statement Summary block. Verified against the statement's own printed totals
+and/or running-balance continuity (the "Golden Rule").
 """
 from __future__ import annotations
 
@@ -20,25 +31,39 @@ logger = logging.getLogger(__name__)
 # ──────────────────────────────────────────────────────────────────
 # Column header keyword lists (lowercase substring match)
 # ──────────────────────────────────────────────────────────────────
-_DATE_KW    = ["txn date", "tran date", "value date", "date", "posting date"]
-_NARR_KW    = ["narration", "description", "particulars", "transaction details", "details"]
-_REF_KW     = ["chq", "ref no", "cheque no", "reference", "instrument"]
-_DEBIT_KW   = ["withdrawal amt", "withdrawal", "debit (inr)", "debit amt", "(dr)", "dr amount", "debit", "withdrawl"]
-_CREDIT_KW  = ["deposit amt", "deposit", "credit (inr)", "credit amt", "(cr)", "cr amount", "credit"]
+_DATE_KW    = ["txn date", "tran date", "transaction date", "value date", "posting date", "date"]
+_NARR_KW    = ["narration", "description", "particulars", "transaction details", "details", "remarks"]
+_REF_KW     = ["chq", "ref no", "cheque no", "reference", "instrument", "ref."]
+# NOTE: never put a bare "dr"/"cr" here — it substring-matches "DesCRiption",
+# "WithDRawal" etc. Standalone Dr/Cr flag columns are handled in _tag_for().
+_DEBIT_KW   = ["withdrawal amt", "withdrawals", "withdrawal", "debit (inr)", "debit amt",
+               "(dr)", "(dr.)", "dr amount", "debit", "withdrawl", "paid out"]
+_CREDIT_KW  = ["deposit amt", "deposits", "deposit", "credit (inr)", "credit amt",
+               "(cr)", "(cr.)", "cr amount", "credit", "paid in"]
 _BALANCE_KW = ["closing balance", "running balance", "balance (inr)", "balance"]
-_TOTAL_SET  = {"total", "grand total", "totals", "total:", "subtotal"}
+_TOTAL_SET  = {"total", "grand total", "totals", "total:", "subtotal", "closing balance", "statement summary"}
+# Strong end-of-transactions phrases — once seen, the rest of the page is a
+# footer/legend, never a transaction (prevents the last row absorbing boilerplate).
+_END_MARKERS = ("commonly used narrations", "end of statement", "this is a system generated",
+                "unless the constituent", "registered office", "account summary",
+                "please examine the statement", "computer generated statement",
+                "legend", "abbreviations used")
 
 # Real reference number: at least 6 consecutive digits
 _REAL_REF_RE = re.compile(r'\d{6,}')
 
-_KW_MAP = [
-    ('date',    _DATE_KW),
-    ('narr',    _NARR_KW),
-    ('ref',     _REF_KW),
-    ('debit',   _DEBIT_KW),
-    ('credit',  _CREDIT_KW),
+# Tag detection order — first match wins. Unique tags (debit/credit/balance/narr/ref)
+# are claimed once; date may repeat (Transaction Date + Value Date).
+_TAG_ORDER = [
     ('balance', _BALANCE_KW),
+    ('credit',  _CREDIT_KW),
+    ('debit',   _DEBIT_KW),
+    ('ref',     _REF_KW),
+    ('narr',    _NARR_KW),
+    ('date',    _DATE_KW),
 ]
+_UNIQUE_TAGS = {'balance', 'credit', 'debit', 'ref', 'narr'}
+_NUMERIC_TAGS = {'debit', 'credit', 'balance'}
 
 
 def _match(cell: str, keywords: list[str]) -> bool:
@@ -46,218 +71,563 @@ def _match(cell: str, keywords: list[str]) -> bool:
     return any(k in c for k in keywords)
 
 
+def _tag_for(text: str) -> Optional[str]:
+    t = (text or "").lower().strip()
+    if not t:
+        return None
+    # Standalone Dr/Cr flag column (exact token only — never substring)
+    if t in ('dr', 'dr.', 'cr', 'cr.'):
+        return 'debit' if t[0] == 'd' else 'credit'
+    for tag, kws in _TAG_ORDER:
+        if any(k in t for k in kws):
+            return tag
+    return None
+
+
+# ──────────────────────────────────────────────────────────────────
+# Amount parsing — handles ₹, commas, Dr/Cr suffix, (parentheses), trailing −
+# ──────────────────────────────────────────────────────────────────
+_AMT_RE = re.compile(r'-?\d[\d,]*\.?\d*')
+
+
 def _parse_amount(value) -> float:
+    """Parse a currency cell to float. Returns 0.0 when the cell is not a number.
+    Understands 1,234.00 / ₹1,234 / (1,234.00) neg / 1,234.00Dr / 1,234.00 Cr / 1234.00-."""
     if value is None:
         return 0.0
-    s = re.sub(r"[₹,\s]", "", str(value).strip())
-    if not s or s in ("-", "—", "nil", "n/a", "na", "--"):
+    if isinstance(value, (int, float)):
+        return float(value)
+    s = str(value).strip()
+    if not s or s.lower() in ("-", "—", "nil", "n/a", "na", "--", "b/f", "c/f"):
+        return 0.0
+    neg = False
+    low = s.lower()
+    # Parenthesised negative
+    if s.startswith("(") and s.endswith(")"):
+        neg = True
+    # Trailing Dr = withdrawal is caller's concern; here Dr/Cr only flags sign for balance cells
+    if low.endswith("dr") or low.endswith("dr.") or low.endswith("-"):
+        neg = True
+    s = re.sub(r"[₹,\s]", "", s)
+    m = _AMT_RE.search(s.replace("(", "").replace(")", ""))
+    if not m:
         return 0.0
     try:
-        return float(s)
+        v = float(m.group(0).replace(",", ""))
     except ValueError:
         return 0.0
+    return -abs(v) if neg else v
+
+
+_MONTHS = {'jan': 1, 'feb': 2, 'mar': 3, 'apr': 4, 'may': 5, 'jun': 6,
+           'jul': 7, 'aug': 8, 'sep': 9, 'oct': 10, 'nov': 11, 'dec': 12}
 
 
 def _parse_date(s: str) -> str:
-    s = s.strip()
-    return s if re.match(r"\d{1,2}[/\-\.]\d{1,2}[/\-\.]\d{2,4}", s) else ""
+    """Return a normalised DD/MM/YYYY if `s` is a single date token, else ''.
+    Rejects strings with trailing junk (two dates, date+ref) so they aren't
+    mistaken for a transaction anchor."""
+    s = (s or "").strip()
+    m = re.match(r"^(\d{1,2})[/\-\.](\d{1,2})[/\-\.](\d{2,4})$", s)
+    if m:
+        d, mo, y = m.group(1), m.group(2), m.group(3)
+        if len(y) == 2:
+            y = "20" + y
+        return f"{int(d):02d}/{int(mo):02d}/{y}"
+    m = re.match(r"^(\d{1,2})[\s\-]+([A-Za-z]{3,9})[\s\-]+(\d{2,4})$", s)
+    if m:
+        mon = _MONTHS.get(m.group(2)[:3].lower())
+        if mon:
+            y = m.group(3)
+            if len(y) == 2:
+                y = "20" + y
+            return f"{int(m.group(1)):02d}/{mon:02d}/{y}"
+    return ""
 
 
 # ──────────────────────────────────────────────────────────────────
-# Column X-boundary detection (from header word positions)
+# Line grouping
 # ──────────────────────────────────────────────────────────────────
-def _detect_col_x_bounds(page) -> Optional[dict]:
-    """
-    Detect X-coordinate column boundaries from the table header row.
-
-    Uses ALL words on the header row (including unrecognized columns like "ValueDt")
-    to build correct midpoint boundaries, then maps recognized column names to slots.
-    This prevents unrecognized columns from corrupting recognized column boundaries.
-    """
-    words = page.extract_words(x_tolerance=3, y_tolerance=3)
-    if not words:
-        return None
-
-    # Collect candidates per recognized column
-    candidates: dict[str, list] = {col: [] for col, _ in _KW_MAP}
-    for w in words:
-        wl = w['text'].lower()
-        for col_name, kws in _KW_MAP:
-            if any(kw in wl for kw in kws):
-                candidates[col_name].append(w)
-                break
-
-    if sum(1 for v in candidates.values() if v) < 4:
-        return None
-
-    # Find the header Y where most recognized column words cluster
-    all_ys = {round(w['top']) for cols in candidates.values() for w in cols}
-    best_y, best_count = None, 0
-    for y in all_ys:
-        cnt = sum(1 for cols in candidates.values()
-                  if any(abs(w['top'] - y) <= 6 for w in cols))
-        if cnt > best_count:
-            best_count, best_y = cnt, y
-
-    if best_count < 4 or best_y is None:
-        return None
-
-    # Get ALL words at that header Y (including unrecognized like "ValueDt")
-    all_hdr = sorted([w for w in words if abs(w['top'] - best_y) <= 6],
-                     key=lambda w: w['x0'])
-    if not all_hdr:
-        return None
-
-    # Build slot boundaries using ALL header word centers (accounts for extra columns)
-    page_w = float(page.width)
-    centers = [(w['x0'] + w['x1']) / 2 for w in all_hdr]
-    slot_bounds = [0.0]
-    for i in range(len(centers) - 1):
-        slot_bounds.append((centers[i] + centers[i + 1]) / 2)
-    slot_bounds.append(page_w)
-
-    # Map each recognized column to the slot containing its header center
-    header_recognized: dict[str, dict] = {}
-    for col_name, col_words in candidates.items():
-        near = [w for w in col_words if abs(w['top'] - best_y) <= 6]
-        if near:
-            header_recognized[col_name] = min(near, key=lambda w: abs(w['top'] - best_y))
-
-    bounds: dict[str, tuple] = {}
-    for col_name, w in header_recognized.items():
-        cx = (w['x0'] + w['x1']) / 2
-        for i in range(len(slot_bounds) - 1):
-            if slot_bounds[i] <= cx < slot_bounds[i + 1]:
-                bounds[col_name] = (slot_bounds[i], slot_bounds[i + 1])
-                break
-
-    if len(bounds) < 4:
-        return None
-
-    logger.info("Col bounds (Y=%.0f, %d total cols, %d recognized): %s",
-                best_y, len(all_hdr), len(bounds),
-                {k: (round(v[0]), round(v[1])) for k, v in bounds.items()})
-    return bounds
-
-
-# ──────────────────────────────────────────────────────────────────
-# Word-level row extraction
-# ──────────────────────────────────────────────────────────────────
-def _extract_visual_rows(page, col_bounds: dict) -> list[dict]:
-    """
-    Group page words into visual rows by Y-coordinate, then assign each word
-    to a column by X-coordinate. Returns list of {col_name: text} dicts.
-    """
-    words = page.extract_words(x_tolerance=3, y_tolerance=3, keep_blank_chars=False)
-    if not words:
-        return []
-
-    # Group words into visual rows (Y tolerance = 4pt)
-    y_groups: list[dict] = []
+def _group_lines(words: list, tol: float = 3.5) -> list[dict]:
+    """Group extracted words into visual lines by Y (top). Returns [{y, words[]}] sorted top→bottom."""
+    lines: list[dict] = []
     for w in sorted(words, key=lambda w: (w['top'], w['x0'])):
         placed = False
-        for grp in reversed(y_groups[-8:]):
-            if abs(w['top'] - grp['y']) <= 4:
-                grp['words'].append(w)
+        for ln in reversed(lines[-6:]):
+            if abs(w['top'] - ln['y']) <= tol:
+                ln['words'].append(w)
+                ln['y'] = (ln['y'] * ln['n'] + w['top']) / (ln['n'] + 1)
+                ln['n'] += 1
                 placed = True
                 break
         if not placed:
-            y_groups.append({'y': w['top'], 'words': [w]})
-
-    rows = []
-    for grp in y_groups:
-        cells: dict[str, str] = {col: '' for col in col_bounds}
-        for w in sorted(grp['words'], key=lambda w: w['x0']):
-            wx = (w['x0'] + w['x1']) / 2
-            for col_name, (xmin, xmax) in col_bounds.items():
-                if xmin <= wx <= xmax:
-                    cur = cells[col_name]
-                    cells[col_name] = (cur + ' ' + w['text']) if cur else w['text']
-                    break
-        rows.append(cells)
-
-    return rows
+            lines.append({'y': w['top'], 'n': 1, 'words': [w]})
+    for ln in lines:
+        ln['words'].sort(key=lambda w: w['x0'])
+    return sorted(lines, key=lambda ln: ln['y'])
 
 
 # ──────────────────────────────────────────────────────────────────
-# Build transactions from visual rows
+# Header band detection (multi-line aware)
 # ──────────────────────────────────────────────────────────────────
-def _build_transactions(visual_rows: list[dict], prev_balance: Optional[float]) -> tuple[list[dict], float]:
-    """
-    Convert visual rows into transaction dicts.
-    A row with a date-like value in 'date' starts a new transaction.
-    Rows without a date are continuation rows (append narration).
-    """
-    transactions: list[dict] = []
-    current: Optional[dict] = None
-    found_totals = False
+def _distinct_tags(words: list) -> set:
+    tags = set()
+    for w in words:
+        t = _tag_for(w['text'])
+        if t:
+            tags.add(t)
+    return tags
 
-    for cells in visual_rows:
-        date_v = cells.get('date', '').strip()
-        narr_v = cells.get('narr', '').strip()
 
-        # Skip header rows
-        if _match(date_v, _DATE_KW) or _match(narr_v, _NARR_KW):
+def _find_header_band(lines: list[dict]) -> Optional[dict]:
+    """Choose the transaction-table header. Tries each line and each pair of
+    consecutive lines (wrapped headers like 'Running / Balance'); picks the band
+    with the most distinct semantic tags. Requires a date column plus a balance
+    or (debit/credit) column so summary tables above don't win."""
+    best = None
+    for i in range(len(lines)):
+        for span in (1, 2):
+            if i + span > len(lines):
+                continue
+            band_words = [w for ln in lines[i:i + span] for w in ln['words']]
+            # header lines are short; a data line with 30 words isn't a header
+            if len(band_words) > 22:
+                continue
+            tags = _distinct_tags(band_words)
+            has_money = 'balance' in tags or 'debit' in tags or 'credit' in tags
+            if 'date' not in tags or not has_money or len(tags) < 3:
+                continue
+            score = len(tags)
+            key = (score, -span, -len(band_words))
+            if best is None or key > best['key']:
+                y0 = min(w['top'] for w in band_words)
+                y1 = max(w['bottom'] for w in band_words)
+                best = {'key': key, 'idx': i, 'span': span,
+                        'words': band_words, 'y0': y0, 'y1': y1, 'tags': tags}
+    return best
+
+
+# ──────────────────────────────────────────────────────────────────
+# Column detection — HYBRID: header-gap clustering + data-projection split
+# ──────────────────────────────────────────────────────────────────
+_HDR_GAP = 8.0     # header words > this far apart start a new column
+_MIN_GAP = 5       # data whitespace gap (pt) that marks a sub-column split
+
+
+def _data_bands(data_lines, lo: float, hi: float, page_w: int) -> list[list[int]]:
+    """Whitespace-separated occupancy bands within x-range [lo, hi), from the
+    DATA rows only (used to split tight amount columns without description
+    interference — only words whose CENTER falls in the range count)."""
+    occ = [0] * (page_w + 2)
+    for ln in data_lines[:200]:
+        for w in ln['words']:
+            cx = (w['x0'] + w['x1']) / 2
+            if lo <= cx < hi:
+                a = max(int(lo), int(w['x0']))
+                b = min(int(hi), int(w['x1']))
+                for x in range(a, b + 1):
+                    occ[x] += 1
+    bands: list[list[int]] = []
+    i, W = int(lo), int(hi)
+    while i < W:
+        if occ[i] > 0:
+            j = i
+            while j < W and occ[j] > 0:
+                j += 1
+            if bands and i - bands[-1][1] - 1 < _MIN_GAP:
+                bands[-1][1] = j - 1
+            else:
+                bands.append([i, j - 1])
+            i = j
+        else:
+            i += 1
+    return bands
+
+
+_AMOUNT_TOKEN_RE = re.compile(r'^\(?-?[\d,]*\d\.\d{1,2}\)?(?:\s*[dc]r\.?)?$', re.I)
+
+
+def _looks_amount(text: str) -> bool:
+    """A right-aligned money value: digits with a 1–2 dp decimal (₹4,601.31),
+    optional (), optional Dr/Cr. Deliberately excludes long ref numbers (no
+    decimal) so we don't mistake them for amounts."""
+    return bool(_AMOUNT_TOKEN_RE.match((text or "").strip().replace('₹', '')))
+
+
+def _right_edge_columns(data_lines, lo: float, hi: float, tol: float = 6.0) -> list[float]:
+    """Split an amount region by clustering the RIGHT edges (x1) of decimal
+    money tokens. Right-aligned columns each share a right edge, so this cleanly
+    separates Withdrawals/Deposits/Balance even when they never co-occur on a
+    row (occupancy projection can't). Returns representative x per column."""
+    xs = []
+    for ln in data_lines[:400]:
+        for w in ln['words']:
+            cx = (w['x0'] + w['x1']) / 2
+            if lo <= cx < hi and _looks_amount(w['text']):
+                xs.append(w['x1'])
+    if len(xs) < 3:
+        return []
+    xs.sort()
+    clusters = [[xs[0]]]
+    for x in xs[1:]:
+        if x - clusters[-1][-1] <= tol:
+            clusters[-1].append(x)
+        else:
+            clusters.append([x])
+    support = max(2, len(xs) // 25)
+    return [sum(c) / len(c) for c in clusters if len(c) >= support]
+
+
+def _split_region(data_lines, lo, hi, page_w, hwords) -> Optional[list[dict]]:
+    """Try to split a header region into sub-columns. Prefer right-edge amount
+    clustering (robust for money columns); fall back to whitespace bands. Accept
+    a split only if every sub-column gets ≥1 header word and #subs ≤ #headers —
+    so wide text columns never fragment into phantom empty columns."""
+    candidates: list[list[tuple]] = []
+
+    reps = sorted(_right_edge_columns(data_lines, lo, hi))
+    if len(reps) >= 2:
+        ranges = []
+        for k, r in enumerate(reps):
+            sl = lo if k == 0 else (reps[k - 1] + r) / 2.0
+            sr = hi if k == len(reps) - 1 else (r + reps[k + 1]) / 2.0
+            ranges.append((sl, sr))
+        candidates.append(ranges)
+
+    bands = _data_bands(data_lines, lo, hi, page_w)
+    if len(bands) >= 2:
+        ranges = []
+        for k, (s, e) in enumerate(bands):
+            sl = lo if k == 0 else (bands[k - 1][1] + s) / 2.0
+            sr = hi if k == len(bands) - 1 else (e + bands[k + 1][0]) / 2.0
+            ranges.append((sl, sr))
+        candidates.append(ranges)
+
+    best = None
+    for cand in candidates:
+        if not (2 <= len(cand) <= len(hwords)):
+            continue
+        subs, ok = [], True
+        for (sl, sr) in cand:
+            hw = [w for w in hwords if sl <= (w['x0'] + w['x1']) / 2 < sr]
+            if not hw:
+                ok = False
+                break
+            subs.append({'x0': sl, 'x1': sr, 'words': hw})
+        if ok and (best is None or len(subs) > len(best)):
+            best = subs
+    return best
+
+
+def _detect_columns(page, header: dict, data_lines: list[dict]) -> Optional[list[dict]]:
+    """Cluster header words into columns by X-gap (cleanly separates text
+    columns from right-aligned amount columns), then split any cluster whose
+    DATA shows multiple whitespace-separated bands (e.g. tight Withdrawals/
+    Deposits/Balance headers that sit only a few points apart)."""
+    page_w = int(page.width) + 2
+    hdr = sorted(header['words'], key=lambda w: w['x0'])
+    if not hdr:
+        return None
+
+    # 1) Header-gap clusters
+    clusters: list[dict] = []
+    for w in hdr:
+        if clusters and w['x0'] - clusters[-1]['x1'] <= _HDR_GAP:
+            clusters[-1]['words'].append(w)
+            clusters[-1]['x1'] = max(clusters[-1]['x1'], w['x1'])
+        else:
+            clusters.append({'words': [w], 'x0': w['x0'], 'x1': w['x1']})
+
+    # 2) Cluster x-boundaries (midpoints between neighbours; ends fill the page)
+    regions: list[tuple[float, float, dict]] = []
+    for i, cl in enumerate(clusters):
+        left = 0.0 if i == 0 else (clusters[i - 1]['x1'] + cl['x0']) / 2.0
+        right = float(page_w) if i == len(clusters) - 1 else (cl['x1'] + clusters[i + 1]['x0']) / 2.0
+        regions.append((left, right, cl))
+
+    # 3) Within each region, split ONLY when the data shows as many bands as the
+    #    cluster has header words AND every band gets a header word. This splits
+    #    tight amount headers (Withdrawals/Deposits/Balance) apart without
+    #    fragmenting a wide text column into phantom empty columns.
+    raw_cols: list[dict] = []
+    for left, right, cl in regions:
+        subs = _split_region(data_lines, left, right, page_w, cl['words'])
+        if subs:
+            raw_cols.extend(subs)
+        else:
+            raw_cols.append({'x0': left, 'x1': right, 'words': cl['words']})
+
+    # 4) Label + tag each column (multi-line header words joined top→bottom)
+    columns: list[dict] = []
+    claimed: set = set()
+    for k, rc in enumerate(raw_cols):
+        hwords = sorted(rc['words'], key=lambda w: (w['top'], w['x0']))
+        label = " ".join(w['text'] for w in hwords).strip()
+        tag = _tag_for(label)
+        if tag in _UNIQUE_TAGS and tag in claimed:
+            tag = 'other'
+        if tag in _UNIQUE_TAGS:
+            claimed.add(tag)
+        columns.append({
+            'key': f"c{k}",
+            'header': label or f"Column {k + 1}",
+            'tag': tag or 'other',
+            'x0': rc['x0'], 'x1': rc['x1'],
+        })
+
+    tags = {c['tag'] for c in columns}
+    if 'date' not in tags or not (tags & _NUMERIC_TAGS):
+        return None
+
+    date_cols = [c for c in columns if c['tag'] == 'date']
+    for c in columns:
+        c['is_primary_date'] = (c is date_cols[0]) if date_cols else False
+
+    # Right-edge X of each amount column: real money values are right-aligned and
+    # share this edge; description numbers that leak into the column sit to the
+    # left of it and are rejected at cell-assignment time.
+    import statistics
+    for c in columns:
+        c['right_x'] = None
+        if c['tag'] in _NUMERIC_TAGS:
+            x1s = [w['x1'] for ln in data_lines[:400] for w in ln['words']
+                   if c['x0'] <= (w['x0'] + w['x1']) / 2 < c['x1'] and _looks_amount(w['text'])]
+            if len(x1s) >= 3:
+                c['right_x'] = statistics.median(x1s)
+
+    logger.info("Detected %d columns: %s", len(columns),
+                [(c['header'], c['tag']) for c in columns])
+    return columns
+
+
+_RIGHT_TOL = 12.0  # pt: how close an amount's right edge must be to the column's
+
+
+def _assign_cells(line_words: list, columns: list[dict]) -> dict:
+    """Bin a line's words into columns by center X. Returns {col_key: text}.
+    For amount columns, a word is only kept if it is right-aligned to the
+    column's amount edge — this rejects description text that overflows into
+    the amount column (a common cause of phantom debits/credits)."""
+    cells = {c['key']: '' for c in columns}
+    for w in sorted(line_words, key=lambda w: w['x0']):
+        cx = (w['x0'] + w['x1']) / 2
+        for c in columns:
+            if c['x0'] <= cx < c['x1']:
+                if c['tag'] in _NUMERIC_TAGS:
+                    # An amount cell accepts only money-shaped, right-aligned
+                    # tokens — never a date/ref fragment overflowing from the
+                    # description column.
+                    if not _looks_amount(w['text']):
+                        break
+                    rx = c.get('right_x')
+                    if rx is not None and abs(w['x1'] - rx) > _RIGHT_TOL:
+                        break
+                cur = cells[c['key']]
+                cells[c['key']] = (cur + ' ' + w['text']) if cur else w['text']
+                break
+    return cells
+
+
+# ──────────────────────────────────────────────────────────────────
+# Anchor-based transaction assembly
+# ──────────────────────────────────────────────────────────────────
+def _primary_date_key(columns: list[dict]) -> Optional[str]:
+    for c in columns:
+        if c.get('is_primary_date'):
+            return c['key']
+    return None
+
+
+def _tag_key(columns: list[dict], tag: str) -> Optional[str]:
+    for c in columns:
+        if c['tag'] == tag:
+            return c['key']
+    return None
+
+
+def _is_header_like(cells: dict, columns: list[dict]) -> bool:
+    hits = 0
+    for c in columns:
+        if c['tag'] != 'other' and _tag_for(cells.get(c['key'], '')):
+            hits += 1
+    return hits >= 3
+
+
+def _build_transactions(all_lines: list[dict], columns: list[dict]) -> list[dict]:
+    """all_lines: [{y, cells}] across the whole statement (in reading order).
+    A line whose primary-date cell parses as a date is an anchor; date-less
+    lines attach to the nearest anchor by Y (per page-block, carried across)."""
+    date_key = _primary_date_key(columns)
+    text_keys = [c['key'] for c in columns if c['tag'] not in _NUMERIC_TAGS and c['key'] != date_key]
+    debit_key = _tag_key(columns, 'debit')
+    credit_key = _tag_key(columns, 'credit')
+    bal_key = _tag_key(columns, 'balance')
+
+    # Typical line height → cap how far a date-less line may attach to an anchor
+    # (a real wrapped narration is a few lines away; a footer block is far below).
+    ys = sorted(ln['y'] for ln in all_lines)
+    gaps = [b - a for a, b in zip(ys, ys[1:]) if 0 < b - a < 40]
+    import statistics
+    line_h = statistics.median(gaps) if gaps else 12.0
+    max_attach = max(30.0, 5 * line_h)
+
+    anchors: list[dict] = []
+    pending: list[dict] = []   # date-less lines waiting to attach to nearest anchor
+
+    def flush_pending():
+        """Attach each pending (date-less) line to its nearest anchor by Y,
+        but only within `max_attach` — footer/legend text far below the last
+        transaction is dropped rather than glued onto its description."""
+        if not pending:
+            return
+        for pl in pending:
+            if not anchors:
+                break
+            near = min(anchors, key=lambda a: abs(a['y'] - pl['y']))
+            if abs(near['y'] - pl['y']) > max_attach:
+                continue
+            for k in text_keys:
+                txt = pl['cells'].get(k, '').strip()
+                if txt:
+                    near['frag'].setdefault(k, []).append((pl['y'], txt))
+        pending.clear()
+
+    stopped = False
+    for ln in all_lines:
+        cells = ln['cells']
+        # Skip repeated headers
+        if _is_header_like(cells, columns):
+            continue
+        # Totals / summary / footer → stop collecting further transactions
+        joined = " ".join(v.lower().strip() for v in cells.values() if v.strip())
+        if any(t == joined or joined.startswith(t + " ") for t in _TOTAL_SET) \
+                or any(m in joined for m in _END_MARKERS):
+            stopped = True
+        if stopped:
+            pending.clear()
             continue
 
-        # Non-date text in the date cell = narration column overflow (e.g. "ATION" at x=68
-        # which lands left of the narration header but is really narration continuation).
-        # The narration header is often centered far right of where narration data starts.
-        if date_v and not _parse_date(date_v):
-            narr_v = (date_v + narr_v).strip() if narr_v else date_v
-            date_v = ''
+        date_raw = (cells.get(date_key, '') if date_key else '').strip()
+        if _parse_date(date_raw):
+            # New anchor
+            flush_pending()
+            frag: dict = {}
+            for k in text_keys:
+                t = cells.get(k, '').strip()
+                if t:
+                    frag[k] = [(ln['y'], t)]
+            anchors.append({
+                'y': ln['y'],
+                'date': date_raw,
+                # Debit/credit are never negative — a negative here is a leaked/
+                # misread token; clamp to 0. Balance may be negative (overdraft).
+                'debit': max(0.0, _parse_amount(cells.get(debit_key))) if debit_key else 0.0,
+                'credit': max(0.0, _parse_amount(cells.get(credit_key))) if credit_key else 0.0,
+                'balance': _parse_amount(cells.get(bal_key)) if bal_key else 0.0,
+                'has_balance': bool(bal_key and cells.get(bal_key, '').strip()),
+                'raw_cells': dict(cells),
+                'frag': frag,
+            })
+        else:
+            # Date-less line: either continuation text, or a stray line.
+            if any(cells.get(k, '').strip() for k in text_keys):
+                pending.append(ln)
+    flush_pending()
 
-        # Detect totals/summary row — stop adding transactions
-        if any(v.lower().strip() in _TOTAL_SET for v in cells.values() if v.strip()):
-            if current:
-                transactions.append(current)
-                current = None
-            found_totals = True
-            continue
-
-        if found_totals:
-            continue  # skip everything after totals row
-
-        if date_v and _parse_date(date_v):
-            # New transaction
-            if current:
-                transactions.append(current)
-            ref_v = cells.get('ref', '').strip()
-            current = {
-                'date':        date_v,
-                'description': narr_v,
-                'ref_no':      ref_v if _REAL_REF_RE.search(ref_v) else '',
-                'debit':       _parse_amount(cells.get('debit', '')),
-                'credit':      _parse_amount(cells.get('credit', '')),
-                'balance':     _parse_amount(cells.get('balance', '')),
-            }
-        elif current:
-            # Continuation row
-            if narr_v:
-                prev = current['description']
-                # Mid-word wrap (both sides alphanumeric) → no space; else space
-                if prev and prev[-1].isalnum() and narr_v[0].isalnum():
-                    current['description'] = prev + narr_v
+    # Derive missing debit/credit from balance movement (single-amount layouts)
+    if (debit_key is None) ^ (credit_key is None) and bal_key is not None:
+        prev = None
+        for a in anchors:
+            if prev is not None and a['has_balance']:
+                delta = round(a['balance'] - prev, 2)
+                if delta >= 0:
+                    a['credit'] = delta
                 else:
-                    current['description'] = (prev + ' ' + narr_v).strip()
-            ref_v = cells.get('ref', '').strip()
-            if ref_v and not current['ref_no'] and _REAL_REF_RE.search(ref_v):
-                current['ref_no'] = ref_v
-            # Sometimes balance only appears on the first row of a transaction
-            if not current['balance'] and cells.get('balance', '').strip():
-                current['balance'] = _parse_amount(cells.get('balance', ''))
+                    a['debit'] = -delta
+            prev = a['balance'] if a['has_balance'] else prev
 
-    if current:
-        transactions.append(current)
-
-    last_bal = transactions[-1]['balance'] if transactions else (prev_balance or 0.0)
-    return transactions, last_bal
+    # Finalise cells: join text fragments in reading order; numbers as floats
+    txns: list[dict] = []
+    for a in anchors:
+        cells_out: dict = {}
+        for c in columns:
+            k = c['key']
+            if c['tag'] in _NUMERIC_TAGS:
+                amt = _parse_amount(a['raw_cells'].get(k))
+                cells_out[k] = amt if c['tag'] == 'balance' else max(0.0, amt)
+            elif k == date_key:
+                cells_out[k] = a['raw_cells'].get(k, '').strip()
+            else:
+                frags = sorted(a['frag'].get(k, []), key=lambda t: t[0])
+                cells_out[k] = " ".join(t for _, t in frags).strip()
+        txns.append({
+            'cells': cells_out,
+            'date': a['date'],
+            'debit': a['debit'],
+            'credit': a['credit'],
+            'balance': a['balance'],
+            'description': cells_out.get(_tag_key(columns, 'narr'), ''),
+            'ref_no': cells_out.get(_tag_key(columns, 'ref'), ''),
+        })
+    return txns
 
 
 # ──────────────────────────────────────────────────────────────────
-# Metadata + Statement Summary extraction
+# Bank detection (IFSC-first — reliable across every Indian bank)
 # ──────────────────────────────────────────────────────────────────
-def _extract_metadata(pdf) -> dict:
+_IFSC_BANK = {
+    'HDFC': 'HDFC Bank', 'ICIC': 'ICICI Bank', 'SBIN': 'State Bank of India',
+    'KKBK': 'Kotak Mahindra Bank', 'UTIB': 'Axis Bank', 'INDB': 'IndusInd Bank',
+    'YESB': 'Yes Bank', 'PUNB': 'Punjab National Bank', 'CNRB': 'Canara Bank',
+    'BARB': 'Bank of Baroda', 'UBIN': 'Union Bank of India', 'IDFB': 'IDFC First Bank',
+    'IBKL': 'IDBI Bank', 'FDRL': 'Federal Bank', 'RATN': 'RBL Bank', 'BDBL': 'Bandhan Bank',
+    'AUBL': 'AU Small Finance Bank', 'IDIB': 'Indian Bank', 'CBIN': 'Central Bank of India',
+    'MAHB': 'Bank of Maharashtra', 'PSIB': 'Punjab & Sind Bank', 'KARB': 'Karnataka Bank',
+    'CIUB': 'City Union Bank', 'SIBL': 'South Indian Bank', 'TMBL': 'Tamilnad Mercantile Bank',
+    'DBSS': 'DBS Bank', 'HSBC': 'HSBC Bank', 'CITI': 'Citibank', 'SCBL': 'Standard Chartered',
+    'KVBL': 'Karur Vysya Bank', 'DLXB': 'Dhanlaxmi Bank', 'JAKA': 'J&K Bank',
+    'UCBA': 'UCO Bank', 'IOBA': 'Indian Overseas Bank', 'MSNU': 'Equitas Small Finance Bank',
+}
+_BANK_NAME_PATTERNS = [
+    (r'STATE BANK OF INDIA', 'State Bank of India'), (r'HDFC BANK', 'HDFC Bank'),
+    (r'ICICI BANK', 'ICICI Bank'), (r'KOTAK MAHINDRA', 'Kotak Mahindra Bank'),
+    (r'KOTAK BANK', 'Kotak Mahindra Bank'), (r'AXIS BANK', 'Axis Bank'),
+    (r'INDUSIND', 'IndusInd Bank'), (r'YES BANK', 'Yes Bank'),
+    (r'PUNJAB NATIONAL BANK', 'Punjab National Bank'), (r'CANARA BANK', 'Canara Bank'),
+    (r'BANK OF BARODA', 'Bank of Baroda'), (r'UNION BANK', 'Union Bank of India'),
+    (r'IDFC FIRST', 'IDFC First Bank'), (r'IDBI BANK', 'IDBI Bank'),
+    (r'FEDERAL BANK', 'Federal Bank'), (r'RBL BANK', 'RBL Bank'),
+    (r'BANDHAN', 'Bandhan Bank'), (r'AU SMALL FINANCE', 'AU Small Finance Bank'),
+    (r'INDIAN BANK', 'Indian Bank'), (r'CENTRAL BANK OF INDIA', 'Central Bank of India'),
+    (r'BANK OF MAHARASHTRA', 'Bank of Maharashtra'), (r'KARNATAKA BANK', 'Karnataka Bank'),
+    (r'SOUTH INDIAN BANK', 'South Indian Bank'), (r'STANDARD CHARTERED', 'Standard Chartered'),
+]
+_IFSC_RE = re.compile(r'\b([A-Z]{4})0[A-Z0-9]{6}\b')
+
+
+def _detect_bank(header_text: str, full_text: str) -> str:
+    for m in _IFSC_RE.finditer(header_text or ''):
+        if m.group(1) in _IFSC_BANK:
+            return _IFSC_BANK[m.group(1)]
+    hu = (header_text or '').upper()
+    for pat, name in _BANK_NAME_PATTERNS:
+        if re.search(pat, hu):
+            return name
+    codes = [m.group(1) for m in _IFSC_RE.finditer(full_text or '') if m.group(1) in _IFSC_BANK]
+    if codes:
+        from collections import Counter
+        return _IFSC_BANK[Counter(codes).most_common(1)[0][0]]
+    fu = (full_text or '').upper()
+    for pat, name in _BANK_NAME_PATTERNS:
+        if re.search(pat, fu):
+            return name
+    return ''
+
+
+# ──────────────────────────────────────────────────────────────────
+# Metadata
+# ──────────────────────────────────────────────────────────────────
+def _extract_metadata(pdf, header_text: str, all_text: str) -> dict:
     meta = {
         "bank_name": "", "account_no": "", "account_name": "",
         "period_from": "", "period_to": "",
@@ -266,24 +636,16 @@ def _extract_metadata(pdf) -> dict:
         "dr_count": None, "cr_count": None,
     }
     try:
-        all_text = "\n".join(pg.extract_text() or "" for pg in pdf.pages)
+        meta["bank_name"] = _detect_bank(header_text, all_text)
 
-        for bank in ["HDFC BANK", "ICICI BANK", "STATE BANK OF INDIA", "SBI",
-                     "AXIS BANK", "KOTAK MAHINDRA", "KOTAK BANK",
-                     "PUNJAB NATIONAL BANK", "PNB", "INDUSIND BANK",
-                     "YES BANK", "CANARA BANK", "BANK OF BARODA",
-                     "UNION BANK", "IDFC FIRST BANK"]:
-            if bank.lower() in all_text.lower():
-                meta["bank_name"] = bank
-                break
-
-        m = re.search(r"Account\s*No[.:\s]*([0-9\sXx]{8,20})", all_text, re.IGNORECASE)
+        m = re.search(r"Account\s*(?:No|Number)[.:\s]*([0-9\sXx]{6,25})", all_text, re.IGNORECASE)
         if m:
             meta["account_no"] = re.sub(r"[^0-9X]", "", m.group(1))[-4:]
 
         m = re.search(
-            r"Statement\s+From\s*[:\s]*(\d{1,2}[/\-]\d{1,2}[/\-]\d{2,4})"
-            r"\s+[Tt]o\s*[:\s]*(\d{1,2}[/\-]\d{1,2}[/\-]\d{2,4})",
+            r"(?:Statement\s+From|Period[:\s]*From|From)\s*[:\s]*"
+            r"(\d{1,2}[/\-\.][A-Za-z0-9]{1,4}[/\-\.]\d{2,4})"
+            r"\s*(?:[Tt]o|-)\s*[:\s]*(\d{1,2}[/\-\.][A-Za-z0-9]{1,4}[/\-\.]\d{2,4})",
             all_text, re.IGNORECASE,
         )
         if m:
@@ -300,7 +662,6 @@ def _extract_metadata(pdf) -> dict:
                     meta["account_name"] = name[:80]
                     break
 
-        # Statement Summary: Opening Bal | Dr Count | Cr Count | Debits | Credits | Closing Bal
         _A = r"[\d,]+\.\d{2}"
         _N = r"\d+"
         sm = re.search(
@@ -323,48 +684,47 @@ def _extract_metadata(pdf) -> dict:
 # ──────────────────────────────────────────────────────────────────
 # Core extraction
 # ──────────────────────────────────────────────────────────────────
-def extract_bank_statement(pdf_bytes: bytes) -> dict:
-    """
-    Extract all transactions from a bank statement PDF using word-level extraction.
-    Returns dict with all transaction data and validation.
-    """
-    import pdfplumber
-
-    transactions: list[dict] = []
-    col_bounds: Optional[dict] = None
-    prev_balance: Optional[float] = None
-
-    with pdfplumber.open(BytesIO(pdf_bytes)) as pdf:
-        meta = _extract_metadata(pdf)
-
-        for page_num, page in enumerate(pdf.pages):
-            # Detect column boundaries from header (first occurrence)
-            if col_bounds is None:
-                col_bounds = _detect_col_x_bounds(page)
-                if col_bounds:
-                    logger.info("Page %d: col bounds detected %s", page_num + 1,
-                                {k: (round(v[0]), round(v[1])) for k, v in col_bounds.items()})
-
-            if col_bounds is None:
-                continue
-
-            visual_rows = _extract_visual_rows(page, col_bounds)
-            if not visual_rows:
-                continue
-
-            page_txns, last_bal = _build_transactions(visual_rows, prev_balance)
-            if page_txns:
-                transactions.extend(page_txns)
-                prev_balance = last_bal
-
-    # Validation against PDF-stated totals
+def _finalize(transactions: list[dict], columns: list[dict], meta: dict) -> dict:
+    """Compute validation (PDF totals + balance continuity + Golden-Rule net) and
+    assemble the public result dict. Shared by the deterministic and LLM paths."""
     computed_debit  = round(sum(t["debit"]  for t in transactions), 2)
     computed_credit = round(sum(t["credit"] for t in transactions), 2)
     pdf_d = meta.get("pdf_total_debit")
     pdf_c = meta.get("pdf_total_credit")
 
-    debit_match  = pdf_d is None or abs(computed_debit  - pdf_d) < 2.0
-    credit_match = pdf_c is None or abs(computed_credit - pdf_c) < 2.0
+    totals_found = pdf_d is not None and pdf_c is not None
+    debit_match  = totals_found and abs(computed_debit  - pdf_d) < 2.0
+    credit_match = totals_found and abs(computed_credit - pdf_c) < 2.0
+    pdf_totals_ok = totals_found and debit_match and credit_match
+
+    has_bal = _tag_key(columns, 'balance') is not None
+    checked = mismatches = 0
+    prev_bal = None
+    if has_bal:
+        for t in transactions:
+            b = t.get("balance")
+            if prev_bal is not None:
+                checked += 1
+                expected = round(prev_bal + t["credit"] - t["debit"], 2)
+                if abs(expected - b) > 1.0:
+                    mismatches += 1
+            prev_bal = b
+    continuity_ok = has_bal and checked >= max(1, len(transactions) // 2) and mismatches == 0
+
+    opening_balance = meta.get("opening_balance")
+    if opening_balance is None and transactions and has_bal:
+        first = transactions[0]
+        opening_balance = round(first["balance"] - (first["credit"] - first["debit"]), 2)
+    closing_balance = meta.get("closing_balance")
+    if closing_balance is None and transactions and has_bal:
+        closing_balance = transactions[-1]["balance"]
+
+    net_ok = (opening_balance is not None and closing_balance is not None and
+              abs(round(opening_balance + computed_credit - computed_debit, 2) - closing_balance) < 2.0)
+
+    balance_reconciled = bool(continuity_ok or net_ok)
+    verified = pdf_totals_ok or balance_reconciled
+    verify_method = "pdf_totals" if pdf_totals_ok else ("balance" if balance_reconciled else "none")
 
     validation = {
         "pdf_total_debit":       pdf_d,
@@ -373,201 +733,391 @@ def extract_bank_statement(pdf_bytes: bytes) -> dict:
         "computed_total_credit": computed_credit,
         "debit_match":           debit_match,
         "credit_match":          credit_match,
-        "verified":              debit_match and credit_match,
-        "totals_found_in_pdf":   pdf_d is not None,
-        "opening_balance":       meta.get("opening_balance"),
-        "closing_balance":       meta.get("closing_balance"),
+        "verified":              verified,
+        "verify_method":         verify_method,
+        "balance_reconciled":    balance_reconciled,
+        "balance_rows_checked":  checked,
+        "balance_mismatches":    mismatches,
+        "totals_found_in_pdf":   totals_found,
+        "opening_balance":       opening_balance,
+        "closing_balance":       closing_balance,
         "dr_count":              meta.get("dr_count"),
         "cr_count":              meta.get("cr_count"),
     }
 
-    logger.info("Extracted %d transactions. Debit=%.2f Credit=%.2f",
-                len(transactions), computed_debit, computed_credit)
+    preview = [{
+        "date": t["date"], "description": t["description"], "ref_no": t["ref_no"],
+        "debit": t["debit"], "credit": t["credit"], "balance": t["balance"],
+    } for t in transactions[:10]]
 
     return {
-        "bank_name":         meta["bank_name"],
-        "account_no":        meta["account_no"],
-        "account_name":      meta["account_name"],
-        "period_from":       meta["period_from"],
-        "period_to":         meta["period_to"],
+        "bank_name":         meta.get("bank_name", ""),
+        "account_no":        meta.get("account_no", ""),
+        "account_name":      meta.get("account_name", ""),
+        "period_from":       meta.get("period_from", ""),
+        "period_to":         meta.get("period_to", ""),
+        "columns":           [{"key": c["key"], "header": c["header"], "tag": c["tag"]} for c in columns],
+        "_columns_full":     columns,
         "transaction_count": len(transactions),
         "transactions":      transactions,
         "validation":        validation,
-        "preview_rows":      transactions[:10],
+        "preview_rows":      preview,
     }
 
 
 # ──────────────────────────────────────────────────────────────────
-# Excel builder
+# Claude (Anthropic) fallback — fires ONLY when deterministic extraction
+# fails (no table detected, zero rows, or balance doesn't reconcile). Rare
+# path. Raw HTTPS (urllib) — no SDK dependency. Key from env or new-backend/.env.
+# ──────────────────────────────────────────────────────────────────
+_LLM_COLS = [("c0", "Txn Date", "date"), ("c1", "Description", "narr"),
+             ("c2", "Chq./Ref.No.", "ref"), ("c3", "Debit", "debit"),
+             ("c4", "Credit", "credit"), ("c5", "Balance", "balance")]
+
+
+def _anthropic_key() -> Optional[str]:
+    import os
+    k = os.environ.get("ANTHROPIC_API_KEY")
+    if k:
+        return k.strip()
+    here = os.path.dirname(os.path.abspath(__file__))
+    for cand in (os.path.join(here, "..", "..", "new-backend", ".env"),
+                 os.path.join(here, "..", "..", "..", "new-backend", ".env")):
+        try:
+            with open(cand, encoding="utf-8") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if line.startswith("ANTHROPIC_API_KEY="):
+                        return line.split("=", 1)[1].strip()
+        except Exception:
+            continue
+    return None
+
+
+def _llm_extract(pdf_bytes: bytes, all_text: str, meta: dict) -> Optional[dict]:
+    key = _anthropic_key()
+    if not key or not (all_text or "").strip():
+        return None
+    import os
+    import ssl
+    import urllib.request
+    import json as _json
+
+    model = os.environ.get("ANTHROPIC_MODEL", "claude-haiku-4-5")
+    MAXCHARS = 60000
+    truncated = len(all_text) > MAXCHARS
+    text = all_text[:MAXCHARS]
+    prompt = (
+        "Extract EVERY transaction row from this bank statement text into JSON. "
+        "Return ONLY a JSON object (no prose, no code fences) of the form: "
+        '{"transactions":[{"date":"...","description":"...","ref_no":"...",'
+        '"debit":0,"credit":0,"balance":0}]}. '
+        "Rules: debit = money withdrawn/paid out (0 if none); credit = money deposited/received "
+        "(0 if none); balance = the running balance after the transaction. Numbers must be plain "
+        "(no commas, no currency symbols). Keep original row order. Do NOT include header rows, "
+        "sub-totals, or opening/closing-balance summary lines that are not real transactions.\n\n"
+        + ("[NOTE: statement text was truncated to fit; extract what is present]\n\n" if truncated else "")
+        + "STATEMENT TEXT:\n" + text
+    )
+    body = _json.dumps({
+        "model": model, "max_tokens": 16000,
+        "messages": [{"role": "user", "content": prompt}],
+    }).encode("utf-8")
+    try:
+        import certifi
+        _ctx = ssl.create_default_context(cafile=certifi.where())
+    except Exception:
+        _ctx = ssl.create_default_context()
+    try:
+        req = urllib.request.Request("https://api.anthropic.com/v1/messages", data=body, headers={
+            "content-type": "application/json", "x-api-key": key, "anthropic-version": "2023-06-01",
+        })
+        with urllib.request.urlopen(req, timeout=120, context=_ctx) as resp:
+            data = _json.loads(resp.read().decode("utf-8"))
+    except Exception as e:
+        logger.warning("Claude fallback call failed: %s: %s", type(e).__name__, str(e)[:160])
+        return None
+    if data.get("stop_reason") == "refusal":
+        logger.warning("Claude fallback refused the request.")
+        return None
+    raw = ""
+    for b in data.get("content", []):
+        if b.get("type") == "text":
+            raw = b.get("text", "") or ""
+            break
+    m = re.search(r'\{.*\}', raw, re.S)
+    if not m:
+        return None
+    try:
+        parsed = _json.loads(m.group(0))
+    except Exception:
+        return None
+    rows = parsed.get("transactions") or []
+    if not rows:
+        return None
+
+    def _num(v):
+        try:
+            return abs(float(str(v).replace(",", "").strip() or 0))
+        except Exception:
+            return 0.0
+
+    def _bal(v):
+        try:
+            return float(str(v).replace(",", "").strip() or 0)
+        except Exception:
+            return 0.0
+
+    columns = [{"key": k, "header": h, "tag": t, "x0": 0.0, "x1": 0.0,
+                "is_primary_date": (t == "date"), "right_x": None} for k, h, t in _LLM_COLS]
+    txns = []
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        d, c, b = _num(r.get("debit")), _num(r.get("credit")), _bal(r.get("balance"))
+        cells = {"c0": str(r.get("date", "") or ""), "c1": str(r.get("description", "") or ""),
+                 "c2": str(r.get("ref_no", "") or ""), "c3": d, "c4": c, "c5": b}
+        txns.append({"cells": cells, "date": cells["c0"], "debit": d, "credit": c,
+                     "balance": b, "description": cells["c1"], "ref_no": cells["c2"]})
+    if not txns:
+        return None
+    res = _finalize(txns, columns, meta)
+    v = res["validation"]
+    v["verify_method"] = (v["verify_method"] + "+llm") if v["verified"] else "llm"
+    v["llm_used"] = True
+    logger.info("Claude fallback extracted %d transactions (verified=%s)", len(txns), v["verified"])
+    return res
+
+
+def extract_bank_statement(pdf_bytes: bytes) -> dict:
+    import pdfplumber
+
+    columns: Optional[list[dict]] = None
+    all_lines: list[dict] = []       # {y, cells} in reading order (page-offset applied)
+    header_found_page = None
+
+    with pdfplumber.open(BytesIO(pdf_bytes)) as pdf:
+        all_text = "\n".join(pg.extract_text() or "" for pg in pdf.pages)
+        p0 = pdf.pages[0]
+        header_text = " ".join(w['text'] for w in p0.extract_words()
+                               if w['top'] < p0.height * 0.40)
+        meta = _extract_metadata(pdf, header_text, all_text)
+
+        y_offset = 0.0
+        for page_num, page in enumerate(pdf.pages):
+            words = page.extract_words(x_tolerance=1.5, y_tolerance=3, keep_blank_chars=False)
+            if not words:
+                y_offset += float(page.height)
+                continue
+            lines = _group_lines(words)
+
+            if columns is None:
+                header = _find_header_band(lines)
+                if header is None:
+                    y_offset += float(page.height)
+                    continue
+                data_lines = [ln for ln in lines if ln['y'] > header['y1'] + 0.5]
+                columns = _detect_columns(page, header, data_lines)
+                if columns is None:
+                    y_offset += float(page.height)
+                    continue
+                header_found_page = page_num
+                start_lines = data_lines
+            else:
+                start_lines = lines
+
+            for ln in start_lines:
+                all_lines.append({
+                    'y': y_offset + ln['y'],
+                    'cells': _assign_cells(ln['words'], columns),
+                })
+            y_offset += float(page.height)
+
+    if columns is not None:
+        transactions = _build_transactions(all_lines, columns)
+        result = _finalize(transactions, columns, meta)
+        logger.info("Extracted %d transactions (%d cols). verified=%s",
+                    len(transactions), len(columns), result["validation"]["verified"])
+        if transactions and result["validation"].get("verified"):
+            return result  # deterministic succeeded — no LLM cost
+        # Deterministic produced nothing usable OR didn't reconcile → try Claude.
+        alt = _llm_extract(pdf_bytes, all_text, meta)
+        if alt and (not transactions or alt["validation"].get("verified")):
+            return alt
+        return result
+
+    # No transaction table detected deterministically → Claude fallback.
+    alt = _llm_extract(pdf_bytes, all_text, meta)
+    if alt:
+        return alt
+    logger.warning("No transaction table header detected in PDF.")
+    return {
+        "bank_name": "", "account_no": "", "account_name": "",
+        "period_from": "", "period_to": "", "columns": [],
+        "transaction_count": 0, "transactions": [],
+        "validation": {"verified": False, "verify_method": "none",
+                       "error": "Could not detect a transaction table in the PDF."},
+        "preview_rows": [],
+    }
+
+
+# ──────────────────────────────────────────────────────────────────
+# Excel builder — reproduces source columns + Check Point 1 / 2 + Summary
 # ──────────────────────────────────────────────────────────────────
 def build_pdf_bank_excel(data: dict) -> bytes:
     from openpyxl import Workbook
     from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
     from openpyxl.utils import get_column_letter
+    from openpyxl.formatting.rule import CellIsRule
 
-    wb  = Workbook()
-    ws  = wb.active
+    columns = data.get("_columns_full") or []
+    txns = data.get("transactions", [])
+
+    wb = Workbook()
+    ws = wb.active
     ws.title = "Bank Statement"
 
-    HEADERS    = ["Txn Date", "Description", "Chq./Ref.No.", "Debit", "Credit", "Balance",
-                  "Voucher No.", "Check Point 1", "Check Point 2"]
-    COL_WIDTHS = [14, 70, 28, 16, 16, 18, 16, 18, 18]
-
-    thin   = Side(border_style="thin", color="D0D5DD")
+    thin = Side(border_style="thin", color="D0D5DD")
     BORDER = Border(left=thin, right=thin, top=thin, bottom=thin)
-
     HDR_FILL = PatternFill("solid", fgColor="0748EE")
     HDR_FONT = Font(bold=True, color="FFFFFF", size=10, name="Calibri")
     DAT_FONT = Font(size=10, name="Calibri")
     ALT_FILL = PatternFill("solid", fgColor="EEF3FF")
-    TOT_FILL = PatternFill("solid", fgColor="1E3A5F")
-    TOT_FONT = Font(bold=True, color="FFFFFF", size=10, name="Calibri")
-    GRY_FONT = Font(italic=True, size=8, color="666666", name="Calibri")
-
     CENTER = Alignment(horizontal="center", vertical="center")
-    LEFT   = Alignment(horizontal="left",   vertical="center", wrap_text=False)
-    RIGHT  = Alignment(horizontal="right",  vertical="center")
+    LEFT = Alignment(horizontal="left", vertical="center", wrap_text=False)
+    RIGHT = Alignment(horizontal="right", vertical="center")
+
+    if not columns:
+        ws["A1"] = "No transaction table detected in this PDF."
+        buf = BytesIO(); wb.save(buf); return buf.getvalue()
+
+    # Column layout: source columns, then Check Point 1 / Check Point 2
+    src_headers = [c["header"] for c in columns]
+    HEADERS = src_headers + ["Check Point 1", "Check Point 2"]
+    ncol = len(HEADERS)
+    cp1_idx = len(src_headers) + 1   # 1-based
+    cp2_idx = cp1_idx + 1
+
+    # Locate tagged columns (1-based excel indices)
+    def col_index(tag):
+        for i, c in enumerate(columns):
+            if c["tag"] == tag:
+                return i + 1
+        return None
+    debit_i = col_index("debit")
+    credit_i = col_index("credit")
+    bal_i = col_index("balance")
+
+    numeric_keys = {c["key"] for c in columns if c["tag"] in _NUMERIC_TAGS}
 
     # Header row
-    for col, (h, w) in enumerate(zip(HEADERS, COL_WIDTHS), start=1):
-        c = ws.cell(row=1, column=col, value=h)
+    for i, h in enumerate(HEADERS, start=1):
+        c = ws.cell(row=1, column=i, value=h)
         c.fill, c.font, c.alignment, c.border = HDR_FILL, HDR_FONT, CENTER, BORDER
-        ws.column_dimensions[get_column_letter(col)].width = w
+        letter = get_column_letter(i)
+        # width heuristic by tag
+        tag = columns[i - 1]["tag"] if i - 1 < len(columns) else "cp"
+        ws.column_dimensions[letter].width = 60 if tag == "narr" else (14 if tag == "date" else 18)
     ws.row_dimensions[1].height = 22
 
     # Data rows
-    txns = data.get("transactions", [])
-    for row_idx, txn in enumerate(txns, start=2):
-        alt  = (row_idx % 2 == 0)
-        vals = [
-            txn.get("date", ""),
-            txn.get("description", ""),
-            txn.get("ref_no", ""),
-            txn.get("debit",   0.0) or None,
-            txn.get("credit",  0.0) or None,
-            txn.get("balance", 0.0) or None,
-            "",
-        ]
-        for col, value in enumerate(vals, start=1):
-            c = ws.cell(row=row_idx, column=col, value=value)
-            c.font   = DAT_FONT
-            c.border = BORDER
+    for r, txn in enumerate(txns, start=2):
+        alt = (r % 2 == 0)
+        cells = txn.get("cells", {})
+        for i, c in enumerate(columns, start=1):
+            val = cells.get(c["key"], "")
+            is_num = c["key"] in numeric_keys
+            if is_num and (val == 0.0 or val == 0):
+                val = None
+            cell = ws.cell(row=r, column=i, value=val)
+            cell.font, cell.border = DAT_FONT, BORDER
             if alt:
-                c.fill = ALT_FILL
-            if col in (4, 5, 6):
-                c.alignment  = RIGHT
-                if isinstance(value, float):
-                    c.number_format = '#,##0.00'
+                cell.fill = ALT_FILL
+            if is_num:
+                cell.alignment = RIGHT
+                if isinstance(val, (int, float)):
+                    cell.number_format = '#,##0.00'
             else:
-                c.alignment = LEFT
-        # Check Point 1 (col 8): empty for first data row; formula for all others
-        cp1_val = None if row_idx == 2 else f"=F{row_idx - 1}+E{row_idx}-D{row_idx}"
-        c = ws.cell(row=row_idx, column=8, value=cp1_val)
-        c.font, c.border, c.alignment = DAT_FONT, BORDER, RIGHT
-        if alt: c.fill = ALT_FILL
-        if cp1_val: c.number_format = '#,##0.00'
+                cell.alignment = LEFT
 
-        # Check Point 2 (col 9): empty for first data row; =F(n)-H(n) for others
-        cp2_val = None if row_idx == 2 else f"=F{row_idx}-H{row_idx}"
-        c = ws.cell(row=row_idx, column=9, value=cp2_val)
-        c.font, c.border, c.alignment = DAT_FONT, BORDER, RIGHT
-        if alt: c.fill = ALT_FILL
-        if cp2_val: c.number_format = '#,##0.00'
+        # Check Point 1: prev balance + credit − debit  (live formula when columns exist)
+        cp1 = None
+        if r > 2 and bal_i and (debit_i or credit_i):
+            bal_col = get_column_letter(bal_i)
+            cr = f"+{get_column_letter(credit_i)}{r}" if credit_i else ""
+            dr = f"-{get_column_letter(debit_i)}{r}" if debit_i else ""
+            cp1 = f"={bal_col}{r - 1}{cr}{dr}"
+        cc = ws.cell(row=r, column=cp1_idx, value=cp1)
+        cc.font, cc.border, cc.alignment = DAT_FONT, BORDER, RIGHT
+        if alt: cc.fill = ALT_FILL
+        if cp1: cc.number_format = '#,##0.00'
 
-        ws.row_dimensions[row_idx].height = 15
+        # Check Point 2: stated balance − Check Point 1  (should be 0)
+        cp2 = None
+        if r > 2 and bal_i:
+            bal_col = get_column_letter(bal_i)
+            cp2 = f"={bal_col}{r}-{get_column_letter(cp1_idx)}{r}"
+        c2 = ws.cell(row=r, column=cp2_idx, value=cp2)
+        c2.font, c2.border, c2.alignment = DAT_FONT, BORDER, RIGHT
+        if alt: c2.fill = ALT_FILL
+        if cp2: c2.number_format = '#,##0.00'
+        ws.row_dimensions[r].height = 15
 
-    # ── Statement Summary row (matches PDF summary) ──────────────────
-    n         = len(txns)
+    n = len(txns)
+    last_row = n + 1
 
     # Conditional formatting on Check Point 2: green = 0, red ≠ 0
-    if n > 1:
-        from openpyxl.formatting.rule import CellIsRule
-        cp2_range = f"I3:I{n + 1}"
-        GREEN_FILL = PatternFill("solid", fgColor="C6EFCE")
-        RED_FILL   = PatternFill("solid", fgColor="FFC7CE")
-        ws.conditional_formatting.add(
-            cp2_range, CellIsRule(operator="equal",    formula=["0"], fill=GREEN_FILL))
-        ws.conditional_formatting.add(
-            cp2_range, CellIsRule(operator="notEqual", formula=["0"], fill=RED_FILL))
-    last_row  = n + 1          # last data row
-    summ_row  = n + 2          # summary row
-    val       = data.get("validation", {})
-    pdf_d     = val.get("pdf_total_debit")
-    pdf_c     = val.get("pdf_total_credit")
-    open_bal  = val.get("opening_balance")
-    close_bal = val.get("closing_balance") or (txns[-1]["balance"] if txns else 0.0)
-    dr_cnt    = val.get("dr_count", "")
-    cr_cnt    = val.get("cr_count", "")
+    if n > 1 and bal_i:
+        rng = f"{get_column_letter(cp2_idx)}3:{get_column_letter(cp2_idx)}{last_row}"
+        ws.conditional_formatting.add(rng, CellIsRule(
+            operator="between", formula=["-0.01", "0.01"],
+            fill=PatternFill("solid", fgColor="C6EFCE")))
+        ws.conditional_formatting.add(rng, CellIsRule(
+            operator="notBetween", formula=["-0.01", "0.01"],
+            fill=PatternFill("solid", fgColor="FFC7CE")))
 
-    # Blank separator row
-    ws.row_dimensions[summ_row - 1].height = 6
-
-    # Summary header row (column labels)
-    lbl_row = summ_row
-    lbl_vals = [
-        (1, "STATEMENT SUMMARY"),
-        (2, "Opening Balance"),
-        (3, "Dr Count"),
-        (4, "Cr Count"),
-        (5, "Total Debit"),
-        (6, "Total Credit"),
-        (7, "Closing Balance"),
-    ]
+    # ── Statement Summary block ──────────────────────────────────
+    val = data.get("validation", {})
+    summ = last_row + 2
     LBL_FILL = PatternFill("solid", fgColor="2C3E50")
     LBL_FONT = Font(bold=True, color="FFFFFF", size=9, name="Calibri")
-    for col, label in lbl_vals:
-        c = ws.cell(row=lbl_row, column=col, value=label)
-        c.fill, c.font  = LBL_FILL, LBL_FONT
-        c.alignment     = CENTER
-        c.border        = BORDER
-    ws.row_dimensions[lbl_row].height = 18
-
-    # Summary data row (actual values)
-    data_row  = summ_row + 1
-    data_vals = [
-        (1, ""),
-        (2, open_bal),
-        (3, dr_cnt),
-        (4, cr_cnt),
-        (5, f"=SUM(D2:D{last_row})"),
-        (6, f"=SUM(E2:E{last_row})"),
-        (7, close_bal),
-    ]
-    VAL_FILL = PatternFill("solid", fgColor="EBF5FB")
     VAL_FONT = Font(bold=True, size=10, name="Calibri")
-    for col, value in data_vals:
-        c = ws.cell(row=data_row, column=col, value=value)
-        c.fill, c.font, c.border = VAL_FILL, VAL_FONT, BORDER
-        if col in (2, 5, 6, 7):
-            c.alignment  = RIGHT
-            c.number_format = '#,##0.00'
-        else:
-            c.alignment = CENTER
-    ws.row_dimensions[data_row].height = 20
+    VAL_FILL = PatternFill("solid", fgColor="EBF5FB")
 
-    # PDF-stated totals comparison row (if available)
-    if pdf_d is not None:
-        cmp_row   = data_row + 1
-        cmp_vals  = [
-            (1, "As per PDF"),
-            (2, ""),
-            (3, ""),
-            (4, ""),
-            (5, pdf_d),
-            (6, pdf_c),
-            (7, close_bal),
-        ]
+    def put(row, col, value, fill, font, align, numfmt=None):
+        if col < 1:
+            return
+        c = ws.cell(row=row, column=col, value=value)
+        c.fill, c.font, c.alignment, c.border = fill, font, align, BORDER
+        if numfmt:
+            c.number_format = numfmt
+
+    ws.cell(row=summ, column=1, value="STATEMENT SUMMARY").fill = LBL_FILL
+    ws.cell(row=summ, column=1).font = LBL_FONT
+    ws.cell(row=summ, column=1).border = BORDER
+    if debit_i:
+        put(summ, debit_i, "Total Debit", LBL_FILL, LBL_FONT, CENTER)
+        put(summ + 1, debit_i, f"=SUM({get_column_letter(debit_i)}2:{get_column_letter(debit_i)}{last_row})",
+            VAL_FILL, VAL_FONT, RIGHT, '#,##0.00')
+    if credit_i:
+        put(summ, credit_i, "Total Credit", LBL_FILL, LBL_FONT, CENTER)
+        put(summ + 1, credit_i, f"=SUM({get_column_letter(credit_i)}2:{get_column_letter(credit_i)}{last_row})",
+            VAL_FILL, VAL_FONT, RIGHT, '#,##0.00')
+    if bal_i:
+        put(summ, bal_i, "Closing Balance", LBL_FILL, LBL_FONT, CENTER)
+        put(summ + 1, bal_i, val.get("closing_balance"), VAL_FILL, VAL_FONT, RIGHT, '#,##0.00')
+    ws.cell(row=summ + 1, column=1, value=f"Opening: {val.get('opening_balance')}").font = VAL_FONT
+
+    # PDF-stated totals comparison (if the statement printed them)
+    if val.get("pdf_total_debit") is not None:
+        cmp = summ + 2
         CMP_FONT = Font(italic=True, size=9, color="555555", name="Calibri")
         CMP_FILL = PatternFill("solid", fgColor="F8F9FA")
-        for col, value in cmp_vals:
-            c = ws.cell(row=cmp_row, column=col, value=value)
-            c.font, c.fill, c.border = CMP_FONT, CMP_FILL, BORDER
-            if col in (5, 6, 7) and isinstance(value, float):
-                c.alignment  = RIGHT
-                c.number_format = '#,##0.00'
-            else:
-                c.alignment = LEFT
-        ws.row_dimensions[cmp_row].height = 16
+        put(cmp, 1, "As per PDF", CMP_FILL, CMP_FONT, LEFT)
+        if debit_i:
+            put(cmp, debit_i, val.get("pdf_total_debit"), CMP_FILL, CMP_FONT, RIGHT, '#,##0.00')
+        if credit_i:
+            put(cmp, credit_i, val.get("pdf_total_credit"), CMP_FILL, CMP_FONT, RIGHT, '#,##0.00')
 
     ws.freeze_panes = "A2"
     buf = BytesIO()

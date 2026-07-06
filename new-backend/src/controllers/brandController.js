@@ -1,8 +1,20 @@
 const { Brand, BrandUser, User, Agent } = require('../models/master');
 const { getBrandConnection, createBrandDatabase } = require('../config/database');
 const { getBrandAgentModel, getDynamicModel } = require('../models/brand');
+const drive = require('../services/driveService');
+const { getGoogleClient } = require('../services/googleClient');
+const { google } = require('googleapis');
 const path = require('path');
 const fs = require('fs-extra');
+
+const DRIVE_FOLDER_MIME = 'application/vnd.google-apps.folder';
+
+// Can this user see this brand? (admin, or assigned via brand_users)
+const userCanAccessBrand = async (user, brandId) => {
+  if (user.role === 'admin') return true;
+  const link = await BrandUser.findOne({ where: { brand_id: brandId, user_id: user.id } });
+  return !!link;
+};
 
 const OUTPUT_DIR = path.join(__dirname, '../../outputs');
 
@@ -225,11 +237,94 @@ const getBrandStatus = async (req, res, next) => {
   }
 };
 
+/**
+ * GET /api/brands/:brandId/drive
+ * Lists files/subfolders in this brand's configured Drive folder.
+ * Degrades gracefully: returns { configured:false } when no folder is set or
+ * the service account isn't available (e.g. on local — real creds live on AWS).
+ */
+const getBrandDrive = async (req, res, next) => {
+  try {
+    const { brandId } = req.params;
+    const brand = await Brand.findByPk(brandId);
+    if (!brand) return res.status(404).json({ error: 'Brand not found' });
+    if (!(await userCanAccessBrand(req.user, brandId))) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+    if (!brand.drive_folder_id) {
+      return res.json({ configured: false, reason: 'no_folder', files: [] });
+    }
+    try {
+      // Prefer the connected Google account (OAuth → its own Drive); fall back
+      // to the service account for folders shared with colonel-drive@…
+      const g = await getGoogleClient();
+      let files;
+      if (g) {
+        const d = google.drive({ version: 'v3', auth: g.client });
+        const r = await d.files.list({
+          q: `'${brand.drive_folder_id}' in parents and trashed = false`,
+          fields: 'files(id,name,mimeType,size,webViewLink)',
+          pageSize: 100,
+          supportsAllDrives: true,
+          includeItemsFromAllDrives: true,
+        });
+        files = (r.data.files || []).map((c) => ({
+          id: c.id,
+          name: c.name,
+          mimeType: c.mimeType,
+          isFolder: c.mimeType === DRIVE_FOLDER_MIME,
+          size: c.size != null ? Number(c.size) : null,
+          webViewLink: c.webViewLink || `https://drive.google.com/file/d/${c.id}/view`,
+        }));
+      } else if (drive.isConfigured()) {
+        const children = await drive.listChildren(brand.drive_folder_id);
+        files = (children || []).map((c) => ({
+          id: c.id,
+          name: c.name,
+          mimeType: c.mimeType,
+          isFolder: c.mimeType === drive.FOLDER_MIME,
+          size: c.size != null ? Number(c.size) : null,
+          webViewLink: `https://drive.google.com/file/d/${c.id}/view`,
+        }));
+      } else {
+        return res.json({ configured: false, reason: 'google_not_connected', files: [] });
+      }
+      res.json({ configured: true, folderId: brand.drive_folder_id, files });
+    } catch (err) {
+      // Folder not accessible, or transient Drive error → empty, not 500.
+      res.json({ configured: true, error: err.message, files: [] });
+    }
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * PUT /api/brands/:brandId/drive-folder  (admin)
+ * Admin pastes the brand's Drive folder link/id; we store the parsed id.
+ */
+const setBrandDriveFolder = async (req, res, next) => {
+  try {
+    const { brandId } = req.params;
+    const { folderLink } = req.body;
+    const brand = await Brand.findByPk(brandId);
+    if (!brand) return res.status(404).json({ error: 'Brand not found' });
+
+    const folderId = folderLink ? drive.parseFolderId(folderLink) : null;
+    await brand.update({ drive_folder_id: folderId });
+    res.json({ message: 'Drive folder updated', drive_folder_id: folderId, serviceAccount: drive.isConfigured() ? drive.serviceAccountEmail() : null });
+  } catch (error) {
+    next(error);
+  }
+};
+
 module.exports = {
   createBrand,
   getAllBrands,
   getBrandById,
   assignUserToBrand,
   getBrandUsers,
-  getBrandStatus
+  getBrandStatus,
+  getBrandDrive,
+  setBrandDriveFolder
 };

@@ -82,6 +82,16 @@ const ensureCatalog = async () => {
         });
       }
     }
+    // Pre-connect Zoho Books from the env-provided refresh token (read-only sync).
+    if (c.type === 'zoho_books' && process.env.ZOHO_REFRESH_TOKEN) {
+      const cfg = row.config || {};
+      if (!cfg.refresh_token) {
+        await row.update({
+          status: 'connected',
+          config: { ...cfg, refresh_token: process.env.ZOHO_REFRESH_TOKEN, account: process.env.ZOHO_ORGANIZATION_ID || null },
+        });
+      }
+    }
   }
 };
 
@@ -96,8 +106,10 @@ const publicView = (row) => {
     category: cat.category || 'Other',
     fields: cat.fields || [],
     status: row.status,
-    hasKey: !!(cfg.apiKey || cfg.account),
+    hasKey: !!(cfg.apiKey || cfg.account || cfg.refresh_token),
     account: cfg.account || null,           // non-secret display value
+    email: cfg.email || null,               // Google OAuth connected email
+    picture: cfg.picture || null,           // Google OAuth profile picture
     connected_by: row.connected_by || null,
     updatedAt: row.updatedAt,
   };
@@ -141,4 +153,91 @@ const disconnectIntegration = async (req, res, next) => {
   } catch (e) { next(e); }
 };
 
-module.exports = { listIntegrations, connectIntegration, disconnectIntegration };
+/* ── Google OAuth 2.0 ──────────────────────────────────────────────────────────
+   Mirrors the AWS flow. URLs are env-driven so localhost and the ngrok/AWS host
+   both work — set GOOGLE_REDIRECT_URI / GOOGLE_FRONT_URL in .env per environment.
+   The connected user's tokens (incl. refresh_token) are stored on the google
+   integration row and reused by googleClient.js for Calendar/Drive. */
+const { google } = require('googleapis');
+
+const GOOGLE_REDIRECT_URI = process.env.GOOGLE_REDIRECT_URI || 'http://localhost:8001/api/auth/google/callback';
+const GOOGLE_FRONT_URL    = process.env.GOOGLE_FRONT_URL || 'http://localhost:3000/integrations';
+
+function makeOAuth2Client() {
+  return new google.auth.OAuth2(
+    process.env.GOOGLE_CLIENT_ID,
+    process.env.GOOGLE_CLIENT_SECRET,
+    GOOGLE_REDIRECT_URI,
+  );
+}
+
+/* GET /api/integrations/google/oauth/start — returns { url } for the frontend to redirect to. */
+const startGoogleOAuth = (req, res) => {
+  if (!process.env.GOOGLE_CLIENT_ID || !process.env.GOOGLE_CLIENT_SECRET) {
+    return res.status(400).json({ error: 'Google OAuth is not configured on this server (missing GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET).' });
+  }
+  try {
+    const oauth2Client = makeOAuth2Client();
+    const url = oauth2Client.generateAuthUrl({
+      access_type: 'offline',
+      prompt: 'consent',
+      scope: [
+        'https://www.googleapis.com/auth/drive',
+        'https://www.googleapis.com/auth/spreadsheets',
+        'https://www.googleapis.com/auth/documents',
+        'https://www.googleapis.com/auth/gmail.modify',
+        'https://www.googleapis.com/auth/calendar',
+        'https://www.googleapis.com/auth/meetings.space.created',
+        'https://www.googleapis.com/auth/userinfo.email',
+        'https://www.googleapis.com/auth/userinfo.profile',
+        'openid',
+      ],
+      state: req.user.id,
+    });
+    res.json({ url });
+  } catch (e) {
+    console.error('startGoogleOAuth error:', e.message);
+    res.status(500).json({ error: 'Failed to build OAuth URL' });
+  }
+};
+
+/* GET /api/auth/google/callback — public; Google redirects here after consent. */
+const googleOAuthCallback = async (req, res) => {
+  const { code, error, state } = req.query;
+  if (error || !code) {
+    console.error('Google OAuth denied:', error);
+    return res.redirect(GOOGLE_FRONT_URL + '?error=oauth_denied');
+  }
+  try {
+    const oauth2Client = makeOAuth2Client();
+    const { tokens } = await oauth2Client.getToken(code);
+    oauth2Client.setCredentials(tokens);
+
+    const oauth2Api = google.oauth2({ version: 'v2', auth: oauth2Client });
+    const { data: userInfo } = await oauth2Api.userinfo.get();
+
+    await ensureCatalog();
+    const row = await Integration.findOne({ where: { type: 'google' } });
+    const existingCfg = row.config || {};
+    await row.update({
+      status: 'connected',
+      config: {
+        access_token:  tokens.access_token,
+        refresh_token: tokens.refresh_token || existingCfg.refresh_token,
+        token_expiry:  tokens.expiry_date,
+        email:   userInfo.email || existingCfg.email || '',
+        name:    userInfo.name || existingCfg.name || '',
+        picture: userInfo.picture || existingCfg.picture || '',
+      },
+      connected_by: state || null,
+    });
+
+    console.log('Google OAuth connected:', userInfo.email);
+    res.redirect(GOOGLE_FRONT_URL + '?connected=true');
+  } catch (e) {
+    console.error('googleOAuthCallback error:', e.message);
+    res.redirect(GOOGLE_FRONT_URL + '?error=oauth_failed');
+  }
+};
+
+module.exports = { listIntegrations, connectIntegration, disconnectIntegration, startGoogleOAuth, googleOAuthCallback };

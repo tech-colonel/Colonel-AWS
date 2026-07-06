@@ -94,6 +94,70 @@ export default function BrandLogo({ type, size = 28 }) {
           <rect x="25.5" y="25.5" width="15.5" height="15.5" rx="4.5" fill="url(#ffG)" />
         </svg>
       );
+    case 'google_meet':
+    case 'meet':
+      return (
+        <svg viewBox="0 0 87.5 72" style={s} aria-label="Google Meet">
+          <path fill="#00832d" d="M49.5 36l8.53 9.75 11.47 7.33 2-17.02-2-16.64-11.69 6.44z" />
+          <path fill="#0066da" d="M0 51.5V66c0 3.315 2.685 6 6 6h14.5l3-10.96-3-9.54-9.95-3z" />
+          <path fill="#e94235" d="M20.5 0L0 20.5l10.55 3 9.95-3 2.95-9.41z" />
+          <path fill="#2684fc" d="M20.5 20.5H0v31h20.5z" />
+          <path fill="#00ac47" d="M82.6 8.68L69.5 19.42v33.66l13.16 10.79c1.97 1.54 4.85.135 4.85-2.37V11c0-2.535-2.945-3.925-4.91-2.32zM49.5 36v15.5h-29V72h43c3.315 0 6-2.685 6-6V53.08z" />
+          <path fill="#ffba00" d="M63.5 0h-43v20.5h29V36l20-16.58V6c0-3.315-2.685-6-6-6z" />
+        </svg>
+      );
+    case 'google_calendar':
+    case 'gcal':
+    case 'calendar':
+      return (
+        <svg viewBox="0 0 48 48" style={s} aria-label="Google Calendar">
+          <rect x="10" y="10" width="28" height="28" rx="3" fill="#fff" />
+          <path fill="#4285f4" d="M38 14h-4v-4h1a3 3 0 0 1 3 3z" />
+          <path fill="#ea4335" d="M14 10a4 4 0 0 0-4 4h4z" />
+          <path fill="#fbbc04" d="M10 34h4v4a4 4 0 0 1-4-4z" />
+          <path fill="#34a853" d="M34 38v-4h4a4 4 0 0 1-4 4z" />
+          <path fill="#188038" d="M34 34h4V14h-4z" />
+          <path fill="#1967d2" d="M14 34h20v4H14z" />
+          <rect x="10" y="14" width="4" height="20" fill="#4285f4" />
+          <rect x="14" y="10" width="20" height="4" fill="#4285f4" />
+          <text x="24" y="31" fontSize="16" fontWeight="700" fill="#4285f4" textAnchor="middle" fontFamily="Arial, Helvetica, sans-serif">31</text>
+        </svg>
+      );
+    case 'zoom':
+      return (
+        <svg viewBox="0 0 40 40" style={s} aria-label="Zoom">
+          <circle cx="20" cy="20" r="20" fill="#2D8CFF" />
+          <path fill="#fff" d="M10 15.2c0-1.2.97-2.2 2.17-2.2h8.6c1.2 0 2.17 1 2.17 2.2v9.6c0 1.2-.97 2.2-2.17 2.2h-8.6c-1.2 0-2.17-1-2.17-2.2zM24.1 17.4l4.4-3.2c.57-.42 1.5-.02 1.5.78v10.1c0 .8-.93 1.2-1.5.78l-4.4-3.2z" />
+        </svg>
+      );
+    case 'google_drive':
+    case 'drive':
+      return (
+        <svg viewBox="0 0 87.3 78" style={s} aria-label="Google Drive">
+          <path fill="#0066da" d="M6.6 66.85l3.85 6.65c.8 1.4 1.95 2.5 3.3 3.3l13.75-23.8H0c0 1.55.4 3.1 1.2 4.5z" />
+          <path fill="#00ac47" d="M43.65 25L29.9 1.2c-1.35.8-2.5 1.9-3.3 3.3l-25.4 44A9.06 9.06 0 000 53h27.5z" />
+          <path fill="#ea4335" d="M73.55 76.8c1.35-.8 2.5-1.9 3.3-3.3l1.6-2.75 7.65-13.25c.8-1.4 1.2-2.95 1.2-4.5H59.8l5.85 11.5z" />
+          <path fill="#00832d" d="M43.65 25L57.4 1.2C56.05.4 54.5 0 52.9 0H34.4c-1.6 0-3.15.45-4.5 1.2z" />
+          <path fill="#2684fc" d="M59.8 53H27.5L13.75 76.8c1.35.8 2.9 1.2 4.5 1.2h50.8c1.6 0 3.15-.45 4.5-1.2z" />
+          <path fill="#ffba00" d="M73.4 26.5l-12.7-22c-.8-1.4-1.95-2.5-3.3-3.3L43.65 25 59.8 53h27.45c0-1.55-.4-3.1-1.2-4.5z" />
+        </svg>
+      );
+    case 'claude':
+    case 'anthropic':
+      return (
+        <svg viewBox="0 0 24 24" style={s} aria-label="Claude">
+          <rect width="24" height="24" rx="5" fill="#D97757" />
+          <path fill="#fff" d="M7.4 15.6l3.05-7.2h1.55l3.05 7.2h-1.6l-.62-1.57h-3.2l-.62 1.57zm2.7-2.86h2.2l-1.1-2.83z" />
+        </svg>
+      );
+    case 'openai':
+    case 'chatgpt':
+      return (
+        <svg viewBox="0 0 24 24" style={s} aria-label="OpenAI">
+          <rect width="24" height="24" rx="5" fill="#000" />
+          <path fill="#fff" d="M12 5.5a3.2 3.2 0 012.77 1.6 3.2 3.2 0 011.9 5.4 3.2 3.2 0 01-2.77 4.8A3.2 3.2 0 0112 18.5a3.2 3.2 0 01-2.77-1.2 3.2 3.2 0 01-1.9-5.4A3.2 3.2 0 0110.1 7.1 3.2 3.2 0 0112 5.5zm0 1.6l-2.4 1.38v2.0L12 12.3l2.4-1.42v-2L12 7.1z" />
+        </svg>
+      );
     default:
       return (
         <svg viewBox="0 0 24 24" style={s} aria-label={type || 'integration'} fill="none" stroke="#64748B" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">

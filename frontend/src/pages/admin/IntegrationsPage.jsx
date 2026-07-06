@@ -1,14 +1,12 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import DashboardLayout from '../../components/layout/DashboardLayout';
 import {
-  Plug, CheckCircle2, X, Loader2, ShieldCheck, KeyRound, RefreshCw, Plug2,
+  Plug, CheckCircle2, X, Loader2, ShieldCheck, KeyRound, RefreshCw, Plug2, BookOpen,
 } from 'lucide-react';
 import api from '../../lib/api';
 import { toast } from 'sonner';
-import { ADMIN_SIDEBAR } from '../../lib/adminNav';
+import { sidebarFor } from '../../lib/adminNav';
 import BrandLogo from '../../components/BrandLogos';
-
-const sidebarItems = ADMIN_SIDEBAR;
 
 /* ── Status pill (matches ToolResultDashboard pill atoms) ───────────────────── */
 function StatusPill({ connected }) {
@@ -128,9 +126,10 @@ function ConnectForm({ connector, onCancel, onSubmit, submitting }) {
 }
 
 /* ── Connector card ─────────────────────────────────────────────────────────── */
-function ConnectorCard({ connector, onConnect, onDisconnect, busy }) {
+function ConnectorCard({ connector, onConnect, onDisconnect, onOAuthConnect, busy }) {
   const [open, setOpen] = useState(false);
   const connected = connector.status === 'connected';
+  const isGoogleOAuth = connector.type === 'google' && !!onOAuthConnect;
 
   const handleSubmit = async (payload) => {
     const ok = await onConnect(connector.type, payload);
@@ -168,17 +167,19 @@ function ConnectorCard({ connector, onConnect, onDisconnect, busy }) {
         {connector.blurb || 'Connect this service to automate workflows.'}
       </p>
 
-      {/* Connected account line */}
-      {connected && connector.account && (
+      {/* Connected account line (Google OAuth shows email + profile picture) */}
+      {connected && (connector.account || connector.email) && (
         <div
           style={{
-            marginTop: 12, display: 'flex', alignItems: 'center', gap: 6,
+            marginTop: 12, display: 'flex', alignItems: 'center', gap: 7,
             fontSize: 12, color: '#059669', fontWeight: 600,
             background: '#ECFDF5', border: '1px solid #A7F3D0', borderRadius: 10, padding: '7px 10px',
           }}
         >
-          <ShieldCheck style={{ width: 14, height: 14 }} />
-          <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{connector.account}</span>
+          {connector.picture
+            ? <img src={connector.picture} alt="" referrerPolicy="no-referrer" style={{ width: 18, height: 18, borderRadius: '50%', flexShrink: 0 }} />
+            : <ShieldCheck style={{ width: 14, height: 14, flexShrink: 0 }} />}
+          <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{connector.email || connector.account}</span>
         </div>
       )}
 
@@ -186,19 +187,41 @@ function ConnectorCard({ connector, onConnect, onDisconnect, busy }) {
       {!open && (
         <div style={{ marginTop: 16 }}>
           {connected ? (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              {connector.type === 'zoho_books' && (
+                <a href="/zoho" style={{ width: '100%', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 8, background: '#0748EE', color: '#fff', border: 'none', borderRadius: 10, padding: '9px 14px', fontSize: 13, fontWeight: 700, textDecoration: 'none', boxShadow: '0 2px 8px rgba(7,72,238,0.22)' }}>
+                  <BookOpen style={{ width: 14, height: 14 }} /> Open Zoho Books
+                </a>
+              )}
+              <button
+                onClick={() => onDisconnect(connector.type)}
+                disabled={busy}
+                style={{
+                  width: '100%', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 8,
+                  background: '#fff', color: '#E11D48', border: '1px solid #FECACA', borderRadius: 10,
+                  padding: '9px 14px', fontSize: 13, fontWeight: 700,
+                  cursor: busy ? 'not-allowed' : 'pointer', opacity: busy ? 0.7 : 1,
+                }}
+              >
+                {busy
+                  ? <><Loader2 className="animate-spin" style={{ width: 14, height: 14 }} /> Working…</>
+                  : <><Plug2 style={{ width: 14, height: 14 }} /> Disconnect</>}
+              </button>
+            </div>
+          ) : isGoogleOAuth ? (
             <button
-              onClick={() => onDisconnect(connector.type)}
+              onClick={() => onOAuthConnect(connector.type)}
               disabled={busy}
               style={{
                 width: '100%', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 8,
-                background: '#fff', color: '#E11D48', border: '1px solid #FECACA', borderRadius: 10,
+                background: '#fff', color: '#3C4043', border: '1px solid #DADCE0', borderRadius: 10,
                 padding: '9px 14px', fontSize: 13, fontWeight: 700,
                 cursor: busy ? 'not-allowed' : 'pointer', opacity: busy ? 0.7 : 1,
               }}
             >
               {busy
-                ? <><Loader2 className="animate-spin" style={{ width: 14, height: 14 }} /> Working…</>
-                : <><Plug2 style={{ width: 14, height: 14 }} /> Disconnect</>}
+                ? <><Loader2 className="animate-spin" style={{ width: 14, height: 14 }} /> Redirecting…</>
+                : <><BrandLogo type="google" size={16} /> Connect with Google</>}
             </button>
           ) : (
             <button
@@ -248,6 +271,8 @@ function StatCard({ label, value, color, bg }) {
    MAIN PAGE
    ════════════════════════════════════════════════════════════════════════════ */
 const IntegrationsPage = () => {
+  // Admin → admin shell; accountant (on /integrations) → their own sidebar.
+  const sidebarItems = sidebarFor([]);
   const [connectors, setConnectors] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(false);
@@ -263,6 +288,30 @@ const IntegrationsPage = () => {
   }, []);
 
   useEffect(() => { load(); }, [load]);
+
+  // Handle the Google OAuth round-trip (?connected / ?error on return).
+  useEffect(() => {
+    const p = new URLSearchParams(window.location.search);
+    if (p.get('connected')) {
+      toast.success('Google connected');
+      window.history.replaceState({}, '', window.location.pathname);
+      load();
+    } else if (p.get('error')) {
+      toast.error('Google sign-in failed — please try again');
+      window.history.replaceState({}, '', window.location.pathname);
+    }
+  }, [load]);
+
+  const handleOAuthConnect = async (type) => {
+    setBusyType(type);
+    try {
+      const r = await api.get(`/api/integrations/${type}/oauth/start`);
+      window.location.href = r.data.url;   // hand off to Google's consent screen
+    } catch (e) {
+      toast.error(e?.response?.data?.error || 'Could not start Google sign-in');
+      setBusyType(null);
+    }
+  };
 
   const patchConnector = (type, patch) =>
     setConnectors((list) => list.map((c) => (c.type === type ? { ...c, ...patch } : c)));
@@ -381,6 +430,7 @@ const IntegrationsPage = () => {
                 busy={busyType === c.type}
                 onConnect={handleConnect}
                 onDisconnect={handleDisconnect}
+                onOAuthConnect={c.type === 'google' ? handleOAuthConnect : undefined}
               />
             ))}
           </div>

@@ -1535,6 +1535,13 @@ def load_bank_statement(filepath: str) -> tuple:
         amt_col = next(
             (c for c in df.columns if str(c).strip().lower() in ('amount', 'amt')),
             None
+        ) or next(
+            # Fallback: a column whose header *contains* amount / amt (e.g. ICICI
+            # "Transaction Amount(INR)"), excluding the running balance column.
+            (c for c in df.columns
+             if ('amount' in str(c).strip().lower() or re.search(r'\bamt\b', str(c).strip().lower()))
+             and 'balance' not in str(c).strip().lower()),
+            None
         )
         dir_col = next(
             (c for c in df.columns
@@ -1739,6 +1746,68 @@ def gemini_classify(narration, candidates, api_key, model="gemini-2.5-flash", ti
     return None  # model returned something not in the COA candidate list → reject
 
 
+# ---------------------------------------------------------------------------
+# Claude (Anthropic) LLM fallback — same contract as gemini_classify: the model
+# may ONLY return a ledger that exists in `candidates`; anything else (abstention,
+# invented name, timeout, API/refusal error) yields None and the caller keeps
+# "Suspense A/c". Raw HTTPS (urllib) to mirror gemini_classify — no SDK dependency.
+# ---------------------------------------------------------------------------
+def anthropic_classify(narration, candidates, api_key, model="claude-haiku-4-5", timeout=30):
+    import urllib.request
+    import json as _json
+    if not api_key or not candidates or not str(narration).strip():
+        return None
+    cand_block = "\n".join(candidates)
+    prompt = (
+        "You are an expert Indian bank-reconciliation assistant mapping a bank transaction "
+        "to a Tally ledger. From the CANDIDATES list, choose the ONE ledger that best matches "
+        "the transaction narration (consider payee/vendor name, UPI/NEFT counterparty, and "
+        "purpose). You MUST copy a candidate EXACTLY as written. If none is a clear match, "
+        "reply exactly: SUSPENSE. Reply with ONLY the chosen ledger name or SUSPENSE — no "
+        "explanation, no extra text.\n\n"
+        f"TRANSACTION NARRATION:\n{narration}\n\nCANDIDATES:\n{cand_block}"
+    )
+    body = _json.dumps({
+        "model": model,
+        "max_tokens": 100,
+        "messages": [{"role": "user", "content": prompt}],
+    }).encode("utf-8")
+    url = "https://api.anthropic.com/v1/messages"
+    import ssl
+    try:
+        import certifi
+        _ctx = ssl.create_default_context(cafile=certifi.where())
+    except Exception:
+        _ctx = ssl.create_default_context()
+    try:
+        req = urllib.request.Request(url, data=body, headers={
+            "content-type": "application/json",
+            "x-api-key": api_key,
+            "anthropic-version": "2023-06-01",
+        })
+        with urllib.request.urlopen(req, timeout=timeout, context=_ctx) as resp:
+            data = _json.loads(resp.read().decode("utf-8"))
+    except Exception as _e:
+        print(f"      → Claude call failed: {type(_e).__name__}: {str(_e)[:160]}", file=sys.stderr)
+        return None
+    if data.get("stop_reason") == "refusal":
+        return None
+    text = ""
+    for block in data.get("content", []):
+        if block.get("type") == "text":
+            text = (block.get("text") or "").strip()
+            break
+    if not text or text.strip().upper() == "SUSPENSE":
+        return None
+    def _n(x):
+        return ' '.join(re.sub(r'[^a-z0-9 ]', ' ', str(x).lower()).split())
+    nt = _n(text)
+    for c in candidates:
+        if _n(c) == nt:
+            return c
+    return None  # model returned something not in the COA candidate list → reject
+
+
 def main():
     import argparse
     parser = argparse.ArgumentParser(description="Universal Tally Bank Statement Classifier")
@@ -1756,6 +1825,11 @@ def main():
                         help="Gemini API key for the LLM fallback (else env GEMINI_API_KEY)")
     parser.add_argument("--gemini-model", default="gemini-2.5-flash",
                         help="Gemini model for the fallback (default: gemini-2.5-flash)")
+    parser.add_argument("--anthropic-key", default=None,
+                        help="Anthropic (Claude) API key for the LLM fallback (else env "
+                             "ANTHROPIC_API_KEY). Preferred over Gemini when present.")
+    parser.add_argument("--anthropic-model", default="claude-haiku-4-5",
+                        help="Claude model for the fallback (default: claude-haiku-4-5)")
     parser.add_argument("--list-ledgers", action="store_true",
                         help="COA ingest mode: load + validate --ledger and print the cleaned "
                              "ledger names as a JSON array to stdout, then exit. Applies the same "
@@ -1936,16 +2010,25 @@ def main():
     print(f"         Low:    {summary['Low']}  ({summary['Low']/total*100:.1f}%)")
 
     # ------------------------------------------------------------------
-    # Gemini LLM fallback — fires on Low AND Medium rows (Medium may be
-    # uncertain; Gemini can confirm or correct). High rows are never touched.
-    # On any failure the row stays unchanged.
+    # LLM fallback — fires on Low AND Medium rows (Medium may be uncertain; the
+    # LLM can confirm or correct). High rows are never touched. On any failure the
+    # row stays unchanged. Claude is preferred when its key is present; else Gemini.
     # ------------------------------------------------------------------
+    anthropic_key = args.anthropic_key or os.environ.get("ANTHROPIC_API_KEY")
     gemini_key = args.gemini_key or os.environ.get("GEMINI_API_KEY")
-    if gemini_key and total:
+    llm_key = anthropic_key or gemini_key
+    llm_name = (f"Claude ({args.anthropic_model})" if anthropic_key
+                else f"Gemini ({args.gemini_model})")
+
+    def llm_pick(desc, cands):
+        if anthropic_key:
+            return anthropic_classify(desc, cands, anthropic_key, args.anthropic_model)
+        return llm_pick(desc, cands)
+
+    if llm_key and total:
         low_idx = [i for i, r in enumerate(rows) if r["confidence"] in ("Low", "Medium")]
         if low_idx:
-            print(f"[3.5/4] Gemini fallback on {len(low_idx)} low/medium-confidence rows "
-                  f"(model {args.gemini_model}) …")
+            print(f"[3.5/4] {llm_name} fallback on {len(low_idx)} low/medium-confidence rows …")
             from concurrent.futures import ThreadPoolExecutor
             suspense_label = classifier._suspense_ledger
             _cache = {}
@@ -1963,7 +2046,7 @@ def main():
                     cands = classifier.top_candidates(desc, k=15)
                 if suspense_label not in cands:
                     cands = cands + [suspense_label]
-                pick = gemini_classify(desc, cands, gemini_key, args.gemini_model)
+                pick = llm_pick(desc, cands)
                 _cache[key] = pick
                 return i, pick
 
@@ -1984,8 +2067,8 @@ def main():
                                 summary["High"] += 1
                             resolved += 1
             except Exception as _e:
-                print(f"        → Gemini fallback aborted ({_e}); rows kept as-is")
-            print(f"        → Gemini resolved {resolved}/{len(low_idx)} "
+                print(f"        → {llm_name} fallback aborted ({_e}); rows kept as-is")
+            print(f"        → {llm_name} resolved {resolved}/{len(low_idx)} "
                   f"(unresolved stay Suspense A/c / Medium)")
 
         # ── Gemini ARBITRATION on generic-rule High rows ───────────────────
@@ -2013,7 +2096,7 @@ def main():
             if top and top[0] and top[0] != assigned:
                 arb_idx.append(i)
         if arb_idx:
-            print(f"[3.6/4] Gemini arbitration on {len(arb_idx)} generic-rule High rows "
+            print(f"[3.6/4] {llm_name} arbitration on {len(arb_idx)} generic-rule High rows "
                   f"with a competing COA match …")
             def _arb(i):
                 r = rows[i]; desc = r["description"]; entity = r.get("entity", "") or desc
@@ -2023,7 +2106,7 @@ def main():
                     cands = [assigned] + cands
                 if suspense_label not in cands:
                     cands = cands + [suspense_label]
-                return i, gemini_classify(desc, cands, gemini_key, args.gemini_model)
+                return i, llm_pick(desc, cands)
             corrected = 0; flagged = 0
             try:
                 with _TPE(max_workers=6) as ex:
@@ -2040,7 +2123,7 @@ def main():
                                 summary["High"] -= 1; summary["Medium"] += 1
                             flagged += 1
             except Exception as _e:
-                print(f"        → Gemini arbitration aborted ({_e}); rows kept as-is")
+                print(f"        → {llm_name} arbitration aborted ({_e}); rows kept as-is")
             print(f"        → arbitration: {corrected} ledger(s) corrected, "
                   f"{flagged} flagged Medium for review")
 

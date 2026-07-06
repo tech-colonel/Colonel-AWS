@@ -1,4 +1,4 @@
-import { LayoutDashboard, Building2, Bot, Users as UsersIcon, Link as LinkIcon, ClipboardList, Workflow, Plug, Flag, Sparkles } from 'lucide-react';
+import { LayoutDashboard, Building2, Bot, Users as UsersIcon, Link as LinkIcon, ClipboardList, Workflow, Plug, Flag, Sparkles, Video, BookOpen, CalendarCheck, MessageSquare } from 'lucide-react';
 
 const readRole = () => {
   try { return JSON.parse(localStorage.getItem('user') || '{}').role || ''; }
@@ -27,6 +27,7 @@ export const ADMIN_SIDEBAR = [
   { path: '/admin/agents',      label: 'Agents',      icon: Bot,             testId: 'nav-agents' },
   { path: '/admin/users',       label: 'Users',       icon: UsersIcon,       testId: 'nav-users' },
   { path: '/admin/tasks',       label: 'Tasks',       icon: ClipboardList,   testId: 'nav-tasks' },
+  { path: '/admin/chats',       label: 'Chats',       icon: MessageSquare,   testId: 'nav-chats' },
   { path: '/admin/plans',       label: 'Plans',       icon: Workflow,        testId: 'nav-plans' },
   { path: '/admin/feedback',    label: 'Feedback',    icon: Flag,            testId: 'nav-feedback' },
   { path: '/admin/integrations',label: 'Integrations',icon: Plug,            testId: 'nav-integrations' },
@@ -44,18 +45,42 @@ const onAdminRoute = () => {
 // Pick the right sidebar: admins keep the admin menu; accountants get their
 // brand-scoped menu PLUS global Tasks + Plans (so they can see assigned tasks
 // and plans shared with them from anywhere).
-export const sidebarFor = (brandItems) => {
+// Remember the accountant's current brand so brand-scoped nav items (Dashboard,
+// Agents) stay linkable from GLOBAL pages (Meetings, Tasks, Feedback…) too.
+const lastBrandId = () => { try { return localStorage.getItem('lastBrandId') || ''; } catch { return ''; } };
+
+export const sidebarFor = (brandItems = []) => {
   if (isAdminUser() || onAdminRoute()) return ADMIN_SIDEBAR;
   if (isDeveloperUser()) return DEVELOPER_SIDEBAR;
-  // Accountant: brand-scoped items + global Tasks/Plans. Some callers already
-  // include a Tasks/Plans item in brandItems, so dedupe by path (first wins) to
-  // avoid the doubled "Tasks · Tasks" the user saw.
-  const items = [
-    ...brandItems,
-    { path: '/chat',  label: 'Colonel AI', icon: Sparkles, testId: 'nav-chat' },
-    { path: '/tasks', label: 'Tasks', icon: ClipboardList, testId: 'nav-tasks' },
-    { path: '/plans', label: 'Plans', icon: Workflow, testId: 'nav-plans' },
+  // Accountant: the SAME full menu on every page, so navigating to Meetings/
+  // Tasks/etc. never drops Dashboard/Agents from the shell. Brand-scoped items
+  // link to the last-visited brand (falls back to the brand picker).
+  const bid = lastBrandId();
+  const dashPath = bid ? `/brands/${bid}/dashboard` : '/brands';
+  const agentsPath = bid ? `/brands/${bid}/agents` : '/brands';
+  const compliancePath = bid ? `/brands/${bid}/compliance-tracker` : '/brands';
+  const base = [
+    { path: dashPath,        label: 'Dashboard',   icon: LayoutDashboard, testId: 'nav-dashboard' },
+    { path: agentsPath,      label: 'Agents',      icon: Bot,             testId: 'nav-agents' },
+    { path: compliancePath,  label: 'Tracker',     icon: CalendarCheck,   testId: 'nav-compliance' },
+    { path: '/chat',         label: 'Colonel AI',  icon: Sparkles,        testId: 'nav-chat' },
+    { path: '/meetings',     label: 'Meetings',    icon: Video,           testId: 'nav-meetings' },
+    { path: '/tasks',        label: 'Tasks',       icon: ClipboardList,   testId: 'nav-tasks' },
+    { path: '/feedback',     label: 'Feedback',    icon: Flag,            testId: 'nav-feedback' },
+    { path: '/integrations', label: 'Integrations',icon: Plug,            testId: 'nav-integrations' },
+    { path: '/zoho',         label: 'Zoho Books',  icon: BookOpen,        testId: 'nav-zoho' },
+    { path: '/plans',        label: 'Plans',       icon: Workflow,        testId: 'nav-plans' },
+    { path: '/brands',       label: 'Switch brands',icon: Building2,       testId: 'nav-switch-brands' },
   ];
-  const seen = new Set();
-  return items.filter((it) => (seen.has(it.path) ? false : (seen.add(it.path), true)));
+  // Let a caller override brand-scoped paths with the EXACT current brand
+  // (matched by label), then keep the canonical base order. Any extra caller
+  // item that collides with a base path OR label is dropped (e.g. TasksPage /
+  // PlansPage pass their own '/brands' "Brands" — base's "Switch brands" wins).
+  const byLabel = new Map(base.map((it) => [it.label, it]));
+  for (const it of brandItems) byLabel.set(it.label, it);
+  const merged = base.map((it) => byLabel.get(it.label));
+  const basePaths = new Set(base.map((b) => b.path));
+  const baseLabels = new Set(base.map((b) => b.label));
+  const extra = brandItems.filter((it) => !baseLabels.has(it.label) && !basePaths.has(it.path));
+  return [...merged, ...extra];
 };

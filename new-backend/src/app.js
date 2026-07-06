@@ -43,6 +43,11 @@ const plansRoutes           = require('./routes/plansRoutes');
 const integrationRoutes     = require('./routes/integrationRoutes');
 const chatRoutes            = require('./routes/chatRoutes');
 const workflowRoutes        = require('./routes/workflowRoutes');
+const meetingRoutes         = require('./routes/meetingRoutes');
+const zohoRoutes            = require('./routes/zohoRoutes');
+// ── Compliance Tracker ────────────────────────────────────────────────────────
+const complianceRoutes      = require('./routes/complianceRoutes');
+const attachmentsRoutes     = require('./routes/attachmentsRoutes');
 
 app.use('/api/auth',      authRoutes);
 app.use('/api',           brandRoutes);
@@ -62,6 +67,10 @@ app.use('/api',           plansRoutes);
 app.use('/api',           integrationRoutes);
 app.use('/api',           chatRoutes);
 app.use('/api',           workflowRoutes);
+app.use('/api',           meetingRoutes);
+app.use('/api',           zohoRoutes);
+app.use('/api',           complianceRoutes);
+app.use('/api',           attachmentsRoutes);
 
 // Error handling middleware
 app.use((err, req, res, next) => {

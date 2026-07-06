@@ -4,7 +4,7 @@ import DashboardLayout from '../../components/layout/DashboardLayout';
 import { Flag, Workflow, Loader2, Send, RefreshCw, Building2 } from 'lucide-react';
 import api from '../../lib/api';
 import { toast } from 'sonner';
-import { sidebarFor, isAdminUser } from '../../lib/adminNav';
+import { sidebarFor, isAdminUser, isDeveloperUser } from '../../lib/adminNav';
 
 const STATUS = {
   pending:     { label: 'Pending',     bg: '#F1F5F9', c: '#64748B' },
@@ -18,6 +18,9 @@ const fmt = (s) => { try { return new Date(s).toLocaleString('en-IN', { day: '2-
 export default function FeedbackPage() {
   const navigate = useNavigate();
   const admin = isAdminUser();
+  // Accountants get a read-only view of the feedback THEY raised (reply only).
+  // Only admin/developer can change status or spin up a plan.
+  const canManage = admin || isDeveloperUser();
   const [tasks, setTasks] = useState([]);
   const [loading, setLoading] = useState(true);
   const [openId, setOpenId] = useState(null);
@@ -92,7 +95,9 @@ export default function FeedbackPage() {
         <div className="flex items-center justify-between mb-5">
           <div>
             <h1 className="text-3xl font-bold tracking-tight" style={{ color: 'var(--text-heading)' }}>Feedback</h1>
-            <p style={{ color: 'var(--text-muted)' }} className="mt-1 text-sm">User-flagged reconciliation issues — triage, discuss, and turn into a plan.</p>
+            <p style={{ color: 'var(--text-muted)' }} className="mt-1 text-sm">{canManage
+              ? 'User-flagged reconciliation issues — triage, discuss, and turn into a plan.'
+              : 'Track the issues you flagged — follow the status and the team’s replies here.'}</p>
           </div>
           <button onClick={() => { setLoading(true); fetchList(); }} className="flex items-center gap-2 text-sm font-semibold px-3 py-2 rounded-xl"
             style={{ background: 'var(--surface)', border: '1px solid var(--card-border)', color: 'var(--text-heading)' }}>
@@ -108,7 +113,9 @@ export default function FeedbackPage() {
             ) : tasks.length === 0 ? (
               <div className="text-center py-16 text-sm" style={{ color: 'var(--text-muted)' }}>
                 <Flag className="w-10 h-10 mx-auto mb-3" style={{ color: '#CBD5E1' }} />
-                No feedback yet. When an accountant flags rows on a reco result, it lands here.
+                {canManage
+                  ? 'No feedback yet. When an accountant flags rows on a reco result, it lands here.'
+                  : 'You haven’t flagged anything yet. Flag rows on a reco result and it will show up here.'}
               </div>
             ) : tasks.map((t) => {
               const st = STATUS[t.status] || STATUS.pending;
@@ -145,15 +152,17 @@ export default function FeedbackPage() {
                       <span>{fmt(detail.createdAt)}</span>
                     </div>
                   </div>
-                  <button onClick={makePlan} disabled={makingPlan} className="flex items-center gap-2 text-sm font-semibold px-4 py-2 rounded-xl text-white"
-                    style={{ background: '#0748EE', opacity: makingPlan ? 0.6 : 1 }}>
-                    {makingPlan ? <Loader2 className="w-4 h-4 animate-spin" /> : <Workflow className="w-4 h-4" />} Make a plan
-                  </button>
+                  {canManage && (
+                    <button onClick={makePlan} disabled={makingPlan} className="flex items-center gap-2 text-sm font-semibold px-4 py-2 rounded-xl text-white"
+                      style={{ background: '#0748EE', opacity: makingPlan ? 0.6 : 1 }}>
+                      {makingPlan ? <Loader2 className="w-4 h-4 animate-spin" /> : <Workflow className="w-4 h-4" />} Make a plan
+                    </button>
+                  )}
                 </div>
 
-                {/* status flow */}
+                {/* status flow — admin/developer can change it; accountant sees current status only */}
                 <div className="flex items-center gap-2 mb-4 flex-wrap">
-                  {STATUS_FLOW.map((s) => {
+                  {canManage ? STATUS_FLOW.map((s) => {
                     const cfg = STATUS[s]; const on = detail.status === s;
                     return (
                       <button key={s} onClick={() => setStatus(s)}
@@ -162,7 +171,10 @@ export default function FeedbackPage() {
                         {cfg.label}
                       </button>
                     );
-                  })}
+                  }) : (() => {
+                    const cfg = STATUS[detail.status] || STATUS.pending;
+                    return <span className="text-xs font-bold px-3 py-1.5 rounded-full" style={{ background: cfg.bg, color: cfg.c, border: `1.5px solid ${cfg.c}` }}>{cfg.label}</span>;
+                  })()}
                 </div>
 
                 {/* the comment */}

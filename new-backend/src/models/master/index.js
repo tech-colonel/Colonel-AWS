@@ -50,6 +50,12 @@ const Brand = masterSequelize.define('Brand', {
     type: DataTypes.STRING,
     unique: true,
     allowNull: false
+  },
+  // Google Drive folder for this brand's shared files (admin pastes the link;
+  // stored as the parsed folder id). Feeds the dashboard "Sources to chat with".
+  drive_folder_id: {
+    type: DataTypes.STRING,
+    allowNull: true
   }
 }, {
   tableName: 'brands',

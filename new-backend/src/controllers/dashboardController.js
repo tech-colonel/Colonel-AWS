@@ -114,7 +114,8 @@ const getDashboardSummary = async (req, res) => {
         `SELECT agent_type,
                 COUNT(*)                         AS runs,
                 COALESCE(SUM(total_rows),0)      AS total_rows,
-                COALESCE(SUM(matched_rows),0)    AS matched_rows
+                COALESCE(SUM(matched_rows),0)    AS matched_rows,
+                MAX(created_at)                  AS last_run
          FROM reco_jobs WHERE brand_id = $1 ${userFilter}
          GROUP BY agent_type ORDER BY runs DESC`,
         { bind: bind2, transaction: t }

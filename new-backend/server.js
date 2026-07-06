@@ -1,6 +1,8 @@
 const app = require('./src/app');
 const { masterSequelize } = require('./src/config/database');
 const { migrateAllBrands } = require('./src/db/migrate');
+const { migrateZoho } = require('./src/db/zohoMigrate');
+const { migrateCompliance } = require('./src/db/complianceMigrate');
 const dotenv = require('dotenv');
 
 dotenv.config();
@@ -73,6 +75,12 @@ const start = async () => {
 
     // 4. Run reco table migrations on all brand DBs (idempotent)
     await migrateAllBrands();
+
+    // 4b. Zoho Books mirror tables (master DB, idempotent)
+    await migrateZoho();
+
+    // 4c. Compliance Tracker tables (master DB, idempotent)
+    await migrateCompliance();
 
     // 5. Start Express Server
     app.listen(PORT, () => {

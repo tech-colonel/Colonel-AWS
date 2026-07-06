@@ -28,6 +28,8 @@ const Login = () => {
       } else if (user.role === 'developer') {
         navigate('/feedback');
       } else if (user.role === 'accountant') {
+        // Always land on the brand picker; the accountant chooses a brand, then
+        // the card opens that brand's Dashboard.
         navigate('/brands');
       } else if (user.role === 'brand_executive') {
         navigate('/dashboard');

@@ -1,4 +1,5 @@
-const { Agent, Brand, BrandAgent } = require('../models/master');
+const { Agent, Brand, BrandAgent, User } = require('../models/master');
+const { Task } = require('../models/task');
 const { getBrandConnection, masterSequelize } = require('../config/database');
 const { getBrandAgentModel, getDynamicModel } = require('../models/brand');
 
@@ -98,6 +99,42 @@ const getBrandAgents = async (req, res, next) => {
     }
 
     res.json(brand.Agents || []);
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * POST /api/agents/request  (any authenticated user)
+ * A user requests a brand-new agent/tool with a description. We don't create an
+ * Agent — instead this becomes a 'agent_request' Task routed to an admin, so it
+ * shows up in the admin Tasks queue. Reuses the Task model (no schema change).
+ */
+const requestAgent = async (req, res, next) => {
+  try {
+    const { name, description, brandId, brandName } = req.body;
+    if (!name?.trim()) return res.status(400).json({ error: 'Agent name is required' });
+
+    const assignee = await User.findOne({ where: { role: 'admin' } });
+    if (!assignee) return res.status(500).json({ error: 'No admin available to receive the request' });
+
+    const task = await Task.create({
+      title: `Agent request · ${name.trim()}`,
+      description: (description || '').trim() || 'No description provided.',
+      category: 'agent_request',
+      status: 'pending',
+      priority: 'medium',
+      assigned_to: assignee.id,
+      assigned_by: req.user.id,
+      source_meta: {
+        requestedName: name.trim(),
+        brandId: brandId || null,
+        brandName: brandName || null,
+        by: { id: req.user.id, name: req.user.name, email: req.user.email },
+      },
+    });
+
+    res.status(201).json({ message: 'Agent request submitted', taskId: task.id });
   } catch (error) {
     next(error);
   }
@@ -249,5 +286,6 @@ module.exports = {
   getAgentBrands,
   clearBrandAgentData,
   deleteAgent,
-  proxyWebhook
+  proxyWebhook,
+  requestAgent
 };

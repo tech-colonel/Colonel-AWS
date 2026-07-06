@@ -12,9 +12,12 @@ import AssignmentsPage   from './pages/admin/AssignmentsPage';
 import BrandOverviewPage from './pages/admin/BrandOverviewPage';
 import UsersPage         from './pages/admin/UsersPage';
 import TasksPage         from './pages/admin/TasksPage';
+import AdminChats        from './pages/admin/AdminChats';
 import PlansPage         from './pages/admin/PlansPage';
 import PlanEditor        from './pages/admin/PlanEditor';
 import IntegrationsPage  from './pages/admin/IntegrationsPage';
+import MeetingsPage      from './pages/accountant/MeetingsPage';
+import ZohoBooksPage     from './pages/accountant/ZohoBooksPage';
 import FeedbackPage      from './pages/developer/FeedbackPage';
 // ── Accountant pages ──────────────────────────────────────────────────────────
 import BrandSelection        from './pages/accountant/BrandSelection';
@@ -27,6 +30,7 @@ import RecoWorkspace         from './pages/accountant/RecoWorkspace';
 import RecoMultiStateWorkspace from './pages/accountant/RecoMultiStateWorkspace';
 import PdfBankExtractorWorkspace from './pages/accountant/PdfBankExtractorWorkspace';
 import RecoJobDashboard      from './pages/accountant/RecoJobDashboard';
+import ComplianceTracker     from './pages/accountant/ComplianceTracker';
 // ── Colonel AI (Round 3) ──────────────────────────────────────────────────────
 import ColonelChat           from './pages/ColonelChat';
 import './App.css';
@@ -51,6 +55,7 @@ function App() {
                   <Route path="/agents"      element={<AgentsPage />} />
                   <Route path="/users"       element={<UsersPage />} />
                   <Route path="/tasks"       element={<TasksPage />} />
+                  <Route path="/chats"       element={<AdminChats />} />
                   <Route path="/plans"       element={<PlansPage />} />
                   <Route path="/plans/:id"   element={<PlanEditor />} />
                   <Route path="/integrations" element={<IntegrationsPage />} />
@@ -91,12 +96,42 @@ function App() {
             }
           />
 
-          {/* ── Feedback (developer engineer view; admin uses /admin/feedback) ── */}
+          {/* ── Feedback (developer engineer view + accountant's own raised items; admin uses /admin/feedback) ── */}
           <Route
             path="/feedback"
             element={
-              <ProtectedRoute allowedRoles={['developer', 'admin']}>
+              <ProtectedRoute allowedRoles={['developer', 'admin', 'accountant']}>
                 <FeedbackPage />
+              </ProtectedRoute>
+            }
+          />
+
+          {/* ── Integrations (accountant + admin; admin also uses /admin/integrations) ── */}
+          <Route
+            path="/integrations"
+            element={
+              <ProtectedRoute allowedRoles={['accountant', 'admin']}>
+                <IntegrationsPage />
+              </ProtectedRoute>
+            }
+          />
+
+          {/* ── Meetings (calendar + recordings; accountant + admin) ── */}
+          <Route
+            path="/meetings"
+            element={
+              <ProtectedRoute allowedRoles={['accountant', 'admin']}>
+                <MeetingsPage />
+              </ProtectedRoute>
+            }
+          />
+
+          {/* ── Zoho Books (read-only mirror; accountant + admin + developer) ── */}
+          <Route
+            path="/zoho"
+            element={
+              <ProtectedRoute allowedRoles={['accountant', 'admin', 'developer']}>
+                <ZohoBooksPage />
               </ProtectedRoute>
             }
           />
@@ -125,6 +160,16 @@ function App() {
             element={
               <ProtectedRoute allowedRoles={['accountant', 'admin']}>
                 <BrandDashboard />
+              </ProtectedRoute>
+            }
+          />
+
+          {/* ── Compliance Tracker (monthly workflow) ────────────────────── */}
+          <Route
+            path="/brands/:brandId/compliance-tracker"
+            element={
+              <ProtectedRoute allowedRoles={['accountant', 'admin']}>
+                <ComplianceTracker />
               </ProtectedRoute>
             }
           />

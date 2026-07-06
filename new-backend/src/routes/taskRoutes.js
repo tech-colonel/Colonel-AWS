@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { authenticateToken, authorize } = require('../middleware/authMiddleware');
 const {
-  getTasks, getTask, createTask, updateTask,
+  getTasks, getTask, createTask, createSelfTask, updateTask,
   deleteTask, addMessage, getTaskStats, createFeedback,
 } = require('../controllers/taskController');
 
@@ -15,6 +15,7 @@ router.post('/feedback', auth, createFeedback);
 router.get('/tasks/stats', ...adminOnly, getTaskStats);
 router.get('/tasks', auth, getTasks);
 router.get('/tasks/:id', auth, getTask);
+router.post('/tasks/self', auth, createSelfTask);
 router.post('/tasks', ...adminOnly, createTask);
 router.put('/tasks/:id', auth, updateTask);
 router.delete('/tasks/:id', ...adminOnly, deleteTask);

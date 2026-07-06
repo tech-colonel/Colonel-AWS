@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import { useLocation, useNavigate } from 'react-router-dom';
 import DashboardLayout from '../components/layout/DashboardLayout';
 import {
   Sparkles, Plus, Send, Paperclip, Bot, Plug, Server, ChevronDown,
@@ -140,6 +141,11 @@ export default function ColonelChat() {
   const fileRef = useRef(null);
   const abortRef = useRef(null);
 
+  // An incoming ?prompt (e.g. "Draft summary email" from Meetings) auto-sends.
+  const location = useLocation();
+  const navigate = useNavigate();
+  const promptFired = useRef(false);
+
   /* ── load conversation list ── */
   const loadConvos = useCallback(async () => {
     try { const { data } = await api.get('/api/conversations'); setConvos(data || []); }
@@ -243,8 +249,8 @@ export default function ColonelChat() {
   };
 
   /* ── send a message + stream the reply ── */
-  const send = async () => {
-    const text = input.trim();
+  const send = async (overrideText) => {
+    const text = (typeof overrideText === 'string' ? overrideText : input).trim();
     if (!text || streaming) return;
 
     if (feedbackMode) { submitFeedback(text); return; }
@@ -337,6 +343,19 @@ export default function ColonelChat() {
   const onKey = (e) => {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
   };
+
+  // Consume a prompt passed via navigation (e.g. Meetings → "Draft summary
+  // email") and auto-send it once, then clear it so it doesn't re-fire.
+  useEffect(() => {
+    const p = location.state?.prompt;
+    if (!p || promptFired.current || streaming) return;
+    promptFired.current = true;
+    setInput(p);
+    navigate(location.pathname, { replace: true, state: {} });
+    const t = setTimeout(() => send(p), 200);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [location.state]);
 
   /* ── an agent run finished: dashboard inline in chat, Excel on the right,
         capture run context (for "why partially matched?") + feedback target ── */

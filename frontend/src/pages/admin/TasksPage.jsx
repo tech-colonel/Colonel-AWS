@@ -1,13 +1,53 @@
 import React, { useState, useEffect, useRef } from 'react';
 import DashboardLayout from '../../components/layout/DashboardLayout';
-import { Building2, ClipboardList, Plus, Trash2, Send, X, Clock, CheckCircle2, AlertTriangle, Loader2 } from 'lucide-react';
+import { Building2, ClipboardList, Plus, Trash2, Send, X, Clock, CheckCircle2, AlertTriangle, Loader2, Paperclip, UploadCloud } from 'lucide-react';
 import { Button } from '../../components/ui/button';
 import { Input } from '../../components/ui/input';
 import { Label } from '../../components/ui/label';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../../components/ui/modal';
-import api from '../../lib/api';
+import api, { API_URL } from '../../lib/api';
 import { toast } from 'sonner';
 import { sidebarFor, isAdminUser } from '../../lib/adminNav';
+
+/* Attachments for an existing task (local upload). Shares the polymorphic
+   /api/attachments endpoint with the Compliance Tracker (entity_type 'task'). */
+function TaskAttachments({ taskId }) {
+  const [items, setItems] = useState([]);
+  const [busy, setBusy] = useState(false);
+  const load = () => api.get(`/api/attachments/task/${taskId}`).then(r => setItems(r.data || [])).catch(() => {});
+  useEffect(() => { load(); /* eslint-disable-next-line */ }, [taskId]);
+  const onUpload = async (e) => {
+    const file = e.target.files?.[0]; if (!file) return;
+    setBusy(true);
+    const fd = new FormData(); fd.append('file', file);
+    try {
+      await api.post(`/api/attachments/task/${taskId}/upload`, fd, { headers: { 'Content-Type': 'multipart/form-data' } });
+      toast.success('File attached'); load();
+    } catch { toast.error('Upload failed'); } finally { setBusy(false); e.target.value = ''; }
+  };
+  const remove = async (id) => { try { await api.delete(`/api/attachments/${id}`); load(); } catch { toast.error('Remove failed'); } };
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-2">
+        <span className="text-xs font-bold uppercase tracking-wide text-slate-400">Attachments</span>
+        <label className="text-xs font-semibold px-2.5 py-1 rounded-lg border cursor-pointer flex items-center gap-1.5"
+          style={{ borderColor: '#CBD5E1', color: '#0748EE' }}>
+          <UploadCloud className="w-3.5 h-3.5" /> Upload
+          <input type="file" accept=".pdf,.xlsx,.xls,.csv" hidden onChange={onUpload} disabled={busy} />
+        </label>
+      </div>
+      {items.length === 0 ? (
+        <p className="text-sm text-slate-400">No files attached.</p>
+      ) : items.map(a => (
+        <div key={a.id} className="flex items-center gap-2 px-2.5 py-2 mb-1.5 rounded-lg border" style={{ borderColor: '#E2E8F0' }}>
+          <Paperclip className="w-3.5 h-3.5 text-slate-400" />
+          <a href={(a.url?.startsWith('http') ? a.url : `${API_URL}${a.url || ''}`)} target="_blank" rel="noreferrer" className="text-xs font-semibold text-slate-700 flex-1 truncate">{a.fileName}</a>
+          <button onClick={() => remove(a.id)} style={{ color: '#E11D48' }}><Trash2 className="w-3.5 h-3.5" /></button>
+        </div>
+      ))}
+    </div>
+  );
+}
 
 const STATUS = {
   pending:     { label: 'Pending',     bg: '#F1F5F9', c: '#64748B' },
@@ -229,6 +269,11 @@ const TasksPage = () => {
                   </button>
                 ))}
               </div>
+            </div>
+
+            {/* Attachments */}
+            <div className="px-5 py-4 border-b" style={{ borderColor: '#E2E8F0' }}>
+              <TaskAttachments taskId={openTask.id} />
             </div>
 
             {/* Messages / updates thread (live) */}

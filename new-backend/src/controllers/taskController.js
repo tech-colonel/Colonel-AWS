@@ -25,7 +25,9 @@ const getTasks = async (req, res, next) => {
     let where;
     if (role === 'admin') where = {};
     else if (role === 'developer') where = { [Op.or]: [{ category: 'feedback' }, { assigned_to: userId }] };
-    else where = { assigned_to: userId };
+    // Accountant: tasks assigned to them PLUS feedback they raised (so the
+    // person who flagged the rows can follow the engineer's replies/status).
+    else where = { [Op.or]: [{ assigned_to: userId }, { category: 'feedback', assigned_by: userId }] };
     if (req.query.category) where = { ...where, category: req.query.category };
 
     const tasks = await Task.findAll({ where, ...taskWithDetails });
@@ -78,11 +80,13 @@ const getTask = async (req, res, next) => {
     const task = await Task.findByPk(req.params.id, taskWithDetails);
     if (!task) return res.status(404).json({ error: 'Task not found' });
 
-    // admin → any · developer → feedback tasks · others → own assigned
+    // admin → any · developer → feedback tasks · others → own assigned OR
+    // feedback they raised (the flagging accountant can view their own item).
     const canView =
       req.user.role === 'admin' ||
       (req.user.role === 'developer' && task.category === 'feedback') ||
-      task.assigned_to === req.user.id;
+      task.assigned_to === req.user.id ||
+      (task.category === 'feedback' && task.assigned_by === req.user.id);
     if (!canView) return res.status(403).json({ error: 'Access denied' });
     res.json(task);
   } catch (err) { next(err); }
@@ -104,6 +108,30 @@ const createTask = async (req, res, next) => {
       assigned_by: req.user.id,
       priority: priority || 'medium',
       due_date: due_date || null,
+    });
+
+    const full = await Task.findByPk(task.id, taskWithDetails);
+    res.status(201).json(full);
+  } catch (err) { next(err); }
+};
+
+/* ── POST /api/tasks/self ──
+   Any logged-in user creates a personal to-do assigned to themselves.
+   Distinct from the admin createTask flow (which assigns to others). */
+const createSelfTask = async (req, res, next) => {
+  try {
+    const { title, description, priority, due_date } = req.body;
+    if (!title?.trim()) return res.status(400).json({ error: 'title is required' });
+
+    const task = await Task.create({
+      title: title.trim(),
+      description: (description || '').trim(),
+      category: 'task',
+      status: 'pending',
+      priority: priority || 'medium',
+      due_date: due_date || null,
+      assigned_to: req.user.id,
+      assigned_by: req.user.id,
     });
 
     const full = await Task.findByPk(task.id, taskWithDetails);
@@ -153,7 +181,8 @@ const addMessage = async (req, res, next) => {
     const canPost =
       req.user.role === 'admin' ||
       (req.user.role === 'developer' && task.category === 'feedback') ||
-      task.assigned_to === req.user.id;
+      task.assigned_to === req.user.id ||
+      (task.category === 'feedback' && task.assigned_by === req.user.id);
     if (!canPost) return res.status(403).json({ error: 'Access denied' });
 
     const { message } = req.body;
@@ -195,4 +224,4 @@ const getTaskStats = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
-module.exports = { getTasks, getTask, createTask, updateTask, deleteTask, addMessage, getTaskStats, createFeedback };
+module.exports = { getTasks, getTask, createTask, createSelfTask, updateTask, deleteTask, addMessage, getTaskStats, createFeedback };
