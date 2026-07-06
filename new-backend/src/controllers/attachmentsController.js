@@ -16,7 +16,7 @@ const { masterSequelize } = require('../config/database');
 // This controller lives in src/controllers, so reaching that same dir is ../../output.
 const OUTPUT_DIR = path.join(__dirname, '../../output');
 const ATTACH_DIR = path.join(OUTPUT_DIR, 'attachments');
-const ENTITY_TYPES = ['compliance_task', 'task'];
+const ENTITY_TYPES = ['compliance_task', 'task', 'statutory_filing'];
 
 const rowToClient = (a) => ({
   id: a.id,

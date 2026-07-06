@@ -3,6 +3,7 @@ const { masterSequelize } = require('./src/config/database');
 const { migrateAllBrands } = require('./src/db/migrate');
 const { migrateZoho } = require('./src/db/zohoMigrate');
 const { migrateCompliance } = require('./src/db/complianceMigrate');
+const { migrateStatutory } = require('./src/db/statutoryMigrate');
 const dotenv = require('dotenv');
 
 dotenv.config();
@@ -81,6 +82,9 @@ const start = async () => {
 
     // 4c. Compliance Tracker tables (master DB, idempotent)
     await migrateCompliance();
+
+    // 4d. Statutory Compliance table (master DB, idempotent)
+    await migrateStatutory();
 
     // 5. Start Express Server
     app.listen(PORT, () => {
