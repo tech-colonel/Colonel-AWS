@@ -374,7 +374,7 @@ export default function StatutoryTracker() {
   const [dragId, setDragId] = useState(null);
   const [dragOverCol, setDragOverCol] = useState(null);
   const [showChat, setShowChat] = useState(false);
-  const [calMode, setCalMode] = useState('month'); // 'month' | 'year'
+  const [calMode, setCalMode] = useState('year'); // 'month' | 'year' — Calendar opens on the whole year
 
   useEffect(() => { if (brandId) { try { localStorage.setItem('lastBrandId', brandId); } catch (_) {} } }, [brandId]);
   useEffect(() => { api.get('/api/brands/my-brands').then(r => setBrands(Array.isArray(r.data) ? r.data : [])).catch(() => {}); }, []);
@@ -536,7 +536,7 @@ export default function StatutoryTracker() {
           <div>
             <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 10 }}>
               <div style={{ display: 'flex', gap: 4, background: 'var(--surface)', border: '1px solid var(--card-border)', borderRadius: 10, padding: 3 }}>
-                {[{ k: 'month', label: MONTHS[month] }, { k: 'year', label: `Whole ${year}` }].map(o => (
+                {[{ k: 'month', label: MONTHS[month] }, { k: 'year', label: `${year}` }].map(o => (
                   <button key={o.k} onClick={() => setCalMode(o.k)} style={{ ...miniBtn, border: 'none', padding: '6px 12px', background: calMode === o.k ? '#0748EE' : 'transparent', color: calMode === o.k ? '#fff' : 'var(--text-muted)', fontWeight: 700 }}>{o.label}</button>
                 ))}
               </div>
