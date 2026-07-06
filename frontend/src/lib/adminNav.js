@@ -34,6 +34,7 @@ export const ADMIN_SIDEBAR = [
   { path: '/admin/users',       label: 'Users',       icon: UsersIcon,       testId: 'nav-users' },
   { path: '/admin/tasks',       label: 'Tasks',       icon: ClipboardList,   testId: 'nav-tasks' },
   { path: '/admin/chats',       label: 'Chats',       icon: MessageSquare,   testId: 'nav-chats' },
+  { path: '/admin/statutory',   label: 'Statutory',   icon: Landmark,        testId: 'nav-statutory-admin' },
   { path: '/admin/plans',       label: 'Plans',       icon: Workflow,        testId: 'nav-plans' },
   { path: '/admin/feedback',    label: 'Feedback',    icon: Flag,            testId: 'nav-feedback' },
   { path: '/admin/integrations',label: 'Integrations',icon: Plug,            testId: 'nav-integrations' },

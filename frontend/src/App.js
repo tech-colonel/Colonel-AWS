@@ -13,6 +13,7 @@ import BrandOverviewPage from './pages/admin/BrandOverviewPage';
 import UsersPage         from './pages/admin/UsersPage';
 import TasksPage         from './pages/admin/TasksPage';
 import AdminChats        from './pages/admin/AdminChats';
+import AdminStatutory     from './pages/admin/AdminStatutory';
 import PlansPage         from './pages/admin/PlansPage';
 import PlanEditor        from './pages/admin/PlanEditor';
 import IntegrationsPage  from './pages/admin/IntegrationsPage';
@@ -64,6 +65,7 @@ function App() {
                   <Route path="/users"       element={<UsersPage />} />
                   <Route path="/tasks"       element={<TasksPage />} />
                   <Route path="/chats"       element={<AdminChats />} />
+                  <Route path="/statutory"   element={<AdminStatutory />} />
                   <Route path="/plans"       element={<PlansPage />} />
                   <Route path="/plans/:id"   element={<PlanEditor />} />
                   <Route path="/integrations" element={<IntegrationsPage />} />
