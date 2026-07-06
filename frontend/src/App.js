@@ -31,6 +31,14 @@ import RecoMultiStateWorkspace from './pages/accountant/RecoMultiStateWorkspace'
 import PdfBankExtractorWorkspace from './pages/accountant/PdfBankExtractorWorkspace';
 import RecoJobDashboard      from './pages/accountant/RecoJobDashboard';
 import ComplianceTracker     from './pages/accountant/ComplianceTracker';
+import StatutoryTracker      from './pages/accountant/StatutoryTracker';
+
+// Statutory Compliance is a private feature — only this owner can reach the page.
+const STATUTORY_OWNER_EMAIL = 'chauhandhaval932@gmail.com';
+const isStatutoryOwner = () => {
+  try { return JSON.parse(localStorage.getItem('user') || '{}').email === STATUTORY_OWNER_EMAIL; }
+  catch { return false; }
+};
 // ── Colonel AI (Round 3) ──────────────────────────────────────────────────────
 import ColonelChat           from './pages/ColonelChat';
 import './App.css';
@@ -170,6 +178,16 @@ function App() {
             element={
               <ProtectedRoute allowedRoles={['accountant', 'admin']}>
                 <ComplianceTracker />
+              </ProtectedRoute>
+            }
+          />
+
+          {/* ── Statutory Compliance (private: owner email only) ─────────── */}
+          <Route
+            path="/brands/:brandId/statutory-compliance"
+            element={
+              <ProtectedRoute allowedRoles={['accountant', 'admin']}>
+                {isStatutoryOwner() ? <StatutoryTracker /> : <Navigate to="/brands" replace />}
               </ProtectedRoute>
             }
           />

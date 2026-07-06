@@ -1,7 +1,13 @@
-import { LayoutDashboard, Building2, Bot, Users as UsersIcon, Link as LinkIcon, ClipboardList, Workflow, Plug, Flag, Sparkles, Video, BookOpen, CalendarCheck, MessageSquare } from 'lucide-react';
+import { LayoutDashboard, Building2, Bot, Users as UsersIcon, Link as LinkIcon, ClipboardList, Workflow, Plug, Flag, Sparkles, Video, BookOpen, CalendarCheck, MessageSquare, Landmark } from 'lucide-react';
+
+const STATUTORY_OWNER_EMAIL = 'chauhandhaval932@gmail.com';
 
 const readRole = () => {
   try { return JSON.parse(localStorage.getItem('user') || '{}').role || ''; }
+  catch { return ''; }
+};
+const readEmail = () => {
+  try { return JSON.parse(localStorage.getItem('user') || '{}').email || ''; }
   catch { return ''; }
 };
 
@@ -59,10 +65,15 @@ export const sidebarFor = (brandItems = []) => {
   const dashPath = bid ? `/brands/${bid}/dashboard` : '/brands';
   const agentsPath = bid ? `/brands/${bid}/agents` : '/brands';
   const compliancePath = bid ? `/brands/${bid}/compliance-tracker` : '/brands';
+  const statutoryPath = bid ? `/brands/${bid}/statutory-compliance` : '/brands';
   const base = [
     { path: dashPath,        label: 'Dashboard',   icon: LayoutDashboard, testId: 'nav-dashboard' },
     { path: agentsPath,      label: 'Agents',      icon: Bot,             testId: 'nav-agents' },
     { path: compliancePath,  label: 'Tracker',     icon: CalendarCheck,   testId: 'nav-compliance' },
+    // Statutory Compliance — private to the owner email only.
+    ...(readEmail() === STATUTORY_OWNER_EMAIL
+      ? [{ path: statutoryPath, label: 'Statutory Compliance', icon: Landmark, testId: 'nav-statutory' }]
+      : []),
     { path: '/chat',         label: 'Colonel AI',  icon: Sparkles,        testId: 'nav-chat' },
     { path: '/meetings',     label: 'Meetings',    icon: Video,           testId: 'nav-meetings' },
     { path: '/tasks',        label: 'Tasks',       icon: ClipboardList,   testId: 'nav-tasks' },
