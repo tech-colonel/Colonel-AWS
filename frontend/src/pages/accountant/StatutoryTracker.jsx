@@ -280,11 +280,22 @@ function CalendarView({ rows, year, month, onOpen }) {
 }
 
 /* ── whole-year calendar (12 mini months, plotted by due date) ───────────── */
-/* Hover card listing a day's filings — category-colored border, meta, note, chip. */
-function DayPopover({ rows }) {
+/* Hover card listing a day's filings — category-colored border, meta, note, chip.
+   Opens up/down and left/right based on the cell position so it never spills. */
+function DayPopover({ rows, rect }) {
+  const W = 250, MAXH = 264;
+  let left = rect.left;
+  if (left + W > window.innerWidth - 8) left = window.innerWidth - 8 - W; // keep on-screen (right)
+  if (left < 8) left = 8;                                                 // keep on-screen (left)
+  const estH = Math.min(MAXH, 42 + rows.length * 72);
+  let top = rect.bottom + 6;
+  if (top + estH > window.innerHeight - 8) top = Math.max(8, rect.top - estH - 6); // flip above
   return (
     <div className="glass-card" onClick={e => e.stopPropagation()}
-      style={{ position: 'absolute', zIndex: 100, top: '118%', left: '50%', transform: 'translateX(-50%)', width: 236, maxHeight: 260, overflowY: 'auto', padding: 8, textAlign: 'left', cursor: 'default', boxShadow: '0 10px 34px rgba(10,15,46,0.20)' }}>
+      style={{ position: 'fixed', left, top, zIndex: 2000, width: W, maxHeight: MAXH, overflowY: 'auto', padding: 8, textAlign: 'left', cursor: 'default', background: 'var(--surface)', boxShadow: '0 16px 40px rgba(10,15,46,0.26)' }}>
+      <div style={{ fontSize: 10, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.04em', color: 'var(--text-muted)', marginBottom: 6, position: 'sticky', top: 0, background: 'var(--surface)', paddingBottom: 2 }}>
+        {rows.length} filing{rows.length > 1 ? 's' : ''}
+      </div>
       {rows.map((r, idx) => {
         const color = catColor(r);
         return (
@@ -308,6 +319,7 @@ function YearCalendar({ rows, year, onOpenMonth }) {
   const byMonth = {};
   rows.forEach(r => { if (!r.due_date) return; const d = new Date(r.due_date); if (d.getFullYear() !== year) return; const m = d.getMonth(); byMonth[m] = byMonth[m] || {}; (byMonth[m][d.getDate()] = byMonth[m][d.getDate()] || []).push(r); });
   return (
+    <>
     <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: 14 }}>
       {Array.from({ length: 12 }).map((_, m) => {
         const isCur = m === today.getMonth() && year === today.getFullYear();
@@ -331,11 +343,10 @@ function YearCalendar({ rows, year, onOpenMonth }) {
               {cells.map((d, i) => {
                 const has = d && monthRows[d];
                 const isToday = isCur && d === today.getDate();
-                const key = `${m}-${d}`;
                 return (
                   <div key={i}
-                    onMouseEnter={has ? () => setHover(key) : undefined}
-                    onMouseLeave={has ? () => setHover(h => (h === key ? null : h)) : undefined}
+                    onMouseEnter={has ? (e) => setHover({ rows: has, rect: e.currentTarget.getBoundingClientRect() }) : undefined}
+                    onMouseLeave={has ? () => setHover(null) : undefined}
                     style={{
                       position: 'relative', height: 22, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', borderRadius: isToday ? 999 : 5,
                       fontSize: 9.5, fontWeight: (isToday || has) ? 700 : 400, cursor: has ? 'pointer' : 'default',
@@ -344,7 +355,6 @@ function YearCalendar({ rows, year, onOpenMonth }) {
                     }}>
                     {d || ''}
                     {has && !isToday && <span style={{ width: 3, height: 3, borderRadius: 999, background: catColor(has[0]), marginTop: 1 }} />}
-                    {has && hover === key && <DayPopover rows={has} />}
                   </div>
                 );
               })}
@@ -353,6 +363,8 @@ function YearCalendar({ rows, year, onOpenMonth }) {
         );
       })}
     </div>
+    {hover && <DayPopover rows={hover.rows} rect={hover.rect} />}
+    </>
   );
 }
 
