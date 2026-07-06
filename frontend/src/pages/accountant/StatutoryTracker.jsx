@@ -509,7 +509,14 @@ export default function StatutoryTracker() {
           {scoped.length > 0 && (
             <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
               <div style={{ fontFamily: 'Barlow', fontWeight: 900, fontSize: 18, color: 'var(--text-heading)', lineHeight: 1 }}>{filedCount}/{scoped.length}</div>
-              <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>filed ({pct}%)</div>
+              <div>
+                <div style={{ fontSize: 11.5, fontWeight: 700, color: 'var(--text-heading)', lineHeight: 1.15 }}>
+                  {rangeActive
+                    ? `${fmtDay(filters.quick.dateFrom) || '…'} – ${fmtDay(filters.quick.dateTo) || '…'}`
+                    : `${MONTHS[month]} ${year}`}
+                </div>
+                <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>filings · {pct}% filed</div>
+              </div>
             </div>
           )}
           <div style={{ marginLeft: 'auto', display: 'flex', gap: 10 }}>
