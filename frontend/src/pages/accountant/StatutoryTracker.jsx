@@ -280,8 +280,31 @@ function CalendarView({ rows, year, month, onOpen }) {
 }
 
 /* ── whole-year calendar (12 mini months, plotted by due date) ───────────── */
+/* Hover card listing a day's filings — category-colored border, meta, note, chip. */
+function DayPopover({ rows }) {
+  return (
+    <div className="glass-card" onClick={e => e.stopPropagation()}
+      style={{ position: 'absolute', zIndex: 100, top: '118%', left: '50%', transform: 'translateX(-50%)', width: 236, maxHeight: 260, overflowY: 'auto', padding: 8, textAlign: 'left', cursor: 'default', boxShadow: '0 10px 34px rgba(10,15,46,0.20)' }}>
+      {rows.map((r, idx) => {
+        const color = catColor(r);
+        return (
+          <div key={r.id || idx} style={{ borderLeft: `3px solid ${color}`, background: 'var(--surface)', border: '1px solid var(--card-border)', borderLeftWidth: 3, borderRadius: 8, padding: '7px 9px', marginBottom: idx < rows.length - 1 ? 6 : 0 }}>
+            <div style={{ fontSize: 11.5, fontWeight: 700, color: 'var(--text-heading)', lineHeight: 1.3 }}>{r.title}</div>
+            <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 2 }}>{[r.period_label, r.state, r.due_date ? `Due ${fmtDay(r.due_date)}` : ''].filter(Boolean).join(' · ')}</div>
+            {r.note && <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 4, lineHeight: 1.35 }}>{r.note.length > 140 ? r.note.slice(0, 140) + '…' : r.note}</div>}
+            <div style={{ marginTop: 6 }}>
+              <span style={{ fontSize: 9, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.03em', color, background: `${color}18`, border: `1px solid ${color}33`, borderRadius: 999, padding: '1px 7px' }}>{catName(r)}</span>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 function YearCalendar({ rows, year, onOpenMonth }) {
   const today = new Date();
+  const [hover, setHover] = useState(null);
   const byMonth = {};
   rows.forEach(r => { if (!r.due_date) return; const d = new Date(r.due_date); if (d.getFullYear() !== year) return; const m = d.getMonth(); byMonth[m] = byMonth[m] || {}; (byMonth[m][d.getDate()] = byMonth[m][d.getDate()] || []).push(r); });
   return (
@@ -308,15 +331,20 @@ function YearCalendar({ rows, year, onOpenMonth }) {
               {cells.map((d, i) => {
                 const has = d && monthRows[d];
                 const isToday = isCur && d === today.getDate();
+                const key = `${m}-${d}`;
                 return (
-                  <div key={i} style={{
-                    height: 22, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', borderRadius: isToday ? 999 : 5,
-                    fontSize: 9.5, fontWeight: (isToday || has) ? 700 : 400,
-                    color: isToday ? '#fff' : d ? 'var(--text-heading)' : 'transparent',
-                    background: isToday ? '#0748EE' : has ? `${catColor(has[0])}18` : 'transparent',
-                  }}>
+                  <div key={i}
+                    onMouseEnter={has ? () => setHover(key) : undefined}
+                    onMouseLeave={has ? () => setHover(h => (h === key ? null : h)) : undefined}
+                    style={{
+                      position: 'relative', height: 22, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', borderRadius: isToday ? 999 : 5,
+                      fontSize: 9.5, fontWeight: (isToday || has) ? 700 : 400, cursor: has ? 'pointer' : 'default',
+                      color: isToday ? '#fff' : d ? 'var(--text-heading)' : 'transparent',
+                      background: isToday ? '#0748EE' : has ? `${catColor(has[0])}18` : 'transparent',
+                    }}>
                     {d || ''}
                     {has && !isToday && <span style={{ width: 3, height: 3, borderRadius: 999, background: catColor(has[0]), marginTop: 1 }} />}
+                    {has && hover === key && <DayPopover rows={has} />}
                   </div>
                 );
               })}
