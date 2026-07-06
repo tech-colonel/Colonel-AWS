@@ -281,11 +281,13 @@ function CalendarView({ rows, year, month, onOpen }) {
 
 /* ── whole-year calendar (12 mini months, plotted by due date) ───────────── */
 function YearCalendar({ rows, year, onOpenMonth }) {
+  const today = new Date();
   const byMonth = {};
   rows.forEach(r => { if (!r.due_date) return; const d = new Date(r.due_date); if (d.getFullYear() !== year) return; const m = d.getMonth(); byMonth[m] = byMonth[m] || {}; (byMonth[m][d.getDate()] = byMonth[m][d.getDate()] || []).push(r); });
   return (
     <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: 14 }}>
       {Array.from({ length: 12 }).map((_, m) => {
+        const isCur = m === today.getMonth() && year === today.getFullYear();
         const days = new Date(year, m + 1, 0).getDate();
         const first = new Date(year, m, 1).getDay();
         const monthRows = byMonth[m] || {};
@@ -294,19 +296,27 @@ function YearCalendar({ rows, year, onOpenMonth }) {
         for (let i = 0; i < first; i++) cells.push(null);
         for (let d = 1; d <= days; d++) cells.push(d);
         return (
-          <button key={m} onClick={() => onOpenMonth(m + 1)} className="glass-card" style={{ padding: 12, textAlign: 'left', cursor: 'pointer', border: '1px solid var(--card-border)' }}>
+          <button key={m} onClick={() => onOpenMonth(m + 1)} className="glass-card"
+            style={{ padding: 12, textAlign: 'left', cursor: 'pointer', border: isCur ? '1.5px solid #0748EE' : '1px solid var(--card-border)', boxShadow: isCur ? '0 0 0 3px #0748EE18' : undefined }}>
             <div style={{ display: 'flex', alignItems: 'center', marginBottom: 8 }}>
-              <span style={{ fontWeight: 700, fontSize: 13, color: 'var(--text-heading)' }}>{MONTHS[m + 1]}</span>
+              <span style={{ fontWeight: 700, fontSize: 13, color: isCur ? '#0748EE' : 'var(--text-heading)' }}>{MONTHS[m + 1]}</span>
+              {isCur && <span style={{ fontSize: 9, fontWeight: 800, color: '#0748EE', background: '#0748EE14', borderRadius: 999, padding: '1px 6px', marginLeft: 6, textTransform: 'uppercase', letterSpacing: '0.04em' }}>This month</span>}
               {count > 0 && <span style={{ marginLeft: 'auto', fontSize: 10.5, fontWeight: 700, color: '#0748EE', background: '#0748EE12', borderRadius: 999, padding: '1px 7px' }}>{count}</span>}
             </div>
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7,1fr)', gap: 2 }}>
               {['S', 'M', 'T', 'W', 'T', 'F', 'S'].map((w, i) => <div key={`h${i}`} style={{ fontSize: 8.5, textAlign: 'center', color: 'var(--text-muted)', fontWeight: 700 }}>{w}</div>)}
               {cells.map((d, i) => {
                 const has = d && monthRows[d];
+                const isToday = isCur && d === today.getDate();
                 return (
-                  <div key={i} style={{ height: 22, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', borderRadius: 5, fontSize: 9.5, color: d ? 'var(--text-heading)' : 'transparent', background: has ? `${catColor(has[0])}18` : 'transparent', fontWeight: has ? 700 : 400 }}>
+                  <div key={i} style={{
+                    height: 22, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', borderRadius: isToday ? 999 : 5,
+                    fontSize: 9.5, fontWeight: (isToday || has) ? 700 : 400,
+                    color: isToday ? '#fff' : d ? 'var(--text-heading)' : 'transparent',
+                    background: isToday ? '#0748EE' : has ? `${catColor(has[0])}18` : 'transparent',
+                  }}>
                     {d || ''}
-                    {has && <span style={{ width: 3, height: 3, borderRadius: 999, background: catColor(has[0]), marginTop: 1 }} />}
+                    {has && !isToday && <span style={{ width: 3, height: 3, borderRadius: 999, background: catColor(has[0]), marginTop: 1 }} />}
                   </div>
                 );
               })}
