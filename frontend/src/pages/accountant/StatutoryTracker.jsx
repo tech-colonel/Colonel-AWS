@@ -4,11 +4,12 @@ import DashboardLayout from '../../components/layout/DashboardLayout';
 import {
   Landmark, ChevronLeft, ChevronRight, Plus, X, Loader2, Building2,
   LayoutGrid, List as ListIcon, CalendarDays, Paperclip, Trash2, UploadCloud,
-  HardDrive, Check, GripVertical, FileCheck2, Calendar, Tag, MapPin, AlignLeft, ExternalLink, ChevronDown,
+  HardDrive, Check, GripVertical, FileCheck2, Calendar, Tag, MapPin, AlignLeft, ExternalLink, ChevronDown, MessageCircle,
 } from 'lucide-react';
 import api, { API_URL } from '../../lib/api';
 import { toast } from 'sonner';
 import { sidebarFor } from '../../lib/adminNav';
+import AdminChatPanel from '../../components/AdminChatPanel';
 import {
   STATUTORY_CATEGORIES, CATEGORY_BY_KEY, STATUTORY_STATUS_COLUMNS,
   GST_STATES, PT_STATES, ALL_STATES,
@@ -278,6 +279,45 @@ function CalendarView({ rows, year, month, onOpen }) {
   );
 }
 
+/* ── whole-year calendar (12 mini months, plotted by due date) ───────────── */
+function YearCalendar({ rows, year, onOpenMonth }) {
+  const byMonth = {};
+  rows.forEach(r => { if (!r.due_date) return; const d = new Date(r.due_date); if (d.getFullYear() !== year) return; const m = d.getMonth(); byMonth[m] = byMonth[m] || {}; (byMonth[m][d.getDate()] = byMonth[m][d.getDate()] || []).push(r); });
+  return (
+    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: 14 }}>
+      {Array.from({ length: 12 }).map((_, m) => {
+        const days = new Date(year, m + 1, 0).getDate();
+        const first = new Date(year, m, 1).getDay();
+        const monthRows = byMonth[m] || {};
+        const count = Object.values(monthRows).reduce((a, arr) => a + arr.length, 0);
+        const cells = [];
+        for (let i = 0; i < first; i++) cells.push(null);
+        for (let d = 1; d <= days; d++) cells.push(d);
+        return (
+          <button key={m} onClick={() => onOpenMonth(m + 1)} className="glass-card" style={{ padding: 12, textAlign: 'left', cursor: 'pointer', border: '1px solid var(--card-border)' }}>
+            <div style={{ display: 'flex', alignItems: 'center', marginBottom: 8 }}>
+              <span style={{ fontWeight: 700, fontSize: 13, color: 'var(--text-heading)' }}>{MONTHS[m + 1]}</span>
+              {count > 0 && <span style={{ marginLeft: 'auto', fontSize: 10.5, fontWeight: 700, color: '#0748EE', background: '#0748EE12', borderRadius: 999, padding: '1px 7px' }}>{count}</span>}
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7,1fr)', gap: 2 }}>
+              {['S', 'M', 'T', 'W', 'T', 'F', 'S'].map((w, i) => <div key={`h${i}`} style={{ fontSize: 8.5, textAlign: 'center', color: 'var(--text-muted)', fontWeight: 700 }}>{w}</div>)}
+              {cells.map((d, i) => {
+                const has = d && monthRows[d];
+                return (
+                  <div key={i} style={{ height: 22, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', borderRadius: 5, fontSize: 9.5, color: d ? 'var(--text-heading)' : 'transparent', background: has ? `${catColor(has[0])}18` : 'transparent', fontWeight: has ? 700 : 400 }}>
+                    {d || ''}
+                    {has && <span style={{ width: 3, height: 3, borderRadius: 999, background: catColor(has[0]), marginTop: 1 }} />}
+                  </div>
+                );
+              })}
+            </div>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 /* ── month/year calendar picker (jump to any period) ─────────────────────── */
 function MonthYearPicker({ year, month, onStep, onPick }) {
   const [open, setOpen] = useState(false);
@@ -333,6 +373,8 @@ export default function StatutoryTracker() {
   const [panel, setPanel] = useState(null);
   const [dragId, setDragId] = useState(null);
   const [dragOverCol, setDragOverCol] = useState(null);
+  const [showChat, setShowChat] = useState(false);
+  const [calMode, setCalMode] = useState('month'); // 'month' | 'year'
 
   useEffect(() => { if (brandId) { try { localStorage.setItem('lastBrandId', brandId); } catch (_) {} } }, [brandId]);
   useEffect(() => { api.get('/api/brands/my-brands').then(r => setBrands(Array.isArray(r.data) ? r.data : [])).catch(() => {}); }, []);
@@ -349,12 +391,16 @@ export default function StatutoryTracker() {
   const brand = brands.find(b => b.id === brandId);
   const brandStates = ALL_STATES;
 
-  // Month rule: monthly items match the selected month; quarterly/annual/event (no month) always show.
+  // A custom Period range (from filters) spans months, so it overrides the
+  // single-month scope. Otherwise: monthly items match the selected month;
+  // quarterly/annual/event (no month) always show.
+  const rangeActive = !!(filters.quick.dateFrom || filters.quick.dateTo);
   const scoped = useMemo(() => {
-    let rows = allRows.filter(r => r.month == null || r.month === month);
+    let rows = allRows;
+    if (!rangeActive) rows = rows.filter(r => r.month == null || r.month === month);
     if (activeCat !== 'all') rows = rows.filter(r => r.compliance_type === activeCat);
     return applyStatutoryFilters(rows, filters);
-  }, [allRows, month, activeCat, filters]);
+  }, [allRows, month, activeCat, filters, rangeActive]);
 
   // Calendar plots by DUE DATE, so it must not be scoped to the period-month
   // (e.g. a June GSTR-3B is due 20 July). Category + custom filters still apply.
@@ -416,9 +462,14 @@ export default function StatutoryTracker() {
               <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>filed ({pct}%)</div>
             </div>
           )}
-          <button onClick={() => setPanel({ mode: 'create', row: { year, month } })} style={{ ...miniBtn, marginLeft: 'auto', background: '#0748EE', color: '#fff', border: 'none', fontWeight: 700, padding: '9px 16px' }}>
-            <Plus style={{ width: 15, height: 15 }} /> New Filing
-          </button>
+          <div style={{ marginLeft: 'auto', display: 'flex', gap: 10 }}>
+            <button onClick={() => setShowChat(true)} style={{ ...miniBtn, fontWeight: 700, padding: '9px 14px' }}>
+              <MessageCircle style={{ width: 15, height: 15 }} /> Chat with admin
+            </button>
+            <button onClick={() => setPanel({ mode: 'create', row: { year, month } })} style={{ ...miniBtn, background: '#0748EE', color: '#fff', border: 'none', fontWeight: 700, padding: '9px 16px' }}>
+              <Plus style={{ width: 15, height: 15 }} /> New Filing
+            </button>
+          </div>
         </div>
 
         {/* category tabs */}
@@ -482,11 +533,23 @@ export default function StatutoryTracker() {
             })}
           </div>
         ) : (
-          <CalendarView rows={calRows} year={year} month={month} onOpen={(r) => setPanel({ mode: 'edit', row: r })} />
+          <div>
+            <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 10 }}>
+              <div style={{ display: 'flex', gap: 4, background: 'var(--surface)', border: '1px solid var(--card-border)', borderRadius: 10, padding: 3 }}>
+                {[{ k: 'month', label: MONTHS[month] }, { k: 'year', label: `Whole ${year}` }].map(o => (
+                  <button key={o.k} onClick={() => setCalMode(o.k)} style={{ ...miniBtn, border: 'none', padding: '6px 12px', background: calMode === o.k ? '#0748EE' : 'transparent', color: calMode === o.k ? '#fff' : 'var(--text-muted)', fontWeight: 700 }}>{o.label}</button>
+                ))}
+              </div>
+            </div>
+            {calMode === 'year'
+              ? <YearCalendar rows={calRows} year={year} onOpenMonth={(m) => { setMonth(m); setCalMode('month'); }} />
+              : <CalendarView rows={calRows} year={year} month={month} onOpen={(r) => setPanel({ mode: 'edit', row: r })} />}
+          </div>
         )}
       </div>
 
       {panel && <FilingPanel mode={panel.mode} row={panel.row} brandId={brandId} onClose={() => setPanel(null)} onSaved={load} />}
+      {showChat && <AdminChatPanel brandId={brandId} brandName={brand?.name || 'Brand'} onClose={() => setShowChat(false)} />}
     </DashboardLayout>
   );
 }

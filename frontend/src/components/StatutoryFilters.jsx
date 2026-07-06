@@ -26,6 +26,10 @@ export function applyStatutoryFilters(rows, value) {
     if (q.state && r.state !== q.state) return false;
     if (q.periodType && r.period_type !== q.periodType) return false;
     if (q.status && r.status !== q.status) return false;
+    // Period range (by due date)
+    const dd = r.due_date ? r.due_date.slice(0, 10) : '';
+    if (q.dateFrom && (!dd || dd < q.dateFrom)) return false;
+    if (q.dateTo && (!dd || dd > q.dateTo)) return false;
     for (const c of conds) {
       const field = c.field === 'category' ? 'compliance_type' : c.field;
       if (!matchesCondition(r, { field, op: c.op, value: c.value })) return false;
@@ -168,6 +172,64 @@ function AddFilter({ brandStates, onAdd }) {
   );
 }
 
+/* ── period range picker (custom From–To calendar) ───────────────────────── */
+const fmtDay = (d) => { try { return d ? new Date(d).toLocaleDateString('en-GB', { day: '2-digit', month: 'short' }) : ''; } catch { return d; } };
+function PeriodRange({ from, to, onChange }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef(null);
+  useEffect(() => {
+    const h = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
+    document.addEventListener('mousedown', h);
+    return () => document.removeEventListener('mousedown', h);
+  }, []);
+  const active = from || to;
+  const label = active ? `${from ? fmtDay(from) : '…'} – ${to ? fmtDay(to) : '…'}` : '';
+
+  // presets computed from today (browser date)
+  const preset = (kind) => {
+    const now = new Date();
+    const iso = (d) => d.toISOString().slice(0, 10);
+    if (kind === 'month') { const s = new Date(now.getFullYear(), now.getMonth(), 1); const e = new Date(now.getFullYear(), now.getMonth() + 1, 0); onChange(iso(s), iso(e)); }
+    else if (kind === 'quarter') { const q = Math.floor(now.getMonth() / 3); const s = new Date(now.getFullYear(), q * 3, 1); const e = new Date(now.getFullYear(), q * 3 + 3, 0); onChange(iso(s), iso(e)); }
+    else if (kind === 'fy') { const y = now.getMonth() >= 3 ? now.getFullYear() : now.getFullYear() - 1; onChange(`${y}-04-01`, `${y + 1}-03-31`); }
+    setOpen(false);
+  };
+
+  return (
+    <div ref={ref} style={{ position: 'relative' }}>
+      <button onClick={() => setOpen(o => !o)} style={{
+        display: 'inline-flex', alignItems: 'center', gap: 7, padding: '7px 12px', borderRadius: 999, fontSize: 12.5, fontWeight: 600, cursor: 'pointer',
+        border: `1px solid ${active ? '#0EA5E9' : 'var(--card-border)'}`, background: active ? '#0EA5E912' : 'var(--surface)', color: active ? '#0EA5E9' : 'var(--text-heading)',
+      }}>
+        <span style={{ color: active ? '#0EA5E9' : 'var(--text-muted)' }}>Period</span>
+        {active && <span>· {label}</span>}
+        <ChevronDown style={{ width: 13, height: 13, opacity: 0.7 }} />
+      </button>
+      {open && (
+        <div className="glass-card" style={{ position: 'absolute', top: '112%', left: 0, zIndex: 50, width: 280, padding: 12 }}>
+          <div style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.04em', color: 'var(--text-muted)', marginBottom: 8 }}>Custom date range (by due date)</div>
+          <div style={{ display: 'flex', gap: 8, marginBottom: 10 }}>
+            <label style={{ flex: 1, fontSize: 11, color: 'var(--text-muted)', fontWeight: 600 }}>From
+              <input type="date" value={from || ''} onChange={e => onChange(e.target.value, to)} style={rangeInput} />
+            </label>
+            <label style={{ flex: 1, fontSize: 11, color: 'var(--text-muted)', fontWeight: 600 }}>To
+              <input type="date" value={to || ''} onChange={e => onChange(from, e.target.value)} style={rangeInput} />
+            </label>
+          </div>
+          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+            <button onClick={() => preset('month')} style={presetBtn}>This month</button>
+            <button onClick={() => preset('quarter')} style={presetBtn}>This quarter</button>
+            <button onClick={() => preset('fy')} style={presetBtn}>This FY</button>
+            <button onClick={() => { onChange('', ''); setOpen(false); }} style={{ ...presetBtn, color: '#E11D48', borderColor: '#E11D4833' }}>Clear</button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+const rangeInput = { width: '100%', marginTop: 4, padding: '7px 9px', border: '1px solid var(--card-border)', borderRadius: 9, background: 'var(--page-bg)', color: 'var(--text-heading)', fontSize: 12, outline: 'none' };
+const presetBtn = { padding: '6px 10px', borderRadius: 8, border: '1px solid var(--card-border)', background: 'var(--surface)', color: 'var(--text-heading)', fontSize: 11.5, fontWeight: 600, cursor: 'pointer' };
+
 /* ── main filter bar ──────────────────────────────────────────────────────── */
 export default function StatutoryFilters({ value, onChange, brandStates }) {
   const quick = value?.quick || { state: '', periodType: '', status: '' };
@@ -175,8 +237,9 @@ export default function StatutoryFilters({ value, onChange, brandStates }) {
   const setQuick = (k, v) => onChange({ ...value, quick: { ...quick, [k]: v } });
   const addCond = (c) => onChange({ ...value, conditions: [...conditions, { ...c, id: `${c.field}-${c.op}-${conditions.length}` }] });
   const removeCond = (id) => onChange({ ...value, conditions: conditions.filter(c => c.id !== id) });
-  const clearAll = () => onChange({ quick: { state: '', periodType: '', status: '' }, conditions: [] });
-  const anyActive = quick.state || quick.periodType || quick.status || conditions.length;
+  const clearAll = () => onChange({ quick: { state: '', periodType: '', status: '', dateFrom: '', dateTo: '' }, conditions: [] });
+  const setRange = (f, t) => onChange({ ...value, quick: { ...quick, dateFrom: f, dateTo: t } });
+  const anyActive = quick.state || quick.periodType || quick.status || quick.dateFrom || quick.dateTo || conditions.length;
 
   const condLabel = (c) => {
     const f = FIELD_BY_KEY[c.field];
@@ -198,6 +261,7 @@ export default function StatutoryFilters({ value, onChange, brandStates }) {
       </span>
       <PillSelect label="State"  value={quick.state}      options={optionSet('states', brandStates)} onChange={v => setQuick('state', v)} accent="#14B8A6" />
       <PillSelect label="Cadence" value={quick.periodType} options={optionSet('periodTypes')}         onChange={v => setQuick('periodType', v)} accent="#7C3AED" />
+      <PeriodRange from={quick.dateFrom} to={quick.dateTo} onChange={setRange} />
       <PillSelect label="Status" value={quick.status}     options={optionSet('statuses')}             onChange={v => setQuick('status', v)} accent="#0748EE" />
       <AddFilter brandStates={brandStates} onAdd={addCond} />
 
