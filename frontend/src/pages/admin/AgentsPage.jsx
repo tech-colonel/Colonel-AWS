@@ -23,6 +23,7 @@ const RICH_META = {
   gstr_2b_books:            { section: 'reco',        displayName: 'GSTR-2B vs Books',               icon: '📂', category: 'GST Reconciliation', color: '#0748EE', bg: '#E8EFFE', border: '#A3BFF8', accuracy: '99.5%' },
   gstr_2b_books_multistate: { section: 'reco',        displayName: 'GSTR-2B vs Books (Multi-State)', icon: '🗺️', category: 'GST Reconciliation', color: '#7C3AED', bg: '#F5F3FF', border: '#C4B5FD', accuracy: '99.5%' },
   gstr_1_vs_books:          { section: 'reco',        displayName: 'GSTR-1 vs Books',                icon: '📊', category: 'GST Reconciliation', color: '#0748EE', bg: '#E8EFFE', border: '#A3BFF8', accuracy: '99.3%' },
+  einvoice_reco:            { section: 'reco',        displayName: 'E-Invoice Reco',                 icon: '🧾', category: 'GST Reconciliation', color: '#0284C7', bg: '#F0F9FF', border: '#BAE6FD', accuracy: '99.6%' },
   gstr_3b_tally_entry:      { section: 'reco',        displayName: 'GSTR-3B Tally Entry',            icon: '📒', category: 'Journal Entry',      color: '#0F766E', bg: '#F0FDFA', border: '#99F6E4', accuracy: '99.9%' },
   universal_bank_statement: { section: 'bank',        displayName: 'Universal Bank Statement',       icon: '🌍', category: 'Bank & Finance',     color: '#059669', bg: '#ECFDF5', border: '#A7F3D0', accuracy: '100%'  },
   amazon_mtr_consolidator:  { section: 'marketplace', displayName: 'Amazon MTR Consolidator',        icon: '🛒', category: 'Marketplace MIS',    color: '#D97706', bg: '#FFFBEB', border: '#FDE68A', accuracy: '99.8%' },

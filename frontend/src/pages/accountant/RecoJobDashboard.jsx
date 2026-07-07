@@ -26,6 +26,7 @@ const AGENT_META = {
   gstr_1_vs_books:            { label: 'GSTR-1 vs Books',                     color: '#D97706' },
   gstr_2b_books_multistate:   { label: 'GSTR-2B vs Books (Multi-State)',      color: '#7C3AED' },
   gstr_3b_tally_entry:        { label: 'GSTR-3B Tally Entry',                 color: '#0F766E' },
+  einvoice_reco:              { label: 'E-Invoice Reco',                      color: '#0284C7' },
 };
 
 const GST_STATE_CODES = {

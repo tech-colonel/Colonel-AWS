@@ -73,6 +73,15 @@ const RECO_AGENTS = [
     createdAt: new Date(),
     updatedAt: new Date(),
   },
+  {
+    // Superset UUID ...010 (AWS uses ...008 for einvoice, but ...008 is zepto_receivables here)
+    id: 'd0000000-0000-0000-0000-000000000010',
+    name: 'einvoice_reco',
+    description: 'E-Invoice Register (B2B/SEZ/DE + CDNR) vs Books (Sales + Credit Note) reconciliation',
+    columns: JSON.stringify([]),
+    createdAt: new Date(),
+    updatedAt: new Date(),
+  },
 ];
 
 module.exports = {
@@ -103,7 +112,8 @@ module.exports = {
         'universal_bank_statement',
         'amazon_mtr_consolidator',
         'pdf_bank_extract',
-        'zepto_receivables'
+        'zepto_receivables',
+        'einvoice_reco'
       )
       ON CONFLICT DO NOTHING
     `);

@@ -54,6 +54,14 @@ const RECO_AGENT_META = {
     accuracy: '99.3%',
     fields: ['Tally Sales Export', 'GSTR-1 File', 'Amazon RTF (Optional)'],
   },
+  einvoice_reco: {
+    displayName: 'E-Invoice Reco',
+    icon: '🧾',
+    category: 'GST Reconciliation',
+    color: '#0284C7', bg: '#F0F9FF', border: '#BAE6FD',
+    accuracy: '99.6%',
+    fields: ['E-Invoice Register', 'Books (Sales + Credit Note)'],
+  },
   gstr_3b_tally_entry: {
     displayName: 'GSTR-3B Tally Entry',
     icon: '📒',

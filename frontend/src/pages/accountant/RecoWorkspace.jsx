@@ -77,6 +77,17 @@ const AGENT_CONFIG = {
       { key: 'credit_note', label: 'Credit Note Register (Optional)', hint: '.xlsx / .xls', required: false },
     ],
   },
+  einvoice_reco: {
+    name: 'E-Invoice Reconciliation',
+    slug: 'E-INVOICE · BOOKS',
+    icon: FileSpreadsheet,
+    description: 'Reconciles the GST Portal E-Invoice Register (B2B/SEZ/DE + CDNR) against Books (combined Sales + Credit Note). Outputs Pivot, After Pivot, and a side-by-side RECO sheet.',
+    color: '#0284C7', bg: 'rgba(2,132,199,0.08)', border: 'rgba(2,132,199,0.2)',
+    files: [
+      { key: 'einvoice', label: 'E-Invoice Register', hint: '.xlsx — portal download (b2b, sez, de + cdnr sheets)', required: true },
+      { key: 'books', label: 'Books — Combined (Sales + Credit Note)', hint: '.xlsx — single workbook with the Combined sheet', required: true },
+    ],
+  },
   bank_statement: {
     name: 'Bank Statement Classifier',
     slug: 'AI · LEDGER · TAGGING',

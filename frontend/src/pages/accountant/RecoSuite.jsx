@@ -19,6 +19,13 @@ const RECO_AGENTS = [
     fields: ['GSTR-2B × N States', 'Purchase Register × N States', 'Debit Note × N States'], accuracy: '99.5%',
   },
   {
+    id: 'einvoice_reco', category: 'GST Reconciliation',
+    name: 'E-Invoice Reco', icon: '🧾',
+    color: '#0284C7', bg: '#F0F9FF', border: '#BAE6FD',
+    description: 'Reconcile the GST Portal E-Invoice Register (B2B/SEZ/DE + CDNR) against Books (combined Sales + Credit Note). Outputs Pivot, After Pivot and a side-by-side RECO.',
+    fields: ['E-Invoice Register', 'Books (Sales + Credit Note)'], accuracy: '99.6%',
+  },
+  {
     id: 'gstr_3b_tally_entry', category: 'Journal Entry',
     name: 'GSTR-3B Tally Entry', icon: '📒',
     color: '#0F766E', bg: '#F0FDFA', border: '#99F6E4',

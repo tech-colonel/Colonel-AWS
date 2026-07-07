@@ -80,7 +80,7 @@ const F = {
 // ─── Agent grouping ───────────────────────────────────────────────────────────
 const GST_2B_AGENTS = new Set([
   'gstr_2b_books', 'gstr_2b_books_multistate', 'gstr_2a_vs_2b_vs_books',
-  'gstr_2b_vs_purchase', 'gstr_2a_2b_books',
+  'gstr_2b_vs_purchase', 'gstr_2a_2b_books', 'einvoice_reco',
 ]);
 const BANK_AGENTS = new Set(['universal_bank_statement', 'bank_reco', 'bank_statement']);
 
