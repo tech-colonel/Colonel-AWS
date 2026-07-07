@@ -45,6 +45,7 @@ const chatRoutes            = require('./routes/chatRoutes');
 const workflowRoutes        = require('./routes/workflowRoutes');
 const meetingRoutes         = require('./routes/meetingRoutes');
 const zohoRoutes            = require('./routes/zohoRoutes');
+const composioRoutes        = require('./routes/composioRoutes');
 // ── Compliance Tracker ────────────────────────────────────────────────────────
 const complianceRoutes      = require('./routes/complianceRoutes');
 const attachmentsRoutes     = require('./routes/attachmentsRoutes');
@@ -70,6 +71,7 @@ app.use('/api',           chatRoutes);
 app.use('/api',           workflowRoutes);
 app.use('/api',           meetingRoutes);
 app.use('/api',           zohoRoutes);
+app.use('/api',           composioRoutes);
 app.use('/api',           complianceRoutes);
 app.use('/api',           attachmentsRoutes);
 app.use('/api',           statutoryRoutes);

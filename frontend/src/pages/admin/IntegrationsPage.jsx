@@ -7,6 +7,7 @@ import api from '../../lib/api';
 import { toast } from 'sonner';
 import { sidebarFor } from '../../lib/adminNav';
 import BrandLogo from '../../components/BrandLogos';
+import ComposioMarketplace from './ComposioMarketplace';
 
 /* ── Status pill (matches ToolResultDashboard pill atoms) ───────────────────── */
 function StatusPill({ connected }) {
@@ -435,6 +436,9 @@ const IntegrationsPage = () => {
             ))}
           </div>
         )}
+
+        {/* Composio marketplace — 1000+ connectable apps (additive, self-contained) */}
+        <ComposioMarketplace />
       </div>
     </DashboardLayout>
   );
