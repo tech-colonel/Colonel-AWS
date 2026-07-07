@@ -161,6 +161,49 @@ async function makeAnyoneReader(fileId) {
   });
 }
 
+
+/**
+ * Build an OAuth2Client from stored tokens (Integration model).
+ * Auto-refreshes if the access token is within 60s of expiry.
+ * Returns null if no Google OAuth connection exists.
+ */
+async function getOAuthClient() {
+  try {
+    const { Integration } = require('../models/master');
+    const row = await Integration.findOne({ where: { type: 'google' } });
+    if (!row || row.status !== 'connected' || !row.config || !row.config.refresh_token) return null;
+
+    const oauth2Client = new google.auth.OAuth2(
+      process.env.GOOGLE_CLIENT_ID,
+      process.env.GOOGLE_CLIENT_SECRET,
+      'https://eggbeater-thesis-crowbar.ngrok-free.dev/api/auth/google/callback',
+    );
+    oauth2Client.setCredentials({
+      access_token:  row.config.access_token,
+      refresh_token: row.config.refresh_token,
+      expiry_date:   row.config.token_expiry,
+    });
+
+    // Refresh if expired or within 60s of expiry
+    const expiry = row.config.token_expiry;
+    if (expiry && Date.now() > expiry - 60000) {
+      const { credentials } = await oauth2Client.refreshAccessToken();
+      oauth2Client.setCredentials(credentials);
+      await row.update({
+        config: {
+          ...row.config,
+          access_token: credentials.access_token,
+          token_expiry: credentials.expiry_date,
+        },
+      });
+    }
+    return oauth2Client;
+  } catch (e) {
+    console.error('getOAuthClient error:', e.message);
+    return null;
+  }
+}
+
 module.exports = {
   FOLDER_MIME,
   isConfigured,
@@ -172,5 +215,6 @@ module.exports = {
   downloadFile,
   uploadXlsxAsSheet,
   makeAnyoneReader,
+  getOAuthClient,
   hasOutputFolder: () => !!OUTPUT_FOLDER_ID,
 };

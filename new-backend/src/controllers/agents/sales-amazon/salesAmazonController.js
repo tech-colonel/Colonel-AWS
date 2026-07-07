@@ -417,6 +417,20 @@ const generate = async (req, res, next) => {
         await Model.sync();
         const rows = await Model.bulkCreate(finalData, { returning: true });
 
+        // fire-and-forget: record run for admin analytics (never blocks/breaks the agent)
+        try {
+            const { recordAgentRun } = require('../../../services/agentRunTracker');
+            recordAgentRun(Model.sequelize, {
+                brandId: req.params.brandId,
+                agentType: Model.tableName || 'sales_amazon',
+                month: finalData?.[0]?.month ?? null,
+                year: finalData?.[0]?.year ?? null,
+                totalRows: finalData?.length || 0,
+                outputFileId: processFile || null,
+                createdBy: req.user?.id || null,
+            });
+        } catch (e) { /* tracking must never break the agent */ }
+
         // ==================================
         // 🔥 USE PROCESSOR WORKBOOK (ALL SHEETS INCLUDED)
         // ==================================
@@ -567,6 +581,20 @@ const generateCommit = async (req, res, next) => {
         await Model.sync({ alter: true });
         await Model.bulkCreate(finalData, { returning: true });
         await workbook.xlsx.writeFile(processPath);
+
+        // fire-and-forget: record run for admin analytics (never blocks/breaks the agent)
+        try {
+            const { recordAgentRun } = require('../../../services/agentRunTracker');
+            recordAgentRun(Model.sequelize, {
+                brandId: req.params.brandId,
+                agentType: Model.tableName || 'sales_amazon',
+                month: finalData?.[0]?.month ?? null,
+                year: finalData?.[0]?.year ?? null,
+                totalRows: finalData?.length || 0,
+                outputFileId: processFile || null,
+                createdBy: req.user?.id || null,
+            });
+        } catch (e) { /* tracking must never break the agent */ }
 
         deletePending(taskId);
 

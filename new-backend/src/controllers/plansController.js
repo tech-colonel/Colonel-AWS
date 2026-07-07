@@ -95,6 +95,8 @@ const createPlanFromTask = async (req, res, next) => {
       shared_with: [],
       graph: { nodes, edges },
     });
+    // Link plan back to the task so the UI can show "View Plan" instead of "Make a plan".
+    await task.update({ plan_id: plan.id });
     res.status(201).json(plan);
   } catch (e) { next(e); }
 };

@@ -27,6 +27,11 @@ const Task = masterSequelize.define('Task', {
     type: DataTypes.DATEONLY,
     allowNull: true,
   },
+  plan_id: {
+    type: DataTypes.UUID,
+    allowNull: true,
+    defaultValue: null,
+  },
   // 'task' (normal admin task) | 'feedback' (raised by a user on a reco result)
   category: {
     type: DataTypes.STRING(32),
