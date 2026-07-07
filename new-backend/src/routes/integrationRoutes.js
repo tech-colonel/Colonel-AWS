@@ -15,8 +15,4 @@ router.post('/integrations/:type/disconnect', ...allowManage, disconnectIntegrat
 router.get('/integrations/google/oauth/start', ...allowManage, startGoogleOAuth);
 router.get('/auth/google/callback', googleOAuthCallback);
 
-// Google OAuth — start returns JSON URL (auth required); callback is public (Google redirects here)
-router.get('/integrations/google/oauth/start', ...adminOnly, startGoogleOAuth);
-router.get('/auth/google/callback', googleOAuthCallback);
-
 module.exports = router;
