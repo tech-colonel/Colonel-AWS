@@ -11,7 +11,7 @@ const seedUsers = async () => {
         // Jayesh
         let exists = await User.findOne({ where: { email: 'jayesh.colonel@gmail.com' } });
         if (!exists) {
-            const hashedPassword = await bcrypt.hash('jayesh123', 10);
+            const hashedPassword = await bcrypt.hash(process.env.SEED_USER_PASSWORD || 'ChangeMe123!', 10);
             await User.create({
                 name: 'Jayesh',
                 email: 'jayesh.colonel@gmail.com',
@@ -24,7 +24,7 @@ const seedUsers = async () => {
         // Amjad
         exists = await User.findOne({ where: { email: 'amjad.colonel@gmail.com' } });
         if (!exists) {
-            const hashedPassword = await bcrypt.hash('amjad123', 10);
+            const hashedPassword = await bcrypt.hash(process.env.SEED_USER_PASSWORD || 'ChangeMe123!', 10);
             await User.create({
                 name: 'Amjad',
                 email: 'amjad.colonel@gmail.com',
@@ -37,7 +37,7 @@ const seedUsers = async () => {
         // Varshita
         exists = await User.findOne({ where: { email: 'varshita.colonel@gmail.com' } });
         if (!exists) {
-            const hashedPassword = await bcrypt.hash('varshita123', 10);
+            const hashedPassword = await bcrypt.hash(process.env.SEED_USER_PASSWORD || 'ChangeMe123!', 10);
             await User.create({
                 name: 'Varshita',
                 email: 'varshita.colonel@gmail.com',
@@ -50,7 +50,7 @@ const seedUsers = async () => {
         // Vidhi
         exists = await User.findOne({ where: { email: 'Vidhi.colonel@gmail.com' } });
         if (!exists) {
-            const hashedPassword = await bcrypt.hash('vidhi123', 10);
+            const hashedPassword = await bcrypt.hash(process.env.SEED_USER_PASSWORD || 'ChangeMe123!', 10);
             await User.create({
                 name: 'Vidhi',
                 email: 'Vidhi.colonel@gmail.com',
@@ -63,7 +63,7 @@ const seedUsers = async () => {
         // Shrikant (fix typo if needed)
         exists = await User.findOne({ where: { email: 'shrikant.colonel@gmail.com' } });
         if (!exists) {
-            const hashedPassword = await bcrypt.hash('shrikant123', 10);
+            const hashedPassword = await bcrypt.hash(process.env.SEED_USER_PASSWORD || 'ChangeMe123!', 10);
             await User.create({
                 name: 'Shrikant',
                 email: 'shrikant.colonel@gmail.com',
@@ -76,7 +76,7 @@ const seedUsers = async () => {
         // Pankaj Rathore
         exists = await User.findOne({ where: { email: 'pankajrathore.colonel@gmail.com' } });
         if (!exists) {
-            const hashedPassword = await bcrypt.hash('pankaj123', 10);
+            const hashedPassword = await bcrypt.hash(process.env.SEED_USER_PASSWORD || 'ChangeMe123!', 10);
             await User.create({
                 name: 'Pankaj Rathore',
                 email: 'pankajrathore.colonel@gmail.com',
@@ -89,7 +89,7 @@ const seedUsers = async () => {
         // Riya
         exists = await User.findOne({ where: { email: 'riya.colonel@gmail.com' } });
         if (!exists) {
-            const hashedPassword = await bcrypt.hash('riya123', 10);
+            const hashedPassword = await bcrypt.hash(process.env.SEED_USER_PASSWORD || 'ChangeMe123!', 10);
             await User.create({
                 name: 'Riya',
                 email: 'riya.colonel@gmail.com',
