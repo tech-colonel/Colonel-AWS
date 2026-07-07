@@ -5,6 +5,7 @@ import RecoMultiStateWorkspace from './RecoMultiStateWorkspace';
 import MtrWorkspace from './MtrWorkspace';
 import PdfBankExtractorWorkspace from './PdfBankExtractorWorkspace';
 import MyntraTicketFinderWorkspace from './MyntraTicketFinderWorkspace';
+import Gstr3bTallyWorkspace from './Gstr3bTallyWorkspace';
 
 // Stable UUIDs assigned by seed.js — one per RECO agent
 export const RECO_ID_TO_TYPE = {
@@ -28,6 +29,7 @@ export default function AgentDispatch() {
   if (recoType === 'gstr_2b_books_multistate') return <RecoMultiStateWorkspace />;
   if (recoType === 'pdf_bank_extract') return <PdfBankExtractorWorkspace />;
   if (recoType === 'myntra_ticket_finder') return <MyntraTicketFinderWorkspace />;
+  if (recoType === 'gstr_3b_tally_entry') return <Gstr3bTallyWorkspace />;
   if (recoType) return <RecoWorkspace agentTypeProp={recoType} />;
   return <AgentWorkspace />;
 }

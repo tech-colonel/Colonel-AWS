@@ -31,6 +31,7 @@ const recoRoutes            = require('./routes/recoRoutes');
 const dashboardRoutes       = require('./routes/dashboardRoutes');
 const bankCorrectionsRoutes = require('./routes/bankCorrectionsRoutes');
 const taskRoutes            = require('./routes/taskRoutes');
+const gstr3bRoutes          = require('./routes/gstr3bRoutes');
 // ── Sales agents ─────────────────────────────────────────────────────────────
 const salesRoutes           = require('./routes/salesRoutes');
 const invoiceRoutes         = require('./routes/invoiceRoutes');
@@ -59,6 +60,7 @@ app.use('/api',           recoRoutes);
 app.use('/api',           dashboardRoutes);
 app.use('/api/bank-reco', bankCorrectionsRoutes);
 app.use('/api',           taskRoutes);
+app.use('/api',           gstr3bRoutes);
 app.use('/api',           salesRoutes);
 app.use('/api',           invoiceRoutes);
 app.use('/api',           orderCycleRoutes);
