@@ -66,7 +66,7 @@ const RECO_AGENTS = [
     updatedAt: new Date(),
   },
   {
-    id: 'd0000000-0000-0000-0000-000000000008',
+    id: 'd0000000-0000-0000-0000-000000000010',
     name: 'zepto_receivables',
     description: 'Zepto receivables tracker — reads a Google Drive folder (Tally + Zepto files), reconciles per-invoice, outputs the Invoice Tracker with live formulas',
     columns: JSON.stringify([]),
@@ -74,8 +74,8 @@ const RECO_AGENTS = [
     updatedAt: new Date(),
   },
   {
-    // Superset UUID ...010 (AWS uses ...008 for einvoice, but ...008 is zepto_receivables here)
-    id: 'd0000000-0000-0000-0000-000000000010',
+    // Superset UUID ...008 (matches AWS agents table; zepto_receivables moved to ...010)
+    id: 'd0000000-0000-0000-0000-000000000008',
     name: 'einvoice_reco',
     description: 'E-Invoice Register (B2B/SEZ/DE + CDNR) vs Books (Sales + Credit Note) reconciliation',
     columns: JSON.stringify([]),

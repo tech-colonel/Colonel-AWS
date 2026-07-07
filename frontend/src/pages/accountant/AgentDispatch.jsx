@@ -16,9 +16,9 @@ export const RECO_ID_TO_TYPE = {
   'd0000000-0000-0000-0000-000000000005': 'gstr_1_vs_books',
   'd0000000-0000-0000-0000-000000000006': 'amazon_mtr_consolidator',
   'd0000000-0000-0000-0000-000000000007': 'pdf_bank_extract',
-  'd0000000-0000-0000-0000-000000000008': 'zepto_receivables',
+  'd0000000-0000-0000-0000-000000000008': 'einvoice_reco',
   'd0000000-0000-0000-0000-000000000009': 'myntra_ticket_finder',
-  'd0000000-0000-0000-0000-000000000010': 'einvoice_reco',
+  'd0000000-0000-0000-0000-000000000010': 'zepto_receivables',
 };
 
 export default function AgentDispatch() {
