@@ -24,6 +24,207 @@ let _activeRecoJobs = 0;
 const MAX_CONCURRENT_RECO = parseInt(process.env.MAX_CONCURRENT_RECO || '8', 10);
 
 const { loadCorrectionMap, normalizeNarration } = require('./bankCorrectionsController');
+
+// ── KOPARO-specific: Tally Debit/Credit ledger output ─────────────────────────
+const KOPARO_BRAND_ID = 'b0000000-0000-0000-0000-000000000003';
+
+const KOPARO_BANK_ACCOUNTS = [
+  { pattern: '50200060142961',  name: 'HDFC Bank Ltd-50200060142961'   },
+  { pattern: '409001624930',    name: 'RBL-Bank (409001624930)'        },
+  { pattern: '409002286984',    name: 'RBL-Bank (409002286984)'        },
+  { pattern: '3141295500063761',name: 'IDFC Bank (3141295500063761)'   },
+  { pattern: '2049187735',      name: 'Kotak Mahindra Bank-7735'       },
+  { pattern: '7735',            name: 'Kotak Mahindra Bank-7735'       },
+];
+
+const KOPARO_IFSC_TO_ACCOUNT = {
+  'KKBK': 'Kotak Mahindra Bank-7735',
+  'RATN': 'RBL-Bank (409001624930)',
+  'HDFC': 'HDFC Bank Ltd-50200060142961',
+  'IDFB': 'IDFC Bank (3141295500063761)',
+};
+
+const KOPARO_ACCOUNT_TO_BANK = {
+  '2049187735':      'Kotak Mahindra Bank-7735',
+  '409001624930':    'RBL-Bank (409001624930)',
+  '409002286984':    'RBL-Bank (409002286984)',
+  '50200060142961':  'HDFC Bank Ltd-50200060142961',
+  '3141295500063761':'IDFC Bank (3141295500063761)',
+};
+
+async function detectKoparoBankAccount(bankPath) {
+  // Scan row-by-row (max 35 rows) and return on the FIRST matching account pattern.
+  // Self-account appears at row ~24 (header area); counterparty account appears later
+  // in transaction narrations (~row 28+). First-hit ensures we pick the correct self-bank.
+  try {
+    const isXls = bankPath.toLowerCase().endsWith('.xls');
+    if (isXls) {
+      const XLSX = require('xlsx');
+      const wb = XLSX.readFile(bankPath);
+      const ws = wb.Sheets[wb.SheetNames[0]];
+      const rows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '', blankrows: false });
+      for (let i = 0; i < Math.min(35, rows.length); i++) {
+        const rowText = rows[i].map(v => String(v || '')).join(' ');
+        for (const { pattern, name } of KOPARO_BANK_ACCOUNTS) {
+          if (rowText.includes(pattern)) return name;
+        }
+      }
+    } else {
+      const wb = new ExcelJS.Workbook();
+      await wb.xlsx.readFile(bankPath);
+      const ws = wb.worksheets[0];
+      let found = null;
+      ws.eachRow((row, rn) => {
+        if (found || rn > 35) return;
+        let rowText = '';
+        row.values.forEach(v => {
+          if (!v) return;
+          let s = typeof v === 'object'
+            ? String(v.result ?? v.text ?? (Array.isArray(v.richText) ? v.richText.map(r => r.text).join('') : '') ?? '')
+            : String(v);
+          if (s) rowText += s + ' ';
+        });
+        for (const { pattern, name } of KOPARO_BANK_ACCOUNTS) {
+          if (rowText.includes(pattern)) { found = name; return; }
+        }
+      });
+      if (found) return found;
+    }
+  } catch (e) {
+    console.warn('[KOPARO] Bank account detection error:', e.message);
+  }
+  return 'Bank Account';
+}
+
+function detectContraCounterparty(narration, selfBankName) {
+  const u = String(narration || '').toUpperCase();
+  // P1: HDFC "RTGS CR-KKBK..." / "RTGS DR-RATN..."
+  const m1 = u.match(/(?:RTGS|NEFT|IMPS)\s+(CR|DR)-([A-Z]{4})/);
+  if (m1) {
+    const otherBank = KOPARO_IFSC_TO_ACCOUNT[m1[2]] || null;
+    if (otherBank) return { otherBank, isCredit: m1[1] === 'CR' };
+  }
+  // P2: RBL slash "RTGS/KKBKH.../SIMK..."
+  // Exclude RATN only when self-bank IS RBL 4930 (both RBL accounts share RATN IFSC prefix;
+  // in RBL 6984 statement, RATN = valid counterparty RBL 4930).
+  const m2 = u.match(/(?:RTGS|NEFT|IMPS)\/([A-Z]{4})[^/]*\/SIMK/);
+  if (m2) {
+    const ifsc = m2[1];
+    const selfIsRbl4930 = selfBankName && selfBankName.includes('409001624930');
+    if (ifsc !== 'RATN' || !selfIsRbl4930) {
+      const otherBank = KOPARO_IFSC_TO_ACCOUNT[ifsc] || null;
+      if (otherBank && otherBank !== selfBankName) return { otherBank, isCredit: null };
+    }
+  }
+  // P3: RBL IB:OFT "IB:OFT409001624930/INTER TRF/..."
+  const m3 = u.match(/IB:OFT(\d+)\//);
+  if (m3) {
+    const otherBank = KOPARO_ACCOUNT_TO_BANK[m3[1]] || null;
+    if (otherBank) return { otherBank, isCredit: null };
+  }
+  // P4: RBL alt-slash "NEFT/ref/KKBK/Simk Labels..."
+  const m4 = u.match(/(?:RTGS|NEFT|IMPS)\/[^/]+\/([A-Z]{4})\/[^/]*SIMK/);
+  if (m4) {
+    const ifsc = m4[1];
+    const selfIsRbl4930b = selfBankName && selfBankName.includes('409001624930');
+    if (ifsc !== 'RATN' || !selfIsRbl4930b) {
+      const otherBank = KOPARO_IFSC_TO_ACCOUNT[ifsc] || null;
+      if (otherBank && otherBank !== selfBankName) return { otherBank, isCredit: null };
+    }
+  }
+  // P5: IMPS masked "IMPS-ref-name-IFSC-XXXXXXXX6984-..."
+  const m5 = u.match(/IMPS[-\/][^-]+[-\/][^-]+[-\/]([A-Z]{4})[-\/]X+(\d{4,})/);
+  if (m5) {
+    const acctSuffix = m5[2];
+    const matchKey = Object.keys(KOPARO_ACCOUNT_TO_BANK).find(k => k.endsWith(acctSuffix));
+    if (matchKey) return { otherBank: KOPARO_ACCOUNT_TO_BANK[matchKey], isCredit: null };
+  }
+  return { otherBank: null, isCredit: null };
+}
+
+async function generateKoparoExcel(results, bankAccountName, outputPath) {
+  const wb = new ExcelJS.Workbook();
+  const ws = wb.addWorksheet('Bank Statement');
+  const GREEN  = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFC8E6C9' } };
+  const YELLOW = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFF9C4' } };
+  const RED    = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFCDD2' } };
+  const HEADER = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF263238' } };
+  const THIN   = {
+    left:   { style: 'thin', color: { argb: 'FFCCCCCC' } },
+    right:  { style: 'thin', color: { argb: 'FFCCCCCC' } },
+    top:    { style: 'thin', color: { argb: 'FFCCCCCC' } },
+    bottom: { style: 'thin', color: { argb: 'FFCCCCCC' } },
+  };
+  ws.addRow(['Txn Date', 'Narration', 'Chq / Ref No.', 'Withdrawal Amt.', 'Deposit Amt.',
+             'Voucher Type', 'Debit', 'Credit', 'Amount', 'Confidence']);
+  ws.getRow(1).height = 25;
+  ws.getRow(1).eachCell(cell => {
+    cell.fill      = HEADER;
+    cell.font      = { name: 'Calibri', size: 11, bold: true, color: { argb: 'FFFFFFFF' } };
+    cell.border    = THIN;
+    cell.alignment = { horizontal: 'center', vertical: 'middle' };
+  });
+  const KOPARO_BANK_LEDGER_NAMES = new Set(Object.values(KOPARO_ACCOUNT_TO_BANK));
+  for (const r of results) {
+    const withdrawal = r.debit  || null;
+    const deposit    = r.credit || null;
+    const amount     = withdrawal || deposit || null;
+    const ledger     = r.ledger_name || '';
+    const { otherBank, isCredit: rawIsCredit } = detectContraCounterparty(r.description, bankAccountName);
+    const isCorrectionsContra = r.type === 'Contra' && KOPARO_BANK_LEDGER_NAMES.has(ledger);
+    let debitLedger, creditLedger, voucherType;
+    if (otherBank) {
+      voucherType  = 'Contra';
+      const isCredit = rawIsCredit !== null ? rawIsCredit : (!!r.credit && !r.debit);
+      debitLedger  = isCredit ? bankAccountName : otherBank;
+      creditLedger = isCredit ? otherBank        : bankAccountName;
+    } else if (isCorrectionsContra) {
+      voucherType  = 'Contra';
+      const isDeposit = !!deposit && !withdrawal;
+      debitLedger  = isDeposit ? bankAccountName : ledger;
+      creditLedger = isDeposit ? ledger           : bankAccountName;
+    } else if (r.type === 'Receipt') {
+      voucherType  = 'Receipt';
+      debitLedger  = bankAccountName;
+      creditLedger = ledger;
+    } else if (r.type === 'Payment') {
+      voucherType  = 'Payment';
+      debitLedger  = ledger;
+      creditLedger = bankAccountName;
+    } else {
+      voucherType  = r.type || '';
+      debitLedger  = bankAccountName;
+      creditLedger = ledger || bankAccountName;
+    }
+    ws.addRow([r.date || '', r.description || '', r.chq_ref || '', withdrawal, deposit,
+               voucherType, debitLedger, creditLedger, amount, r.confidence || 'Low']);
+    const rowNum = ws.rowCount;
+    const conf   = r.confidence || 'Low';
+    const fill   = conf === 'High' ? GREEN : (conf === 'Medium' ? YELLOW : RED);
+    ws.getRow(rowNum).height = 20;
+    ws.getRow(rowNum).eachCell((cell, ci) => {
+      cell.font   = { name: 'Calibri', size: 11 };
+      cell.border = THIN;
+      if ([4, 5, 9].includes(ci)) {
+        cell.numFmt    = '#,##0.00';
+        cell.alignment = { horizontal: 'right', vertical: 'middle' };
+      } else if ([1, 6, 10].includes(ci)) {
+        cell.alignment = { horizontal: 'center', vertical: 'middle' };
+      } else {
+        cell.alignment = { horizontal: 'left', vertical: 'middle' };
+      }
+      if ([7, 8, 9, 10].includes(ci)) cell.fill = fill;
+    });
+  }
+  ws.columns.forEach(col => {
+    let maxLen = 10;
+    col.eachCell(cell => { const l = String(cell.value || '').length; if (l > maxLen) maxLen = l; });
+    col.width = Math.min(maxLen + 3, 55);
+  });
+  await wb.xlsx.writeFile(outputPath);
+}
+// ── END KOPARO-specific ────────────────────────────────────────────────────────
+
 const drive = require('../services/driveService');
 const zeptoDrive = require('../services/zeptoDrive');
 
@@ -396,7 +597,7 @@ const saveGstr1B2cSummary = async (sequelize, jobId, brandId, b2cRows) => {
 // Frontend reco types that use the gstr_2b_books Python engine → persist to gstr_2b_results
 const GST_2B_FRONTEND_TYPES = new Set([
   'gstr_2b_books', 'gstr_2a_vs_2b_vs_books', 'gstr_2b_vs_purchase',
-  'gstr_2b_books_multistate',
+  'gstr_2b_books_multistate', 'einvoice_reco',
 ]);
 
 // Map frontend reco_type names → Python server reco_type names
@@ -412,6 +613,7 @@ const RECO_TYPE_MAP = {
   'gstr_1_vs_books': 'gstr_1_vs_books',
   'gstr_2b_books_multistate': 'gstr_2b_books_multistate', // multi-state variant
   'zepto_receivables': 'zepto_receivables',
+  'einvoice_reco': 'einvoice_reco',                    // E-Invoice Register vs Books (Sales + Credit Note)
 };
 
 /**
@@ -870,6 +1072,20 @@ const runReco = async (req, res) => {
         ledgerRowCount = lws ? lws.rowCount - 1 : 0; // Exclude header row
       } catch (err) {
         console.warn('[RECO-UNIVERSAL] Failed to parse ledger row count:', err.message);
+      }
+
+
+      // ── KOPARO: overwrite classify.py output with Tally Debit/Credit ledger format ──
+      // Guarded by brandId === KOPARO_BRAND_ID — zero impact on other brands.
+      if (brandId === KOPARO_BRAND_ID && results.length > 0) {
+        try {
+          const bankAccountName = await detectKoparoBankAccount(bankPath);
+          console.log(`[KOPARO] Detected bank account: ${bankAccountName}`);
+          await generateKoparoExcel(results, bankAccountName, outputPath);
+          console.log(`[KOPARO] Generated Tally Debit/Credit format output (${results.length} rows)`);
+        } catch (koparoErr) {
+          console.warn('[KOPARO] Non-fatal: falling back to standard output:', koparoErr.message);
+        }
       }
 
       // 5. Persist Excel File for Direct Download

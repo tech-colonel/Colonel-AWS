@@ -218,6 +218,7 @@ const RESULTS_TABLE_MAP = {
   gstr_2a_vs_2b_vs_books:   { table: 'gstr_2b_results', columns: GST_2B_COLUMNS },
   gstr_2b_vs_purchase:       { table: 'gstr_2b_results', columns: GST_2B_COLUMNS },
   gstr_2b_books_multistate:  { table: 'gstr_2b_results', columns: GST_2B_COLUMNS },
+  einvoice_reco:             { table: 'gstr_2b_results', columns: GST_2B_COLUMNS },
   gstr_2a_2b_books: {
     table: 'gstr_2a_2b_results',
     columns: GST_2B_COLUMNS,
@@ -296,6 +297,7 @@ const TOOL_LABELS = {
   universal_bank_statement: 'Universal Bank Statement',
   pdf_bank_extract: 'PDF → Bank Statement',
   amazon_mtr_consolidator: 'Amazon MTR Consolidator',
+  einvoice_reco: 'E-Invoice Reco',
 };
 
 // The full universe of finance tools we ship — analytics zero-fills against this

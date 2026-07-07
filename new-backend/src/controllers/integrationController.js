@@ -1,4 +1,61 @@
 const { Integration } = require('../models/master');
+const { masterSequelize } = require('../config/database');
+
+/* ── Per-user Google connections ───────────────────────────────────────────────
+   The Google card is PERSONAL: each user sees only their own connection. The
+   shared "workspace" connection (the integrations.google row, owned by
+   connected_by) is what powers the firm's drive/sheets/docs/calendar/mail
+   automations and is left UNTOUCHED here — a non-owner connecting their own
+   Google writes only their per-user row and never clobbers the workspace one. */
+let _ugReady = false;
+const ensureUserGoogleTable = async () => {
+  if (_ugReady) return;
+  await masterSequelize.query(`
+    CREATE TABLE IF NOT EXISTS user_google_accounts (
+      user_id uuid PRIMARY KEY,
+      access_token text,
+      refresh_token text,
+      token_expiry bigint,
+      email text,
+      name text,
+      picture text,
+      status varchar(16) DEFAULT 'connected',
+      "createdAt" timestamptz DEFAULT now(),
+      "updatedAt" timestamptz DEFAULT now()
+    );
+  `);
+  _ugReady = true;
+};
+
+const getUserGoogle = async (userId) => {
+  await ensureUserGoogleTable();
+  const [rows] = await masterSequelize.query(
+    'SELECT * FROM user_google_accounts WHERE user_id = :uid LIMIT 1',
+    { replacements: { uid: userId } },
+  );
+  return rows[0] || null;
+};
+
+// What the google card looks like for THIS viewer: the owner sees the shared
+// workspace connection; everyone else sees only their own personal connection.
+const googleViewFor = async (user, globalRow) => {
+  const catEntry = CATALOG_BY_TYPE['google'] || {};
+  const base = {
+    type: 'google', name: catEntry.name || 'Google Workspace',
+    blurb: catEntry.blurb || '', category: catEntry.category || 'Storage & Docs',
+    fields: catEntry.fields || [],
+  };
+  const ownerId = globalRow?.connected_by || null;
+  if (ownerId && String(ownerId) === String(user.id) && globalRow?.status === 'connected') {
+    const cfg = globalRow.config || {};
+    return { ...base, status: 'connected', hasKey: true, account: null, email: cfg.email || null, picture: cfg.picture || null, connected_by: ownerId, updatedAt: globalRow.updatedAt };
+  }
+  const mine = await getUserGoogle(user.id);
+  if (mine && mine.status === 'connected') {
+    return { ...base, status: 'connected', hasKey: true, account: null, email: mine.email || null, picture: mine.picture || null, connected_by: user.id, updatedAt: mine.updatedAt };
+  }
+  return { ...base, status: 'disconnected', hasKey: false, account: null, email: null, picture: null, connected_by: null, updatedAt: null };
+};
 
 // The connectors we surface in the UI. Visual connect only — no live OAuth yet.
 const CATALOG = [
@@ -46,13 +103,6 @@ const CATALOG = [
     blurb: 'Post reconciliation alerts & feedback notifications to a Slack channel.',
     category: 'Communication',
     fields: [{ key: 'apiKey', label: 'Bot token', placeholder: 'xoxb-…' }],
-  },
-  {
-    type: 'gmail',
-    name: 'Gmail',
-    blurb: 'Auto-fetch invoice attachments straight from a mailbox.',
-    category: 'Communication',
-    fields: [{ key: 'account', label: 'Mailbox address', placeholder: 'invoices@brand.com' }],
   },
   {
     type: 'fireflies',
@@ -121,8 +171,16 @@ const listIntegrations = async (req, res, next) => {
     await ensureCatalog();
     const rows = await Integration.findAll();
     const byType = Object.fromEntries(rows.map((r) => [r.type, r]));
-    // Return in catalog order so the grid is stable.
-    res.json(CATALOG.map((c) => publicView(byType[c.type] || { type: c.type, name: c.name, status: 'disconnected', config: {} })));
+    // Return in catalog order so the grid is stable. Google is per-viewer.
+    const out = [];
+    for (const c of CATALOG) {
+      if (c.type === 'google') {
+        out.push(await googleViewFor(req.user, byType['google']));
+      } else {
+        out.push(publicView(byType[c.type] || { type: c.type, name: c.name, status: 'disconnected', config: {} }));
+      }
+    }
+    res.json(out);
   } catch (e) { next(e); }
 };
 
@@ -147,6 +205,22 @@ const disconnectIntegration = async (req, res, next) => {
     const { type } = req.params;
     if (!CATALOG_BY_TYPE[type]) return res.status(404).json({ error: 'Unknown integration' });
     await ensureCatalog();
+
+    // Google: disconnect is PER-USER. Only the workspace owner reconnecting/
+    // disconnecting affects the shared row; other admins only clear their own
+    // personal connection — they can never nuke the firm's automations account.
+    if (type === 'google') {
+      await ensureUserGoogleTable();
+      const grow = await Integration.findOne({ where: { type: 'google' } });
+      const ownerId = grow?.connected_by || null;
+      if (ownerId && String(ownerId) === String(req.user.id)) {
+        await grow.update({ status: 'disconnected', config: {}, connected_by: null });
+      }
+      await masterSequelize.query('DELETE FROM user_google_accounts WHERE user_id = :uid', { replacements: { uid: req.user.id } });
+      const fresh = await Integration.findOne({ where: { type: 'google' } });
+      return res.json(await googleViewFor(req.user, fresh));
+    }
+
     const row = await Integration.findOne({ where: { type } });
     await row.update({ status: 'disconnected', config: {}, connected_by: null });
     res.json(publicView(row));
@@ -156,8 +230,9 @@ const disconnectIntegration = async (req, res, next) => {
 /* ── Google OAuth 2.0 ──────────────────────────────────────────────────────────
    Mirrors the AWS flow. URLs are env-driven so localhost and the ngrok/AWS host
    both work — set GOOGLE_REDIRECT_URI / GOOGLE_FRONT_URL in .env per environment.
-   The connected user's tokens (incl. refresh_token) are stored on the google
-   integration row and reused by googleClient.js for Calendar/Drive. */
+   Per-user model (from AWS): each connecting user gets their own row in
+   user_google_accounts; the SHARED workspace row (used by googleClient.js for
+   Calendar/Drive) is only (re)pointed when it is empty or its owner reconnects. */
 const { google } = require('googleapis');
 
 const GOOGLE_REDIRECT_URI = process.env.GOOGLE_REDIRECT_URI || 'http://localhost:8001/api/auth/google/callback';
@@ -215,24 +290,49 @@ const googleOAuthCallback = async (req, res) => {
 
     const oauth2Api = google.oauth2({ version: 'v2', auth: oauth2Client });
     const { data: userInfo } = await oauth2Api.userinfo.get();
+    const email = userInfo.email || '';
 
     await ensureCatalog();
+    await ensureUserGoogleTable();
     const row = await Integration.findOne({ where: { type: 'google' } });
     const existingCfg = row.config || {};
-    await row.update({
-      status: 'connected',
-      config: {
-        access_token:  tokens.access_token,
-        refresh_token: tokens.refresh_token || existingCfg.refresh_token,
-        token_expiry:  tokens.expiry_date,
-        email:   userInfo.email || existingCfg.email || '',
-        name:    userInfo.name || existingCfg.name || '',
-        picture: userInfo.picture || existingCfg.picture || '',
-      },
-      connected_by: state || null,
-    });
+    const ownerId = row.connected_by || null;
+    // (Re)point the SHARED workspace connection only when it's empty or its own
+    // owner is reconnecting — so another admin connecting never clobbers it.
+    const isOwnerOrEmpty = !ownerId || row.status !== 'connected' || String(ownerId) === String(state);
 
-    console.log('Google OAuth connected:', userInfo.email);
+    // 1) Always store the connecting user's OWN personal connection.
+    await masterSequelize.query(`
+      INSERT INTO user_google_accounts (user_id, access_token, refresh_token, token_expiry, email, name, picture, status, "updatedAt")
+      VALUES (:uid, :at, :rt, :exp, :email, :name, :pic, 'connected', now())
+      ON CONFLICT (user_id) DO UPDATE SET
+        access_token = EXCLUDED.access_token,
+        refresh_token = COALESCE(EXCLUDED.refresh_token, user_google_accounts.refresh_token),
+        token_expiry = EXCLUDED.token_expiry,
+        email = EXCLUDED.email, name = EXCLUDED.name, picture = EXCLUDED.picture,
+        status = 'connected', "updatedAt" = now()
+    `, { replacements: {
+      uid: state, at: tokens.access_token, rt: tokens.refresh_token || null,
+      exp: tokens.expiry_date || null, email, name: userInfo.name || '', pic: userInfo.picture || '',
+    } });
+
+    // 2) Keep the shared workspace row in sync only for its owner / when empty.
+    if (isOwnerOrEmpty) {
+      await row.update({
+        status: 'connected',
+        config: {
+          access_token:  tokens.access_token,
+          refresh_token: tokens.refresh_token || existingCfg.refresh_token,
+          token_expiry:  tokens.expiry_date,
+          email,
+          name:    userInfo.name || existingCfg.name || '',
+          picture: userInfo.picture || existingCfg.picture || '',
+        },
+        connected_by: state || ownerId || null,
+      });
+    }
+
+    console.log('Google OAuth connected:', email);
     res.redirect(GOOGLE_FRONT_URL + '?connected=true');
   } catch (e) {
     console.error('googleOAuthCallback error:', e.message);

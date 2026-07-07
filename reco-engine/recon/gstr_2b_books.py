@@ -1192,7 +1192,7 @@ def _populate_workbook(ws, results: list[Any]) -> None:
         diff_igst    = round(g_igst    - b_igst,    2)
 
         # New: GSTIN, Source Tab, State for 2B
-        gstin_2b   = str(_get_val(g, "supplier_gstin", "") or "")
+        gstin_2b   = str(_get_val(g, "supplier_gstin", "") or "") or str(_get_val(b, "supplier_gstin", "") or "")
         source_tab = str(_get_val(g, "sheet_name",     "") or "")
         raw_g      = _get_val(g, "raw", {}) or {}
         entity_g   = str(raw_g.get("_entity_gstin", "") or "")
@@ -1781,7 +1781,7 @@ def _build_month_summary_sheet(wb: Any, results: list[Any]) -> None:
         "Month",
         "2B Taxable", "2B IGST", "2B CGST", "2B SGST",
         "Books Taxable", "Books IGST", "Books CGST", "Books SGST",
-        "Diff Taxable", "Diff IGST",
+        "Diff Taxable", "Diff IGST", "Diff CGST", "Diff SGST",
         "Matched", "2B Only", "Books Only",
     ]
     for col, hdr in enumerate(headers, 1):
@@ -1804,12 +1804,14 @@ def _build_month_summary_sheet(wb: Any, results: list[Any]) -> None:
         fill = fill_alt if row_idx % 2 == 0 else PatternFill()
         diff_t = round(md["taxable_2b"] - md["taxable_bk"], 2)
         diff_i = round(md["igst_2b"]    - md["igst_bk"],    2)
+        diff_c = round(md["cgst_2b"]    - md["cgst_bk"],    2)
+        diff_s = round(md["sgst_2b"]    - md["sgst_bk"],    2)
 
         row_vals = [
             month,
             md["taxable_2b"], md["igst_2b"], md["cgst_2b"], md["sgst_2b"],
             md["taxable_bk"], md["igst_bk"], md["cgst_bk"], md["sgst_bk"],
-            diff_t, diff_i,
+            diff_t, diff_i, diff_c, diff_s,
             md["matched"], md["only_2b"], md["only_bk"],
         ]
         for col, val in enumerate(row_vals, 1):
@@ -1818,7 +1820,7 @@ def _build_month_summary_sheet(wb: Any, results: list[Any]) -> None:
             c.fill   = fill
             if col == 1:
                 c.alignment = center
-            elif col <= 11:
+            elif col <= 13:
                 c.alignment    = right
                 c.number_format = num_fmt
             else:
@@ -1832,11 +1834,13 @@ def _build_month_summary_sheet(wb: Any, results: list[Any]) -> None:
     tr = len(sorted_months) + 2
     diff_t_tot = round(totals["taxable_2b"] - totals["taxable_bk"], 2)
     diff_i_tot = round(totals["igst_2b"]    - totals["igst_bk"],    2)
+    diff_c_tot = round(totals["cgst_2b"]    - totals["cgst_bk"],    2)
+    diff_s_tot = round(totals["sgst_2b"]    - totals["sgst_bk"],    2)
     total_vals = [
         "TOTAL",
         totals["taxable_2b"], totals["igst_2b"], totals["cgst_2b"], totals["sgst_2b"],
         totals["taxable_bk"], totals["igst_bk"], totals["cgst_bk"], totals["sgst_bk"],
-        diff_t_tot, diff_i_tot,
+        diff_t_tot, diff_i_tot, diff_c_tot, diff_s_tot,
         int(totals["matched"]), int(totals["only_2b"]), int(totals["only_bk"]),
     ]
     for col, val in enumerate(total_vals, 1):
@@ -1845,9 +1849,9 @@ def _build_month_summary_sheet(wb: Any, results: list[Any]) -> None:
         c.fill   = fill_total
         c.border = border
         c.alignment = center if col == 1 else right
-        if 2 <= col <= 11:
+        if 2 <= col <= 13:
             c.number_format = num_fmt
-        elif col > 11:
+        elif col > 13:
             c.number_format = int_fmt
 
     ws.freeze_panes = "B2"
