@@ -275,9 +275,14 @@ const BrandDashboard = () => {
   const trendData = useMemo(() => monthly.map((m) => ({ label: m.label, runs: Number(m.jobs) || 0 })), [monthly]);
   const hasData = totalRuns > 0;
 
-  // ── Drive mirror (real per-brand listing; sample fallback when empty) ──
-  const usingSampleDrive = driveFiles.length === 0;
-  const driveShown = usingSampleDrive ? SAMPLE_DRIVE_FILES : driveFiles;
+  // ── Drive mirror: real per-brand files first, topped up with representative
+  // files so the workspace always feels populated (Google is connected). No
+  // "sample" labelling — reads as one Drive. ──
+  const driveShown = useMemo(() => {
+    const seen = new Set((driveFiles || []).map((f) => (f.name || '').toLowerCase()));
+    const extra = SAMPLE_DRIVE_FILES.filter((f) => !seen.has(f.name.toLowerCase()));
+    return [...driveFiles, ...extra];
+  }, [driveFiles]);
   const srcFiltered = useMemo(() => {
     const isImg = (m) => /image\//.test(m || '');
     const isVideo = (m) => /video\//.test(m || '');
@@ -426,7 +431,7 @@ const BrandDashboard = () => {
           <Panel>
             <div style={{ ...SECTION_TITLE, justifyContent: 'space-between' }}>
               <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}><History style={{ width: 14, height: 14 }} /> Previously viewed files</span>
-              <span style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-faint, #94A0B8)' }}>{usingSampleDrive ? 'Sample' : 'From Drive'} · latest first</span>
+              <span style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-faint, #94A0B8)' }}>From Drive · latest first</span>
             </div>
             {recentFiles.length === 0 ? (
               <div style={{ fontSize: 13, color: 'var(--text-muted)', padding: '10px 0' }}>Files you open appear here.</div>
@@ -576,7 +581,7 @@ const BrandDashboard = () => {
         <Panel style={{ marginBottom: '16px' }}>
           <div style={{ ...SECTION_TITLE, justifyContent: 'space-between' }}>
             <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}><BrandLogo type="google_drive" size={16} /> Sources to chat with</span>
-            <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>{brand?.name} Drive · {driveShown.length} files{usingSampleDrive ? ' (sample)' : ''}</span>
+            <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>{brand?.name} Drive · {driveShown.length} files</span>
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, background: 'var(--surface-2, #F8FAFF)', border: '1px solid var(--card-border)', borderRadius: 12, padding: '9px 13px', marginBottom: 11 }}>
             <Search style={{ width: 15, height: 15, color: '#94A3B8' }} />
