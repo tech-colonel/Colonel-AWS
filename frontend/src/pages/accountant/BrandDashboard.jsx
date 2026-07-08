@@ -5,7 +5,7 @@ import {
   LayoutDashboard, Bot, BarChart3, Activity, Rows3, Clock, Sparkles,
   CalendarDays, Video, FileText, Search, ChevronRight, Plus, Flag,
   CheckCircle2, ArrowUpRight, Building2, Send, Plug, Zap, History,
-  ExternalLink,
+  ExternalLink, Maximize2, X,
 } from 'lucide-react';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../../components/ui/modal';
 import { Card, CardContent, CardHeader, CardTitle } from '../../components/ui/card';
@@ -149,6 +149,11 @@ const BrandDashboard = () => {
   const [detail, setDetail] = useState(null);
   const [prioritized, setPrioritized] = useState(false);
   const [taskQuery, setTaskQuery] = useState('');
+  const [driveFolderId, setDriveFolderId] = useState(null);
+  const [drivePath, setDrivePath] = useState([{ id: null, name: 'Drive' }]);
+  const [viewerFile, setViewerFile] = useState(null);
+  const [viewerFull, setViewerFull] = useState(false);
+  const [recentOpened, setRecentOpened] = useState([]);
   const [showNewTask, setShowNewTask] = useState(false);
   const [ntTitle, setNtTitle] = useState('');
   const [ntDesc, setNtDesc] = useState('');
@@ -191,15 +196,34 @@ const BrandDashboard = () => {
       .then((r) => setStatutory(Array.isArray(r.data?.filings) ? r.data.filings : (Array.isArray(r.data) ? r.data : [])))
       .catch(() => setStatutory([]));
     api.get('/api/brands/my-brands').then((r) => setMyBrands(Array.isArray(r.data) ? r.data : [])).catch(() => setMyBrands([]));
-    api.get(`/api/brands/${brandId}/drive`).then((r) => {
-      setDriveFiles(Array.isArray(r.data?.files) ? r.data.files : []);
-      setDriveMeta({ configured: r.data?.configured, reason: r.data?.reason });
-    }).catch(() => { setDriveFiles([]); setDriveMeta({ configured: false }); });
+    // Drive contents are loaded (and navigable) via loadDrive() below.
     api.get('/api/meetings/upcoming').then((r) => setUpcoming(Array.isArray(r.data?.events) ? r.data.events : [])).catch(() => setUpcoming([]));
     api.get('/api/meetings/recent').then((r) => setRecentMeetings(Array.isArray(r.data?.meetings) ? r.data.meetings : [])).catch(() => setRecentMeetings([]));
   }, [brandId]);
 
   useEffect(() => { fetchData(); }, [fetchData]);
+
+  // Per-brand Drive listing — supports drilling into subfolders (?folderId).
+  const loadDrive = useCallback((folderId) => {
+    const qs = folderId ? `?folderId=${encodeURIComponent(folderId)}` : '';
+    api.get(`/api/brands/${brandId}/drive${qs}`).then((r) => {
+      setDriveFiles(Array.isArray(r.data?.files) ? r.data.files : []);
+      setDriveFolderId(r.data?.folderId || folderId || null);
+    }).catch(() => setDriveFiles([]));
+  }, [brandId]);
+  useEffect(() => { setDrivePath([{ id: null, name: 'Drive' }]); loadDrive(null); }, [loadDrive]);
+
+  // Files opened from the UI (persisted per brand) → feed Previously viewed.
+  useEffect(() => {
+    try { setRecentOpened(JSON.parse(localStorage.getItem(`colonel_recent_${brandId}`) || '[]')); } catch { setRecentOpened([]); }
+  }, [brandId]);
+  const logOpen = useCallback((f) => {
+    setRecentOpened((prev) => {
+      const next = [{ id: f.id, name: f.name, mimeType: f.mimeType, webViewLink: f.webViewLink, size: f.size ?? null }, ...prev.filter((x) => x.id !== f.id)].slice(0, 8);
+      try { localStorage.setItem(`colonel_recent_${brandId}`, JSON.stringify(next)); } catch (_) {}
+      return next;
+    });
+  }, [brandId]);
 
   // ── Derived data ──
   const s = summary?.summary || {};
@@ -288,11 +312,7 @@ const BrandDashboard = () => {
   // ── Drive mirror: real per-brand files first, topped up with representative
   // files so the workspace always feels populated (Google is connected). No
   // "sample" labelling — reads as one Drive. ──
-  const driveShown = useMemo(() => {
-    const seen = new Set((driveFiles || []).map((f) => (f.name || '').toLowerCase()));
-    const extra = SAMPLE_DRIVE_FILES.filter((f) => !seen.has(f.name.toLowerCase()));
-    return [...driveFiles, ...extra];
-  }, [driveFiles]);
+  const driveShown = driveFiles; // real per-brand Drive contents (folders + files)
   const srcFiltered = useMemo(() => {
     const isImg = (m) => /image\//.test(m || '');
     const isVideo = (m) => /video\//.test(m || '');
@@ -308,8 +328,12 @@ const BrandDashboard = () => {
     const q = srcQuery.trim().toLowerCase();
     return q ? list.filter((f) => (f.name || '').toLowerCase().includes(q)) : list;
   }, [driveShown, srcTab, srcQuery]);
-  // Previously viewed = most recent files (real Drive recency; sample fallback).
-  const recentFiles = useMemo(() => driveShown.filter((f) => !f.isFolder).slice(0, 5), [driveShown]);
+  // Previously viewed = files opened from the UI (persisted); sample fallback
+  // until the accountant opens something, so the card is never empty.
+  const recentFiles = useMemo(
+    () => (recentOpened.length ? recentOpened.slice(0, 5) : SAMPLE_DRIVE_FILES.slice(0, 5)),
+    [recentOpened]
+  );
 
   const prettySize = (b) => { if (b == null) return ''; if (b < 1024) return `${b} B`; if (b < 1048576) return `${Math.round(b / 1024)} KB`; return `${(b / 1048576).toFixed(1)} MB`; };
   const fmtTime = (str) => { if (!str) return ''; try { return new Date(str).toLocaleString('en-IN', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' }); } catch { return ''; } };
@@ -354,6 +378,19 @@ const BrandDashboard = () => {
       ? navigate(`/brands/${brandId}/reco/${recoSlug}`)
       : navigate(`/brands/${brandId}/agents/${agent.id}`);
   };
+
+  // Drive file preview URL (native Google types use their own /preview host).
+  const previewUrl = (f) => {
+    if (!f?.id) return null;
+    const m = f.mimeType || '';
+    if (/spreadsheet/.test(m)) return `https://docs.google.com/spreadsheets/d/${f.id}/preview`;
+    if (/document/.test(m)) return `https://docs.google.com/document/d/${f.id}/preview`;
+    if (/presentation/.test(m)) return `https://docs.google.com/presentation/d/${f.id}/preview`;
+    return `https://drive.google.com/file/d/${f.id}/preview`;
+  };
+  const openFile = (f) => { setViewerFull(false); setViewerFile(f); logOpen(f); };
+  const enterFolder = (f) => { setDrivePath((p) => [...p, { id: f.id, name: f.name }]); loadDrive(f.id); };
+  const breadcrumbTo = (idx) => { const target = drivePath[idx]; setDrivePath((p) => p.slice(0, idx + 1)); loadDrive(target ? target.id : null); };
 
   if (loading) {
     return (
@@ -450,14 +487,14 @@ const BrandDashboard = () => {
                 {recentFiles.map((f) => {
                   const t = fileTint(f.mimeType);
                   return (
-                    <a key={`pv-${f.id}`} href={f.webViewLink || '#'} target="_blank" rel="noreferrer"
-                      style={{ display: 'flex', alignItems: 'center', gap: 11, padding: '8px 10px', borderRadius: 10, textDecoration: 'none', transition: 'background .14s ease' }}
+                    <div key={`pv-${f.id}`} onClick={() => openFile(f)}
+                      style={{ display: 'flex', alignItems: 'center', gap: 11, padding: '8px 10px', borderRadius: 10, cursor: 'pointer', transition: 'background .14s ease' }}
                       onMouseEnter={(e) => { e.currentTarget.style.background = 'rgba(255,255,255,0.8)'; }}
                       onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent'; }}>
                       <span style={{ width: 30, height: 30, borderRadius: 9, background: t.bg, color: t.c, display: 'grid', placeItems: 'center', flexShrink: 0 }}><FileText style={{ width: 16, height: 16 }} /></span>
                       <span style={{ flex: 1, minWidth: 0, fontSize: 13, fontWeight: 600, color: 'var(--text-heading)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{f.name}</span>
                       {f.size != null && <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>{prettySize(f.size)}</span>}
-                    </a>
+                    </div>
                   );
                 })}
               </div>
@@ -610,6 +647,18 @@ const BrandDashboard = () => {
               <button key={t} onClick={() => setSrcTab(t)} style={{ fontSize: 12, fontWeight: 600, padding: '5px 12px', borderRadius: 9999, cursor: 'pointer', background: srcTab === t ? 'var(--text-heading)' : 'var(--surface)', border: `1px solid ${srcTab === t ? 'var(--text-heading)' : 'var(--card-border)'}`, color: srcTab === t ? '#fff' : 'var(--text-muted)' }}>{t}</button>
             ))}
           </div>
+          {drivePath.length > 1 && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 3, flexWrap: 'wrap', marginBottom: 10, fontSize: 12 }}>
+              {drivePath.map((p, i) => (
+                <span key={i} style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}>
+                  {i > 0 && <ChevronRight style={{ width: 12, height: 12, color: '#CBD5E1' }} />}
+                  <button onClick={() => breadcrumbTo(i)} style={{ background: 'none', border: 'none', cursor: 'pointer', fontWeight: i === drivePath.length - 1 ? 700 : 500, color: i === drivePath.length - 1 ? 'var(--text-heading)' : '#0748EE' }}>
+                    {i === 0 ? `${brand?.name || ''} Drive` : p.name}
+                  </button>
+                </span>
+              ))}
+            </div>
+          )}
           {srcFiltered.length === 0 ? (
             <div style={{ textAlign: 'center', padding: '22px 0', color: 'var(--text-muted)' }}>
               <FileText style={{ width: 30, height: 30, margin: '0 auto 8px', color: '#CBD5E1' }} />
@@ -620,7 +669,8 @@ const BrandDashboard = () => {
               {srcFiltered.slice(0, 40).map((f) => {
                 const t = fileTint(f.mimeType);
                 return (
-                  <div key={f.id} className="drive-row" style={{ display: 'flex', alignItems: 'center', gap: 11, padding: '9px 8px', borderRadius: 10 }}
+                  <div key={f.id} className="drive-row" style={{ display: 'flex', alignItems: 'center', gap: 11, padding: '9px 8px', borderRadius: 10, cursor: 'pointer' }}
+                    onClick={() => (f.isFolder ? enterFolder(f) : openFile(f))}
                     onMouseEnter={(e) => { e.currentTarget.style.background = 'var(--surface-2, #F8FAFF)'; const a = e.currentTarget.querySelector('.file-actions'); if (a) a.style.opacity = '1'; }}
                     onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent'; const a = e.currentTarget.querySelector('.file-actions'); if (a) a.style.opacity = '0'; }}>
                     <span style={{ width: 28, height: 28, borderRadius: 8, background: f.isFolder ? '#EEF2F8' : t.bg, color: t.c, display: 'grid', placeItems: 'center', flexShrink: 0 }}>
@@ -629,11 +679,11 @@ const BrandDashboard = () => {
                     <span style={{ flex: 1, minWidth: 0, fontSize: 13, fontWeight: 500, color: 'var(--text-heading)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{f.name}</span>
                     {f.size != null && <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>{prettySize(f.size)}</span>}
                     <span className="file-actions" style={{ display: 'flex', gap: 6, opacity: 0, transition: 'opacity .14s ease' }}>
-                      <a href={f.webViewLink || '#'} target="_blank" rel="noreferrer" title="Open in Drive"
+                      <a href={f.webViewLink || '#'} target="_blank" rel="noreferrer" title="Open in Drive" onClick={(e) => e.stopPropagation()}
                         style={{ width: 26, height: 26, borderRadius: 7, border: '1px solid var(--card-border)', background: 'var(--surface)', display: 'grid', placeItems: 'center', color: 'var(--text-muted)' }}>
                         <ExternalLink style={{ width: 13, height: 13 }} />
                       </a>
-                      <button onClick={() => navigate('/chat', { state: { prompt: `Tell me about the file "${f.name}"` } })} title="Ask Colonel AI about this file"
+                      <button onClick={(e) => { e.stopPropagation(); navigate('/chat', { state: { prompt: `Tell me about the file "${f.name}"` } }); }} title="Ask Colonel AI about this file"
                         style={{ width: 26, height: 26, borderRadius: 7, border: '1px solid #DDD6FE', background: 'var(--surface)', display: 'grid', placeItems: 'center', color: '#7C3AED', cursor: 'pointer' }}>
                         <Sparkles style={{ width: 13, height: 13 }} />
                       </button>
@@ -765,6 +815,42 @@ const BrandDashboard = () => {
           </div>
         </DialogContent>
       </Dialog>
+
+      {/* ── In-app Drive file viewer (preview · full screen · open in Drive) ── */}
+      {viewerFile && (
+        <div onClick={() => setViewerFile(null)} style={{ position: 'fixed', inset: 0, zIndex: 80, background: 'rgba(10,15,46,0.45)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: viewerFull ? 0 : 24 }}>
+          <div onClick={(e) => e.stopPropagation()} style={{ background: '#fff', borderRadius: viewerFull ? 0 : 16, width: viewerFull ? '100vw' : 'min(1000px, 100%)', height: viewerFull ? '100vh' : 'min(80vh, 100%)', display: 'flex', flexDirection: 'column', overflow: 'hidden', boxShadow: 'var(--card-shadow-hover)' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '12px 16px', borderBottom: '1px solid var(--card-border)' }}>
+              <FileText style={{ width: 16, height: 16, color: '#0748EE', flexShrink: 0 }} />
+              <span style={{ flex: 1, minWidth: 0, fontSize: 14, fontWeight: 700, color: 'var(--text-heading)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{viewerFile.name}</span>
+              <button onClick={() => setViewerFull((v) => !v)} title={viewerFull ? 'Exit full screen' : 'Full screen'}
+                style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 12, fontWeight: 600, color: 'var(--text-muted)', background: 'var(--surface)', border: '1px solid var(--card-border)', borderRadius: 8, padding: '6px 10px', cursor: 'pointer' }}>
+                <Maximize2 style={{ width: 13, height: 13 }} /> {viewerFull ? 'Exit' : 'Expand'}
+              </button>
+              <a href={viewerFile.webViewLink && viewerFile.webViewLink !== '#' ? viewerFile.webViewLink : `https://drive.google.com/file/d/${viewerFile.id}/view`} target="_blank" rel="noreferrer"
+                style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 12, fontWeight: 600, color: '#0748EE', background: '#EFF6FF', border: '1px solid #BFDBFE', borderRadius: 8, padding: '6px 10px', textDecoration: 'none' }}>
+                <ExternalLink style={{ width: 13, height: 13 }} /> Open in Drive
+              </a>
+              <button onClick={() => setViewerFile(null)} title="Close" style={{ width: 30, height: 30, borderRadius: 8, border: '1px solid var(--card-border)', background: 'var(--surface)', display: 'grid', placeItems: 'center', cursor: 'pointer', color: 'var(--text-muted)' }}>
+                <X style={{ width: 15, height: 15 }} />
+              </button>
+            </div>
+            <div style={{ flex: 1, background: '#F1F5F9' }}>
+              {viewerFile.webViewLink !== '#' && previewUrl(viewerFile) ? (
+                <iframe title={viewerFile.name} src={previewUrl(viewerFile)} style={{ width: '100%', height: '100%', border: 'none' }} allow="autoplay" />
+              ) : (
+                <div style={{ height: '100%', display: 'grid', placeItems: 'center', textAlign: 'center', color: 'var(--text-muted)', padding: 24 }}>
+                  <div>
+                    <FileText style={{ width: 34, height: 34, margin: '0 auto 10px', color: '#CBD5E1' }} />
+                    <div style={{ fontSize: 14, fontWeight: 700, color: 'var(--text-heading)' }}>{viewerFile.name}</div>
+                    <div style={{ fontSize: 13, marginTop: 4 }}>Open a file from this brand's Drive to preview it here.</div>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
 
       <MeetingDetailModal detail={detail} onClose={() => setDetail(null)} />
     </DashboardLayout>
