@@ -13,6 +13,8 @@ import { ADMIN_SIDEBAR } from '../../lib/adminNav';
 const V = '#6D5AE6';
 const V_WASH = '#F1EEFC';
 const initials = (n = '') => n.trim().split(/\s+/).slice(0, 2).map((p) => p[0]).join('').toUpperCase() || 'B';
+const BRAND_COLORS = ['#6D5AE6', '#0EA5E9', '#EC4899', '#F59E0B', '#059669', '#8B5CF6', '#14B8A6', '#F43F5E', '#0748EE', '#D946EF'];
+const bc = (s = '') => BRAND_COLORS[[...s].reduce((h, c) => (h * 31 + c.charCodeAt(0)) >>> 0, 0) % BRAND_COLORS.length];
 // Dummy clients that OWN the real brands (grouped round-robin). Real client tables can come later.
 const CLIENT_DEFS = [
   { name: 'Ajmera Ventures', industry: 'D2C Holding', contact: 'partner@ajmeraventures.com', color: '#6D5AE6' },
@@ -82,12 +84,13 @@ const BrandsPage = () => {
             {tab === 'clients' ? (
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: 14 }}>
                 {clients.map((c) => (
-                  <div key={c.name} className="glass-card" style={{ padding: '18px', cursor: 'pointer', transition: 'transform .14s, box-shadow .14s' }}
+                  <div key={c.name} className="glass-card" style={{ padding: '18px', cursor: 'pointer', position: 'relative', overflow: 'hidden', transition: 'transform .16s, box-shadow .16s' }}
                     onClick={() => openClient(c)}
-                    onMouseEnter={(e) => { e.currentTarget.style.transform = 'translateY(-2px)'; e.currentTarget.style.boxShadow = 'var(--card-shadow-hover)'; }}
+                    onMouseEnter={(e) => { e.currentTarget.style.transform = 'translateY(-3px)'; e.currentTarget.style.boxShadow = `0 14px 34px ${c.color}26`; }}
                     onMouseLeave={(e) => { e.currentTarget.style.transform = 'none'; e.currentTarget.style.boxShadow = ''; }}>
+                    <div style={{ position: 'absolute', top: 0, left: 0, right: 0, height: 3, background: `linear-gradient(90deg, ${c.color}, ${c.color}77)` }} />
                     <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 12 }}>
-                      <span style={{ width: 46, height: 46, borderRadius: 14, flexShrink: 0, display: 'grid', placeItems: 'center', color: '#fff', fontWeight: 800, fontSize: 15, background: `linear-gradient(135deg, ${c.color}, ${c.color}CC)` }}>{initials(c.name)}</span>
+                      <span style={{ width: 48, height: 48, borderRadius: '50%', flexShrink: 0, display: 'grid', placeItems: 'center', color: '#fff', fontWeight: 800, fontSize: 15, background: `linear-gradient(135deg, ${c.color}, ${c.color}BB)`, boxShadow: `0 0 0 3px ${c.color}22, 0 4px 10px ${c.color}33` }}>{initials(c.name)}</span>
                       <div style={{ minWidth: 0 }}>
                         <div style={{ fontSize: 15, fontWeight: 800, color: '#0F172A', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{c.name}</div>
                         <div style={{ fontSize: 12, color: '#94A3B8' }}>{c.industry}</div>
@@ -115,27 +118,28 @@ const BrandsPage = () => {
                   <div className="glass-card" style={{ padding: 40, textAlign: 'center', color: '#94A3B8' }}><Building2 style={{ width: 34, height: 34, margin: '0 auto 8px', color: '#CBD5E1' }} /><div style={{ fontSize: 13 }}>No brands{query ? ' match your search' : ' yet'}.</div></div>
                 ) : (
                   <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))', gap: 14 }}>
-                    {shownBrands.map((b) => (
-                      <div key={b.id} className="glass-card" data-testid={`brand-card-${b.id}`} style={{ padding: '18px', cursor: 'pointer', transition: 'transform .14s, box-shadow .14s' }}
+                    {shownBrands.map((b) => { const col = bc(b.name); return (
+                      <div key={b.id} className="glass-card" data-testid={`brand-card-${b.id}`} style={{ padding: '18px', cursor: 'pointer', position: 'relative', overflow: 'hidden', transition: 'transform .16s, box-shadow .16s' }}
                         onClick={() => navigate(`/admin/brands/${b.id}`)}
-                        onMouseEnter={(e) => { e.currentTarget.style.transform = 'translateY(-2px)'; e.currentTarget.style.boxShadow = 'var(--card-shadow-hover)'; }}
+                        onMouseEnter={(e) => { e.currentTarget.style.transform = 'translateY(-3px)'; e.currentTarget.style.boxShadow = `0 14px 34px ${col}26`; }}
                         onMouseLeave={(e) => { e.currentTarget.style.transform = 'none'; e.currentTarget.style.boxShadow = ''; }}>
+                        <div style={{ position: 'absolute', top: 0, left: 0, right: 0, height: 3, background: `linear-gradient(90deg, ${col}, ${col}77)` }} />
                         <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 12 }}>
-                          <span style={{ width: 46, height: 46, borderRadius: 14, flexShrink: 0, overflow: 'hidden', display: 'grid', placeItems: 'center', color: '#fff', fontWeight: 800, fontSize: 15, background: `linear-gradient(135deg, ${V}, #8B5CF6)` }}>
+                          <span style={{ width: 48, height: 48, borderRadius: '50%', flexShrink: 0, overflow: 'hidden', display: 'grid', placeItems: 'center', color: '#fff', fontWeight: 800, fontSize: 15, background: `linear-gradient(135deg, ${col}, ${col}BB)`, boxShadow: `0 0 0 3px ${col}22, 0 4px 10px ${col}33` }}>
                             {b.image_url ? <img src={b.image_url} alt={b.name} style={{ width: '100%', height: '100%', objectFit: 'cover' }} /> : initials(b.name)}
                           </span>
                           <div style={{ minWidth: 0, flex: 1 }}>
                             <div style={{ fontSize: 15, fontWeight: 800, color: '#0F172A', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{b.name}</div>
-                            <span style={{ fontSize: 9.5, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.04em', color: '#059669', background: '#ECFDF5', padding: '2px 8px', borderRadius: 9999 }}>Active</span>
+                            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 9.5, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.04em', color: '#059669', background: '#ECFDF5', padding: '2px 8px', borderRadius: 9999, marginTop: 4 }}><span style={{ width: 5, height: 5, borderRadius: 99, background: '#059669' }} />Active</span>
                           </div>
                         </div>
                         <p style={{ fontSize: 12.5, color: '#64748B', lineHeight: 1.4, minHeight: 34, margin: 0, display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>{b.description || 'No description provided'}</p>
                         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', borderTop: '1px solid #EEF1F8', paddingTop: 10, marginTop: 12 }}>
                           <span style={{ fontSize: 10.5, fontFamily: 'monospace', color: '#94A3B8', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 150 }}>{b.db_name}</span>
-                          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3, fontSize: 12, fontWeight: 700, color: V }}>Open<ChevronRight style={{ width: 13, height: 13 }} /></span>
+                          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3, fontSize: 12, fontWeight: 700, color: col }}>Open<ChevronRight style={{ width: 13, height: 13 }} /></span>
                         </div>
                       </div>
-                    ))}
+                    ); })}
                   </div>
                 )}
               </>
