@@ -224,7 +224,7 @@ const AdminDashboard = () => {
                   <span style={{ fontSize: 12.5, fontWeight: 700, color: '#0F172A' }}>New project</span>
                 </button>
                 {PROJECTS.map((p) => (
-                  <div key={p.name} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '12px', borderRadius: 12, border: '1px solid #EEF1F8', cursor: 'pointer' }}
+                  <div key={p.name} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '12px', borderRadius: 12, border: '1px solid #EEF1F8', cursor: 'pointer', minWidth: 0 }}
                     onMouseEnter={(e) => e.currentTarget.style.background = '#F8FAFF'} onMouseLeave={(e) => e.currentTarget.style.background = 'transparent'}>
                     <span style={{ width: 30, height: 30, borderRadius: 8, flexShrink: 0, background: `${p.color}1A`, color: p.color, display: 'grid', placeItems: 'center', fontWeight: 900, fontSize: 13, fontFamily: 'Barlow' }}>{p.name[0]}</span>
                     <span style={{ minWidth: 0 }}>
