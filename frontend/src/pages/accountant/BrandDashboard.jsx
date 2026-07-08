@@ -148,6 +148,7 @@ const BrandDashboard = () => {
   const [srcQuery, setSrcQuery] = useState('');
   const [detail, setDetail] = useState(null);
   const [prioritized, setPrioritized] = useState(false);
+  const [taskQuery, setTaskQuery] = useState('');
   const [showNewTask, setShowNewTask] = useState(false);
   const [ntTitle, setNtTitle] = useState('');
   const [ntDesc, setNtDesc] = useState('');
@@ -270,7 +271,16 @@ const BrandDashboard = () => {
     const byPrio = (a, b) => (PRIORITY[a.priority]?.rank ?? 2) - (PRIORITY[b.priority]?.rank ?? 2);
     return [...open].sort(prioritized ? (a, b) => byPrio(a, b) || byDue(a, b) : (a, b) => byDue(a, b) || byPrio(a, b));
   }, [agenda, prioritized]);
-  const nextTask = openAgg[0] || null;
+  // My Tasks card = current month only (undated kept) + search box. The full set
+  // across all months opens via "See all tasks" → Statutory tracker Calendar.
+  const myTasksList = useMemo(() => {
+    const ym = todayKey().slice(0, 7);
+    const q = taskQuery.trim().toLowerCase();
+    return openAgg
+      .filter((t) => !t.due || dayKeyOf(t.due).slice(0, 7) === ym)
+      .filter((t) => !q || (t.title || '').toLowerCase().includes(q));
+  }, [openAgg, taskQuery]);
+  const nextTask = myTasksList[0] || null;
 
   const trendData = useMemo(() => monthly.map((m) => ({ label: m.label, runs: Number(m.jobs) || 0 })), [monthly]);
   const hasData = totalRuns > 0;
@@ -428,7 +438,7 @@ const BrandDashboard = () => {
         {/* ── Row 1: Previously viewed files · Next Meeting ──────────────── */}
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: '14px', marginBottom: '16px' }}>
           {/* Previously viewed files */}
-          <Panel>
+          <Panel style={{ background: 'linear-gradient(135deg, #FFFBEB 0%, #FFFFFF 72%)' }}>
             <div style={{ ...SECTION_TITLE, justifyContent: 'space-between' }}>
               <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}><History style={{ width: 14, height: 14 }} /> Previously viewed files</span>
               <span style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-faint, #94A0B8)' }}>From Drive · latest first</span>
@@ -441,10 +451,9 @@ const BrandDashboard = () => {
                   const t = fileTint(f.mimeType);
                   return (
                     <a key={`pv-${f.id}`} href={f.webViewLink || '#'} target="_blank" rel="noreferrer"
-                      className="pv-file"
-                      style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '9px 10px', borderRadius: 12, textDecoration: 'none', border: '1px solid var(--card-border)', background: 'var(--surface)', transition: 'all .16s ease' }}
-                      onMouseEnter={(e) => { e.currentTarget.style.borderColor = '#B9CCF7'; e.currentTarget.style.transform = 'translateY(-1px)'; e.currentTarget.style.boxShadow = 'var(--card-shadow-hover)'; }}
-                      onMouseLeave={(e) => { e.currentTarget.style.borderColor = 'var(--card-border)'; e.currentTarget.style.transform = 'none'; e.currentTarget.style.boxShadow = 'none'; }}>
+                      style={{ display: 'flex', alignItems: 'center', gap: 11, padding: '8px 10px', borderRadius: 10, textDecoration: 'none', transition: 'background .14s ease' }}
+                      onMouseEnter={(e) => { e.currentTarget.style.background = 'rgba(255,255,255,0.8)'; }}
+                      onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent'; }}>
                       <span style={{ width: 30, height: 30, borderRadius: 9, background: t.bg, color: t.c, display: 'grid', placeItems: 'center', flexShrink: 0 }}><FileText style={{ width: 16, height: 16 }} /></span>
                       <span style={{ flex: 1, minWidth: 0, fontSize: 13, fontWeight: 600, color: 'var(--text-heading)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{f.name}</span>
                       {f.size != null && <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>{prettySize(f.size)}</span>}
@@ -547,6 +556,10 @@ const BrandDashboard = () => {
                 </button>
               </div>
             </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, background: 'var(--surface-2, #F8FAFF)', border: '1px solid var(--card-border)', borderRadius: 10, padding: '7px 11px', marginBottom: 10 }}>
+              <Search style={{ width: 14, height: 14, color: '#94A3B8' }} />
+              <input value={taskQuery} onChange={(e) => setTaskQuery(e.target.value)} placeholder="Search tasks…" style={{ flex: 1, border: 'none', background: 'transparent', outline: 'none', fontSize: 12.5, color: 'var(--text-heading)' }} />
+            </div>
             {nextTask && (
               <div style={{ background: '#EFF6FF', border: '1px solid #BFDBFE', borderRadius: 10, padding: '10px 12px', marginBottom: 10 }}>
                 <div style={{ fontSize: 10, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', color: '#0748EE', marginBottom: 3 }}>Up next</div>
@@ -555,9 +568,9 @@ const BrandDashboard = () => {
               </div>
             )}
             <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflowY: 'auto', maxHeight: 220 }}>
-              {openAgg.length === 0 ? (
-                <div style={{ fontSize: 13, color: 'var(--text-muted)', padding: '12px 0' }}>No open tasks. You're all caught up.</div>
-              ) : openAgg.slice(0, 8).map((t) => {
+              {myTasksList.length === 0 ? (
+                <div style={{ fontSize: 13, color: 'var(--text-muted)', padding: '12px 0' }}>{taskQuery ? 'No tasks match your search.' : 'Nothing due this month. You’re all caught up.'}</div>
+              ) : myTasksList.slice(0, 8).map((t) => {
                 const st = TASK_STATUS[t.status] || TASK_STATUS.pending;
                 const pr = PRIORITY[t.priority] || PRIORITY.medium;
                 const src = SRC[t.source] || SRC.task;
@@ -571,9 +584,14 @@ const BrandDashboard = () => {
                 );
               })}
             </div>
-            <button onClick={() => navigate('/tasks')} style={{ marginTop: 10, fontSize: 13, fontWeight: 600, color: '#0748EE', background: 'none', border: 'none', cursor: 'pointer', textAlign: 'left' }}>
-              Manage tasks →
-            </button>
+            <div style={{ marginTop: 10, display: 'flex', alignItems: 'center', gap: 14 }}>
+              <button onClick={() => navigate(`/brands/${brandId}/statutory-compliance?view=calendar`)} style={{ fontSize: 13, fontWeight: 700, color: '#0748EE', background: 'none', border: 'none', cursor: 'pointer' }}>
+                See all tasks →
+              </button>
+              <button onClick={() => navigate('/tasks')} style={{ fontSize: 12.5, fontWeight: 600, color: 'var(--text-muted)', background: 'none', border: 'none', cursor: 'pointer' }}>
+                Manage tasks
+              </button>
+            </div>
           </Panel>
         </div>
 

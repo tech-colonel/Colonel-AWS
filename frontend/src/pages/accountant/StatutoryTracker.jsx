@@ -417,7 +417,7 @@ export default function StatutoryTracker() {
   const [denied, setDenied] = useState(false);
   const [year, setYear] = useState(2026);
   const [month, setMonth] = useState(nowMonth());
-  const [view, setView] = useState('kanban');
+  const [view, setView] = useState(() => (typeof window !== 'undefined' && /[?&]view=calendar/.test(window.location.search) ? 'calendar' : 'kanban'));
   const [activeCat, setActiveCat] = useState('all');
   const [filters, setFilters] = useState({ quick: { state: '', periodType: '', status: '' }, conditions: [] });
   const [panel, setPanel] = useState(null);
