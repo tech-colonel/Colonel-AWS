@@ -45,11 +45,15 @@ const AnalysisPage = () => {
   const [brand, setBrand] = useState(null);
   const [summary, setSummary] = useState(null);
   const [activity, setActivity] = useState([]);
+  const [compliance, setCompliance] = useState([]);
+  const [statutory, setStatutory] = useState([]);
 
   useEffect(() => {
     api.get(`/api/brands/${brandId}`).then((r) => setBrand(r.data)).catch(() => {});
     api.get(`/api/dashboard/summary/${brandId}`).then((r) => setSummary(r.data)).catch(() => setSummary(null));
     api.get(`/api/dashboard/activity/${brandId}?days=30`).then((r) => setActivity(Array.isArray(r.data?.days) ? r.data.days : [])).catch(() => setActivity([]));
+    api.get(`/api/brands/${brandId}/compliance`).then((r) => setCompliance(Array.isArray(r.data?.tasks) ? r.data.tasks : (Array.isArray(r.data) ? r.data : []))).catch(() => setCompliance([]));
+    api.get(`/api/brands/${brandId}/statutory`).then((r) => setStatutory(Array.isArray(r.data?.filings) ? r.data.filings : (Array.isArray(r.data) ? r.data : []))).catch(() => setStatutory([]));
   }, [brandId]);
 
   const sidebarItems = sidebarFor([
@@ -66,6 +70,20 @@ const AnalysisPage = () => {
   const matchRate = s.match_rate != null ? s.match_rate : (totalRows ? Math.round(((s.matched_rows || 0) / totalRows) * 100) : 0);
   const savedHrs = useMemo(() => hoursSaved(totalRows, totalRuns), [totalRows, totalRuns]);
 
+  // Compliance analytics — merge Compliance Tracker + Statutory filings.
+  const compStats = useMemo(() => {
+    const today = new Date().toISOString().slice(0, 10);
+    const items = [];
+    (compliance || []).forEach((c) => items.push({ status: c.status === 'done' ? 'done' : 'open', due: c.due_date }));
+    (statutory || []).forEach((f) => { if (f.status === 'not_applicable') return; items.push({ status: f.status === 'filed' ? 'done' : 'open', due: f.due_date }); });
+    const total = items.length;
+    const done = items.filter((i) => i.status === 'done').length;
+    const overdue = items.filter((i) => i.status !== 'done' && i.due && String(i.due).slice(0, 10) < today).length;
+    const pending = Math.max(0, total - done - overdue);
+    const onTime = total ? Math.round((done / total) * 100) : 0;
+    return { total, done, overdue, pending, onTime };
+  }, [compliance, statutory]);
+
   const trend = useMemo(() => monthly.map((m) => ({ label: m.label, runs: Number(m.jobs) || 0, rows: Number(m.matched || 0) + Number(m.unmatched || 0) })), [monthly]);
   const spark = useMemo(() => (trend.length ? trend.map((t) => ({ v: t.runs })) : [{ v: 0 }, { v: 0 }]), [trend]);
   const toolBars = useMemo(() => byAgent.map((a) => ({ key: a.agent_type, name: agentLabel(a.agent_type), runs: Number(a.runs) || 0 })), [byAgent]);
@@ -77,6 +95,8 @@ const AnalysisPage = () => {
     const rows = [['Tool', 'Runs', 'Rows', 'Matched', 'Time saved (hrs)', 'Last run']];
     byAgent.forEach((a) => rows.push([agentLabel(a.agent_type), a.runs, a.total_rows, a.matched_rows, hoursSaved(a.total_rows, a.runs), fmtDate(a.last_run)]));
     rows.push([]); rows.push(['Totals', totalRuns, totalRows, s.matched_rows || 0, savedHrs, '']);
+    rows.push([]); rows.push(['Compliance', 'Tracked', 'On-time %', 'Pending', 'Overdue', '']);
+    rows.push(['', compStats.total, compStats.onTime, compStats.pending, compStats.overdue, '']);
     const csv = rows.map((r) => r.map((c) => `"${String(c ?? '')}"`).join(',')).join('\n');
     const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
     const a = document.createElement('a'); a.href = url; a.download = `${brand?.name || 'brand'}-analysis.csv`; a.click(); URL.revokeObjectURL(url);
@@ -85,8 +105,11 @@ const AnalysisPage = () => {
   const tabBtn = (active) => ({ display: 'inline-flex', alignItems: 'center', gap: 7, padding: '9px 16px', borderRadius: 9999, fontSize: 13, fontWeight: 700, cursor: 'pointer', background: active ? 'var(--text-heading)' : 'var(--surface)', color: active ? '#fff' : 'var(--text-heading)', border: `1px solid ${active ? 'var(--text-heading)' : 'var(--card-border)'}`, boxShadow: 'var(--card-shadow)' });
   const SECTION = { fontSize: 12, fontWeight: 800, letterSpacing: '0.05em', textTransform: 'uppercase', color: 'var(--text-muted)', margin: '22px 0 12px' };
 
-  const Kpi = ({ icon: Icon, label, value, sub, color, bg }) => (
-    <div className="glass-card" style={{ padding: '16px 18px' }}>
+  const Kpi = ({ icon: Icon, label, value, sub, color, bg, mkey }) => (
+    <div className="glass-card" onClick={mkey ? () => navigate(`/brands/${brandId}/analysis/metric/${mkey}`) : undefined}
+      style={{ padding: '16px 18px', cursor: mkey ? 'pointer' : 'default', transition: 'transform .18s ease, box-shadow .18s ease' }}
+      onMouseEnter={(e) => { if (mkey) { e.currentTarget.style.transform = 'translateY(-2px)'; e.currentTarget.style.boxShadow = 'var(--card-shadow-hover)'; } }}
+      onMouseLeave={(e) => { e.currentTarget.style.transform = 'none'; e.currentTarget.style.boxShadow = ''; }}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
         <span style={{ fontSize: 11, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'var(--text-muted)' }}>{label}</span>
         <span style={{ width: 32, height: 32, borderRadius: 9, background: bg, display: 'grid', placeItems: 'center' }}><Icon style={{ width: 16, height: 16, color }} /></span>
@@ -140,10 +163,10 @@ const AnalysisPage = () => {
 
         {/* KPIs */}
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(210px, 1fr))', gap: 12 }}>
-          <Kpi icon={Activity} label="Total Runs" value={fmtNum(totalRuns)} sub="across all tools" color={BLUE} bg="#E8EFFE" />
-          <Kpi icon={Rows3} label="Rows Processed" value={fmtNum(totalRows)} sub={`${matchRate}% matched`} color="#7C3AED" bg="#F5F3FF" />
-          <Kpi icon={Clock} label="Time Saved" value={`≈ ${savedHrs} hrs`} sub="vs. manual work" color="#059669" bg="#ECFDF5" />
-          <Kpi icon={Bot} label="Active Agents" value={fmtNum(byAgent.length)} sub="with runs" color="#EA580C" bg="#FFF7ED" />
+          <Kpi mkey="runs" icon={Activity} label="Total Runs" value={fmtNum(totalRuns)} sub="across all tools" color={BLUE} bg="#E8EFFE" />
+          <Kpi mkey="rows" icon={Rows3} label="Rows Processed" value={fmtNum(totalRows)} sub={`${matchRate}% matched`} color="#7C3AED" bg="#F5F3FF" />
+          <Kpi mkey="time" icon={Clock} label="Time Saved" value={`≈ ${savedHrs} hrs`} sub="vs. manual work" color="#059669" bg="#ECFDF5" />
+          <Kpi mkey="agents" icon={Bot} label="Active Agents" value={fmtNum(byAgent.length)} sub="with runs" color="#EA580C" bg="#FFF7ED" />
         </div>
 
         {/* Usage & progress */}
@@ -228,6 +251,22 @@ const AnalysisPage = () => {
               </div>
             )}
           </Panel>
+        </div>
+
+        {/* Compliance analytics */}
+        <div style={SECTION}>Compliance</div>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 12 }}>
+          {[
+            { l: 'Filings tracked', v: fmtNum(compStats.total), c: BLUE },
+            { l: 'On-time', v: `${compStats.onTime}%`, c: '#059669' },
+            { l: 'Pending', v: fmtNum(compStats.pending), c: '#D97706' },
+            { l: 'Overdue', v: fmtNum(compStats.overdue), c: '#E11D48' },
+          ].map((x) => (
+            <div key={x.l} className="glass-card" style={{ padding: '16px 18px' }}>
+              <div style={{ fontSize: 11, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'var(--text-muted)' }}>{x.l}</div>
+              <div style={{ fontFamily: 'Barlow, sans-serif', fontWeight: 900, fontSize: 26, lineHeight: 1.05, marginTop: 6, color: x.c }}>{x.v}</div>
+            </div>
+          ))}
         </div>
 
         {/* Per-agent breakdown */}

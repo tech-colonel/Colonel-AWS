@@ -25,6 +25,7 @@ import BrandSelection        from './pages/accountant/BrandSelection';
 import BrandDashboard        from './pages/accountant/BrandDashboard';
 import AnalysisPage          from './pages/accountant/AnalysisPage';
 import AnalysisAgentPage     from './pages/accountant/AnalysisAgentPage';
+import AnalysisMetricPage    from './pages/accountant/AnalysisMetricPage';
 import BrandAgentsInventory  from './pages/accountant/BrandAgentsInventory';
 import AgentWorkspace        from './pages/accountant/AgentWorkspace';
 import AgentDispatch         from './pages/accountant/AgentDispatch';
@@ -190,6 +191,14 @@ function App() {
             element={
               <ProtectedRoute allowedRoles={['accountant', 'admin']}>
                 <AnalysisAgentPage />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/brands/:brandId/analysis/metric/:metric"
+            element={
+              <ProtectedRoute allowedRoles={['accountant', 'admin']}>
+                <AnalysisMetricPage />
               </ProtectedRoute>
             }
           />
