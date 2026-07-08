@@ -2,8 +2,9 @@ import React, { useState, useEffect, useMemo } from 'react';
 import DashboardLayout from '../../components/layout/DashboardLayout';
 import {
   Building2, Bot, Users, Activity, Layers, Target, ClipboardList, Flag,
-  BarChart3, LayoutDashboard, Plus, CalendarDays, Sparkles, Briefcase, Crown,
+  BarChart3, LayoutDashboard, Plus, CalendarDays, Sparkles, Briefcase, Crown, Video, X,
 } from 'lucide-react';
+import { toast } from 'sonner';
 import { useNavigate } from 'react-router-dom';
 import { ResponsiveContainer, AreaChart, Area, PieChart, Pie, Cell, XAxis, YAxis, CartesianGrid, Tooltip, Legend } from 'recharts';
 import api from '../../lib/api';
@@ -27,11 +28,21 @@ const DONUT_CYCLE = [V, '#0EA5E9', '#EC4899', '#F59E0B', '#059669', '#0748EE', '
 
 /* dummy entities (Projects + Goals are new concepts — real tables can come later) */
 const PROJECTS = [
-  { name: 'Q1 Reconciliation Cleanup', tasks: 12, teammates: 5, color: '#6D5AE6' },
-  { name: 'Amazon Settlement Automation', tasks: 8, teammates: 3, color: '#0EA5E9' },
-  { name: 'New Brand Onboarding — Amama', tasks: 6, teammates: 4, color: '#EC4899' },
-  { name: 'Statutory Filing Sprint — July', tasks: 15, teammates: 7, color: '#F59E0B' },
+  { name: 'Q1 Reconciliation Cleanup', tasks: 12, teammates: 5, color: '#6D5AE6', progress: 72, due: '18 Jul', status: 'On track', lead: 'Priya', members: ['Priya', 'Rahul', 'Amjad', 'Vidhi', 'Kunal'], items: ['Close Koparo Apr–Jun', 'Fix GSTR-2B mismatches', 'Vendor ledger cleanup', 'Client sign-off pack'] },
+  { name: 'Amazon Settlement Automation', tasks: 8, teammates: 3, color: '#0EA5E9', progress: 45, due: '25 Jul', status: 'At risk', lead: 'Rahul', members: ['Rahul', 'Shrikant', 'Manisha'], items: ['MTR consolidator run', 'Settlement reconciliation', 'Fee validation'] },
+  { name: 'New Brand Onboarding — Amama', tasks: 6, teammates: 4, color: '#EC4899', progress: 30, due: '30 Jul', status: 'On track', lead: 'Riya', members: ['Riya', 'Jayesh', 'Akshat', 'Vidhi'], items: ['Create brand DB', 'Assign agents', 'Upload masters', 'Kickoff call'] },
+  { name: 'Statutory Filing Sprint — July', tasks: 15, teammates: 7, color: '#F59E0B', progress: 88, due: '20 Jul', status: 'On track', lead: 'Prashant', members: ['Prashant', 'Priya', 'Rahul', 'Amjad', 'Vidhi', 'Kunal', 'Riya'], items: ['GSTR-3B all brands', 'TDS 26Q', 'PF / ESIC', 'ROC annual'] },
 ];
+// fake calendar events per weekday (0=Mon … 6=Sun)
+const CAL_EVENTS = {
+  0: [{ t: 'Team standup', time: '10:00 am', c: '#6D5AE6' }, { t: 'Koparo reco review', time: '02:30 pm', c: '#0EA5E9' }],
+  1: [{ t: 'Client call — Amama onboarding', time: '11:00 am', c: '#EC4899' }],
+  2: [{ t: 'GSTR-3B checkpoint', time: '04:00 pm', c: '#F59E0B' }],
+  3: [{ t: 'GST Filing Review — June', time: '11:00 am', c: '#059669' }, { t: 'Board review — Q1 FY27', time: '05:00 pm', c: '#6D5AE6' }],
+  4: [{ t: 'Bank reco walkthrough', time: '03:00 pm', c: '#0EA5E9' }],
+  5: [{ t: 'Portfolio review', time: '12:00 pm', c: '#6D5AE6' }],
+  6: [],
+};
 const GOALS = [
   { label: 'Onboard 3 new brands this quarter', ctx: 'Growth', pctv: 66, color: V },
   { label: 'Close all June reconciliations', ctx: 'Operations', pctv: 82, color: '#059669' },
@@ -82,6 +93,10 @@ const AdminDashboard = () => {
   const [tasks, setTasks] = useState([]);
   const [meetings, setMeetings] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [projectModal, setProjectModal] = useState(null);
+  const [newProjectOpen, setNewProjectOpen] = useState(false);
+  const todayIdx = (new Date().getDay() + 6) % 7;
+  const [selDay, setSelDay] = useState(todayIdx);
 
   useEffect(() => { fetchAll(); }, []);
   const fetchAll = async () => {
@@ -219,12 +234,12 @@ const AdminDashboard = () => {
                 <div style={{ display: 'inline-flex', alignItems: 'center', gap: 8, fontSize: 15, fontWeight: 800, color: '#0F172A' }}><Briefcase style={{ width: 16, height: 16, color: V }} /> Projects</div>
               </div>
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
-                <button onClick={() => navigate('/admin/tasks')} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '12px', borderRadius: 12, border: '1px dashed #CBD5E1', background: 'transparent', cursor: 'pointer', textAlign: 'left' }}>
+                <button onClick={() => setNewProjectOpen(true)} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '12px', borderRadius: 12, border: '1px dashed #CBD5E1', background: 'transparent', cursor: 'pointer', textAlign: 'left' }}>
                   <span style={{ width: 30, height: 30, borderRadius: 8, display: 'grid', placeItems: 'center', background: V_WASH, color: V }}><Plus style={{ width: 16, height: 16 }} /></span>
                   <span style={{ fontSize: 12.5, fontWeight: 700, color: '#0F172A' }}>New project</span>
                 </button>
                 {PROJECTS.map((p) => (
-                  <div key={p.name} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '12px', borderRadius: 12, border: '1px solid #EEF1F8', cursor: 'pointer', minWidth: 0 }}
+                  <div key={p.name} onClick={() => setProjectModal(p)} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '12px', borderRadius: 12, border: '1px solid #EEF1F8', cursor: 'pointer', minWidth: 0 }}
                     onMouseEnter={(e) => e.currentTarget.style.background = '#F8FAFF'} onMouseLeave={(e) => e.currentTarget.style.background = 'transparent'}>
                     <span style={{ width: 30, height: 30, borderRadius: 8, flexShrink: 0, background: `${p.color}1A`, color: p.color, display: 'grid', placeItems: 'center', fontWeight: 900, fontSize: 13, fontFamily: 'Barlow' }}>{p.name[0]}</span>
                     <span style={{ minWidth: 0 }}>
@@ -239,20 +254,47 @@ const AdminDashboard = () => {
             <div className="glass-card" style={{ padding: '18px 20px' }}>
               <div style={{ display: 'inline-flex', alignItems: 'center', gap: 8, fontSize: 15, fontWeight: 800, color: '#0F172A', marginBottom: 12 }}><CalendarDays style={{ width: 16, height: 16, color: V }} /> Calendar</div>
               <div style={{ display: 'flex', justifyContent: 'space-between', gap: 6, marginBottom: 12 }}>
-                {week.map((d, i) => (
-                  <div key={i} style={{ flex: 1, textAlign: 'center', padding: '8px 0', borderRadius: 10, background: d.today ? V : 'transparent', color: d.today ? '#fff' : '#0F172A' }}>
-                    <div style={{ fontSize: 10, fontWeight: 700, opacity: d.today ? 0.85 : 0.5 }}>{d.dow}</div>
-                    <div style={{ fontSize: 15, fontWeight: 800, fontFamily: 'Barlow' }}>{d.day}</div>
-                  </div>
-                ))}
+                {week.map((d, i) => {
+                  const sel = i === selDay;
+                  return (
+                    <button key={i} onClick={() => setSelDay(i)} style={{ flex: 1, textAlign: 'center', padding: '8px 0', borderRadius: 10, border: 'none', cursor: 'pointer', background: sel ? V : (d.today ? V_WASH : 'transparent'), color: sel ? '#fff' : '#0F172A', transition: 'background .14s' }}>
+                      <div style={{ fontSize: 10, fontWeight: 700, opacity: sel ? 0.85 : 0.5 }}>{d.dow}</div>
+                      <div style={{ fontSize: 15, fontWeight: 800, fontFamily: 'Barlow' }}>{d.day}</div>
+                    </button>
+                  );
+                })}
               </div>
-              {nextMeeting ? (
-                <div style={{ background: V_WASH, borderRadius: 12, padding: '12px 14px' }}>
-                  <div style={{ fontSize: 13.5, fontWeight: 800, color: '#0F172A', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{nextMeeting.title}</div>
-                  <div style={{ fontSize: 12, color: '#64748B', marginTop: 2 }}>{(() => { try { return new Date(nextMeeting.start).toLocaleString('en-IN', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }); } catch { return ''; } })()}</div>
-                  {nextMeeting.joinLink && <a href={nextMeeting.joinLink} target="_blank" rel="noreferrer" style={{ marginTop: 8, display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12, fontWeight: 700, color: '#fff', background: V, borderRadius: 8, padding: '6px 11px', textDecoration: 'none' }}>Join now</a>}
+              {(() => {
+                const clock = (s) => { try { return new Date(s).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' }); } catch { return ''; } };
+                const evs = [
+                  ...(selDay === todayIdx && nextMeeting ? [{ t: nextMeeting.title, time: clock(nextMeeting.start), c: V, join: nextMeeting.joinLink }] : []),
+                  ...(CAL_EVENTS[selDay] || []),
+                ];
+                if (!evs.length) return <div style={{ fontSize: 13, color: '#94A3B8', padding: '8px 0' }}>Nothing scheduled — enjoy the quiet 🌿</div>;
+                return <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>{evs.map((e, i) => (
+                  <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 10, background: 'var(--surface-2,#F8FAFF)', borderRadius: 10, padding: '10px 12px' }}>
+                    <span style={{ width: 8, height: 8, borderRadius: 99, background: e.c, flexShrink: 0 }} />
+                    <span style={{ fontSize: 12.5, fontWeight: 700, color: '#0F172A', flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{e.t}</span>
+                    <span style={{ fontSize: 11.5, color: '#64748B', whiteSpace: 'nowrap' }}>{e.time}</span>
+                    {e.join && <a href={e.join} target="_blank" rel="noreferrer" style={{ fontSize: 11, fontWeight: 700, color: '#fff', background: V, borderRadius: 8, padding: '4px 9px', textDecoration: 'none' }}>Join</a>}
+                  </div>
+                ))}</div>;
+              })()}
+            </div>
+
+            {/* Meetings */}
+            <div className="glass-card" style={{ padding: '18px 20px' }}>
+              <div style={{ display: 'inline-flex', alignItems: 'center', gap: 8, fontSize: 15, fontWeight: 800, color: '#0F172A', marginBottom: 12 }}><Video style={{ width: 16, height: 16, color: V }} /> My Meetings</div>
+              {meetings.length === 0 ? <div style={{ fontSize: 13, color: '#94A3B8' }}>No upcoming meetings.</div> : meetings.slice(0, 4).map((m, i) => (
+                <div key={m.id || i} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 0', borderTop: i ? '1px solid #EEF1F8' : 'none' }}>
+                  <span style={{ width: 30, height: 30, borderRadius: 8, background: V_WASH, color: V, display: 'grid', placeItems: 'center', flexShrink: 0 }}><Video style={{ width: 14, height: 14 }} /></span>
+                  <div style={{ minWidth: 0, flex: 1 }}>
+                    <div style={{ fontSize: 12.5, fontWeight: 700, color: '#0F172A', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{m.title}</div>
+                    <div style={{ fontSize: 11, color: '#94A3B8' }}>{(() => { try { return new Date(m.start).toLocaleString('en-IN', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }); } catch { return ''; } })()}</div>
+                  </div>
+                  {m.joinLink && <a href={m.joinLink} target="_blank" rel="noreferrer" style={{ fontSize: 11, fontWeight: 700, color: '#fff', background: V, borderRadius: 8, padding: '5px 10px', textDecoration: 'none' }}>Join</a>}
                 </div>
-              ) : <div style={{ fontSize: 13, color: '#94A3B8' }}>No upcoming meetings.</div>}
+              ))}
             </div>
           </div>
         </div>
@@ -324,6 +366,55 @@ const AdminDashboard = () => {
 
         {loading && <div style={{ marginTop: 16, fontSize: 12, color: '#94A3B8', textAlign: 'center' }}>Loading platform data…</div>}
       </div>
+
+      {/* Project detail modal (fake) */}
+      {projectModal && (
+        <div onClick={() => setProjectModal(null)} style={{ position: 'fixed', inset: 0, zIndex: 80, background: 'rgba(10,15,46,.45)', display: 'grid', placeItems: 'center', padding: 24 }}>
+          <div onClick={(e) => e.stopPropagation()} className="glass-card" style={{ width: 'min(560px, 100%)', maxHeight: '85vh', overflowY: 'auto', padding: 0 }}>
+            <div style={{ padding: '20px 22px', borderBottom: '1px solid #E6EAF3', display: 'flex', alignItems: 'center', gap: 12 }}>
+              <span style={{ width: 44, height: 44, borderRadius: 13, background: `${projectModal.color}1A`, color: projectModal.color, display: 'grid', placeItems: 'center', fontWeight: 900, fontFamily: 'Barlow', fontSize: 17, flexShrink: 0 }}>{projectModal.name[0]}</span>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 17, fontWeight: 800, color: '#0F172A' }}>{projectModal.name}</div>
+                <div style={{ fontSize: 12, color: '#64748B' }}>Lead {projectModal.lead} · due {projectModal.due} · <span style={{ color: projectModal.status === 'At risk' ? '#E11D48' : '#059669', fontWeight: 700 }}>{projectModal.status}</span></div>
+              </div>
+              <button onClick={() => setProjectModal(null)} style={{ width: 30, height: 30, borderRadius: 8, border: '1px solid #E6EAF3', background: '#fff', display: 'grid', placeItems: 'center', cursor: 'pointer', color: '#64748B' }}><X style={{ width: 15, height: 15 }} /></button>
+            </div>
+            <div style={{ padding: '18px 22px' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, marginBottom: 6 }}><span style={{ color: '#64748B', fontWeight: 700 }}>Progress</span><span style={{ fontWeight: 800, color: '#0F172A' }}>{projectModal.progress}%</span></div>
+              <div style={{ height: 8, borderRadius: 6, background: '#F1F5F9', overflow: 'hidden', marginBottom: 18 }}><div style={{ height: '100%', width: `${projectModal.progress}%`, background: `linear-gradient(90deg, ${projectModal.color}, ${projectModal.color}CC)` }} /></div>
+              <div style={{ fontSize: 11, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.05em', color: '#94A3B8', marginBottom: 8 }}>Team · {projectModal.teammates}</div>
+              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 18 }}>{projectModal.members.map((m) => (
+                <span key={m} style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12, fontWeight: 600, color: '#0F172A', background: '#F8FAFF', border: '1px solid #E6EAF3', borderRadius: 9999, padding: '4px 10px' }}><span style={{ width: 20, height: 20, borderRadius: '50%', background: `linear-gradient(135deg, ${V}, #8B5CF6)`, color: '#fff', display: 'grid', placeItems: 'center', fontSize: 9, fontWeight: 800 }}>{m[0]}</span>{m}</span>
+              ))}</div>
+              <div style={{ fontSize: 11, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.05em', color: '#94A3B8', marginBottom: 6 }}>Tasks · {projectModal.tasks}</div>
+              <div>{projectModal.items.map((it, idx) => { const doneCount = Math.round(projectModal.items.length * projectModal.progress / 100); const done = idx < doneCount; return (
+                <div key={idx} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '9px 0', borderTop: idx ? '1px solid #EEF1F8' : 'none' }}>
+                  <span style={{ width: 16, height: 16, borderRadius: 5, border: `1.8px solid ${done ? '#059669' : '#C6D0E4'}`, background: done ? '#059669' : 'transparent', flexShrink: 0 }} />
+                  <span style={{ fontSize: 13, color: '#0F172A', textDecoration: done ? 'line-through' : 'none', opacity: done ? 0.6 : 1 }}>{it}</span>
+                </div>
+              ); })}</div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* New project modal (fake) */}
+      {newProjectOpen && (
+        <div onClick={() => setNewProjectOpen(false)} style={{ position: 'fixed', inset: 0, zIndex: 80, background: 'rgba(10,15,46,.45)', display: 'grid', placeItems: 'center', padding: 24 }}>
+          <div onClick={(e) => e.stopPropagation()} className="glass-card" style={{ width: 'min(460px, 100%)', padding: '22px 24px' }}>
+            <div style={{ fontSize: 17, fontWeight: 800, color: '#0F172A' }}>New project</div>
+            <p style={{ fontSize: 13, color: '#64748B', margin: '4px 0 16px' }}>Spin up a client engagement.</p>
+            <label style={{ fontSize: 12, fontWeight: 700, color: '#64748B' }}>Project name</label>
+            <input placeholder="e.g. Q2 Reconciliation Cleanup" style={{ width: '100%', margin: '5px 0 12px', fontSize: 14, borderRadius: 10, border: '1px solid #E2E8F0', padding: '9px 12px', outline: 'none' }} />
+            <label style={{ fontSize: 12, fontWeight: 700, color: '#64748B' }}>Description</label>
+            <input placeholder="What's this project about?" style={{ width: '100%', margin: '5px 0 4px', fontSize: 14, borderRadius: 10, border: '1px solid #E2E8F0', padding: '9px 12px', outline: 'none' }} />
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10, marginTop: 16 }}>
+              <button onClick={() => setNewProjectOpen(false)} style={{ padding: '9px 16px', borderRadius: 10, border: '1px solid #E2E8F0', background: '#fff', color: '#334155', fontSize: 13, fontWeight: 600, cursor: 'pointer' }}>Cancel</button>
+              <button onClick={() => { setNewProjectOpen(false); toast.success('Project created'); }} style={{ padding: '9px 18px', borderRadius: 10, border: 'none', background: V, color: '#fff', fontSize: 13, fontWeight: 700, cursor: 'pointer' }}>Create project</button>
+            </div>
+          </div>
+        </div>
+      )}
     </DashboardLayout>
   );
 };
