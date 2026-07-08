@@ -320,11 +320,16 @@ const BrandDashboard = () => {
     const isDoc = (m) => /(document|word|gdoc|text)/i.test(m || '');
     const isPdf = (m) => /pdf/i.test(m || '');
     let list = driveShown;
-    if (srcTab === 'Images') list = driveShown.filter((f) => isImg(f.mimeType));
-    else if (srcTab === 'Video') list = driveShown.filter((f) => isVideo(f.mimeType));
-    else if (srcTab === 'Sheets') list = driveShown.filter((f) => isSheet(f.mimeType));
-    else if (srcTab === 'Docs') list = driveShown.filter((f) => isDoc(f.mimeType));
-    else if (srcTab === 'PDFs') list = driveShown.filter((f) => isPdf(f.mimeType));
+    // Folders always stay visible (they're navigation); the type filter only
+    // applies to files, so a folder-level never looks empty.
+    if (srcTab !== 'All') {
+      list = driveShown.filter((f) => f.isFolder
+        || (srcTab === 'Images' && isImg(f.mimeType))
+        || (srcTab === 'Video' && isVideo(f.mimeType))
+        || (srcTab === 'Sheets' && isSheet(f.mimeType))
+        || (srcTab === 'Docs' && isDoc(f.mimeType))
+        || (srcTab === 'PDFs' && isPdf(f.mimeType)));
+    }
     const q = srcQuery.trim().toLowerCase();
     return q ? list.filter((f) => (f.name || '').toLowerCase().includes(q)) : list;
   }, [driveShown, srcTab, srcQuery]);
@@ -357,6 +362,17 @@ const BrandDashboard = () => {
     navigate('/chat', { state: aiPrompt.trim() ? { prompt: aiPrompt.trim() } : undefined });
   };
 
+  // Join a meeting: send the Fireflies notetaker into the live Meet, then open it.
+  const joinMeeting = async (m) => {
+    const link = m?.joinLink;
+    if (!link) return;
+    try {
+      const r = await api.post('/api/meetings/fireflies/join', { meetingLink: link, title: m.title });
+      if (r.data?.ok) toast.success('Fireflies notetaker is joining this meeting');
+    } catch (_) { /* non-blocking — still open the meeting */ }
+    window.open(link, '_blank', 'noopener');
+  };
+
   const submitNewTask = async () => {
     if (!ntTitle.trim() || ntBusy) return;
     setNtBusy(true);
@@ -383,9 +399,11 @@ const BrandDashboard = () => {
   const previewUrl = (f) => {
     if (!f?.id) return null;
     const m = f.mimeType || '';
-    if (/spreadsheet/.test(m)) return `https://docs.google.com/spreadsheets/d/${f.id}/preview`;
-    if (/document/.test(m)) return `https://docs.google.com/document/d/${f.id}/preview`;
-    if (/presentation/.test(m)) return `https://docs.google.com/presentation/d/${f.id}/preview`;
+    // Only NATIVE Google types use the docs hosts; uploaded .xlsx/.docx/pdf/etc.
+    // must use the Drive file preview (the docs host errors on them).
+    if (m === 'application/vnd.google-apps.spreadsheet') return `https://docs.google.com/spreadsheets/d/${f.id}/preview`;
+    if (m === 'application/vnd.google-apps.document') return `https://docs.google.com/document/d/${f.id}/preview`;
+    if (m === 'application/vnd.google-apps.presentation') return `https://docs.google.com/presentation/d/${f.id}/preview`;
     return `https://drive.google.com/file/d/${f.id}/preview`;
   };
   const openFile = (f) => { setViewerFull(false); setViewerFile(f); logOpen(f); };
@@ -517,10 +535,10 @@ const BrandDashboard = () => {
                   <div style={{ fontSize: 14, fontWeight: 800, color: 'var(--text-heading)', marginTop: 3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{nextMeeting.title}</div>
                   <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 2 }}>{fmtTime(nextMeeting.start)}</div>
                   {nextMeeting.joinLink && (
-                    <a href={nextMeeting.joinLink} target="_blank" rel="noreferrer" onClick={(e) => e.stopPropagation()}
-                      style={{ marginTop: 9, display: 'inline-flex', alignItems: 'center', gap: 6, background: '#0748EE', color: '#fff', fontSize: 12, fontWeight: 700, borderRadius: 8, padding: '7px 12px', textDecoration: 'none' }}>
+                    <button onClick={(e) => { e.stopPropagation(); joinMeeting(nextMeeting); }}
+                      style={{ marginTop: 9, display: 'inline-flex', alignItems: 'center', gap: 6, background: '#0748EE', color: '#fff', fontSize: 12, fontWeight: 700, borderRadius: 8, padding: '7px 12px', border: 'none', cursor: 'pointer' }}>
                       <Video style={{ width: 13, height: 13 }} /> Join now
-                    </a>
+                    </button>
                   )}
                 </div>
               </div>
@@ -636,7 +654,7 @@ const BrandDashboard = () => {
         <Panel style={{ marginBottom: '16px' }}>
           <div style={{ ...SECTION_TITLE, justifyContent: 'space-between' }}>
             <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}><BrandLogo type="google_drive" size={16} /> Sources to chat with</span>
-            <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>{brand?.name} Drive · {driveShown.length} files</span>
+            <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>{brand?.name} Drive · {driveShown.length} items</span>
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, background: 'var(--surface-2, #F8FAFF)', border: '1px solid var(--card-border)', borderRadius: 12, padding: '9px 13px', marginBottom: 11 }}>
             <Search style={{ width: 15, height: 15, color: '#94A3B8' }} />
