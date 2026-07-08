@@ -26,6 +26,7 @@ import BrandDashboard        from './pages/accountant/BrandDashboard';
 import AnalysisPage          from './pages/accountant/AnalysisPage';
 import AnalysisAgentPage     from './pages/accountant/AnalysisAgentPage';
 import AnalysisMetricPage    from './pages/accountant/AnalysisMetricPage';
+import AdminAnalysisPage     from './pages/admin/AdminAnalysisPage';
 import BrandAgentsInventory  from './pages/accountant/BrandAgentsInventory';
 import AgentWorkspace        from './pages/accountant/AgentWorkspace';
 import AgentDispatch         from './pages/accountant/AgentDispatch';
@@ -62,6 +63,7 @@ function App() {
               <ProtectedRoute allowedRoles={['admin']}>
                 <Routes>
                   <Route path="/"            element={<AdminDashboard />} />
+                  <Route path="/analysis"    element={<AdminAnalysisPage />} />
                   <Route path="/brands"      element={<BrandsPage />} />
                   <Route path="/brands/:id"  element={<BrandOverviewPage />} />
                   <Route path="/agents"      element={<AgentsPage />} />
