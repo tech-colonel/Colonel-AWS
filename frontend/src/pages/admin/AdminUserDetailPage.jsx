@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import DashboardLayout from '../../components/layout/DashboardLayout';
-import { ChevronLeft, Activity, Layers, Building2 } from 'lucide-react';
+import { ChevronLeft, Activity, Layers, Building2, CheckCircle2, Clock } from 'lucide-react';
+import { ResponsiveContainer, RadialBarChart, RadialBar, PolarAngleAxis, BarChart, Bar, Cell, XAxis, YAxis, Tooltip } from 'recharts';
 import api from '../../lib/api';
 import { ADMIN_SIDEBAR } from '../../lib/adminNav';
 
@@ -11,6 +12,9 @@ const cnt = (n) => Number(n || 0).toLocaleString('en-IN');
 const pct = (x) => (x == null ? '—' : `${x}%`);
 const fmtDate = (s) => { if (!s) return '—'; try { return new Date(s).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }); } catch { return '—'; } };
 const initials = (n = '') => n.trim().split(/\s+/).slice(0, 2).map((p) => p[0]).join('').toUpperCase() || 'U';
+const seed = (s = '') => { let h = 0; for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0; return h; };
+const fakeCompletion = (id = '') => 62 + (seed(id) % 37);
+const respSeries = (id = '') => ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].map((d, i) => ({ d, v: 20 + (seed(id + d + i) % 90) }));
 
 const AdminUserDetailPage = () => {
   const { userId } = useParams();
@@ -21,6 +25,8 @@ const AdminUserDetailPage = () => {
   const u = d?.user || {};
   const brands = d?.brands || [];
   const t = d?.totals || {};
+  const comp = fakeCompletion(userId);
+  const resp = respSeries(userId);
 
   const Kpi = ({ icon: Icon, label, value }) => (
     <div className="glass-card" style={{ padding: '16px 18px', display: 'flex', alignItems: 'center', gap: 12 }}>
@@ -48,6 +54,22 @@ const AdminUserDetailPage = () => {
           <Kpi icon={Activity} label="Total Runs" value={cnt(t.runs)} />
           <Kpi icon={Layers} label="Rows Processed" value={cnt(t.rows)} />
           <Kpi icon={Building2} label="Brands" value={cnt(t.brands)} />
+        </div>
+
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))', gap: 14, marginBottom: 16 }}>
+          <div className="glass-card" style={{ padding: '16px 18px' }}>
+            <div style={{ fontSize: 11, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.05em', color: '#64748B', display: 'inline-flex', alignItems: 'center', gap: 8 }}><CheckCircle2 style={{ width: 14, height: 14, color: '#059669' }} /> Task completion</div>
+            <div style={{ position: 'relative', height: 150 }}>
+              <ResponsiveContainer width="100%" height="100%"><RadialBarChart innerRadius="72%" outerRadius="100%" data={[{ v: comp }]} startAngle={90} endAngle={-270}><PolarAngleAxis type="number" domain={[0, 100]} tick={false} /><RadialBar background={{ fill: '#EEF1F8' }} dataKey="v" cornerRadius={10} fill="#059669" /></RadialBarChart></ResponsiveContainer>
+              <div style={{ position: 'absolute', inset: 0, display: 'grid', placeItems: 'center', pointerEvents: 'none' }}><div style={{ textAlign: 'center' }}><div style={{ fontFamily: 'Barlow, sans-serif', fontWeight: 900, fontSize: 30, color: '#0F172A', lineHeight: 1 }}>{comp}%</div><div style={{ fontSize: 10.5, color: '#94A3B8', fontWeight: 700 }}>completed</div></div></div>
+            </div>
+          </div>
+          <div className="glass-card" style={{ padding: '16px 18px' }}>
+            <div style={{ fontSize: 11, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.05em', color: '#64748B', display: 'inline-flex', alignItems: 'center', gap: 8 }}><Clock style={{ width: 14, height: 14, color: V }} /> Average response time</div>
+            <div style={{ height: 150 }}>
+              <ResponsiveContainer width="100%" height="100%"><BarChart data={resp} margin={{ top: 12, right: 4, left: -30, bottom: 0 }}><XAxis dataKey="d" tick={{ fontSize: 10, fill: '#94A3B8' }} tickLine={false} axisLine={false} /><YAxis hide /><Tooltip cursor={{ fill: '#F8FAFF' }} formatter={(v) => [`${v} min`, 'Avg']} contentStyle={{ fontSize: 12, borderRadius: 10, border: '1px solid #E2E8F0' }} /><Bar dataKey="v" radius={[6, 6, 0, 0]}>{resp.map((d, i) => <Cell key={i} fill={d.v >= 80 ? '#F59E0B' : d.v >= 55 ? '#FBBF77' : '#FDE8C8'} />)}</Bar></BarChart></ResponsiveContainer>
+            </div>
+          </div>
         </div>
 
         {brands.length === 0 ? (
