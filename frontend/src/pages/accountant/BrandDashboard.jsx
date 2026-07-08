@@ -4,12 +4,9 @@ import DashboardLayout from '../../components/layout/DashboardLayout';
 import {
   LayoutDashboard, Bot, BarChart3, Activity, Rows3, Clock, Sparkles,
   CalendarDays, Video, FileText, Search, ChevronRight, Plus, Flag,
-  CheckCircle2, ArrowUpRight, Building2, Send,
+  CheckCircle2, ArrowUpRight, Building2, Send, Plug, Zap, History,
+  ExternalLink,
 } from 'lucide-react';
-import {
-  ResponsiveContainer, LineChart, Line, BarChart, Bar,
-  PieChart, Pie, Cell, XAxis, YAxis, CartesianGrid, Tooltip, Legend,
-} from 'recharts';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../../components/ui/modal';
 import { Card, CardContent, CardHeader, CardTitle } from '../../components/ui/card';
 import { Button } from '../../components/ui/button';
@@ -48,6 +45,8 @@ const CONF_COLORS = { High: '#059669', Medium: '#D97706', Low: '#E11D48' };
 const fmtNum = (n) => Number(n || 0).toLocaleString('en-IN');
 const fmtDate = (s) => { if (!s) return '—'; try { return new Date(s).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }); } catch { return '—'; } };
 const fmtDay = (s) => { try { return new Date(s).toLocaleDateString('en-IN', { weekday: 'short', day: '2-digit', month: 'short' }); } catch { return ''; } };
+const todayKey = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
+const dayKeyOf = (s) => { if (!s) return ''; const d = new Date(s); if (isNaN(d)) return String(s).slice(0, 10); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
 
 // Time-saved heuristic: manual reconciliation ≈ 0.5 min per processed row +
 // ~10 min setup/review per run. Surface as a friendly "hours saved" figure.
@@ -58,10 +57,10 @@ const hoursSaved = (rows, runs) => {
 };
 
 const PRIORITY = {
-  urgent: { bg: '#FEF2F2', c: '#E11D48', label: 'Urgent' },
-  high:   { bg: '#FFF7ED', c: '#EA580C', label: 'High' },
-  medium: { bg: '#EFF6FF', c: '#0748EE', label: 'Medium' },
-  low:    { bg: '#F1F5F9', c: '#64748B', label: 'Low' },
+  urgent: { bg: '#FEF2F2', c: '#E11D48', label: 'Urgent', rank: 0 },
+  high:   { bg: '#FFF7ED', c: '#EA580C', label: 'High', rank: 1 },
+  medium: { bg: '#EFF6FF', c: '#0748EE', label: 'Medium', rank: 2 },
+  low:    { bg: '#F1F5F9', c: '#64748B', label: 'Low', rank: 3 },
 };
 const TASK_STATUS = {
   pending:     { bg: '#F1F5F9', c: '#64748B', label: 'To do' },
@@ -69,6 +68,26 @@ const TASK_STATUS = {
   done:        { bg: '#ECFDF5', c: '#059669', label: 'Done' },
   overdue:     { bg: '#FEF2F2', c: '#E11D48', label: 'Overdue' },
 };
+
+// Source badge for the aggregated Today / My Tasks feeds (Tasks + Compliance +
+// Statutory merged into one list, tagged by where each item came from).
+const SRC = {
+  task:       { label: 'Task',      c: '#7C3AED', bg: '#F5F3FF' },
+  compliance: { label: 'Tracker',   c: '#0748EE', bg: '#E8EFFE' },
+  statutory:  { label: 'Statutory', c: '#EA580C', bg: '#FFF7ED' },
+  meeting:    { label: 'Meeting',   c: '#0EA5E9', bg: '#E0F2FE' },
+};
+
+// Sample Drive files — shown ONLY when the real per-brand Drive listing is
+// empty (locally the Google creds live on AWS, so the mirror is empty here).
+// On AWS with a linked+shared folder, the real files replace these.
+const SAMPLE_DRIVE_FILES = [
+  { id: 's1', name: 'GSTR-2B Recon — June.xlsx', mimeType: 'application/vnd.ms-excel', size: 2100000, webViewLink: '#', sample: true },
+  { id: 's2', name: 'Purchase Register — May.pdf', mimeType: 'application/pdf', size: 840000, webViewLink: '#', sample: true },
+  { id: 's3', name: 'Ledger Master — Stroom.gsheet', mimeType: 'application/vnd.google-apps.spreadsheet', size: null, webViewLink: '#', sample: true },
+  { id: 's4', name: 'Bank Statement — HDFC Q1.xlsx', mimeType: 'application/vnd.ms-excel', size: 1500000, webViewLink: '#', sample: true },
+  { id: 's5', name: 'Board review — Q1 FY27.mp4', mimeType: 'video/mp4', size: 42000000, webViewLink: '#', sample: true },
+];
 
 // ─── Small presentational atoms ──────────────────────────────────────────────
 const SECTION_TITLE = { fontSize: '12px', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--text-muted)', marginBottom: '10px', display: 'flex', alignItems: 'center', gap: '8px' };
@@ -79,22 +98,27 @@ function Panel({ children, style, className = '' }) {
 
 function KpiCard({ icon: Icon, label, value, sub, color, bg }) {
   return (
-    <div className="glass-card" style={{ padding: '16px 18px', display: 'flex', flexDirection: 'column', gap: '10px' }}>
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-        <span style={{ fontSize: '11px', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'var(--text-muted)' }}>{label}</span>
-        <span style={{ width: 30, height: 30, borderRadius: 9, background: bg, display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}>
-          <Icon style={{ width: 16, height: 16, color }} />
-        </span>
+    <div className="glass-card" style={{ padding: '14px 16px', display: 'flex', alignItems: 'center', gap: 12 }}>
+      <span style={{ width: 34, height: 34, borderRadius: 10, background: bg, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+        <Icon style={{ width: 17, height: 17, color }} />
+      </span>
+      <div style={{ minWidth: 0 }}>
+        <div style={{ fontFamily: 'Barlow, sans-serif', fontWeight: 900, fontSize: '22px', lineHeight: 1.05, color: 'var(--text-heading)' }}>{value}</div>
+        <div style={{ fontSize: '11px', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.04em', color: 'var(--text-muted)' }}>{label}</div>
       </div>
-      <div style={{ fontFamily: 'Barlow, sans-serif', fontWeight: 900, fontSize: '30px', lineHeight: 1, color: 'var(--text-heading)' }}>{value}</div>
-      {sub && <div style={{ fontSize: '12px', color: 'var(--text-muted)' }}>{sub}</div>}
     </div>
   );
 }
 
-function Soon() {
-  return <span style={{ fontSize: '10px', fontWeight: 700, color: '#7C3AED', background: '#F5F3FF', border: '1px solid #DDD6FE', padding: '2px 7px', borderRadius: '9999px' }}>Coming soon</span>;
-}
+// File-type icon tint for the Drive mirror + previously-viewed cards.
+const fileTint = (mime = '') => {
+  if (/image\//.test(mime)) return { bg: '#FEF3F2', c: '#E11D48' };
+  if (/video\//.test(mime)) return { bg: '#F5F3FF', c: '#7C3AED' };
+  if (/(spreadsheet|excel|sheet|csv)/i.test(mime)) return { bg: '#E6F4EA', c: '#188038' };
+  if (/pdf/i.test(mime)) return { bg: '#FCE8E6', c: '#D93025' };
+  if (/(document|word|gdoc)/i.test(mime)) return { bg: '#E8F0FE', c: '#1a73e8' };
+  return { bg: '#EEF2F8', c: '#64748B' };
+};
 
 const BrandDashboard = () => {
   const { brandId } = useParams();
@@ -106,7 +130,10 @@ const BrandDashboard = () => {
   const [agents, setAgents] = useState([]);
   const [summary, setSummary] = useState(null);
   const [tasks, setTasks] = useState([]);
+  const [compliance, setCompliance] = useState([]);
+  const [statutory, setStatutory] = useState([]);
   const [driveFiles, setDriveFiles] = useState([]);
+  const [driveMeta, setDriveMeta] = useState({ configured: null });
   const [upcoming, setUpcoming] = useState([]);
   const [recentMeetings, setRecentMeetings] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -120,6 +147,7 @@ const BrandDashboard = () => {
   const [srcTab, setSrcTab] = useState('All');
   const [srcQuery, setSrcQuery] = useState('');
   const [detail, setDetail] = useState(null);
+  const [prioritized, setPrioritized] = useState(false);
   const [showNewTask, setShowNewTask] = useState(false);
   const [ntTitle, setNtTitle] = useState('');
   const [ntDesc, setNtDesc] = useState('');
@@ -153,8 +181,19 @@ const BrandDashboard = () => {
     // Secondary data — never blocks the dashboard; failures degrade gracefully.
     api.get(`/api/dashboard/summary/${brandId}`).then((r) => setSummary(r.data)).catch(() => setSummary(null));
     api.get('/api/tasks').then((r) => setTasks(Array.isArray(r.data) ? r.data : [])).catch(() => setTasks([]));
+    // Compliance Tracker (brand + user scoped) — second source for Today/My Tasks.
+    api.get(`/api/brands/${brandId}/compliance`)
+      .then((r) => setCompliance(Array.isArray(r.data?.tasks) ? r.data.tasks : (Array.isArray(r.data) ? r.data : [])))
+      .catch(() => setCompliance([]));
+    // Statutory filings (owner-gated → 403 for non-owners; swallow to []).
+    api.get(`/api/brands/${brandId}/statutory`)
+      .then((r) => setStatutory(Array.isArray(r.data?.filings) ? r.data.filings : (Array.isArray(r.data) ? r.data : [])))
+      .catch(() => setStatutory([]));
     api.get('/api/brands/my-brands').then((r) => setMyBrands(Array.isArray(r.data) ? r.data : [])).catch(() => setMyBrands([]));
-    api.get(`/api/brands/${brandId}/drive`).then((r) => setDriveFiles(Array.isArray(r.data?.files) ? r.data.files : [])).catch(() => setDriveFiles([]));
+    api.get(`/api/brands/${brandId}/drive`).then((r) => {
+      setDriveFiles(Array.isArray(r.data?.files) ? r.data.files : []);
+      setDriveMeta({ configured: r.data?.configured, reason: r.data?.reason });
+    }).catch(() => { setDriveFiles([]); setDriveMeta({ configured: false }); });
     api.get('/api/meetings/upcoming').then((r) => setUpcoming(Array.isArray(r.data?.events) ? r.data.events : [])).catch(() => setUpcoming([]));
     api.get('/api/meetings/recent').then((r) => setRecentMeetings(Array.isArray(r.data?.meetings) ? r.data.meetings : [])).catch(() => setRecentMeetings([]));
   }, [brandId]);
@@ -164,7 +203,6 @@ const BrandDashboard = () => {
   // ── Derived data ──
   const s = summary?.summary || {};
   const byAgent = summary?.by_agent || [];
-  const confDist = summary?.confidence_dist || [];
   const monthly = summary?.monthly_trend || [];
 
   const totalRuns = s.total_jobs || 0;
@@ -172,61 +210,95 @@ const BrandDashboard = () => {
   const activeAgents = byAgent.length;
   const savedHrs = useMemo(() => hoursSaved(totalRows, totalRuns), [totalRows, totalRuns]);
 
-  const myTasks = useMemo(
-    () => tasks.filter((t) => t.category !== 'feedback').sort((a, b) => {
-      const da = a.due_date ? new Date(a.due_date).getTime() : Infinity;
-      const db = b.due_date ? new Date(b.due_date).getTime() : Infinity;
-      return da - db;
-    }),
-    [tasks]
-  );
-  const openTasks = myTasks.filter((t) => t.status !== 'done');
-  const nextTask = openTasks[0] || null;
   const myFeedback = useMemo(
     () => tasks.filter((t) => t.category === 'feedback').sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt)),
     [tasks]
   );
 
-  const trendData = useMemo(
-    () => monthly.map((m) => ({ label: m.label, runs: Number(m.jobs) || 0 })),
-    [monthly]
-  );
-  const agentBars = useMemo(
-    () => byAgent.slice(0, 8).map((a) => ({ name: agentLabel(a.agent_type), runs: Number(a.runs) || 0 })),
-    [byAgent]
-  );
-  const confDonut = useMemo(() => {
-    const order = ['High', 'Medium', 'Low'];
-    return order.filter((o) => confDist.some((c) => c.confidence === o))
-      .map((o) => ({ name: o, value: Number(confDist.find((c) => c.confidence === o)?.count) || 0 }))
-      .concat(confDist.filter((c) => !order.includes(c.confidence)).map((c) => ({ name: c.confidence || 'Unknown', value: Number(c.count) || 0 })));
-  }, [confDist]);
-  const hasData = totalRuns > 0;
-  // Only TIMED events are real meetings — all-day entries (birthdays/holidays,
-  // which repeat and clutter the list) come back as a date with no "T".
+  // Only TIMED events are real meetings — all-day entries (birthdays/holidays)
+  // come back as a date with no "T".
   const realUpcoming = useMemo(() => upcoming.filter((e) => /T/.test(String(e.start || ''))), [upcoming]);
-  // Same rule as the Meetings page: a "meeting" has a video link; everything
-  // else (timed, no link) is an "event". Next Meeting = next real meeting.
   const nextMeeting = useMemo(() => realUpcoming.find((e) => e.joinLink) || null, [realUpcoming]);
-  const restUpcoming = useMemo(() => realUpcoming.filter((e) => !e.joinLink), [realUpcoming]);
-  const fmtTime = (s) => { if (!s) return ''; try { return new Date(s).toLocaleString('en-IN', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' }); } catch { return ''; } };
+
+  // ── Aggregated agenda: Tasks + Compliance + Statutory, normalized + tagged ──
+  const agenda = useMemo(() => {
+    const out = [];
+    (tasks || []).filter((t) => t.category !== 'feedback').forEach((t) => out.push({
+      key: `task-${t.id}`, source: 'task', title: t.title,
+      status: t.status || 'pending', priority: t.priority || 'medium',
+      due: t.due_date, route: '/tasks',
+    }));
+    (compliance || []).forEach((c) => {
+      const status = c.status === 'done' ? 'done' : (c.status === 'in_progress' || c.status === 'review' ? 'in_progress' : 'pending');
+      out.push({
+        key: `comp-${c.id}`, source: 'compliance', title: c.title,
+        status, priority: c.priority || 'medium',
+        due: c.due_date, route: `/brands/${brandId}/compliance-tracker`,
+      });
+    });
+    (statutory || []).forEach((f) => {
+      if (f.status === 'not_applicable') return;
+      const status = f.status === 'filed' ? 'done' : 'pending';
+      out.push({
+        key: `stat-${f.id}`, source: 'statutory', title: f.title || agentLabel(f.compliance_type),
+        status, priority: 'medium', due: f.due_date, route: `/brands/${brandId}/statutory-compliance`,
+      });
+    });
+    return out;
+  }, [tasks, compliance, statutory, brandId]);
+
+  // Today = today's meetings + agenda items due today (any source), time-sorted.
+  const todayItems = useMemo(() => {
+    const tk = todayKey();
+    const meetings = realUpcoming
+      .filter((e) => dayKeyOf(e.start) === tk)
+      .map((e) => ({ key: `meet-${e.id}`, source: 'meeting', title: e.title, when: e.start, joinLink: e.joinLink, route: null }));
+    const items = agenda
+      .filter((a) => a.status !== 'done' && dayKeyOf(a.due) === tk)
+      .map((a) => ({ ...a, when: a.due }));
+    return [...meetings, ...items].sort((x, y) => new Date(x.when || 0) - new Date(y.when || 0));
+  }, [realUpcoming, agenda]);
+
+  // My Tasks = all open agenda items (Tasks + Compliance + Statutory).
+  const openAgg = useMemo(() => {
+    const open = agenda.filter((a) => a.status !== 'done');
+    const byDue = (a, b) => {
+      const da = a.due ? new Date(a.due).getTime() : Infinity;
+      const db = b.due ? new Date(b.due).getTime() : Infinity;
+      return da - db;
+    };
+    const byPrio = (a, b) => (PRIORITY[a.priority]?.rank ?? 2) - (PRIORITY[b.priority]?.rank ?? 2);
+    return [...open].sort(prioritized ? (a, b) => byPrio(a, b) || byDue(a, b) : (a, b) => byDue(a, b) || byPrio(a, b));
+  }, [agenda, prioritized]);
+  const nextTask = openAgg[0] || null;
+
+  const trendData = useMemo(() => monthly.map((m) => ({ label: m.label, runs: Number(m.jobs) || 0 })), [monthly]);
+  const hasData = totalRuns > 0;
+
+  // ── Drive mirror (real per-brand listing; sample fallback when empty) ──
+  const usingSampleDrive = driveFiles.length === 0;
+  const driveShown = usingSampleDrive ? SAMPLE_DRIVE_FILES : driveFiles;
   const srcFiltered = useMemo(() => {
     const isImg = (m) => /image\//.test(m || '');
-    const isReport = (m) => /(spreadsheet|excel|pdf|csv)/i.test(m || '');
-    let list = driveFiles;
-    if (srcTab === 'Images') list = driveFiles.filter((f) => isImg(f.mimeType));
-    else if (srcTab === 'Reports') list = driveFiles.filter((f) => isReport(f.mimeType));
-    else if (srcTab === 'Documents') list = driveFiles.filter((f) => !isImg(f.mimeType) && !f.isFolder);
+    const isVideo = (m) => /video\//.test(m || '');
+    const isSheet = (m) => /(spreadsheet|excel|sheet|csv)/i.test(m || '');
+    const isDoc = (m) => /(document|word|gdoc|text)/i.test(m || '');
+    const isPdf = (m) => /pdf/i.test(m || '');
+    let list = driveShown;
+    if (srcTab === 'Images') list = driveShown.filter((f) => isImg(f.mimeType));
+    else if (srcTab === 'Video') list = driveShown.filter((f) => isVideo(f.mimeType));
+    else if (srcTab === 'Sheets') list = driveShown.filter((f) => isSheet(f.mimeType));
+    else if (srcTab === 'Docs') list = driveShown.filter((f) => isDoc(f.mimeType));
+    else if (srcTab === 'PDFs') list = driveShown.filter((f) => isPdf(f.mimeType));
     const q = srcQuery.trim().toLowerCase();
     return q ? list.filter((f) => (f.name || '').toLowerCase().includes(q)) : list;
-  }, [driveFiles, srcTab, srcQuery]);
-  // Upcoming events on the dashboard = real link-less calendar events + sample
-  // CA-firm events (so the section is never near-empty), soonest first.
-  const dashEvents = useMemo(() => {
-    const merged = [...restUpcoming, ...SAMPLE_EVENTS.filter((e) => !isPastOf(e))];
-    return merged.sort((a, b) => (new Date(a.start) || 0) - (new Date(b.start) || 0)).slice(0, 6);
-  }, [restUpcoming]);
+  }, [driveShown, srcTab, srcQuery]);
+  // Previously viewed = most recent files (real Drive recency; sample fallback).
+  const recentFiles = useMemo(() => driveShown.filter((f) => !f.isFolder).slice(0, 5), [driveShown]);
+
   const prettySize = (b) => { if (b == null) return ''; if (b < 1024) return `${b} B`; if (b < 1048576) return `${Math.round(b / 1024)} KB`; return `${(b / 1048576).toFixed(1)} MB`; };
+  const fmtTime = (str) => { if (!str) return ''; try { return new Date(str).toLocaleString('en-IN', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' }); } catch { return ''; } };
+  const fmtClock = (str) => { if (!str) return ''; try { return new Date(str).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' }); } catch { return ''; } };
 
   const submitRequest = async () => {
     if (!reqName.trim() || reqBusy) return;
@@ -270,20 +342,35 @@ const BrandDashboard = () => {
 
   if (loading) {
     return (
-      <div className="min-h-screen flex items-center justify-center">
-        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-slate-900" />
-      </div>
+      <DashboardLayout sidebarItems={sidebarItems}>
+        <div className="min-h-screen flex items-center justify-center">
+          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-slate-900" />
+        </div>
+      </DashboardLayout>
     );
   }
 
   const firstName = (user?.name || 'there').split(' ')[0];
+  const tabBtn = (active) => ({
+    display: 'inline-flex', alignItems: 'center', gap: 7, padding: '9px 16px', borderRadius: 9999,
+    fontSize: 13, fontWeight: 700, cursor: 'pointer',
+    background: active ? 'var(--text-heading)' : 'var(--surface)',
+    color: active ? '#fff' : 'var(--text-heading)',
+    border: `1px solid ${active ? 'var(--text-heading)' : 'var(--card-border)'}`,
+    boxShadow: 'var(--card-shadow)',
+  });
+  const pillBtn = {
+    display: 'inline-flex', alignItems: 'center', gap: 7, padding: '8px 14px', borderRadius: 9999,
+    fontSize: 12.5, fontWeight: 600, cursor: 'pointer', background: 'var(--surface)',
+    color: 'var(--text-heading)', border: '1px solid var(--card-border)', boxShadow: 'var(--card-shadow)',
+  };
 
   return (
     <DashboardLayout sidebarItems={sidebarItems}>
-      <div className="p-6" data-testid="brand-dashboard" style={{ maxWidth: 1320, margin: '0 auto' }}>
+      <div className="p-6" data-testid="brand-dashboard" style={{ maxWidth: 1320, margin: '0 auto', paddingBottom: 88 }}>
 
-        {/* ── Welcome banner + brand switcher ───────────────────────────── */}
-        <div className="glass-card" style={{ padding: '22px 24px', marginBottom: '18px', background: 'linear-gradient(120deg, #EEF3FF 0%, #FFFFFF 60%)' }}>
+        {/* ── Hero: Welcome + How can I help you today? ─────────────────── */}
+        <div className="glass-card" style={{ padding: '22px 24px', marginBottom: '16px', background: 'linear-gradient(120deg, #EEF3FF 0%, #FFFFFF 60%)' }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: '14px' }}>
             <div>
               <button onClick={() => navigate('/brands')} data-testid="back-to-brands"
@@ -293,12 +380,14 @@ const BrandDashboard = () => {
               <h1 style={{ fontFamily: 'Manrope, sans-serif', fontWeight: 800, fontSize: '28px', color: 'var(--text-heading)', lineHeight: 1.1 }}>
                 Welcome, {firstName} <span style={{ fontWeight: 400 }}>👋</span>
               </h1>
+              <div style={{ fontFamily: 'Manrope, sans-serif', fontWeight: 700, fontSize: '18px', color: '#0748EE', marginTop: 3 }}>
+                How can I help you today?
+              </div>
               <p style={{ color: 'var(--text-muted)', marginTop: '6px', fontSize: '14px' }}>
                 Here's what's happening with <strong style={{ color: 'var(--text-heading)' }}>{brand?.name}</strong>{brand?.description ? ` · ${brand.description}` : ''}.
               </p>
             </div>
             <div style={{ display: 'flex', alignItems: 'center', gap: '10px', position: 'relative' }}>
-              {/* Brand switcher */}
               <div style={{ position: 'relative' }}>
                 <button onClick={() => setShowBrandMenu((v) => !v)}
                   style={{ display: 'inline-flex', alignItems: 'center', gap: 8, background: 'var(--surface)', border: '1px solid var(--card-border)', borderRadius: 12, padding: '9px 14px', fontSize: 13, fontWeight: 600, color: 'var(--text-heading)', cursor: 'pointer' }}>
@@ -322,211 +411,132 @@ const BrandDashboard = () => {
           </div>
         </div>
 
-        {/* ── KPI row ───────────────────────────────────────────────────── */}
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(210px, 1fr))', gap: '14px', marginBottom: '18px' }}>
-          <KpiCard icon={Activity} label="Total Runs"     value={fmtNum(totalRuns)}   sub="across all tools" color="#0748EE" bg="#E8EFFE" />
-          <KpiCard icon={Rows3}    label="Rows Processed" value={fmtNum(totalRows)}   sub="reconciled rows"  color="#7C3AED" bg="#F5F3FF" />
-          <KpiCard icon={Clock}    label="Time Saved"     value={`≈ ${savedHrs} hrs`} sub="vs. manual work"  color="#059669" bg="#ECFDF5" />
-          <KpiCard icon={Bot}      label="Active Agents"  value={fmtNum(activeAgents || agents.length)} sub={`${agents.length} assigned`} color="#EA580C" bg="#FFF7ED" />
+        {/* ── Tabs + quick pills ─────────────────────────────────────────── */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 16 }}>
+          <button style={tabBtn(true)} data-testid="tab-overview"><LayoutDashboard style={{ width: 15, height: 15 }} /> Overview</button>
+          <button style={tabBtn(false)} onClick={() => navigate(`/brands/${brandId}/analysis`)} data-testid="tab-analysis"><BarChart3 style={{ width: 15, height: 15 }} /> Analysis</button>
+          <div style={{ flex: 1, minWidth: 12 }} />
+          <button style={pillBtn} onClick={() => navigate('/meetings')} data-testid="pill-summarize"><Video style={{ width: 15, height: 15, color: '#0748EE' }} /> Summarize last meeting</button>
+          <button style={pillBtn} onClick={() => navigate('/integrations')} data-testid="pill-connect"><Plug style={{ width: 15, height: 15, color: '#0748EE' }} /> Connect apps</button>
         </div>
 
-        {/* ── Row A: Today/Agenda · Next Meeting · Ask AI ───────────────── */}
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))', gap: '14px', marginBottom: '18px' }}>
-          {/* Today + Agenda */}
+        {/* ── Row 1: Previously viewed files · Next Meeting ──────────────── */}
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: '14px', marginBottom: '16px' }}>
+          {/* Previously viewed files */}
           <Panel>
-            <div style={SECTION_TITLE}><CalendarDays style={{ width: 14, height: 14 }} /> Today</div>
-            <div style={{ fontFamily: 'Manrope, sans-serif', fontWeight: 800, fontSize: '20px', color: 'var(--text-heading)' }}>
-              {new Date().toLocaleDateString('en-IN', { weekday: 'long', day: 'numeric', month: 'long' })}
+            <div style={{ ...SECTION_TITLE, justifyContent: 'space-between' }}>
+              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}><History style={{ width: 14, height: 14 }} /> Previously viewed files</span>
+              <span style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-faint, #94A0B8)' }}>{usingSampleDrive ? 'Sample' : 'From Drive'} · latest first</span>
             </div>
-            <div style={{ marginTop: 12, display: 'flex', flexDirection: 'column', gap: 8 }}>
-              {openTasks.slice(0, 3).length === 0 ? (
-                <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>No tasks due. Calendar agenda <Soon /></div>
-              ) : openTasks.slice(0, 3).map((t) => (
-                <div key={t.id} onClick={() => navigate('/tasks')} style={{ display: 'flex', alignItems: 'center', gap: 10, cursor: 'pointer' }}>
-                  <span style={{ width: 6, height: 6, borderRadius: 99, background: (PRIORITY[t.priority] || PRIORITY.medium).c }} />
-                  <span style={{ fontSize: 13, color: 'var(--text-heading)', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{t.title}</span>
-                  <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>{t.due_date ? fmtDay(t.due_date) : ''}</span>
-                </div>
-              ))}
-            </div>
-            <button onClick={() => navigate('/tasks')} style={{ marginTop: 14, fontSize: 13, fontWeight: 600, color: '#0748EE', background: 'none', border: 'none', cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 4 }}>
-              Open Calendar <ArrowUpRight style={{ width: 14, height: 14 }} />
-            </button>
+            {recentFiles.length === 0 ? (
+              <div style={{ fontSize: 13, color: 'var(--text-muted)', padding: '10px 0' }}>Files you open appear here.</div>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                {recentFiles.map((f) => {
+                  const t = fileTint(f.mimeType);
+                  return (
+                    <a key={`pv-${f.id}`} href={f.webViewLink || '#'} target="_blank" rel="noreferrer"
+                      className="pv-file"
+                      style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '9px 10px', borderRadius: 12, textDecoration: 'none', border: '1px solid var(--card-border)', background: 'var(--surface)', transition: 'all .16s ease' }}
+                      onMouseEnter={(e) => { e.currentTarget.style.borderColor = '#B9CCF7'; e.currentTarget.style.transform = 'translateY(-1px)'; e.currentTarget.style.boxShadow = 'var(--card-shadow-hover)'; }}
+                      onMouseLeave={(e) => { e.currentTarget.style.borderColor = 'var(--card-border)'; e.currentTarget.style.transform = 'none'; e.currentTarget.style.boxShadow = 'none'; }}>
+                      <span style={{ width: 30, height: 30, borderRadius: 9, background: t.bg, color: t.c, display: 'grid', placeItems: 'center', flexShrink: 0 }}><FileText style={{ width: 16, height: 16 }} /></span>
+                      <span style={{ flex: 1, minWidth: 0, fontSize: 13, fontWeight: 600, color: 'var(--text-heading)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{f.name}</span>
+                      {f.size != null && <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>{prettySize(f.size)}</span>}
+                    </a>
+                  );
+                })}
+              </div>
+            )}
           </Panel>
 
-          {/* Next Meeting */}
+          {/* Next Meeting (with Summarize on top) */}
           <Panel>
             <div style={{ ...SECTION_TITLE, justifyContent: 'space-between' }}>
               <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}><Video style={{ width: 14, height: 14 }} /> Next Meeting</span>
-              {!nextMeeting && <Soon />}
+              <button onClick={() => navigate('/meetings')}
+                style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 11.5, fontWeight: 700, color: '#7C3AED', background: '#F5F3FF', border: '1px solid #DDD6FE', borderRadius: 9999, padding: '4px 10px', cursor: 'pointer' }}>
+                <Sparkles style={{ width: 12, height: 12 }} /> Summarize
+              </button>
             </div>
             {nextMeeting ? (
-              <>
-                <div onClick={() => setDetail({ ...nextMeeting, past: false })} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '8px 0 12px', cursor: 'pointer' }}>
-                  <BrandLogo type={/zoom/i.test(nextMeeting.joinLink || '') ? 'zoom' : 'google_meet'} size={34} />
-                  <div style={{ minWidth: 0 }}>
-                    <div style={{ fontSize: 14, fontWeight: 700, color: 'var(--text-heading)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{nextMeeting.title}</div>
-                    <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>{fmtTime(nextMeeting.start)}</div>
-                  </div>
+              <div onClick={() => setDetail({ ...nextMeeting, past: false })} style={{ cursor: 'pointer' }}>
+                <div style={{ background: 'linear-gradient(135deg, #E8EFFE, #F5F8FF)', border: '1px solid #CFE0FF', borderRadius: 12, padding: '12px 14px' }}>
+                  <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: '0.06em', textTransform: 'uppercase', color: '#0748EE' }}>Upcoming · {/zoom/i.test(nextMeeting.joinLink || '') ? 'Zoom' : 'Google Meet'}</div>
+                  <div style={{ fontSize: 14, fontWeight: 800, color: 'var(--text-heading)', marginTop: 3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{nextMeeting.title}</div>
+                  <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 2 }}>{fmtTime(nextMeeting.start)}</div>
+                  {nextMeeting.joinLink && (
+                    <a href={nextMeeting.joinLink} target="_blank" rel="noreferrer" onClick={(e) => e.stopPropagation()}
+                      style={{ marginTop: 9, display: 'inline-flex', alignItems: 'center', gap: 6, background: '#0748EE', color: '#fff', fontSize: 12, fontWeight: 700, borderRadius: 8, padding: '7px 12px', textDecoration: 'none' }}>
+                      <Video style={{ width: 13, height: 13 }} /> Join now
+                    </a>
+                  )}
                 </div>
-                {nextMeeting.joinLink && (
-                  <a href={nextMeeting.joinLink} target="_blank" rel="noreferrer"
-                    style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 6, width: '100%', background: '#0748EE', color: '#fff', fontSize: 13, fontWeight: 600, borderRadius: 10, padding: '9px 0', textDecoration: 'none' }}>
-                    <Video style={{ width: 15, height: 15 }} /> Join Now
-                  </a>
-                )}
-              </>
-            ) : recentMeetings.length > 0 ? (
-              <>
-                <div style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', color: '#94A3B8', marginBottom: 6 }}>Recent meetings</div>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                  {recentMeetings.slice(0, 3).map((m) => (
+              </div>
+            ) : (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '4px 0 10px' }}>
+                <BrandLogo type="google_meet" size={30} />
+                <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>No upcoming meeting. Recent recordings below.</div>
+              </div>
+            )}
+            {recentMeetings.length > 0 && (
+              <div style={{ marginTop: nextMeeting ? 12 : 0 }}>
+                <div style={{ fontSize: 10, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'var(--text-faint, #94A0B8)', marginBottom: 6 }}>Recent (Fireflies)</div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                  {recentMeetings.slice(0, nextMeeting ? 2 : 3).map((m) => (
                     <a key={m.id} href={m.url || '#'} target="_blank" rel="noreferrer" style={{ display: 'flex', alignItems: 'center', gap: 10, textDecoration: 'none' }}>
                       <BrandLogo type="fireflies" size={20} />
                       <div style={{ minWidth: 0, flex: 1 }}>
-                        <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-heading)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{m.title}</div>
+                        <div style={{ fontSize: 12.5, fontWeight: 600, color: 'var(--text-heading)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{m.title}</div>
                         <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>{fmtTime(m.date)}{m.duration ? ` · ${Math.round(m.duration)} min` : ''}</div>
                       </div>
                     </a>
                   ))}
                 </div>
-              </>
-            ) : (
-              <>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '14px 0' }}>
-                  <BrandLogo type="google_meet" size={34} />
-                  <div>
-                    <div style={{ fontSize: 14, fontWeight: 700, color: 'var(--text-heading)' }}>No upcoming meeting</div>
-                    <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>Connect a calendar to see your next call here.</div>
-                  </div>
-                </div>
-                <div style={{ display: 'flex', gap: 8 }}>
-                  <BrandLogo type="zoom" size={20} />
-                  <span style={{ fontSize: 12, color: 'var(--text-muted)', alignSelf: 'center' }}>Zoom & Google Meet supported</span>
-                </div>
-              </>
+              </div>
             )}
-          </Panel>
-
-          {/* Ask Colonel AI */}
-          <Panel>
-            <div style={SECTION_TITLE}><Sparkles style={{ width: 14, height: 14, color: '#7C3AED' }} /> Ask Colonel AI</div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 11, marginBottom: 14 }}>
-              <span style={{ width: 38, height: 38, borderRadius: 11, flexShrink: 0, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', background: 'linear-gradient(135deg, #7C3AED 0%, #0748EE 100%)' }}>
-                <Sparkles style={{ width: 19, height: 19, color: '#fff' }} />
-              </span>
-              <span style={{ fontSize: 13, color: 'var(--text-muted)', lineHeight: 1.35 }}>
-                Your AI copilot — ask about reconciliations, ledgers, or this brand.
-              </span>
-            </div>
-            <div style={{ display: 'flex', gap: 8 }}>
-              <input value={aiPrompt} onChange={(e) => setAiPrompt(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && askAI()}
-                placeholder="Ask anything…"
-                style={{ flex: 1, fontSize: 13, borderRadius: 10, border: '1px solid var(--card-border)', padding: '9px 12px', outline: 'none', color: 'var(--text-heading)', background: 'var(--surface)' }} />
-              <button onClick={askAI} style={{ background: '#0748EE', color: '#fff', border: 'none', borderRadius: 10, padding: '0 12px', cursor: 'pointer' }}>
-                <Send style={{ width: 15, height: 15 }} />
-              </button>
-            </div>
           </Panel>
         </div>
 
-        {/* ── Upcoming Events (Calendar — live in Phase 2) ──────────────── */}
-        <Panel style={{ marginBottom: '18px' }}>
-          <div style={{ ...SECTION_TITLE, justifyContent: 'space-between', marginBottom: 14 }}>
-            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}><CalendarDays style={{ width: 14, height: 14 }} /> Upcoming Events</span>
-            <div style={{ display: 'inline-flex', alignItems: 'center', gap: 10 }}>
-              <button onClick={() => navigate('/meetings')}
-                style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 12, fontWeight: 700, color: '#7C3AED', background: 'none', border: 'none', cursor: 'pointer' }}>
-                <Plus style={{ width: 14, height: 14 }} /> Schedule meeting
-              </button>
-            </div>
-          </div>
-          {dashEvents.length === 0 ? (
-            <div style={{ textAlign: 'center', padding: '22px 0', color: 'var(--text-muted)' }}>
-              <Video style={{ width: 30, height: 30, margin: '0 auto 8px', color: '#CBD5E1' }} />
-              <div style={{ fontSize: 13 }}>Nothing else coming up.</div>
-              <div style={{ fontSize: 12, marginTop: 2 }}>Your next meeting is shown above; more upcoming events appear here.</div>
-            </div>
-          ) : (
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))', gap: 12 }}>
-              {dashEvents.map((ev) => (
-                <div key={ev.id} onClick={() => setDetail({ ...ev, past: isPastOf(ev) })} style={{ border: '1px solid var(--card-border)', borderRadius: 12, padding: '12px 14px', cursor: 'pointer' }}
-                  onMouseEnter={(e) => e.currentTarget.style.background = '#F8FAFC'} onMouseLeave={(e) => e.currentTarget.style.background = 'transparent'}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
-                    {ev.joinLink
-                      ? <BrandLogo type={/zoom/i.test(ev.joinLink) ? 'zoom' : 'google_meet'} size={18} />
-                      : <BrandLogo type="google_calendar" size={18} />}
-                    <span style={{ fontSize: 13, fontWeight: 700, color: 'var(--text-heading)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{ev.title}</span>
-                  </div>
-                  <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>{fmtTime(ev.start)}</div>
-                </div>
-              ))}
-            </div>
-          )}
-        </Panel>
-
-        {/* ── Row B: Sources to chat with · My Tasks ────────────────────── */}
-        <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1.5fr) minmax(0, 1fr)', gap: '14px', marginBottom: '18px' }}>
-          {/* Sources to chat with (brand Drive — live in Phase 2) */}
+        {/* ── Row 2: Today · My Tasks ────────────────────────────────────── */}
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: '14px', marginBottom: '16px' }}>
+          {/* Today */}
           <Panel>
             <div style={{ ...SECTION_TITLE, justifyContent: 'space-between' }}>
-              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}><BrandLogo type="google_drive" size={16} /> Sources to chat with</span>
-              <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>{driveFiles.length} files</span>
+              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}><CalendarDays style={{ width: 14, height: 14 }} /> Today</span>
+              <span style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-faint, #94A0B8)' }}>Tasks · Tracker · Meetings</span>
             </div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8, background: 'var(--page-bg, #F5F6FA)', border: '1px solid var(--card-border)', borderRadius: 10, padding: '8px 12px', marginBottom: 10 }}>
-              <Search style={{ width: 15, height: 15, color: '#94A3B8' }} />
-              <input value={srcQuery} onChange={(e) => setSrcQuery(e.target.value)} placeholder="Search this brand's shared Drive…" style={{ flex: 1, border: 'none', background: 'transparent', outline: 'none', fontSize: 13, color: 'var(--text-heading)' }} />
+            <div style={{ fontFamily: 'Manrope, sans-serif', fontWeight: 800, fontSize: '19px', color: 'var(--text-heading)', marginBottom: 10 }}>
+              {new Date().toLocaleDateString('en-IN', { weekday: 'long', day: 'numeric', month: 'long' })}
             </div>
-            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 12 }}>
-              {['All', 'Documents', 'Reports', 'Images'].map((t) => (
-                <button key={t} onClick={() => setSrcTab(t)} style={{ fontSize: 12, fontWeight: 600, padding: '4px 11px', borderRadius: 9999, cursor: 'pointer', background: srcTab === t ? '#0748EE1A' : '#F8FAFC', border: `1.5px solid ${srcTab === t ? '#0748EE' : '#E2E8F0'}`, color: srcTab === t ? '#0748EE' : '#64748B' }}>{t}</button>
-              ))}
-            </div>
-            {srcFiltered.length === 0 ? (
-              <div style={{ textAlign: 'center', padding: '20px 0', color: 'var(--text-muted)' }}>
-                <FileText style={{ width: 30, height: 30, margin: '0 auto 8px', color: '#CBD5E1' }} />
-                <div style={{ fontSize: 13 }}>{driveFiles.length === 0 ? "This brand's Drive folder isn't connected yet." : 'No files in this category.'}</div>
-                {driveFiles.length === 0 && <div style={{ fontSize: 12, marginTop: 2 }}>An admin can link it so files appear here to chat with.</div>}
-              </div>
+            {todayItems.length === 0 ? (
+              <div style={{ fontSize: 13, color: 'var(--text-muted)', padding: '6px 0' }}>Nothing scheduled today. Enjoy the quiet 🌿</div>
             ) : (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 2, maxHeight: 220, overflowY: 'auto' }}>
-                {srcFiltered.slice(0, 30).map((f) => (
-                  <a key={f.id} href={f.webViewLink} target="_blank" rel="noreferrer"
-                    style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 6px', borderRadius: 8, textDecoration: 'none' }}
-                    onMouseEnter={(e) => e.currentTarget.style.background = '#F8FAFC'}
-                    onMouseLeave={(e) => e.currentTarget.style.background = 'transparent'}>
-                    {f.isFolder ? <BrandLogo type="google_drive" size={18} /> : <FileText style={{ width: 17, height: 17, color: '#0748EE' }} />}
-                    <span style={{ flex: 1, fontSize: 13, color: 'var(--text-heading)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{f.name}</span>
-                    {f.size != null && <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>{prettySize(f.size)}</span>}
-                  </a>
-                ))}
-              </div>
-            )}
-            {driveFiles.length > 0 && (
-              <div style={{ marginTop: 14, paddingTop: 14, borderTop: '1px solid var(--card-border)' }}>
-                <div style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', color: '#94A3B8', marginBottom: 8 }}>Previously viewed files</div>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-                  {driveFiles.filter((f) => !f.isFolder).slice(0, 3).map((f) => (
-                    <a key={`recent-${f.id}`} href={f.webViewLink} target="_blank" rel="noreferrer"
-                      style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '7px 6px', borderRadius: 8, textDecoration: 'none' }}
-                      onMouseEnter={(e) => e.currentTarget.style.background = '#F8FAFC'}
-                      onMouseLeave={(e) => e.currentTarget.style.background = 'transparent'}>
-                      <FileText style={{ width: 16, height: 16, color: '#0748EE' }} />
-                      <span style={{ flex: 1, fontSize: 13, color: 'var(--text-heading)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{f.name}</span>
-                      <ChevronRight style={{ width: 14, height: 14, color: '#CBD5E1' }} />
-                    </a>
-                  ))}
-                </div>
+              <div style={{ display: 'flex', flexDirection: 'column' }}>
+                {todayItems.slice(0, 6).map((it) => {
+                  const src = SRC[it.source] || SRC.task;
+                  return (
+                    <div key={it.key} onClick={() => it.route && navigate(it.route)} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 0', borderTop: '1px solid var(--border-soft, #EEF1F8)', cursor: it.route ? 'pointer' : 'default' }}>
+                      <span style={{ width: 7, height: 7, borderRadius: 99, background: src.c, flexShrink: 0 }} />
+                      <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-heading)', flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{it.title}</span>
+                      <span style={{ fontSize: 9.5, fontWeight: 800, letterSpacing: '0.03em', textTransform: 'uppercase', color: src.c, background: src.bg, padding: '2px 7px', borderRadius: 6 }}>{src.label}</span>
+                      <span style={{ fontSize: 11, color: 'var(--text-faint, #94A0B8)', whiteSpace: 'nowrap' }}>{it.source === 'meeting' ? fmtClock(it.when) : (it.due ? 'Due' : '')}</span>
+                    </div>
+                  );
+                })}
               </div>
             )}
           </Panel>
 
-          {/* My Tasks */}
+          {/* My Tasks (aggregated + Prioritize) */}
           <Panel style={{ display: 'flex', flexDirection: 'column' }}>
             <div style={{ ...SECTION_TITLE, justifyContent: 'space-between' }}>
               <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}><CheckCircle2 style={{ width: 14, height: 14 }} /> My Tasks</span>
-              <div style={{ display: 'inline-flex', alignItems: 'center', gap: 10 }}>
-                <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>{openTasks.length} open</span>
+              <div style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+                <button onClick={() => setPrioritized((v) => !v)} title="Sort by priority"
+                  style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 11.5, fontWeight: 700, color: prioritized ? '#fff' : '#7C3AED', background: prioritized ? '#7C3AED' : '#F5F3FF', border: '1px solid #DDD6FE', borderRadius: 9999, padding: '4px 10px', cursor: 'pointer' }}>
+                  <Zap style={{ width: 12, height: 12 }} /> Prioritize
+                </button>
                 <button onClick={() => setShowNewTask(true)} style={{ display: 'inline-flex', alignItems: 'center', gap: 3, fontSize: 12, fontWeight: 700, color: '#0748EE', background: 'none', border: 'none', cursor: 'pointer' }}>
                   <Plus style={{ width: 14, height: 14 }} /> New task
                 </button>
@@ -536,18 +546,20 @@ const BrandDashboard = () => {
               <div style={{ background: '#EFF6FF', border: '1px solid #BFDBFE', borderRadius: 10, padding: '10px 12px', marginBottom: 10 }}>
                 <div style={{ fontSize: 10, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', color: '#0748EE', marginBottom: 3 }}>Up next</div>
                 <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--text-heading)' }}>{nextTask.title}</div>
-                {nextTask.due_date && <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2 }}>Due {fmtDate(nextTask.due_date)}</div>}
+                <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2 }}>{(SRC[nextTask.source] || SRC.task).label}{nextTask.due ? ` · Due ${fmtDate(nextTask.due)}` : ''}</div>
               </div>
             )}
-            <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 7, overflowY: 'auto', maxHeight: 180 }}>
-              {myTasks.length === 0 ? (
-                <div style={{ fontSize: 13, color: 'var(--text-muted)', padding: '12px 0' }}>No tasks assigned yet.</div>
-              ) : myTasks.slice(0, 6).map((t) => {
+            <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflowY: 'auto', maxHeight: 220 }}>
+              {openAgg.length === 0 ? (
+                <div style={{ fontSize: 13, color: 'var(--text-muted)', padding: '12px 0' }}>No open tasks. You're all caught up.</div>
+              ) : openAgg.slice(0, 8).map((t) => {
                 const st = TASK_STATUS[t.status] || TASK_STATUS.pending;
                 const pr = PRIORITY[t.priority] || PRIORITY.medium;
+                const src = SRC[t.source] || SRC.task;
                 return (
-                  <div key={t.id} onClick={() => navigate('/tasks')} style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', padding: '4px 0' }}>
-                    <span style={{ fontSize: 13, color: 'var(--text-heading)', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{t.title}</span>
+                  <div key={t.key} onClick={() => navigate(t.route)} style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', padding: '8px 0', borderTop: '1px solid var(--border-soft, #EEF1F8)' }}>
+                    <span style={{ fontSize: 13, color: 'var(--text-heading)', flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{t.title}</span>
+                    <span style={{ fontSize: 9.5, fontWeight: 800, color: src.c, background: src.bg, padding: '2px 7px', borderRadius: 6, textTransform: 'uppercase' }}>{src.label}</span>
                     <span style={{ fontSize: 10, fontWeight: 700, color: pr.c, background: pr.bg, padding: '1px 7px', borderRadius: 9999 }}>{pr.label}</span>
                     <span style={{ fontSize: 10, fontWeight: 700, color: st.c, background: st.bg, padding: '1px 7px', borderRadius: 9999 }}>{st.label}</span>
                   </div>
@@ -560,158 +572,78 @@ const BrandDashboard = () => {
           </Panel>
         </div>
 
-        {/* ── Charts row ────────────────────────────────────────────────── */}
-        {hasData && (
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(290px, 1fr))', gap: '14px', marginBottom: '18px' }}>
-            <Panel>
-              <div style={SECTION_TITLE}>Runs over time</div>
-              <ResponsiveContainer width="100%" height={210}>
-                <LineChart data={trendData} margin={{ top: 5, right: 10, left: -20, bottom: 0 }}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" />
-                  <XAxis dataKey="label" tick={{ fontSize: 11, fill: '#94A3B8' }} />
-                  <YAxis allowDecimals={false} tick={{ fontSize: 11, fill: '#94A3B8' }} />
-                  <Tooltip />
-                  <Line type="monotone" dataKey="runs" stroke="#0748EE" strokeWidth={2.5} dot={{ r: 3 }} />
-                </LineChart>
-              </ResponsiveContainer>
-            </Panel>
-            <Panel>
-              <div style={SECTION_TITLE}>Runs by tool</div>
-              <ResponsiveContainer width="100%" height={210}>
-                <BarChart data={agentBars} layout="vertical" margin={{ top: 5, right: 10, left: 10, bottom: 0 }}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" />
-                  <XAxis type="number" allowDecimals={false} tick={{ fontSize: 11, fill: '#94A3B8' }} />
-                  <YAxis type="category" dataKey="name" width={120} tick={{ fontSize: 10, fill: '#64748B' }} />
-                  <Tooltip />
-                  <Bar dataKey="runs" fill="#7C3AED" radius={[0, 4, 4, 0]} />
-                </BarChart>
-              </ResponsiveContainer>
-            </Panel>
-            {confDonut.length > 0 && (
-              <Panel>
-                <div style={SECTION_TITLE}>Confidence distribution</div>
-                <ResponsiveContainer width="100%" height={210}>
-                  <PieChart>
-                    <Pie data={confDonut} dataKey="value" nameKey="name" innerRadius={55} outerRadius={80} paddingAngle={2}>
-                      {confDonut.map((d, i) => <Cell key={d.name} fill={CONF_COLORS[d.name] || ['#0748EE', '#94A3B8', '#0F766E'][i % 3]} />)}
-                    </Pie>
-                    <Tooltip formatter={(v, n) => [fmtNum(v), n]} />
-                    <Legend wrapperStyle={{ fontSize: 11 }} />
-                  </PieChart>
-                </ResponsiveContainer>
-              </Panel>
-            )}
+        {/* ── Sources to chat with — live per-brand Drive mirror ─────────── */}
+        <Panel style={{ marginBottom: '16px' }}>
+          <div style={{ ...SECTION_TITLE, justifyContent: 'space-between' }}>
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}><BrandLogo type="google_drive" size={16} /> Sources to chat with</span>
+            <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>{brand?.name} Drive · {driveShown.length} files{usingSampleDrive ? ' (sample)' : ''}</span>
           </div>
-        )}
-
-        {/* ── Tool activity table ───────────────────────────────────────── */}
-        {byAgent.length > 0 && (
-          <Panel style={{ padding: 0, overflow: 'hidden', marginBottom: '18px' }}>
-            <div style={{ padding: '14px 18px', borderBottom: '1px solid var(--card-border)' }}>
-              <div style={{ fontSize: 13, fontWeight: 800, color: 'var(--text-heading)' }}>Tool activity</div>
-              <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>What you've run, how often, and when.</div>
-            </div>
-            <div style={{ overflowX: 'auto' }}>
-              <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: 640 }}>
-                <thead>
-                  <tr>
-                    {['Tool', 'Runs', 'Rows', 'Time Saved', 'Last Run'].map((h, i) => (
-                      <th key={h} style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', color: '#64748B', background: '#F8FAFC', padding: '9px 14px', textAlign: i === 0 || i === 4 ? 'left' : 'right', borderBottom: '1.5px solid #E2E8F0', whiteSpace: 'nowrap' }}>{h}</th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {byAgent.map((a, i) => (
-                    <tr key={a.agent_type} style={{ background: i % 2 ? '#FAFBFF' : undefined }}>
-                      <td style={{ fontSize: 13, padding: '9px 14px', color: 'var(--text-heading)', fontWeight: 600 }}>{agentLabel(a.agent_type)}</td>
-                      <td style={{ fontSize: 13, padding: '9px 14px', textAlign: 'right', fontFamily: 'monospace', color: '#334155' }}>{fmtNum(a.runs)}</td>
-                      <td style={{ fontSize: 13, padding: '9px 14px', textAlign: 'right', fontFamily: 'monospace', color: '#334155' }}>{fmtNum(a.total_rows)}</td>
-                      <td style={{ fontSize: 13, padding: '9px 14px', textAlign: 'right', fontFamily: 'monospace', color: '#059669', fontWeight: 600 }}>≈ {hoursSaved(a.total_rows, a.runs)} hrs</td>
-                      <td style={{ fontSize: 13, padding: '9px 14px', color: '#64748B', whiteSpace: 'nowrap' }}>{fmtDate(a.last_run)}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </Panel>
-        )}
-
-        {/* ── Row C: My Feedback · Connected tools ──────────────────────── */}
-        <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1.5fr) minmax(0, 1fr)', gap: '14px', marginBottom: '18px' }}>
-          <Panel>
-            <div style={{ ...SECTION_TITLE, justifyContent: 'space-between' }}>
-              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}><Flag style={{ width: 14, height: 14 }} /> My Feedback</span>
-              <button onClick={() => navigate('/feedback')} style={{ fontSize: 12, fontWeight: 600, color: '#0748EE', background: 'none', border: 'none', cursor: 'pointer' }}>View all →</button>
-            </div>
-            {myFeedback.length === 0 ? (
-              <div style={{ fontSize: 13, color: 'var(--text-muted)', padding: '10px 0' }}>
-                Nothing flagged yet. When you flag rows on a reco result, you'll see the status and replies here.
-              </div>
-            ) : (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                {myFeedback.slice(0, 4).map((f) => {
-                  const st = TASK_STATUS[f.status] || TASK_STATUS.pending;
-                  const lastMsg = (f.messages || [])[f.messages?.length - 1];
-                  return (
-                    <div key={f.id} onClick={() => navigate('/feedback')} style={{ cursor: 'pointer', border: '1px solid #F1F5F9', borderRadius: 10, padding: '10px 12px' }}>
-                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
-                        <span style={{ fontSize: 13, fontWeight: 700, color: 'var(--text-heading)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{f.title}</span>
-                        <span style={{ fontSize: 10, fontWeight: 700, color: st.c, background: st.bg, padding: '2px 8px', borderRadius: 9999, whiteSpace: 'nowrap' }}>{st.label}</span>
-                      </div>
-                      <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                        {lastMsg ? `${lastMsg.sender?.name || 'Reply'}: ${lastMsg.message}` : f.description}
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-          </Panel>
-
-          <Panel>
-            <div style={SECTION_TITLE}>Connected tools</div>
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10 }}>
-              {[
-                { type: 'google', label: 'Google' },
-                { type: 'gmail', label: 'Gmail' },
-                { type: 'google_drive', label: 'Drive' },
-                { type: 'fireflies', label: 'Fireflies' },
-                { type: 'tally', label: 'Tally' },
-                { type: 'slack', label: 'Slack' },
-              ].map((it) => (
-                <span key={it.type} title={it.label} style={{ width: 38, height: 38, borderRadius: 11, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', background: 'var(--surface)', border: '1px solid var(--card-border)' }}>
-                  <BrandLogo type={it.type} size={22} />
-                </span>
-              ))}
-            </div>
-            <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 12 }}>Integrations are managed by your admin.</div>
-          </Panel>
-        </div>
-
-        {/* ── Assigned Agents + Request a new agent ─────────────────────── */}
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '12px' }}>
-          <h2 style={{ fontFamily: 'Manrope, sans-serif', fontSize: '18px', fontWeight: 800, color: 'var(--text-heading)' }}>Your Agents</h2>
-          <button onClick={() => setShowRequest(true)} style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 13, fontWeight: 600, color: '#0748EE', background: 'var(--surface)', border: '1px solid #A3BFF8', borderRadius: 10, padding: '8px 14px', cursor: 'pointer' }}>
-            <Plus style={{ width: 15, height: 15 }} /> Request a new agent
-          </button>
-        </div>
-        {agents.length === 0 ? (
-          <Card><CardContent className="py-8 text-center"><Bot className="h-12 w-12 text-slate-400 mx-auto mb-4" /><p className="text-slate-600">No agents assigned to this brand yet</p></CardContent></Card>
-        ) : (
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))', gap: '12px' }} data-testid="agents-grid">
-            {agents.map((agent) => (
-              <div key={agent.id} onClick={() => openAgent(agent)} data-testid={`agent-card-${agent.id}`}
-                className="glass-card" style={{ padding: '14px 16px', cursor: 'pointer', display: 'flex', flexDirection: 'column', gap: 6, transition: 'box-shadow 0.2s, transform 0.2s' }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                  <span style={{ width: 30, height: 30, borderRadius: 8, background: '#E8EFFE', display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}><Bot style={{ width: 16, height: 16, color: '#0748EE' }} /></span>
-                  <span style={{ fontSize: 14, fontWeight: 700, color: 'var(--text-heading)' }}>{agent.name}</span>
-                </div>
-                <div style={{ fontSize: 12, color: 'var(--text-muted)', lineHeight: 1.4, minHeight: 32, display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>{agent.description}</div>
-                <span style={{ fontSize: 12, fontWeight: 700, color: '#0748EE', marginTop: 2, display: 'inline-flex', alignItems: 'center', gap: 3 }}>Open agent <ChevronRight style={{ width: 13, height: 13 }} /></span>
-              </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, background: 'var(--surface-2, #F8FAFF)', border: '1px solid var(--card-border)', borderRadius: 12, padding: '9px 13px', marginBottom: 11 }}>
+            <Search style={{ width: 15, height: 15, color: '#94A3B8' }} />
+            <input value={srcQuery} onChange={(e) => setSrcQuery(e.target.value)} placeholder={`Search this brand's Drive…`} style={{ flex: 1, border: 'none', background: 'transparent', outline: 'none', fontSize: 13, color: 'var(--text-heading)' }} />
+          </div>
+          <div style={{ display: 'flex', gap: 7, flexWrap: 'wrap', marginBottom: 12 }}>
+            {['All', 'Sheets', 'Docs', 'PDFs', 'Video', 'Images'].map((t) => (
+              <button key={t} onClick={() => setSrcTab(t)} style={{ fontSize: 12, fontWeight: 600, padding: '5px 12px', borderRadius: 9999, cursor: 'pointer', background: srcTab === t ? 'var(--text-heading)' : 'var(--surface)', border: `1px solid ${srcTab === t ? 'var(--text-heading)' : 'var(--card-border)'}`, color: srcTab === t ? '#fff' : 'var(--text-muted)' }}>{t}</button>
             ))}
           </div>
-        )}
+          {srcFiltered.length === 0 ? (
+            <div style={{ textAlign: 'center', padding: '22px 0', color: 'var(--text-muted)' }}>
+              <FileText style={{ width: 30, height: 30, margin: '0 auto 8px', color: '#CBD5E1' }} />
+              <div style={{ fontSize: 13 }}>No files in this category.</div>
+            </div>
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 2, maxHeight: 300, overflowY: 'auto' }}>
+              {srcFiltered.slice(0, 40).map((f) => {
+                const t = fileTint(f.mimeType);
+                return (
+                  <div key={f.id} className="drive-row" style={{ display: 'flex', alignItems: 'center', gap: 11, padding: '9px 8px', borderRadius: 10 }}
+                    onMouseEnter={(e) => { e.currentTarget.style.background = 'var(--surface-2, #F8FAFF)'; const a = e.currentTarget.querySelector('.file-actions'); if (a) a.style.opacity = '1'; }}
+                    onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent'; const a = e.currentTarget.querySelector('.file-actions'); if (a) a.style.opacity = '0'; }}>
+                    <span style={{ width: 28, height: 28, borderRadius: 8, background: f.isFolder ? '#EEF2F8' : t.bg, color: t.c, display: 'grid', placeItems: 'center', flexShrink: 0 }}>
+                      {f.isFolder ? <BrandLogo type="google_drive" size={16} /> : <FileText style={{ width: 15, height: 15 }} />}
+                    </span>
+                    <span style={{ flex: 1, minWidth: 0, fontSize: 13, fontWeight: 500, color: 'var(--text-heading)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{f.name}</span>
+                    {f.size != null && <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>{prettySize(f.size)}</span>}
+                    <span className="file-actions" style={{ display: 'flex', gap: 6, opacity: 0, transition: 'opacity .14s ease' }}>
+                      <a href={f.webViewLink || '#'} target="_blank" rel="noreferrer" title="Open in Drive"
+                        style={{ width: 26, height: 26, borderRadius: 7, border: '1px solid var(--card-border)', background: 'var(--surface)', display: 'grid', placeItems: 'center', color: 'var(--text-muted)' }}>
+                        <ExternalLink style={{ width: 13, height: 13 }} />
+                      </a>
+                      <button onClick={() => navigate('/chat', { state: { prompt: `Tell me about the file "${f.name}"` } })} title="Ask Colonel AI about this file"
+                        style={{ width: 26, height: 26, borderRadius: 7, border: '1px solid #DDD6FE', background: 'var(--surface)', display: 'grid', placeItems: 'center', color: '#7C3AED', cursor: 'pointer' }}>
+                        <Sparkles style={{ width: 13, height: 13 }} />
+                      </button>
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </Panel>
+
+        {/* ── Slim KPI strip (quick glance; full analytics in the Analysis tab) ── */}
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(210px, 1fr))', gap: '12px', marginBottom: '8px' }}>
+          <KpiCard icon={Activity} label="Total Runs"     value={fmtNum(totalRuns)}   color="#0748EE" bg="#E8EFFE" />
+          <KpiCard icon={Rows3}    label="Rows Processed" value={fmtNum(totalRows)}   color="#7C3AED" bg="#F5F3FF" />
+          <KpiCard icon={Clock}    label="Time Saved"     value={`≈ ${savedHrs} hrs`} color="#059669" bg="#ECFDF5" />
+          <KpiCard icon={Bot}      label="Active Agents"  value={fmtNum(activeAgents || agents.length)} color="#EA580C" bg="#FFF7ED" />
+        </div>
+      </div>
+
+      {/* ── Sticky bottom Ask Colonel AI bar (Overview) ──────────────────── */}
+      <div style={{ position: 'sticky', bottom: 16, zIndex: 30, padding: '0 24px', maxWidth: 1320, margin: '0 auto', pointerEvents: 'none' }}>
+        <div className="glass-card" style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 8px 8px 14px', borderRadius: 16, boxShadow: '0 -2px 10px rgba(16,24,64,.04), 0 12px 34px rgba(16,24,64,.14)', pointerEvents: 'auto' }}>
+          <span style={{ width: 30, height: 30, borderRadius: 9, flexShrink: 0, display: 'grid', placeItems: 'center', background: 'linear-gradient(135deg, #0748EE, #7C3AED)' }}>
+            <Sparkles style={{ width: 16, height: 16, color: '#fff' }} />
+          </span>
+          <input value={aiPrompt} onChange={(e) => setAiPrompt(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && askAI()}
+            placeholder="Ask Colonel AI anything — reconciliations, a Drive file, this brand's numbers…"
+            style={{ flex: 1, border: 'none', background: 'transparent', outline: 'none', fontSize: 13.5, color: 'var(--text-heading)' }} />
+          <button onClick={askAI} style={{ width: 34, height: 34, borderRadius: 10, border: 'none', background: '#0748EE', color: '#fff', display: 'grid', placeItems: 'center', cursor: 'pointer', flexShrink: 0 }}>
+            <Send style={{ width: 16, height: 16 }} />
+          </button>
+        </div>
       </div>
 
       {/* ── CFO agent picker (unchanged) ─────────────────────────────────── */}

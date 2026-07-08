@@ -23,6 +23,7 @@ import FeedbackPage      from './pages/developer/FeedbackPage';
 // ── Accountant pages ──────────────────────────────────────────────────────────
 import BrandSelection        from './pages/accountant/BrandSelection';
 import BrandDashboard        from './pages/accountant/BrandDashboard';
+import AnalysisPage          from './pages/accountant/AnalysisPage';
 import BrandAgentsInventory  from './pages/accountant/BrandAgentsInventory';
 import AgentWorkspace        from './pages/accountant/AgentWorkspace';
 import AgentDispatch         from './pages/accountant/AgentDispatch';
@@ -170,6 +171,16 @@ function App() {
             element={
               <ProtectedRoute allowedRoles={['accountant', 'admin']}>
                 <BrandDashboard />
+              </ProtectedRoute>
+            }
+          />
+
+          {/* ── Brand analysis (accountant deep analytics) ───────────────── */}
+          <Route
+            path="/brands/:brandId/analysis"
+            element={
+              <ProtectedRoute allowedRoles={['accountant', 'admin']}>
+                <AnalysisPage />
               </ProtectedRoute>
             }
           />
