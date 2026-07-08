@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { authenticateToken, authorize } = require('../middleware/authMiddleware');
-const { getRecoHistory, getJobResults, getDashboardSummary, getJobById, getAdminToolAnalytics, getUserActivity, getToolDetails, getUsersOverview } = require('../controllers/dashboardController');
+const { getRecoHistory, getJobResults, getDashboardSummary, getJobById, getAdminToolAnalytics, getUserActivity, getToolDetails, getUsersOverview, getBrandActivity, getBrandAgentDetail } = require('../controllers/dashboardController');
 
 const flexibleAuth = (req, res, next) => {
   const token = req.headers['authorization']?.split(' ')[1];
@@ -16,6 +16,10 @@ router.get('/dashboard/summary/:brandId',       flexibleAuth, authorize('account
 router.get('/dashboard/reco/history/:brandId',  flexibleAuth, authorize('accountant','admin'), getRecoHistory);
 router.get('/dashboard/reco/results/:jobId',    flexibleAuth, authorize('accountant','admin'), getJobResults);
 router.get('/dashboard/reco/job/:jobId',        flexibleAuth, authorize('accountant','admin'), getJobById);
+
+// Accountant Analysis page (per-brand, brand-access gated)
+router.get('/dashboard/activity/:brandId',              flexibleAuth, authorize('accountant','admin'), getBrandActivity);
+router.get('/dashboard/agent-detail/:brandId/:agentType', flexibleAuth, authorize('accountant','admin'), getBrandAgentDetail);
 
 // Platform-wide per-tool analytics — admin only
 router.get('/dashboard/admin/tool-analytics',   flexibleAuth, authorize('admin'), getAdminToolAnalytics);

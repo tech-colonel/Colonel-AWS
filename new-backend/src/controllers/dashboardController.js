@@ -636,4 +636,99 @@ const getUserActivity = async (req, res) => {
   }
 };
 
-module.exports = { getRecoHistory, getJobResults, getDashboardSummary, getJobById, getAdminToolAnalytics, getUserActivity, getToolDetails, getUsersOverview };
+/**
+ * GET /api/dashboard/activity/:brandId?days=30
+ * Per-day runs + rows for this brand (user-scoped like the rest) — drives the
+ * daily-process diagram on the accountant Analysis page. Zero-filled.
+ */
+const getBrandActivity = async (req, res) => {
+  const { brandId } = req.params;
+  const days = Math.min(parseInt(req.query.days, 10) || 30, 90);
+  const userId = effectiveUserId(req);
+  if (!brandId || brandId === 'demo') return res.json({ days: [] });
+  try {
+    const seq = await getBrandSeq(brandId);
+    const rows = await withBypass(seq, async (t) => {
+      const [r] = await seq.query(
+        `SELECT to_char(created_at, 'YYYY-MM-DD') AS day,
+                COUNT(*)::int AS runs, COALESCE(SUM(total_rows),0)::int AS rows
+         FROM reco_jobs
+         WHERE brand_id = $1 AND (created_by = $2 OR $2 IS NULL)
+           AND created_at >= NOW() - ($3 || ' days')::interval
+         GROUP BY day ORDER BY day ASC`,
+        { bind: [brandId, userId || null, String(days)], transaction: t }
+      );
+      return r;
+    });
+    const map = new Map((rows || []).map((x) => [x.day, x]));
+    const out = [];
+    const today = new Date();
+    for (let i = days - 1; i >= 0; i--) {
+      const d = new Date(today); d.setDate(d.getDate() - i);
+      const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+      const hit = map.get(key);
+      out.push({ date: key, runs: hit ? Number(hit.runs) : 0, rows: hit ? Number(hit.rows) : 0 });
+    }
+    res.json({ days: out });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+};
+
+/**
+ * GET /api/dashboard/agent-detail/:brandId/:agentType
+ * Per-agent drill-down for the Analysis page: totals, monthly trend, status mix,
+ * and a USER-WISE breakdown (who ran this tool on this brand, how often).
+ * Brand-level (not self-scoped) — this is team analysis, gated by brand access.
+ */
+const getBrandAgentDetail = async (req, res) => {
+  const { brandId, agentType } = req.params;
+  if (!brandId || brandId === 'demo') return res.json({ totals: {}, byUser: [], monthly: [], statusDist: [] });
+  try {
+    const seq = await getBrandSeq(brandId);
+    const data = await withBypass(seq, async (t) => {
+      const [[totals]] = await seq.query(
+        `SELECT COUNT(*)::int AS runs, COALESCE(SUM(total_rows),0)::int AS rows,
+                COALESCE(SUM(matched_rows),0)::int AS matched, COALESCE(SUM(unmatched_rows),0)::int AS unmatched,
+                MAX(created_at) AS last_run
+         FROM reco_jobs WHERE brand_id = $1 AND agent_type = $2`,
+        { bind: [brandId, agentType], transaction: t }
+      );
+      const [byUserRaw] = await seq.query(
+        `SELECT created_by, COUNT(*)::int AS runs, COALESCE(SUM(total_rows),0)::int AS rows,
+                COALESCE(SUM(matched_rows),0)::int AS matched, MAX(created_at) AS last_run
+         FROM reco_jobs WHERE brand_id = $1 AND agent_type = $2
+         GROUP BY created_by ORDER BY runs DESC`,
+        { bind: [brandId, agentType], transaction: t }
+      );
+      const [monthly] = await seq.query(
+        `SELECT to_char(date_trunc('month', created_at), 'Mon YYYY') AS label,
+                date_trunc('month', created_at) AS m,
+                COUNT(*)::int AS runs, COALESCE(SUM(total_rows),0)::int AS rows
+         FROM reco_jobs WHERE brand_id = $1 AND agent_type = $2
+         GROUP BY m ORDER BY m ASC`,
+        { bind: [brandId, agentType], transaction: t }
+      );
+      const [statusDist] = await seq.query(
+        `SELECT status, COUNT(*)::int AS count FROM reco_jobs
+         WHERE brand_id = $1 AND agent_type = $2 GROUP BY status`,
+        { bind: [brandId, agentType], transaction: t }
+      );
+      return { totals, byUserRaw, monthly, statusDist };
+    });
+    const { User } = require('../models/master');
+    const ids = [...new Set((data.byUserRaw || []).map((u) => u.created_by).filter(Boolean))];
+    const users = ids.length ? await User.findAll({ where: { id: ids }, attributes: ['id', 'name', 'email'] }) : [];
+    const nameMap = Object.fromEntries(users.map((u) => [u.id, u.name || u.email]));
+    const byUser = (data.byUserRaw || []).map((u) => ({
+      userId: u.created_by,
+      name: u.created_by ? (nameMap[u.created_by] || 'Unknown user') : 'Unattributed',
+      runs: Number(u.runs), rows: Number(u.rows), matched: Number(u.matched), last_run: u.last_run,
+    }));
+    res.json({ totals: data.totals || {}, byUser, monthly: data.monthly || [], statusDist: data.statusDist || [] });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+};
+
+module.exports = { getRecoHistory, getJobResults, getDashboardSummary, getJobById, getAdminToolAnalytics, getUserActivity, getToolDetails, getUsersOverview, getBrandActivity, getBrandAgentDetail };
