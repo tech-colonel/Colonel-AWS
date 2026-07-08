@@ -204,8 +204,28 @@ async function getOAuthClient() {
   }
 }
 
+/** True if `childId` is `rootId` or nested under it (parent walk, capped). Used
+ *  to keep brand Drive navigation inside that brand's own folder tree. */
+async function isDescendant(childId, rootId, maxHops = 8) {
+  if (!childId || !rootId) return false;
+  if (childId === rootId) return true;
+  const drive = getDrive();
+  let cur = childId;
+  for (let i = 0; i < maxHops; i++) {
+    try {
+      const res = await drive.files.get({ fileId: cur, fields: 'id,parents', supportsAllDrives: true });
+      const parents = res.data.parents || [];
+      if (parents.includes(rootId)) return true;
+      if (!parents.length) return false;
+      cur = parents[0];
+    } catch (_) { return false; }
+  }
+  return false;
+}
+
 module.exports = {
   FOLDER_MIME,
+  isDescendant,
   isConfigured,
   serviceAccountEmail,
   parseFolderId,

@@ -255,41 +255,50 @@ const getBrandDrive = async (req, res, next) => {
       return res.json({ configured: false, reason: 'no_folder', files: [] });
     }
     try {
-      // Prefer the connected Google account (OAuth → its own Drive); fall back
-      // to the service account for folders shared with colonel-drive@…
-      const g = await getGoogleClient();
-      let files;
-      if (g) {
-        const d = google.drive({ version: 'v3', auth: g.client });
-        const r = await d.files.list({
-          q: `'${brand.drive_folder_id}' in parents and trashed = false`,
-          fields: 'files(id,name,mimeType,size,webViewLink)',
-          pageSize: 100,
-          supportsAllDrives: true,
-          includeItemsFromAllDrives: true,
-        });
-        files = (r.data.files || []).map((c) => ({
-          id: c.id,
-          name: c.name,
-          mimeType: c.mimeType,
-          isFolder: c.mimeType === DRIVE_FOLDER_MIME,
-          size: c.size != null ? Number(c.size) : null,
-          webViewLink: c.webViewLink || `https://drive.google.com/file/d/${c.id}/view`,
-        }));
-      } else if (drive.isConfigured()) {
-        const children = await drive.listChildren(brand.drive_folder_id);
-        files = (children || []).map((c) => ({
-          id: c.id,
-          name: c.name,
-          mimeType: c.mimeType,
-          isFolder: c.mimeType === drive.FOLDER_MIME,
-          size: c.size != null ? Number(c.size) : null,
-          webViewLink: `https://drive.google.com/file/d/${c.id}/view`,
-        }));
-      } else {
-        return res.json({ configured: false, reason: 'google_not_connected', files: [] });
+      const rootId = brand.drive_folder_id;
+      // Allow drilling into a subfolder via ?folderId, but keep it INSIDE this
+      // brand's own tree (isolation) — verified via the service account.
+      let folderId = (req.query.folderId || rootId).toString();
+      if (folderId !== rootId) {
+        const within = drive.isConfigured() ? await drive.isDescendant(folderId, rootId).catch(() => false) : false;
+        if (!within) folderId = rootId;
       }
-      res.json({ configured: true, folderId: brand.drive_folder_id, files });
+
+      const mapFile = (c, folderMime) => ({
+        id: c.id,
+        name: c.name,
+        mimeType: c.mimeType,
+        isFolder: c.mimeType === folderMime,
+        size: c.size != null ? Number(c.size) : null,
+        modifiedTime: c.modifiedTime || null,
+        webViewLink: c.webViewLink || `https://drive.google.com/file/d/${c.id}/view`,
+      });
+
+      let files = null;
+      // Prefer the connected Google account (OAuth → its own Drive access)…
+      const g = await getGoogleClient();
+      if (g) {
+        try {
+          const d = google.drive({ version: 'v3', auth: g.client });
+          const r = await d.files.list({
+            q: `'${folderId}' in parents and trashed = false`,
+            fields: 'files(id,name,mimeType,size,modifiedTime,webViewLink)',
+            orderBy: 'folder,modifiedTime desc,name',
+            pageSize: 200,
+            supportsAllDrives: true,
+            includeItemsFromAllDrives: true,
+          });
+          files = (r.data.files || []).map((c) => mapFile(c, DRIVE_FOLDER_MIME));
+        } catch (_) { files = null; }
+      }
+      // …then fall back to the service account (brand folders are shared with
+      // colonel-drive@…, not with personal OAuth accounts).
+      if ((!files || files.length === 0) && drive.isConfigured()) {
+        try { files = (await drive.listChildren(folderId) || []).map((c) => mapFile(c, drive.FOLDER_MIME)); }
+        catch (_) { if (files == null) files = []; }
+      }
+      if (files == null) return res.json({ configured: false, reason: 'google_not_connected', files: [] });
+      res.json({ configured: true, folderId, rootFolderId: rootId, files });
     } catch (err) {
       // Folder not accessible, or transient Drive error → empty, not 500.
       res.json({ configured: true, error: err.message, files: [] });
