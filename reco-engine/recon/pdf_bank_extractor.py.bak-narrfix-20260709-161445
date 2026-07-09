@@ -62,8 +62,7 @@ _TOTAL_SET  = {"total", "grand total", "totals", "total:", "subtotal", "closing 
 _END_MARKERS = ("commonly used narrations", "end of statement",
                 "this is a system generated", "unless the constituent",
                 "registered office", "please examine the statement",
-                "computer generated statement", "abbreviations used",
-                "the limits and effective available", "details on our products")
+                "computer generated statement", "abbreviations used")
 # Per-page footer like "Page 2 of 30" — skip it (else it bleeds into the last column).
 _PAGE_FOOTER_RE = re.compile(r'^page\s+\d+\s+of\s+\d+\b')
 
@@ -393,29 +392,11 @@ def _detect_columns(page, header: dict, data_lines: list[dict]) -> Optional[list
         else:
             clusters.append({'words': [w], 'x0': w['x0'], 'x1': w['x1']})
 
-    # 2) Cluster x-boundaries. Default = midpoint between neighbours (ends fill the
-    #    page). BUT text columns are LEFT-aligned: a long description overflows past
-    #    the header midpoint into the visual gap before the next column. When a text
-    #    column is followed by ANOTHER text column, give the left column all the space
-    #    up to the next column's header left-edge, so the narration is not split into
-    #    the (often empty) adjacent text column — e.g. IDFC "Particulars" overflowing
-    #    into an empty "Cheq./Ref.No". Any boundary touching an amount column keeps the
-    #    midpoint (amounts are right-aligned and further guarded by right_x downstream).
-    def _cluster_tag(cl: dict) -> str:
-        lbl = " ".join(w['text'] for w in sorted(cl['words'], key=lambda w: (w['top'], w['x0'])))
-        return _tag_for(lbl) or 'other'
-    ctags = [_cluster_tag(cl) for cl in clusters]
-
-    def _boundary(i: int) -> float:
-        cl, nxt = clusters[i], clusters[i + 1]
-        if ctags[i] not in _NUMERIC_TAGS and ctags[i + 1] not in _NUMERIC_TAGS:
-            return float(nxt['x0'])                       # text → text: left column owns the gap
-        return (cl['x1'] + nxt['x0']) / 2.0               # midpoint otherwise
-
+    # 2) Cluster x-boundaries (midpoints between neighbours; ends fill the page)
     regions: list[tuple[float, float, dict]] = []
     for i, cl in enumerate(clusters):
-        left = 0.0 if i == 0 else _boundary(i - 1)
-        right = float(page_w) if i == len(clusters) - 1 else _boundary(i)
+        left = 0.0 if i == 0 else (clusters[i - 1]['x1'] + cl['x0']) / 2.0
+        right = float(page_w) if i == len(clusters) - 1 else (cl['x1'] + clusters[i + 1]['x0']) / 2.0
         regions.append((left, right, cl))
 
     # 3) Within each region, split ONLY when the data shows as many bands as the
@@ -579,31 +560,6 @@ def _build_transactions(all_lines: list[dict], columns: list[dict]) -> list[dict
                 txt = pl['cells'].get(k, '').strip()
                 if txt:
                     near['frag'].setdefault(k, []).append((pl['y'], txt))
-            # Some layouts (e.g. Bank of Baroda) print the running BALANCE on the
-            # tran-date anchor line but the WITHDRAWAL/DEPOSIT amount on the SEPARATE
-            # value-date continuation line. Amounts land in numeric columns, which the
-            # text merge above ignores — so adopt a continuation line's debit/credit
-            # (and balance) when the anchor is still missing it. Amount cells are
-            # already money-shaped + right-aligned (guarded in _assign_cells), so a
-            # wrapped narration token never leaks in here.
-            if near['debit'] == 0.0 and near['credit'] == 0.0:
-                pd_, pc_ = _amounts(pl['cells'])
-                if pd_ or pc_:
-                    near['debit'], near['credit'] = pd_, pc_
-                    # Reflect into raw_cells too — the OUTPUT columns are rendered from
-                    # raw_cells, so without this the amount verifies but shows blank.
-                    if pd_ and debit_key:
-                        near['raw_cells'][debit_key] = pl['cells'].get(debit_key, '')
-                    if pc_ and credit_key:
-                        near['raw_cells'][credit_key] = pl['cells'].get(credit_key, '')
-                    if amount_key and not (debit_key or credit_key):
-                        near['raw_cells'][amount_key] = pl['cells'].get(amount_key, '')
-                        if drcr_key and pl['cells'].get(drcr_key, '').strip():
-                            near['raw_cells'][drcr_key] = pl['cells'].get(drcr_key, '')
-            if not near.get('has_balance') and bal_key and pl['cells'].get(bal_key, '').strip():
-                near['balance'] = _parse_amount(pl['cells'].get(bal_key))
-                near['has_balance'] = True
-                near['raw_cells'][bal_key] = pl['cells'].get(bal_key, '')
         pending.clear()
 
     for ln in all_lines:
@@ -830,22 +786,6 @@ def _finalize(transactions: list[dict], columns: list[dict], meta: dict) -> dict
             prev_bal = b
     continuity_ok = has_bal and checked >= max(1, len(transactions) // 2) and mismatches == 0
 
-    # Reverse-chronological statements (newest row first — e.g. Bank of Baroda):
-    # forward continuity fails, but each row's balance equals the NEXT (older) row's
-    # balance plus this row's credit minus debit. Check that when forward fails.
-    rev_checked = rev_mismatch = 0
-    if has_bal and not continuity_ok and len(transactions) >= 2:
-        for i in range(len(transactions) - 1):
-            b_i = transactions[i].get("balance")
-            b_next = transactions[i + 1].get("balance")
-            if b_i is None or b_next is None:
-                continue
-            rev_checked += 1
-            expected_next = round(b_i - transactions[i]["credit"] + transactions[i]["debit"], 2)
-            if abs(expected_next - b_next) > 1.0:
-                rev_mismatch += 1
-    reverse_ok = has_bal and rev_checked > 0 and rev_checked >= max(1, (len(transactions) - 1) // 2) and rev_mismatch == 0
-
     opening_balance = meta.get("opening_balance")
     if opening_balance is None and transactions and has_bal:
         first = transactions[0]
@@ -857,7 +797,7 @@ def _finalize(transactions: list[dict], columns: list[dict], meta: dict) -> dict
     net_ok = (opening_balance is not None and closing_balance is not None and
               abs(round(opening_balance + computed_credit - computed_debit, 2) - closing_balance) < 2.0)
 
-    balance_reconciled = bool(continuity_ok or net_ok or reverse_ok)
+    balance_reconciled = bool(continuity_ok or net_ok)
     # Credit-card / single-amount statements have no running balance to reconcile;
     # each row's direction is explicit (DR/CR flag or an Amount column), so the
     # parse is unambiguous — accept it when rows were extracted.

@@ -1,0 +1,29 @@
+{
+  "signature": "11b0427c936ad58002cb",
+  "bank": "HDFC Bank",
+  "source": "deterministic",
+  "amount_mode": "amount_drcr_flag",
+  "primary_date_header": "Date",
+  "columns": [
+    {
+      "header": "Date",
+      "tag": "date"
+    },
+    {
+      "header": "Transaction Description",
+      "tag": "narr"
+    },
+    {
+      "header": "Amount",
+      "tag": "amount"
+    },
+    {
+      "header": "DR/CR",
+      "tag": "drcr"
+    },
+    {
+      "header": "Card Number",
+      "tag": "other"
+    }
+  ]
+}

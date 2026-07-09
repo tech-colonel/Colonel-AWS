@@ -1,0 +1,37 @@
+{
+  "signature": "7ebbe6686a8485ea5cc0",
+  "bank": "Bank of Baroda",
+  "source": "deterministic",
+  "amount_mode": "debit_credit",
+  "primary_date_header": "TRAN DATE",
+  "columns": [
+    {
+      "header": "TRAN DATE",
+      "tag": "date"
+    },
+    {
+      "header": "VALUE DATE",
+      "tag": "date"
+    },
+    {
+      "header": "NARRATION",
+      "tag": "narr"
+    },
+    {
+      "header": "CHQ.NO.",
+      "tag": "ref"
+    },
+    {
+      "header": "WITHDRAWAL(DR)",
+      "tag": "debit"
+    },
+    {
+      "header": "DEPOSIT(CR)",
+      "tag": "credit"
+    },
+    {
+      "header": "BALANCE(INR)",
+      "tag": "balance"
+    }
+  ]
+}

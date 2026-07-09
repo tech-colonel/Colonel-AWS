@@ -1,0 +1,33 @@
+{
+  "signature": "efcf806793425354a341",
+  "bank": "HDFC Bank",
+  "source": "deterministic",
+  "amount_mode": "debit_credit",
+  "primary_date_header": "Date",
+  "columns": [
+    {
+      "header": "Date",
+      "tag": "date"
+    },
+    {
+      "header": "Particulars",
+      "tag": "narr"
+    },
+    {
+      "header": "Cheq./Ref.No",
+      "tag": "ref"
+    },
+    {
+      "header": "WithDrawal",
+      "tag": "debit"
+    },
+    {
+      "header": "Deposit",
+      "tag": "credit"
+    },
+    {
+      "header": "Balance",
+      "tag": "balance"
+    }
+  ]
+}

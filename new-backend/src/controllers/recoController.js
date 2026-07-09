@@ -1169,6 +1169,8 @@ const runReco = async (req, res) => {
     const form = new FormData();
     form.append('reco_type', pythonRecoType);
     form.append('tolerance', req.body.tolerance || '1.0');
+    // PDF → Bank Statement: optional password for locked/encrypted PDFs (from the UI field).
+    if (req.body.pdf_password) form.append('pdf_password', String(req.body.pdf_password));
 
     if (!req.files || req.files.length === 0) {
       return res.status(400).json({ error: 'No files uploaded' });

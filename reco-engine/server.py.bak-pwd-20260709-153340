@@ -540,8 +540,7 @@ class ReconciliationHandler(BaseHTTPRequestHandler):
                     self.write_json({"error": "Upload a bank statement PDF (field name: bank_pdf)."}, 400)
                     return
                 content = pdf_file["content"] if isinstance(pdf_file, dict) else pdf_file[0]["content"]
-                pdf_password = (fields.get("pdf_password") or "").strip()
-                data = extract_bank_statement(content, password=pdf_password)
+                data = extract_bank_statement(content)
                 excel_bytes = build_pdf_bank_excel(data)
                 job_id = uuid4().hex
                 payload = {

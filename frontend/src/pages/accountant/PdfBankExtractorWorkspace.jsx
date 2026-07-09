@@ -23,6 +23,8 @@ export default function PdfBankExtractorWorkspace() {
   const [uploadProgress, setUploadProgress] = useState(0);
   const [result,         setResult]         = useState(null);
   const [error,          setError]          = useState('');
+  const [password,       setPassword]       = useState('');
+  const [needsPassword,  setNeedsPassword]  = useState(false);
 
   const fileInputRef = useRef(null);
 
@@ -35,8 +37,8 @@ export default function PdfBankExtractorWorkspace() {
   const brandName = brands.find(b => String(b.id) === String(brandId))?.name || '';
 
   const sidebarItems = sidebarFor([
-    { path: `/brands/${brandId}/dashboard`, label: 'Dashboard',  icon: LayoutDashboard },
-    { path: `/brands/${brandId}/agents`,    label: 'All Agents', icon: Bot },
+    { path: `/brands/${brandId}/dashboard`, label: 'Dashboard',  icon: LayoutDashboard, testId: 'nav-dashboard' },
+    { path: `/brands/${brandId}/agents`,    label: 'All Agents', icon: Bot, testId: 'nav-agents' },
   ]);
 
   // ── Drop handling ──────────────────────────────────────────────
@@ -49,6 +51,8 @@ export default function PdfBankExtractorWorkspace() {
     setPdfFile(file);
     setResult(null);
     setError('');
+    setPassword('');
+    setNeedsPassword(false);
   }, []);
 
   const onDrop = useCallback((e) => {
@@ -61,7 +65,7 @@ export default function PdfBankExtractorWorkspace() {
   const onDragLeave = () => setIsDragging(false);
 
   // ── Convert ────────────────────────────────────────────────────
-  const handleConvert = async () => {
+  const handleConvert = async (pwd = '') => {
     if (!pdfFile || isProcessing) return;
     setIsProcessing(true);
     setUploadProgress(0);
@@ -73,6 +77,7 @@ export default function PdfBankExtractorWorkspace() {
     form.append('brand_id', brandId || 'demo');
     form.append('is_demo', 'false');
     form.append('bank_pdf', pdfFile);
+    if (pwd) form.append('pdf_password', pwd);
 
     try {
       const res = await api.post('/api/reco/run', form, {
@@ -82,7 +87,15 @@ export default function PdfBankExtractorWorkspace() {
         },
         timeout: 300000, // 5 min for large PDFs
       });
-      setResult(res.data);
+      // Password-protected / unreadable PDF → prompt for the password instead of showing a result.
+      if (res.data?.validation?.verify_method === 'unreadable') {
+        setNeedsPassword(true);
+        setResult(null);
+        if (pwd) setError('Incorrect password — please check it and try again.');
+      } else {
+        setNeedsPassword(false);
+        setResult(res.data);
+      }
     } catch (err) {
       const msg = err.response?.data?.error || err.message || 'Conversion failed.';
       setError(msg.includes('ECONNREFUSED') || msg.includes('503')
@@ -295,10 +308,54 @@ export default function PdfBankExtractorWorkspace() {
             </div>
           )}
 
+          {/* Password prompt — shown when the PDF is locked / password-protected */}
+          {needsPassword && (
+            <div style={{
+              marginTop: 16, padding: '16px 18px', borderRadius: 10,
+              background: '#FFFBEB', border: '1px solid #FCD34D',
+            }}>
+              <p style={{ margin: '0 0 10px', fontSize: 13, fontWeight: 700, fontFamily: 'Barlow', color: '#92400E' }}>
+                🔒 This PDF is password-protected
+              </p>
+              <p style={{ margin: '0 0 12px', fontSize: 12.5, color: '#92400E', fontFamily: 'DM Sans' }}>
+                Enter the password to open the statement (e.g. the one your bank sends with the file).
+                It’s used only to open this PDF and is never saved.
+              </p>
+              <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+                <input
+                  type="password"
+                  value={password}
+                  onChange={e => setPassword(e.target.value)}
+                  onKeyDown={e => { if (e.key === 'Enter' && password && !isProcessing) handleConvert(password); }}
+                  placeholder="PDF password"
+                  autoFocus
+                  style={{
+                    flex: '1 1 220px', padding: '9px 12px', borderRadius: 8,
+                    border: '1px solid #FCD34D', fontSize: 13, fontFamily: 'DM Sans',
+                    background: 'var(--surface)', color: 'var(--text-primary)',
+                  }}
+                />
+                <button
+                  onClick={() => handleConvert(password)}
+                  disabled={!password || isProcessing}
+                  style={{
+                    padding: '9px 22px', borderRadius: 8, border: 'none',
+                    cursor: password && !isProcessing ? 'pointer' : 'not-allowed',
+                    background: password && !isProcessing ? '#0748EE' : 'var(--card-border)',
+                    color: password && !isProcessing ? '#fff' : 'var(--text-muted)',
+                    fontSize: 13, fontWeight: 700, fontFamily: 'Barlow',
+                  }}
+                >
+                  {isProcessing ? 'Unlocking…' : 'Unlock & Extract'}
+                </button>
+              </div>
+            </div>
+          )}
+
           {/* Convert button */}
           <div style={{ marginTop: 20, display: 'flex', justifyContent: 'center' }}>
             <button
-              onClick={handleConvert}
+              onClick={() => handleConvert()}
               disabled={!pdfFile || isProcessing}
               style={{
                 padding: '11px 36px', borderRadius: 10, border: 'none', cursor: pdfFile && !isProcessing ? 'pointer' : 'not-allowed',
@@ -461,9 +518,12 @@ export default function PdfBankExtractorWorkspace() {
                 borderRadius: 16, padding: 32, textAlign: 'center',
               }}>
                 <AlertCircle size={32} color="var(--text-muted)" style={{ marginBottom: 12 }} />
-                <p style={{ margin: 0, fontSize: 14, fontWeight: 700, color: 'var(--text-heading)', fontFamily: 'Barlow' }}>No transactions extracted</p>
+                <p style={{ margin: 0, fontSize: 14, fontWeight: 700, color: 'var(--text-heading)', fontFamily: 'Barlow' }}>
+                  {result.validation?.verify_method === 'rejected' ? 'Not a bank / credit-card statement' : 'No transactions extracted'}
+                </p>
                 <p style={{ margin: '6px 0 0', fontSize: 13, color: 'var(--text-muted)', fontFamily: 'DM Sans' }}>
-                  The PDF format may not be supported yet. Try a text-based (not scanned) PDF.
+                  {result.validation?.error
+                    || 'The PDF format may not be supported yet. Try a text-based (not scanned) PDF.'}
                 </p>
               </div>
             )}

@@ -26,15 +26,7 @@ import re
 from io import BytesIO
 from typing import Optional
 
-from recon import format_learn
-
 logger = logging.getLogger(__name__)
-
-# Tier 3 (full-PDF Claude extraction) is the expensive last resort — it sends the
-# whole statement to the LLM. Cap it to small PDFs so a large statement can never
-# blow up tokens/cost; big statements must be handled by Tier 1/2 (deterministic +
-# learned template), never by full re-extraction.
-_MAX_LLM_EXTRACT_PAGES = 5
 
 # ──────────────────────────────────────────────────────────────────
 # Column header keyword lists (lowercase substring match)
@@ -49,32 +41,13 @@ _DEBIT_KW   = ["withdrawal amt", "withdrawals", "withdrawal", "debit (inr)", "de
 _CREDIT_KW  = ["deposit amt", "deposits", "deposit", "credit (inr)", "credit amt",
                "(cr)", "(cr.)", "cr amount", "credit", "paid in"]
 _BALANCE_KW = ["closing balance", "running balance", "balance (inr)", "balance"]
-# Credit-card / single-amount statements: one signed "Amount" column + a DR/CR
-# flag column (no Withdrawal/Deposit split, no running balance).
-_AMOUNT_KW  = ["transaction amount", "txn amount", "amount (inr)", "amount"]
-_DRCR_KW    = ["dr/cr", "cr/dr", "dr / cr", "cr / dr", "debit/credit", "credit/debit"]
 _TOTAL_SET  = {"total", "grand total", "totals", "total:", "subtotal", "closing balance", "statement summary"}
-# End-of-transactions / footer phrases. A line matching one is SKIPPED (not a
-# transaction) — but we do NOT permanently stop, because several of these recur
-# in per-page headers/footers BEFORE the statement ends (e.g. a bank's
-# "Registered Office" address printed at the foot of every page). Kept
-# conservative: only phrases that are footer/legend boilerplate, never a txn row.
-_END_MARKERS = ("commonly used narrations", "end of statement",
-                "this is a system generated", "unless the constituent",
-                "registered office", "please examine the statement",
-                "computer generated statement", "abbreviations used",
-                "the limits and effective available", "details on our products")
-# Per-page footer like "Page 2 of 30" — skip it (else it bleeds into the last column).
-_PAGE_FOOTER_RE = re.compile(r'^page\s+\d+\s+of\s+\d+\b')
-
-
-def _clean_text(s: str) -> str:
-    """Normalise odd PDF glyphs in extracted text: replacement char (�), non-breaking
-    / zero-width spaces → normal space; collapse whitespace."""
-    if not s:
-        return s
-    s = s.replace('�', ' ').replace('\xa0', ' ').replace('​', '').replace('\t', ' ')
-    return ' '.join(s.split())
+# Strong end-of-transactions phrases — once seen, the rest of the page is a
+# footer/legend, never a transaction (prevents the last row absorbing boilerplate).
+_END_MARKERS = ("commonly used narrations", "end of statement", "this is a system generated",
+                "unless the constituent", "registered office", "account summary",
+                "please examine the statement", "computer generated statement",
+                "legend", "abbreviations used")
 
 # Real reference number: at least 6 consecutive digits
 _REAL_REF_RE = re.compile(r'\d{6,}')
@@ -82,17 +55,15 @@ _REAL_REF_RE = re.compile(r'\d{6,}')
 # Tag detection order — first match wins. Unique tags (debit/credit/balance/narr/ref)
 # are claimed once; date may repeat (Transaction Date + Value Date).
 _TAG_ORDER = [
-    ('drcr',    _DRCR_KW),
     ('balance', _BALANCE_KW),
     ('credit',  _CREDIT_KW),
     ('debit',   _DEBIT_KW),
-    ('amount',  _AMOUNT_KW),
     ('ref',     _REF_KW),
     ('narr',    _NARR_KW),
     ('date',    _DATE_KW),
 ]
-_UNIQUE_TAGS = {'balance', 'credit', 'debit', 'amount', 'drcr', 'ref', 'narr'}
-_NUMERIC_TAGS = {'debit', 'credit', 'balance', 'amount'}
+_UNIQUE_TAGS = {'balance', 'credit', 'debit', 'ref', 'narr'}
+_NUMERIC_TAGS = {'debit', 'credit', 'balance'}
 
 
 def _match(cell: str, keywords: list[str]) -> bool:
@@ -174,21 +145,6 @@ def _parse_date(s: str) -> str:
     return ""
 
 
-_LEADING_DATE_RE = re.compile(
-    r'^\s*(\d{1,2}[/\-.]\d{1,2}[/\-.]\d{2,4}|\d{1,2}[\s\-][A-Za-z]{3,9}[\s\-]\d{2,4})')
-
-
-def _leading_date(s: str) -> tuple[str, str]:
-    """If the cell STARTS with a date, return (original_date_token, trailing_text).
-    Tight columns often bleed the first narration word into the date cell
-    (e.g. "02/04/25 APBS C-"); this recovers the date (kept in its original
-    format for display) and the bled text so the row is still recognised."""
-    m = _LEADING_DATE_RE.match(s or "")
-    if not m or not _parse_date(m.group(1)):
-        return "", ""
-    return m.group(1), s[m.end():].strip()
-
-
 # ──────────────────────────────────────────────────────────────────
 # Line grouping
 # ──────────────────────────────────────────────────────────────────
@@ -233,24 +189,13 @@ def _find_header_band(lines: list[dict]) -> Optional[dict]:
         for span in (1, 2):
             if i + span > len(lines):
                 continue
-            # span=2 is for headers wrapped across two lines (e.g. "Running"/"Balance").
-            # Never merge a DATA row into the header — a real date value in the extra
-            # line means it's a transaction row, not a wrapped header.
-            if span >= 2 and any(_parse_date(w['text'])
-                                 for ln in lines[i + 1:i + span] for w in ln['words']):
-                continue
             band_words = [w for ln in lines[i:i + span] for w in ln['words']]
             # header lines are short; a data line with 30 words isn't a header
             if len(band_words) > 22:
                 continue
             tags = _distinct_tags(band_words)
-            has_money = bool(tags & {'balance', 'debit', 'credit', 'amount'})
-            # Require date + a description/narration column + a money column. Real
-            # transaction tables always have a narration column; summary/totals
-            # tables (e.g. a credit-card "Cards Debits Credits Date" block on page 1)
-            # do not — so this skips them and finds the true transaction header,
-            # which on credit-card statements sits on a later page.
-            if not (tags >= {'date', 'narr'}) or not has_money:
+            has_money = 'balance' in tags or 'debit' in tags or 'credit' in tags
+            if 'date' not in tags or not has_money or len(tags) < 3:
                 continue
             score = len(tags)
             key = (score, -span, -len(band_words))
@@ -393,29 +338,11 @@ def _detect_columns(page, header: dict, data_lines: list[dict]) -> Optional[list
         else:
             clusters.append({'words': [w], 'x0': w['x0'], 'x1': w['x1']})
 
-    # 2) Cluster x-boundaries. Default = midpoint between neighbours (ends fill the
-    #    page). BUT text columns are LEFT-aligned: a long description overflows past
-    #    the header midpoint into the visual gap before the next column. When a text
-    #    column is followed by ANOTHER text column, give the left column all the space
-    #    up to the next column's header left-edge, so the narration is not split into
-    #    the (often empty) adjacent text column — e.g. IDFC "Particulars" overflowing
-    #    into an empty "Cheq./Ref.No". Any boundary touching an amount column keeps the
-    #    midpoint (amounts are right-aligned and further guarded by right_x downstream).
-    def _cluster_tag(cl: dict) -> str:
-        lbl = " ".join(w['text'] for w in sorted(cl['words'], key=lambda w: (w['top'], w['x0'])))
-        return _tag_for(lbl) or 'other'
-    ctags = [_cluster_tag(cl) for cl in clusters]
-
-    def _boundary(i: int) -> float:
-        cl, nxt = clusters[i], clusters[i + 1]
-        if ctags[i] not in _NUMERIC_TAGS and ctags[i + 1] not in _NUMERIC_TAGS:
-            return float(nxt['x0'])                       # text → text: left column owns the gap
-        return (cl['x1'] + nxt['x0']) / 2.0               # midpoint otherwise
-
+    # 2) Cluster x-boundaries (midpoints between neighbours; ends fill the page)
     regions: list[tuple[float, float, dict]] = []
     for i, cl in enumerate(clusters):
-        left = 0.0 if i == 0 else _boundary(i - 1)
-        right = float(page_w) if i == len(clusters) - 1 else _boundary(i)
+        left = 0.0 if i == 0 else (clusters[i - 1]['x1'] + cl['x0']) / 2.0
+        right = float(page_w) if i == len(clusters) - 1 else (cl['x1'] + clusters[i + 1]['x0']) / 2.0
         regions.append((left, right, cl))
 
     # 3) Within each region, split ONLY when the data shows as many bands as the
@@ -535,22 +462,6 @@ def _build_transactions(all_lines: list[dict], columns: list[dict]) -> list[dict
     debit_key = _tag_key(columns, 'debit')
     credit_key = _tag_key(columns, 'credit')
     bal_key = _tag_key(columns, 'balance')
-    amount_key = _tag_key(columns, 'amount')   # single signed-amount column (credit cards)
-    drcr_key = _tag_key(columns, 'drcr')        # DR/CR direction flag
-
-    def _amounts(cells):
-        """Return (debit, credit) for a row. Prefers explicit debit/credit columns;
-        else derives them from a single Amount column + a DR/CR flag."""
-        d = max(0.0, _parse_amount(cells.get(debit_key))) if debit_key else 0.0
-        c = max(0.0, _parse_amount(cells.get(credit_key))) if credit_key else 0.0
-        if amount_key and not (debit_key or credit_key):
-            amt = abs(_parse_amount(cells.get(amount_key)))
-            flag = (cells.get(drcr_key, '') if drcr_key else '').strip().upper()
-            if flag.startswith('C'):       # CR → money in (payment/refund) = credit
-                c = amt
-            else:                           # DR / blank → money out (purchase) = debit
-                d = amt
-        return d, c
 
     # Typical line height → cap how far a date-less line may attach to an anchor
     # (a real wrapped narration is a few lines away; a footer block is far below).
@@ -579,50 +490,25 @@ def _build_transactions(all_lines: list[dict], columns: list[dict]) -> list[dict
                 txt = pl['cells'].get(k, '').strip()
                 if txt:
                     near['frag'].setdefault(k, []).append((pl['y'], txt))
-            # Some layouts (e.g. Bank of Baroda) print the running BALANCE on the
-            # tran-date anchor line but the WITHDRAWAL/DEPOSIT amount on the SEPARATE
-            # value-date continuation line. Amounts land in numeric columns, which the
-            # text merge above ignores — so adopt a continuation line's debit/credit
-            # (and balance) when the anchor is still missing it. Amount cells are
-            # already money-shaped + right-aligned (guarded in _assign_cells), so a
-            # wrapped narration token never leaks in here.
-            if near['debit'] == 0.0 and near['credit'] == 0.0:
-                pd_, pc_ = _amounts(pl['cells'])
-                if pd_ or pc_:
-                    near['debit'], near['credit'] = pd_, pc_
-                    # Reflect into raw_cells too — the OUTPUT columns are rendered from
-                    # raw_cells, so without this the amount verifies but shows blank.
-                    if pd_ and debit_key:
-                        near['raw_cells'][debit_key] = pl['cells'].get(debit_key, '')
-                    if pc_ and credit_key:
-                        near['raw_cells'][credit_key] = pl['cells'].get(credit_key, '')
-                    if amount_key and not (debit_key or credit_key):
-                        near['raw_cells'][amount_key] = pl['cells'].get(amount_key, '')
-                        if drcr_key and pl['cells'].get(drcr_key, '').strip():
-                            near['raw_cells'][drcr_key] = pl['cells'].get(drcr_key, '')
-            if not near.get('has_balance') and bal_key and pl['cells'].get(bal_key, '').strip():
-                near['balance'] = _parse_amount(pl['cells'].get(bal_key))
-                near['has_balance'] = True
-                near['raw_cells'][bal_key] = pl['cells'].get(bal_key, '')
         pending.clear()
 
+    stopped = False
     for ln in all_lines:
         cells = ln['cells']
         # Skip repeated headers
         if _is_header_like(cells, columns):
             continue
-        # Totals / summary / footer / legend lines are not transactions — skip just
-        # this line. Do NOT stop permanently: these phrases recur in per-page
-        # headers/footers (e.g. a "Registered Office" line at the foot of each page).
+        # Totals / summary / footer → stop collecting further transactions
         joined = " ".join(v.lower().strip() for v in cells.values() if v.strip())
         if any(t == joined or joined.startswith(t + " ") for t in _TOTAL_SET) \
-                or any(m in joined for m in _END_MARKERS) \
-                or _PAGE_FOOTER_RE.match(joined):
+                or any(m in joined for m in _END_MARKERS):
+            stopped = True
+        if stopped:
+            pending.clear()
             continue
 
         date_raw = (cells.get(date_key, '') if date_key else '').strip()
-        dtok, drest = _leading_date(date_raw)
-        if dtok:
+        if _parse_date(date_raw):
             # New anchor
             flush_pending()
             frag: dict = {}
@@ -630,18 +516,13 @@ def _build_transactions(all_lines: list[dict], columns: list[dict]) -> list[dict
                 t = cells.get(k, '').strip()
                 if t:
                     frag[k] = [(ln['y'], t)]
-            # Recover narration text that bled into a too-wide date cell.
-            if drest:
-                nk = _tag_key(columns, 'narr')
-                if nk:
-                    frag.setdefault(nk, []).insert(0, (ln['y'] - 0.001, drest))
             anchors.append({
                 'y': ln['y'],
-                'date': dtok,
-                # Debit/credit are never negative — from explicit columns or an
-                # Amount+DR/CR split. Balance may be negative (overdraft).
-                'debit': _amounts(cells)[0],
-                'credit': _amounts(cells)[1],
+                'date': date_raw,
+                # Debit/credit are never negative — a negative here is a leaked/
+                # misread token; clamp to 0. Balance may be negative (overdraft).
+                'debit': max(0.0, _parse_amount(cells.get(debit_key))) if debit_key else 0.0,
+                'credit': max(0.0, _parse_amount(cells.get(credit_key))) if credit_key else 0.0,
                 'balance': _parse_amount(cells.get(bal_key)) if bal_key else 0.0,
                 'has_balance': bool(bal_key and cells.get(bal_key, '').strip()),
                 'raw_cells': dict(cells),
@@ -675,10 +556,10 @@ def _build_transactions(all_lines: list[dict], columns: list[dict]) -> list[dict
                 amt = _parse_amount(a['raw_cells'].get(k))
                 cells_out[k] = amt if c['tag'] == 'balance' else max(0.0, amt)
             elif k == date_key:
-                cells_out[k] = a['date']   # clean date token (bled narration already recovered)
+                cells_out[k] = a['raw_cells'].get(k, '').strip()
             else:
                 frags = sorted(a['frag'].get(k, []), key=lambda t: t[0])
-                cells_out[k] = _clean_text(" ".join(t for _, t in frags))
+                cells_out[k] = " ".join(t for _, t in frags).strip()
         txns.append({
             'cells': cells_out,
             'date': a['date'],
@@ -830,22 +711,6 @@ def _finalize(transactions: list[dict], columns: list[dict], meta: dict) -> dict
             prev_bal = b
     continuity_ok = has_bal and checked >= max(1, len(transactions) // 2) and mismatches == 0
 
-    # Reverse-chronological statements (newest row first — e.g. Bank of Baroda):
-    # forward continuity fails, but each row's balance equals the NEXT (older) row's
-    # balance plus this row's credit minus debit. Check that when forward fails.
-    rev_checked = rev_mismatch = 0
-    if has_bal and not continuity_ok and len(transactions) >= 2:
-        for i in range(len(transactions) - 1):
-            b_i = transactions[i].get("balance")
-            b_next = transactions[i + 1].get("balance")
-            if b_i is None or b_next is None:
-                continue
-            rev_checked += 1
-            expected_next = round(b_i - transactions[i]["credit"] + transactions[i]["debit"], 2)
-            if abs(expected_next - b_next) > 1.0:
-                rev_mismatch += 1
-    reverse_ok = has_bal and rev_checked > 0 and rev_checked >= max(1, (len(transactions) - 1) // 2) and rev_mismatch == 0
-
     opening_balance = meta.get("opening_balance")
     if opening_balance is None and transactions and has_bal:
         first = transactions[0]
@@ -857,16 +722,9 @@ def _finalize(transactions: list[dict], columns: list[dict], meta: dict) -> dict
     net_ok = (opening_balance is not None and closing_balance is not None and
               abs(round(opening_balance + computed_credit - computed_debit, 2) - closing_balance) < 2.0)
 
-    balance_reconciled = bool(continuity_ok or net_ok or reverse_ok)
-    # Credit-card / single-amount statements have no running balance to reconcile;
-    # each row's direction is explicit (DR/CR flag or an Amount column), so the
-    # parse is unambiguous — accept it when rows were extracted.
-    has_amount = _tag_key(columns, 'amount') is not None or _tag_key(columns, 'drcr') is not None
-    drcr_ok = has_amount and not has_bal and len(transactions) > 0
-    verified = pdf_totals_ok or balance_reconciled or drcr_ok
-    verify_method = ("pdf_totals" if pdf_totals_ok else
-                     ("balance" if balance_reconciled else
-                      ("drcr_flag" if drcr_ok else "none")))
+    balance_reconciled = bool(continuity_ok or net_ok)
+    verified = pdf_totals_ok or balance_reconciled
+    verify_method = "pdf_totals" if pdf_totals_ok else ("balance" if balance_reconciled else "none")
 
     validation = {
         "pdf_total_debit":       pdf_d,
@@ -936,39 +794,7 @@ def _anthropic_key() -> Optional[str]:
     return None
 
 
-_EXTRACT_TOOL = {
-    "name": "emit_statement",
-    "description": "Return the statement's transaction table: the ORIGINAL column headers (verbatim, "
-                   "never renamed) with each column's semantic tag, and every transaction row as an "
-                   "array of cell values in the SAME order as the headers.",
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "columns": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "header": {"type": "string", "description": "column header exactly as printed"},
-                        "tag": {"type": "string", "enum": sorted(format_learn._VALID_TAGS)},
-                    },
-                    "required": ["header", "tag"],
-                },
-            },
-            "rows": {
-                "type": "array",
-                "items": {"type": "array", "items": {"type": "string"}},
-            },
-        },
-        "required": ["columns", "rows"],
-    },
-}
-
-
 def _llm_extract(pdf_bytes: bytes, all_text: str, meta: dict) -> Optional[dict]:
-    """Tier 3 — full Claude extraction (small PDFs only). Claude returns the
-    statement's ORIGINAL column headers + tags + rows; we build the output from
-    those real headers so names are preserved (never forced to Debit/Credit)."""
     key = _anthropic_key()
     if not key or not (all_text or "").strip():
         return None
@@ -982,19 +808,19 @@ def _llm_extract(pdf_bytes: bytes, all_text: str, meta: dict) -> Optional[dict]:
     truncated = len(all_text) > MAXCHARS
     text = all_text[:MAXCHARS]
     prompt = (
-        "Extract the transaction table from this bank / credit-card statement.\n"
-        "Return, via the tool: (1) the ORIGINAL column headers exactly as printed — do NOT rename "
-        "them (keep 'Money out', 'Paid', 'Withdrawal', etc. as-is); (2) each column's semantic tag "
-        "(date, narr=description, ref, debit=money out, credit=money in, amount=single signed amount, "
-        "drcr=DR/CR flag, balance, other); (3) every transaction row as an array of cell values in the "
-        "SAME order as the headers (empty string for blank cells). Skip header rows, sub-totals, and "
-        "opening/closing summary lines that are not real transactions.\n\n"
-        + ("[NOTE: statement text was truncated to fit]\n\n" if truncated else "")
+        "Extract EVERY transaction row from this bank statement text into JSON. "
+        "Return ONLY a JSON object (no prose, no code fences) of the form: "
+        '{"transactions":[{"date":"...","description":"...","ref_no":"...",'
+        '"debit":0,"credit":0,"balance":0}]}. '
+        "Rules: debit = money withdrawn/paid out (0 if none); credit = money deposited/received "
+        "(0 if none); balance = the running balance after the transaction. Numbers must be plain "
+        "(no commas, no currency symbols). Keep original row order. Do NOT include header rows, "
+        "sub-totals, or opening/closing-balance summary lines that are not real transactions.\n\n"
+        + ("[NOTE: statement text was truncated to fit; extract what is present]\n\n" if truncated else "")
         + "STATEMENT TEXT:\n" + text
     )
     body = _json.dumps({
         "model": model, "max_tokens": 16000,
-        "tools": [_EXTRACT_TOOL], "tool_choice": {"type": "tool", "name": "emit_statement"},
         "messages": [{"role": "user", "content": prompt}],
     }).encode("utf-8")
     try:
@@ -1012,269 +838,65 @@ def _llm_extract(pdf_bytes: bytes, all_text: str, meta: dict) -> Optional[dict]:
         logger.warning("Claude fallback call failed: %s: %s", type(e).__name__, str(e)[:160])
         return None
     if data.get("stop_reason") == "refusal":
+        logger.warning("Claude fallback refused the request.")
         return None
-    inp = None
+    raw = ""
     for b in data.get("content", []):
-        if b.get("type") == "tool_use" and b.get("name") == "emit_statement":
-            inp = b.get("input") or {}
+        if b.get("type") == "text":
+            raw = b.get("text", "") or ""
             break
-    if not inp:
+    m = re.search(r'\{.*\}', raw, re.S)
+    if not m:
         return None
-    raw_cols = inp.get("columns") or []
-    rows = inp.get("rows") or []
-    if not raw_cols or not rows:
+    try:
+        parsed = _json.loads(m.group(0))
+    except Exception:
+        return None
+    rows = parsed.get("transactions") or []
+    if not rows:
         return None
 
-    # Build columns from the ORIGINAL headers + tags (unique tags claimed once).
-    columns = []
-    claimed = set()
-    for i, rc in enumerate(raw_cols):
-        tag = rc.get("tag") if rc.get("tag") in _APPLY_TAGS else "other"
-        if tag in _UNIQUE_TAGS and tag in claimed:
-            tag = "other"
-        if tag in _UNIQUE_TAGS:
-            claimed.add(tag)
-        columns.append({"key": f"c{i}", "header": (rc.get("header") or f"Column {i + 1}").strip(),
-                        "tag": tag, "x0": 0.0, "x1": 0.0, "is_primary_date": False, "right_x": None})
-    date_cols = [c for c in columns if c["tag"] == "date"]
-    if date_cols:
-        date_cols[0]["is_primary_date"] = True
+    def _num(v):
+        try:
+            return abs(float(str(v).replace(",", "").strip() or 0))
+        except Exception:
+            return 0.0
 
-    def kof(t):
-        return next((c["key"] for c in columns if c["tag"] == t), None)
-    dk, ck, ak, fk = kof("debit"), kof("credit"), kof("amount"), kof("drcr")
-    bk, dtk, nk, rk = kof("balance"), _primary_date_key(columns), kof("narr"), kof("ref")
+    def _bal(v):
+        try:
+            return float(str(v).replace(",", "").strip() or 0)
+        except Exception:
+            return 0.0
 
+    columns = [{"key": k, "header": h, "tag": t, "x0": 0.0, "x1": 0.0,
+                "is_primary_date": (t == "date"), "right_x": None} for k, h, t in _LLM_COLS]
     txns = []
-    for row in rows:
-        vals = row if isinstance(row, list) else []
-        if not any(str(v).strip() for v in vals):
+    for r in rows:
+        if not isinstance(r, dict):
             continue
-        cells = {}
-        for i, c in enumerate(columns):
-            v = vals[i] if i < len(vals) else ""
-            cells[c["key"]] = _parse_amount(v) if c["tag"] in _NUMERIC_TAGS else _clean_text(str(v or ""))
-        d = max(0.0, cells.get(dk, 0.0)) if dk else 0.0
-        cr = max(0.0, cells.get(ck, 0.0)) if ck else 0.0
-        if ak and not (dk or ck):
-            amt = abs(cells.get(ak, 0.0))
-            flag = str(cells.get(fk, "")).strip().upper() if fk else ""
-            cr, d = (amt, 0.0) if flag.startswith("C") else (0.0, amt)
-        txns.append({
-            "cells": cells,
-            "date": str(cells.get(dtk, "")) if dtk else "",
-            "debit": d, "credit": cr,
-            "balance": cells.get(bk, 0.0) if bk else 0.0,
-            "description": str(cells.get(nk, "")) if nk else "",
-            "ref_no": str(cells.get(rk, "")) if rk else "",
-        })
+        d, c, b = _num(r.get("debit")), _num(r.get("credit")), _bal(r.get("balance"))
+        cells = {"c0": str(r.get("date", "") or ""), "c1": str(r.get("description", "") or ""),
+                 "c2": str(r.get("ref_no", "") or ""), "c3": d, "c4": c, "c5": b}
+        txns.append({"cells": cells, "date": cells["c0"], "debit": d, "credit": c,
+                     "balance": b, "description": cells["c1"], "ref_no": cells["c2"]})
     if not txns:
         return None
     res = _finalize(txns, columns, meta)
     v = res["validation"]
     v["verify_method"] = (v["verify_method"] + "+llm") if v["verified"] else "llm"
     v["llm_used"] = True
-    # Internal hints so the caller can cache this format (Tier-3 → next-time Tier 1).
-    res["_llm_columns"] = [{"header": c["header"], "tag": c["tag"]} for c in columns]
-    res["_amount_mode"] = _infer_amount_mode(columns)
-    res["_primary_date_header"] = next((c["header"] for c in columns if c.get("is_primary_date")), "")
-    logger.info("Claude fallback extracted %d txns, %d cols (verified=%s)",
-                len(txns), len(columns), v["verified"])
+    logger.info("Claude fallback extracted %d transactions (verified=%s)", len(txns), v["verified"])
     return res
 
 
-# ──────────────────────────────────────────────────────────────────
-# Format-learning integration — template cache + one-shot LLM re-tag
-# ──────────────────────────────────────────────────────────────────
-_APPLY_TAGS = {'date', 'narr', 'ref', 'debit', 'credit', 'amount', 'drcr', 'balance', 'other'}
-
-
-def _headers_of(columns: list) -> list:
-    return [c.get('header', '') for c in columns]
-
-
-def _infer_amount_mode(columns: list) -> str:
-    tags = {c['tag'] for c in columns}
-    if 'debit' in tags or 'credit' in tags:
-        return 'debit_credit'
-    if 'amount' in tags and 'drcr' in tags:
-        return 'amount_drcr_flag'
-    if 'amount' in tags:
-        return 'amount_only'
-    return 'debit_credit'
-
-
-def _apply_template_tags(columns: list, tmpl: dict) -> None:
-    """Override deterministic column tags with a cached/learned template (matched
-    by normalised header). Geometry/x-ranges are untouched — only meaning changes."""
-    tmap = {format_learn.norm(c.get('header')): c.get('tag') for c in tmpl.get('columns', [])}
-    pdh = format_learn.norm(tmpl.get('primary_date_header', ''))
-    claimed: set = set()
-    for c in columns:
-        t = tmap.get(format_learn.norm(c.get('header')))
-        if t in _APPLY_TAGS:
-            if t in _UNIQUE_TAGS and t in claimed:
-                c['tag'] = 'other'
-            else:
-                c['tag'] = t
-                if t in _UNIQUE_TAGS:
-                    claimed.add(t)
-    date_cols = [c for c in columns if c['tag'] == 'date']
-    for c in columns:
-        c['is_primary_date'] = bool(pdh and format_learn.norm(c.get('header')) == pdh)
-    if date_cols and not any(c.get('is_primary_date') for c in columns):
-        date_cols[0]['is_primary_date'] = True
-
-
-def _sample_rows_for_llm(all_lines: list, columns: list, n: int = 12) -> list:
-    keys = [c['key'] for c in columns]
-    out = []
-    for ln in all_lines:
-        vals = [ln['cells'].get(k, '') for k in keys]
-        if sum(1 for v in vals if str(v).strip()) >= 2:
-            out.append(vals)
-        if len(out) >= n:
-            break
-    return out
-
-
-def _save_success_template(sig: str, bank: str, columns: list) -> None:
-    format_learn.save_template(sig, {
-        "signature": sig, "bank": bank, "source": "deterministic",
-        "amount_mode": _infer_amount_mode(columns),
-        "primary_date_header": next((c['header'] for c in columns if c.get('is_primary_date')), ""),
-        "columns": [{"header": c['header'], "tag": c['tag']} for c in columns],
-    })
-
-
-# ──────────────────────────────────────────────────────────────────
-# Statement gate — this agent processes ONLY bank & credit-card
-# statements. Payment advices, invoices, POs, payslips, remittance
-# advices etc. are rejected up front (no LLM call) so we never
-# "entertain" any other document type. Real statements of ANY format
-# still pass easily (a statement keyword OR a genuine multi-row
-# date+amount transaction table is enough).
-# ──────────────────────────────────────────────────────────────────
-_STMT_POS_KW = (
-    "account statement", "statement of account", "bank statement", "e-statement",
-    "credit card statement", "card statement", "statement period", "statement date",
-    "statement of transactions", "transaction details", "account summary",
-    "ifsc", "micr", "opening balance", "closing balance", "available balance",
-    "withdrawal", "deposit", "credit limit", "minimum amount due", "payment due date",
-    "total amount due", "total dues", "account number", "account no", "a/c no",
-)
-_STMT_NEG_KW = (
-    "payment advice", "remittance advice", "settlement advice", "remittance information",
-    "tax invoice", "proforma invoice", "commercial invoice", "purchase order",
-    "delivery challan", "goods receipt", "e-way bill", "eway bill",
-    "salary slip", "payslip", "pay slip", "amount in words", "payment ref no",
-    "payment reference", "type of document", "payment amt", "payment doc", "self billing",
-)
-_STMT_DATE_RE = re.compile(
-    r'\b(\d{1,2}[/-][A-Za-z0-9]{2,3}[/-]\d{2,4}|\d{1,2}\s+[A-Za-z]{3,9}\.?\s+\d{2,4}|\d{4}-\d{2}-\d{2})\b')
-_STMT_AMT_RE = re.compile(r'\d[\d,]*\.\d{2}\b')
-
-
-def _statement_signals(text: str):
-    tl = (text or "").lower()
-    pos = sum(1 for k in _STMT_POS_KW if k in tl)
-    neg = sum(1 for k in _STMT_NEG_KW if k in tl)
-    rows = 0
-    for ln in (text or "").splitlines():
-        if _STMT_DATE_RE.search(ln) and _STMT_AMT_RE.search(ln):
-            rows += 1
-    return pos, neg, rows
-
-
-def _looks_like_statement(text: str) -> bool:
-    """True only for bank / credit-card statements. Generous to real statements
-    (any statement keyword, or a genuine ≥6-row date+amount transaction table,
-    passes), strict against other document types (payment advice / invoice / PO)."""
-    pos, neg, rows = _statement_signals(text)
-    if rows >= 6 and neg == 0:          # a real transaction table, no competing doc marker
-        return True
-    return pos >= 1 and pos >= neg       # else require an explicit statement indicator
-
-
-def _reject_unreadable() -> dict:
-    """Graceful message for an encrypted / password-protected / corrupt PDF that
-    pdfplumber cannot open — never a 500. (iLovePDF auto-unlock / a UI password
-    field will handle these once wired; until then the accountant gets a clear ask.)"""
-    return {
-        "bank_name": "", "account_no": "", "account_name": "",
-        "period_from": "", "period_to": "", "columns": [],
-        "transaction_count": 0, "transactions": [],
-        "validation": {"verified": False, "verify_method": "unreadable",
-                       "error": "This PDF could not be opened — it appears to be password-protected "
-                                "or corrupted. Please remove the password / unlock the PDF and upload it again."},
-        "preview_rows": [],
-    }
-
-
-def _reject_not_statement() -> dict:
-    """Graceful rejection for non-statement uploads (never a 500)."""
-    return {
-        "bank_name": "", "account_no": "", "account_name": "",
-        "period_from": "", "period_to": "", "columns": [],
-        "transaction_count": 0, "transactions": [],
-        "validation": {"verified": False, "verify_method": "rejected",
-                       "error": "This file is not a bank or credit-card statement. The "
-                                "PDF → Bank Statement agent only processes bank and credit-card "
-                                "statements (any format). Please upload a bank or credit-card statement."},
-        "preview_rows": [],
-    }
-
-
-def _cache_llm_template(sig, bank: str, res: dict) -> None:
-    """Strip the internal `_llm_*` hints off an LLM result and — when a
-    deterministic layout signature is available and the extraction VERIFIED —
-    persist the column mapping as a template. Next time the same format lands,
-    Tier 1.5 applies these tags and the deterministic path handles it for free."""
-    cols = res.pop("_llm_columns", None)
-    amode = res.pop("_amount_mode", None)
-    pdh = res.pop("_primary_date_header", "")
-    if not sig or not cols or not res.get("validation", {}).get("verified"):
-        return
-    ok = format_learn.save_template(sig, {
-        "signature": sig, "bank": bank, "source": "llm-fallback",
-        "amount_mode": amode, "primary_date_header": pdh, "columns": cols,
-    })
-    if ok:
-        logger.info("Cached Tier-3 format for reuse (sig=%s, %d cols)", sig, len(cols))
-
-
-def _llm_extract_safe(pdf_bytes: bytes, all_text: str, meta: dict) -> Optional[dict]:
-    """Tier-3 must NEVER crash the request. `_llm_extract` guards only the HTTP
-    call; the response-parsing / row-building / _finalize code after it is not.
-    A valid 200 with an unexpected columns/rows shape would otherwise raise and
-    surface as a 500 to the accountant. Any failure here → None → the caller
-    falls back to a graceful 0-row result instead of an error."""
-    try:
-        return _llm_extract(pdf_bytes, all_text, meta)
-    except Exception as e:
-        logger.warning("Tier-3 _llm_extract crashed, degrading gracefully: %s: %s",
-                       type(e).__name__, str(e)[:160])
-        return None
-
-
-def extract_bank_statement(pdf_bytes: bytes, password: str = "") -> dict:
+def extract_bank_statement(pdf_bytes: bytes) -> dict:
     import pdfplumber
 
     columns: Optional[list[dict]] = None
     all_lines: list[dict] = []       # {y, cells} in reading order (page-offset applied)
     header_found_page = None
 
-    # Guarded open — an encrypted / password-protected / corrupt PDF must degrade
-    # to a clear message, never a 500. `password` (from the UI field, when provided)
-    # is passed straight to pdfplumber so open-password statements can be read.
-    open_kwargs = {"password": password} if password else {}
-    try:
-        _pdf = pdfplumber.open(BytesIO(pdf_bytes), **open_kwargs)
-    except Exception as e:
-        logger.warning("PDF open failed (encrypted/corrupt?): %s: %s", type(e).__name__, str(e)[:160])
-        return _reject_unreadable()
-    with _pdf as pdf:
-        n_pages = len(pdf.pages)
+    with pdfplumber.open(BytesIO(pdf_bytes)) as pdf:
         all_text = "\n".join(pg.extract_text() or "" for pg in pdf.pages)
         p0 = pdf.pages[0]
         header_text = " ".join(w['text'] for w in p0.extract_words()
@@ -1312,87 +934,23 @@ def extract_bank_statement(pdf_bytes: bytes, password: str = "") -> dict:
             y_offset += float(page.height)
 
     if columns is not None:
-        bank = meta.get("bank_name", "")
-        sig = format_learn.layout_signature(bank, _headers_of(columns))
-        cached = format_learn.load_template(sig)
-        if cached:
-            _apply_template_tags(columns, cached)   # Tier 1.5 — reuse a learned format ($0)
-
         transactions = _build_transactions(all_lines, columns)
         result = _finalize(transactions, columns, meta)
-        logger.info("Extracted %d txns (%d cols) verified=%s (sig=%s cached=%s)",
-                    len(transactions), len(columns), result["validation"]["verified"], sig, bool(cached))
+        logger.info("Extracted %d transactions (%d cols). verified=%s",
+                    len(transactions), len(columns), result["validation"]["verified"])
         if transactions and result["validation"].get("verified"):
-            if not cached:                          # auto-learn a template from a good run
-                _save_success_template(sig, bank, columns)
-            return result
-
-        # A table was detected but did not verify. Before spending any LLM call,
-        # confirm this is actually a statement (not an invoice / advice that merely
-        # has a table). Verified statements never reach here, so this can't reject one.
-        if not _looks_like_statement(all_text):
-            logger.info("Rejected: detected a table but document is not a bank/CC statement.")
-            return _reject_not_statement()
-
-        # Tier 2 — TRY HARD to LEARN the format: one Haiku call re-tags the detected
-        # columns from a tiny sample; we re-extract deterministically on a COPY (so the
-        # fallback result is never corrupted) and, on success, CACHE the template so next
-        # time Tier 1 handles this format for free. Skipped only if we already learned
-        # this exact format before (avoids re-calling Haiku for a format that won't verify).
-        import copy as _copy
-        already_learned = bool(cached and cached.get("source") in ("llm", "llm-fallback", "learned"))
-        key = _anthropic_key()
-        if key and not already_learned:
-            try:
-                learned = format_learn.learn_template(
-                    bank, _headers_of(columns), _sample_rows_for_llm(all_lines, columns), key)
-                if learned:
-                    cols2 = _copy.deepcopy(columns)
-                    _apply_template_tags(cols2, learned)
-                    tx2 = _build_transactions(all_lines, cols2)
-                    res2 = _finalize(tx2, cols2, meta)
-                    if tx2 and res2["validation"].get("verified"):
-                        learned["signature"] = sig
-                        format_learn.save_template(sig, learned)
-                        res2["validation"]["verify_method"] += "+learned"
-                        logger.info("Format learned + cached (sig=%s): %d txns", sig, len(tx2))
-                        return res2
-            except Exception as e:
-                # Never let format-learning crash the request — fall through to Tier 3.
-                logger.warning("Tier-2 format-learning failed, falling through: %s: %s",
-                               type(e).__name__, str(e)[:160])
-
-        # Tier 3 — full Claude extraction, last resort. Only for small PDFs
-        # (≤ _MAX_LLM_EXTRACT_PAGES) so a large statement never blows up tokens/cost.
-        # On success we also cache the format so future runs skip straight to Tier 1.
-        if n_pages <= _MAX_LLM_EXTRACT_PAGES:
-            alt = _llm_extract_safe(pdf_bytes, all_text, meta)
-            if alt and (not transactions or alt["validation"].get("verified")):
-                _cache_llm_template(sig, bank, alt)
-                return alt
-        else:
-            logger.info("Skipping Tier-3 full extraction: %d pages > %d limit.",
-                        n_pages, _MAX_LLM_EXTRACT_PAGES)
+            return result  # deterministic succeeded — no LLM cost
+        # Deterministic produced nothing usable OR didn't reconcile → try Claude.
+        alt = _llm_extract(pdf_bytes, all_text, meta)
+        if alt and (not transactions or alt["validation"].get("verified")):
+            return alt
         return result
 
-    # No transaction table detected deterministically. First reject anything that
-    # isn't a bank/credit-card statement (payment advice, invoice, PO …) — no LLM call.
-    if not _looks_like_statement(all_text):
-        logger.info("Rejected: not a bank/credit-card statement (no table + no statement signals).")
-        return _reject_not_statement()
-
-    # Looks like a statement but the geometry defeated deterministic detection → Tier 3
-    # (small PDFs only). No deterministic signature exists here, so it can't be cached
-    # into the Tier-1 path — we just strip the internal hints off the result.
-    if n_pages <= _MAX_LLM_EXTRACT_PAGES:
-        alt = _llm_extract_safe(pdf_bytes, all_text, meta)
-        if alt:
-            _cache_llm_template(None, "", alt)   # strips internal _llm_* hints (no sig → no cache)
-            return alt
-        logger.warning("Looks like a statement but no transaction table could be extracted.")
-    else:
-        logger.warning("No table detected and %d pages > %d — Tier-3 skipped.",
-                       n_pages, _MAX_LLM_EXTRACT_PAGES)
+    # No transaction table detected deterministically → Claude fallback.
+    alt = _llm_extract(pdf_bytes, all_text, meta)
+    if alt:
+        return alt
+    logger.warning("No transaction table header detected in PDF.")
     return {
         "bank_name": "", "account_no": "", "account_name": "",
         "period_from": "", "period_to": "", "columns": [],
@@ -1449,10 +1007,6 @@ def build_pdf_bank_excel(data: dict) -> bytes:
     debit_i = col_index("debit")
     credit_i = col_index("credit")
     bal_i = col_index("balance")
-    amount_i = col_index("amount")
-
-    def _hdr(i):   # original PDF header of column i (1-based) — output never renames columns
-        return columns[i - 1]["header"] if i and 0 < i <= len(columns) else ""
 
     numeric_keys = {c["key"] for c in columns if c["tag"] in _NUMERIC_TAGS}
 
@@ -1541,21 +1095,16 @@ def build_pdf_bank_excel(data: dict) -> bytes:
     ws.cell(row=summ, column=1, value="STATEMENT SUMMARY").fill = LBL_FILL
     ws.cell(row=summ, column=1).font = LBL_FONT
     ws.cell(row=summ, column=1).border = BORDER
-    # Summary labels use the ORIGINAL PDF column headers (never renamed to Debit/Credit).
     if debit_i:
-        put(summ, debit_i, f"Total {_hdr(debit_i)}", LBL_FILL, LBL_FONT, CENTER)
+        put(summ, debit_i, "Total Debit", LBL_FILL, LBL_FONT, CENTER)
         put(summ + 1, debit_i, f"=SUM({get_column_letter(debit_i)}2:{get_column_letter(debit_i)}{last_row})",
             VAL_FILL, VAL_FONT, RIGHT, '#,##0.00')
     if credit_i:
-        put(summ, credit_i, f"Total {_hdr(credit_i)}", LBL_FILL, LBL_FONT, CENTER)
+        put(summ, credit_i, "Total Credit", LBL_FILL, LBL_FONT, CENTER)
         put(summ + 1, credit_i, f"=SUM({get_column_letter(credit_i)}2:{get_column_letter(credit_i)}{last_row})",
             VAL_FILL, VAL_FONT, RIGHT, '#,##0.00')
-    if amount_i and not (debit_i or credit_i):
-        put(summ, amount_i, f"Total {_hdr(amount_i)}", LBL_FILL, LBL_FONT, CENTER)
-        put(summ + 1, amount_i, f"=SUM({get_column_letter(amount_i)}2:{get_column_letter(amount_i)}{last_row})",
-            VAL_FILL, VAL_FONT, RIGHT, '#,##0.00')
     if bal_i:
-        put(summ, bal_i, f"Closing {_hdr(bal_i)}", LBL_FILL, LBL_FONT, CENTER)
+        put(summ, bal_i, "Closing Balance", LBL_FILL, LBL_FONT, CENTER)
         put(summ + 1, bal_i, val.get("closing_balance"), VAL_FILL, VAL_FONT, RIGHT, '#,##0.00')
     ws.cell(row=summ + 1, column=1, value=f"Opening: {val.get('opening_balance')}").font = VAL_FONT
 

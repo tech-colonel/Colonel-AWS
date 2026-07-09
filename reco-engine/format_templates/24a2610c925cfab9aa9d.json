@@ -1,0 +1,29 @@
+{
+  "columns": [
+    {
+      "header": "Date",
+      "tag": "date"
+    },
+    {
+      "header": "Details",
+      "tag": "narr"
+    },
+    {
+      "header": "Paid",
+      "tag": "debit"
+    },
+    {
+      "header": "Received",
+      "tag": "credit"
+    },
+    {
+      "header": "Balance",
+      "tag": "balance"
+    }
+  ],
+  "amount_mode": "debit_credit",
+  "primary_date_header": "Date",
+  "bank": "",
+  "source": "llm",
+  "signature": "24a2610c925cfab9aa9d"
+}
