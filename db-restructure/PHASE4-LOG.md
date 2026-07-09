@@ -13,3 +13,10 @@ Goal: make the app able to run on the single DB, behind `USE_UNIFIED_DB` (defaul
 - Full endpoint smoke test with USE_UNIFIED_DB=true (login, list reco jobs, open a sales agent, admin dashboard totals).
 
 Flag defaults OFF, so the live app is unaffected until Phase 5 cutover.
+
+## 4b — DONE (committed)
+- `withBypass` in dashboardController made flag-aware: OFF sets bypass_rls (unchanged); UNIFIED does NOT bypass, so each brand connection's preset app.brand_id scopes aggregation via RLS. Fixes 16x over-counting.
+- Verified: unified per-brand reco_jobs sum = 105 (correct); old bypass path = 1680 (inflated). Confirms the fix.
+- recoController/gstr3b/bankCorrections keep bypass: their queries all filter by explicit brand_id (data correct); RLS-hardening of their read paths noted as optional follow-up.
+
+## Phase 4 status: connection layer + isolation + dashboard correctness done & tested. Flag defaults OFF (live app unaffected). Next: Phase 5 = boot backend with USE_UNIFIED_DB=true, exercise every route, then decide on old-DB deletion.

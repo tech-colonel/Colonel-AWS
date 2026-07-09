@@ -1,4 +1,4 @@
-const { getBrandConnection } = require('../config/database');
+const { getBrandConnection, UNIFIED } = require('../config/database');
 const { Brand } = require('../models/master');
 
 /**
@@ -12,7 +12,12 @@ const getBrandSeq = async (brandId) => {
 
 const withBypass = async (seq, queryFn) => {
   return seq.transaction(async (t) => {
-    await seq.query(`SET LOCAL app.bypass_rls = 'true'`, { transaction: t });
+    // OFF: bypass RLS (isolation is the physical brand DB). UNIFIED: do NOT bypass —
+    // the brand connection presets app.brand_id, so RLS scopes each query to that
+    // brand. Bypassing in unified would let per-brand aggregation see ALL brands.
+    if (!UNIFIED) {
+      await seq.query(`SET LOCAL app.bypass_rls = 'true'`, { transaction: t });
+    }
     return queryFn(t);
   });
 };
