@@ -13,3 +13,13 @@
 2. Set USE_UNIFIED_DB=true on the live backend (:8001) + restart. Reversible: unset flag + restart => back on old DBs instantly.
 3. User tests every route/UI. If good, keep; else revert.
 4. Old DBs NOT deleted — deletion decided only after confidence (user's call). Then port to AWS + GitHub.
+
+## REAL CUTOVER — DONE (2026-07-09, LOCAL)
+- Fresh backup: db-backups/pre-cutover-20260709-223049 (17 dumps).
+- Delta-sync: build.sh + backfill.sh + 004 → new DB current, reconcile 19853==19853, 0 mismatch.
+- Flipped .env: USE_UNIFIED_DB=true (+UNIFIED_DB_NAME/DB_APP_USER/DB_APP_PASSWORD). .env backed up (.env.bak-cutover-*).
+- pm2 restart colonel-automation-backend → booted in unified mode on :8001.
+- API smoke (live :8001 on unified): 15 routes all HTTP 200, 0 new errors. tool-analytics runs=105 (correct).
+- Browser smoke (Playwright via system Chrome): login OK → /admin dashboard renders real data (16 brands, 14/19 users, 13 agents, 105 runs, 67.8k rows, 57% match, real tasks); /admin/brands shows all 16 brands under 5 clients; 0 console errors on every page.
+- REVERSIBLE: set USE_UNIFIED_DB=false (or remove) in new-backend/.env + pm2 restart → instantly back on old per-brand DBs.
+- Old 17 DBs NOT deleted (kept as fallback). Deletion = user's call later, after confidence.
