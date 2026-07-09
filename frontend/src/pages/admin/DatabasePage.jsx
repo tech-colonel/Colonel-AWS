@@ -120,12 +120,16 @@ export default function DatabasePage() {
 
   const toggle = useCallback((name) => setExpanded((p) => ({ ...p, [name]: !p[name] })), []);
 
-  // re-frame the canvas whenever a layer expands/collapses (zoom to what's visible)
+  // Frame the canvas ONCE when the schema first loads (collapsed overview).
+  // Do NOT re-fit on expand — expanding should reveal tables in place at the
+  // user's current zoom, and they scroll/pan as needed (the '+/-' + fit controls
+  // are always available).
   const rfRef = React.useRef(null);
   useEffect(() => {
-    const t = setTimeout(() => { if (rfRef.current) rfRef.current.fitView({ padding: 0.22, duration: 450, maxZoom: 1 }); }, 70);
+    if (!schema) return;
+    const t = setTimeout(() => { if (rfRef.current) rfRef.current.fitView({ padding: 0.22, duration: 400, maxZoom: 1 }); }, 80);
     return () => clearTimeout(t);
-  }, [expanded, schema]);
+  }, [schema]);
 
   const { nodes, edges } = useMemo(() => {
     if (!schema) return { nodes: [], edges: [] };
