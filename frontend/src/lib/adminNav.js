@@ -1,4 +1,4 @@
-import { LayoutDashboard, Building2, Bot, Users as UsersIcon, Link as LinkIcon, ClipboardList, Workflow, Plug, Flag, Sparkles, Video, BookOpen, CalendarCheck, MessageSquare, Landmark } from 'lucide-react';
+import { LayoutDashboard, Building2, Bot, Users as UsersIcon, Link as LinkIcon, ClipboardList, Workflow, Plug, Flag, Sparkles, Video, BookOpen, CalendarCheck, MessageSquare, Landmark, Database } from 'lucide-react';
 
 const STATUTORY_OWNER_EMAIL = 'chauhandhaval932@gmail.com';
 
@@ -32,6 +32,7 @@ export const ADMIN_SIDEBAR = [
   { path: '/admin/brands',      label: 'Brands',      icon: Building2,       testId: 'nav-brands' },
   { path: '/admin/agents',      label: 'Agents',      icon: Bot,             testId: 'nav-agents' },
   { path: '/admin/users',       label: 'Users',       icon: UsersIcon,       testId: 'nav-users' },
+  { path: '/admin/database',    label: 'Database',    icon: Database,        testId: 'nav-database' },
   { path: '/admin/tasks',       label: 'Tasks',       icon: ClipboardList,   testId: 'nav-tasks' },
   { path: '/admin/chats',       label: 'Chats',       icon: MessageSquare,   testId: 'nav-chats' },
   { path: '/admin/statutory',   label: 'Statutory',   icon: Landmark,        testId: 'nav-statutory-admin' },

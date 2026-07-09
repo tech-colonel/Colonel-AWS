@@ -51,6 +51,7 @@ const composioRoutes        = require('./routes/composioRoutes');
 const complianceRoutes      = require('./routes/complianceRoutes');
 const attachmentsRoutes     = require('./routes/attachmentsRoutes');
 const statutoryRoutes       = require('./routes/statutoryRoutes');
+const databaseRoutes        = require('./routes/databaseRoutes');
 
 app.use('/api/auth',      authRoutes);
 app.use('/api',           brandRoutes);
@@ -77,6 +78,7 @@ app.use('/api',           composioRoutes);
 app.use('/api',           complianceRoutes);
 app.use('/api',           attachmentsRoutes);
 app.use('/api',           statutoryRoutes);
+app.use('/api',           databaseRoutes);
 
 // Error handling middleware
 app.use((err, req, res, next) => {
