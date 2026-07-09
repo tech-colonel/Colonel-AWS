@@ -118,43 +118,77 @@ export default function DatabasePage() {
       .catch((err) => setError(err?.response?.data?.error || err.message));
   }, []);
 
-  const toggle = useCallback((name) => setExpanded((p) => ({ ...p, [name]: !p[name] })), []);
-
-  // Frame the canvas ONCE when the schema first loads (collapsed overview).
-  // Do NOT re-fit on expand — expanding should reveal tables in place at the
-  // user's current zoom, and they scroll/pan as needed (the '+/-' + fit controls
-  // are always available).
   const rfRef = React.useRef(null);
+  const lastOpened = React.useRef(null);
+  const toggle = useCallback((name) => setExpanded((p) => {
+    lastOpened.current = !p[name] ? name : null; // remember the layer being OPENED
+    return { ...p, [name]: !p[name] };
+  }), []);
+
+  // Frame the collapsed overview once, on initial load.
   useEffect(() => {
     if (!schema) return;
-    const t = setTimeout(() => { if (rfRef.current) rfRef.current.fitView({ padding: 0.22, duration: 400, maxZoom: 1 }); }, 80);
+    const t = setTimeout(() => { rfRef.current && rfRef.current.fitView({ padding: 0.22, duration: 400, maxZoom: 1 }); }, 80);
     return () => clearTimeout(t);
   }, [schema]);
+
+  // When a layer is EXPANDED, glide to the top of its column at a readable zoom so
+  // the content is always brought into view (never lost/blank); you scroll down
+  // from there. Collapsing does not move the view.
+  useEffect(() => {
+    const name = lastOpened.current;
+    if (!schema || !rfRef.current || !name) return;
+    const gi = schema.groups.findIndex((g) => g.name === name);
+    const g = schema.groups[gi];
+    if (!g) return;
+    // fit just this layer node + its first few tables → readable "start of column"
+    const ids = ['g' + gi, ...g.tables.slice(0, 3).map((t) => 't-' + t.name)].map((id) => ({ id }));
+    const t = setTimeout(() => { rfRef.current && rfRef.current.fitView({ nodes: ids, padding: 0.2, duration: 450, maxZoom: 0.9 }); }, 90);
+    return () => clearTimeout(t);
+  }, [expanded, schema]);
 
   const { nodes, edges } = useMemo(() => {
     if (!schema) return { nodes: [], edges: [] };
     const nodes = [], edges = [];
     const nGroups = schema.groups.length;
     const centerX = ((nGroups - 1) * COL_GAP) / 2;
+
+    // real relationships: FK constraints + the logical brand_id → brands hub
+    const rels = [];
+    (schema.edges || []).forEach((fk) => { if (fk.from !== fk.to) rels.push({ from: fk.from, to: fk.to, label: fk.col, kind: 'fk' }); });
+    schema.groups.forEach((g) => g.tables.forEach((t) => {
+      if (t.name !== 'brands' && t.fields.some((f) => f.name === 'brand_id')) rels.push({ from: t.name, to: 'brands', label: 'brand_id', kind: 'brand' });
+    }));
+
+    const tableNode = {};
+    schema.groups.forEach((g) => { if (expanded[g.name]) g.tables.forEach((t) => { tableNode[t.name] = 't-' + t.name; }); });
+
     nodes.push({ id: 'db', type: 'dbroot', position: { x: centerX, y: 0 }, data: { db: schema.db, tables: schema.totalTables, rows: schema.totalRows } });
-    const tableNode = {}; // name -> id
     schema.groups.forEach((g, gi) => {
-      const gx = gi * COL_GAP;
-      const gid = 'g' + gi;
-      const open = !!expanded[g.name];
+      const gx = gi * COL_GAP, gid = 'g' + gi, open = !!expanded[g.name];
       nodes.push({ id: gid, type: 'group', position: { x: gx, y: 150 }, data: { name: g.name, count: g.tables.length, rls: g.rls, open, onToggle: () => toggle(g.name) } });
       edges.push({ id: 'e-db-' + gid, source: 'db', target: gid, type: 'smoothstep', animated: true, style: { stroke: '#c3ccdf', strokeWidth: 1.5 } });
       if (!open) return;
       g.tables.forEach((t, ti) => {
-        const id = 't-' + t.name; tableNode[t.name] = id;
+        const id = 't-' + t.name;
         nodes.push({ id, type: 'table', position: { x: gx, y: 320 + ti * ROW_GAP }, data: { name: t.name, rows: t.rows, fields: t.fields, sample: t.sample, group: g.name } });
-        edges.push({ id: 'e-' + (ti === 0 ? gid : 't-' + g.tables[ti - 1].name) + '-' + id, source: ti === 0 ? gid : 't-' + g.tables[ti - 1].name, target: id, type: 'smoothstep', style: { stroke: styleFor(g.name).bar, strokeWidth: 1.5, opacity: .5 } });
+        edges.push({ id: 'h-' + id, source: ti === 0 ? gid : 't-' + g.tables[ti - 1].name, target: id, type: 'smoothstep', style: { stroke: styleFor(g.name).bar, strokeWidth: 1.5, opacity: 0.4 } });
       });
     });
-    // FK relationship wires (only when both ends are rendered)
-    (schema.edges || []).forEach((fk, i) => {
-      const s = tableNode[fk.from], t = tableNode[fk.to];
-      if (s && t && s !== t) edges.push({ id: 'fk' + i, source: s, sourceHandle: 'r', target: t, targetHandle: 'l', type: 'bezier', animated: false, style: { stroke: '#f0736d', strokeWidth: 1, strokeDasharray: '4 3' }, label: fk.col });
+
+    // relationship wires — ALWAYS visible so interconnections are clear at a glance.
+    // green dashed = logical brand_id → brands (the RLS hub); red = real FK.
+    rels.forEach((r, i) => {
+      const s = tableNode[r.from], d = tableNode[r.to];
+      if (!s || !d || s === d) return;
+      const brand = r.kind === 'brand';
+      const c = brand ? '#0f9d6b' : '#e0524d';
+      edges.push({
+        id: 'r' + i, source: s, sourceHandle: 'r', target: d, targetHandle: 'l', type: 'bezier',
+        style: { stroke: c, strokeWidth: 1.3, strokeDasharray: brand ? '5 4' : undefined, opacity: 0.55 },
+        label: r.label, labelStyle: { fontSize: 9.5, fontFamily: 'ui-monospace,monospace', fill: c },
+        labelBgStyle: { fill: '#fff', fillOpacity: 0.8 }, labelBgPadding: [3, 1],
+      });
     });
     return { nodes, edges };
   }, [schema, expanded, toggle]);
