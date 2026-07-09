@@ -1,6 +1,6 @@
 const fs = require('fs');
 const path = require('path');
-const { getBrandConnection, masterSequelize } = require('../config/database');
+const { getBrandConnection, masterSequelize, UNIFIED } = require('../config/database');
 
 const MIGRATION_SQL = fs.readFileSync(
   path.join(__dirname, 'migrations/001_reco_tables.sql'),
@@ -29,6 +29,10 @@ const migrateBrandDb = async (dbName) => {
  * Called once on app startup — safe to re-run (all SQL is idempotent).
  */
 const migrateAllBrands = async () => {
+  if (UNIFIED) {
+    console.log('[MIGRATE] unified mode: shared schema is pre-built (db-restructure); skipping per-brand migration.');
+    return;
+  }
   try {
     const [brands] = await masterSequelize.query(
       `SELECT db_name FROM brands WHERE db_name IS NOT NULL`
@@ -48,6 +52,10 @@ const migrateAllBrands = async () => {
  * Called when a new brand is created.
  */
 const migrateSingleBrand = async (brandId) => {
+  if (UNIFIED) {
+    console.log('[MIGRATE] unified mode: shared schema is pre-built; skipping single-brand migration.');
+    return;
+  }
   try {
     const [rows] = await masterSequelize.query(
       `SELECT db_name FROM brands WHERE id = $1`,
