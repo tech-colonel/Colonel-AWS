@@ -114,11 +114,18 @@ export default function DatabasePage() {
 
   useEffect(() => {
     api.get('/api/database/schema')
-      .then((r) => { setSchema(r.data); const e = {}; r.data.groups.forEach((g, i) => { e[g.name] = i === 1; }); setExpanded(e); })
+      .then((r) => { setSchema(r.data); const e = {}; r.data.groups.forEach((g) => { e[g.name] = false; }); setExpanded(e); })
       .catch((err) => setError(err?.response?.data?.error || err.message));
   }, []);
 
   const toggle = useCallback((name) => setExpanded((p) => ({ ...p, [name]: !p[name] })), []);
+
+  // re-frame the canvas whenever a layer expands/collapses (zoom to what's visible)
+  const rfRef = React.useRef(null);
+  useEffect(() => {
+    const t = setTimeout(() => { if (rfRef.current) rfRef.current.fitView({ padding: 0.22, duration: 450, maxZoom: 1 }); }, 70);
+    return () => clearTimeout(t);
+  }, [expanded, schema]);
 
   const { nodes, edges } = useMemo(() => {
     if (!schema) return { nodes: [], edges: [] };
@@ -163,7 +170,9 @@ export default function DatabasePage() {
           <div style={{ padding: 40, color: '#5a6480' }}>Loading live schema…</div>
         ) : (
           <ReactFlow nodes={nodes} edges={edges} nodeTypes={nodeTypes} fitView
-            minZoom={0.15} maxZoom={1.6} proOptions={{ hideAttribution: true }}
+            onInit={(inst) => { rfRef.current = inst; }}
+            fitViewOptions={{ padding: 0.22, maxZoom: 1 }}
+            minZoom={0.2} maxZoom={1.6} proOptions={{ hideAttribution: true }}
             defaultEdgeOptions={{ type: 'smoothstep' }}>
             <Background color="#d7deee" gap={22} />
             <Controls />
