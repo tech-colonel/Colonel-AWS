@@ -17,15 +17,15 @@ const PORT = process.env.PORT || 8001;
 const seedMasterAgents = async () => {
   await masterSequelize.query(`
     INSERT INTO agents (id, name, description, columns) VALUES
-      ('d0000000-0000-0000-0000-000000000001', 'gstr_2b_books',
+      ('4e02cc5b-8fc8-4c79-8013-e7f510c850d5', 'gstr_2b_books',
        'GSTR-2B vs Purchase Register + Debit Note Register reconciliation', '[]'),
-      ('d0000000-0000-0000-0000-000000000002', 'gstr_2b_books_multistate',
+      ('855fe095-84c6-4947-a5e4-a73da83b2fd6', 'gstr_2b_books_multistate',
        'GSTR-2B vs Books for multi-state brands — detects cross-state booking errors', '[]'),
-      ('d0000000-0000-0000-0000-000000000003', 'gstr_3b_tally_entry',
+      ('b2d3fad4-0d90-4b49-acdc-d243cfa9c8d5', 'gstr_3b_tally_entry',
        'Parse GSTR-3B and generate ready-to-post Tally journal entries', '[]'),
-      ('d0000000-0000-0000-0000-000000000004', 'universal_bank_statement',
+      ('93d027ac-4333-403b-b448-9c637ebfc13c', 'universal_bank_statement',
        'Brand-agnostic bank statement classifier mapped to Tally chart of accounts', '[]'),
-      ('d0000000-0000-0000-0000-000000000005', 'gstr_1_vs_books',
+      ('8b8d0876-3169-4511-96d8-2a7467478007', 'gstr_1_vs_books',
        'GSTR-1 outward supplies vs Tally sales register reconciliation', '[]')
     ON CONFLICT (name) DO NOTHING
   `);
