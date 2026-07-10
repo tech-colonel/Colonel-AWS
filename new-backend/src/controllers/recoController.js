@@ -1505,4 +1505,14 @@ async function detectZeptoFiles(req, res) {
   }
 }
 
-module.exports = { runReco, exportReco, openInSheets, checkHealth, getLedgerStatus, deleteRecoJob, detectZeptoFiles };
+// Ephemeral master-data reset for the "Other" catch-all brand (no-op for real
+// brands). Clears COA/SKU/Ledger master + learned corrections; keeps results.
+const { purgeOtherMaster } = require('../services/otherBrandPurge');
+const purgeSessionMaster = async (req, res, next) => {
+  try {
+    const result = await purgeOtherMaster(req.params.brandId);
+    res.json({ ok: true, ...result });
+  } catch (err) { next(err); }
+};
+
+module.exports = { runReco, exportReco, openInSheets, checkHealth, getLedgerStatus, deleteRecoJob, detectZeptoFiles, purgeSessionMaster };

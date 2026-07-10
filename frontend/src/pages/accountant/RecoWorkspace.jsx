@@ -13,6 +13,7 @@ import {
 } from 'lucide-react';
 import api from '../../lib/api';
 import { sidebarFor, isAdminUser } from '../../lib/adminNav';
+import OtherBrandReset from '../../components/OtherBrandReset';
 import { DEMO_SAMPLES, urlToFile } from '../../lib/demoSamples';
 import { toast } from 'sonner';
 import GoogleDriveFolderInput from './GoogleDriveFolderInput';
@@ -907,6 +908,11 @@ const RecoWorkspace = ({ agentTypeProp } = {}) => {
           <ArrowLeft style={{ width: 14, height: 14 }} />
           All Agents
         </button>
+
+        {/* Ephemeral-data note + reset — only for the "Other" catch-all brand */}
+        <div style={{ marginBottom: 16 }}>
+          <OtherBrandReset brandId={effectiveBrandId} onReset={() => setLedgerStatus(null)} />
+        </div>
 
         {/* ── Agent Identity Card ─────────────────────────────────────── */}
         <div style={{

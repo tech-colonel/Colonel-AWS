@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const multer = require('multer');
 const { authenticateToken, authorize } = require('../middleware/authMiddleware');
-const { runReco, exportReco, openInSheets, checkHealth, getLedgerStatus, deleteRecoJob, detectZeptoFiles } = require('../controllers/recoController');
+const { runReco, exportReco, openInSheets, checkHealth, getLedgerStatus, deleteRecoJob, detectZeptoFiles, purgeSessionMaster } = require('../controllers/recoController');
 
 // In-memory storage — files forwarded directly to Python
 const upload = multer({
@@ -28,6 +28,9 @@ const flexibleAuthorize = (req, res, next) => {
 
 // Health check (no auth needed)
 router.get('/reco/health', checkHealth);
+
+// Ephemeral master-data reset for the "Other" catch-all brand (no-op for real brands)
+router.post('/brands/:brandId/purge-session-master', authenticateToken, purgeSessionMaster);
 
 // Run reconciliation — supports demo mode
 router.post(

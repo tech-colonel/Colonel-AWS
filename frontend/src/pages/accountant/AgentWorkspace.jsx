@@ -14,6 +14,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../../componen
 import api from '../../lib/api';
 import { sidebarFor } from '../../lib/adminNav';
 import BrandSwitcher from '../../components/BrandSwitcher';
+import OtherBrandReset from '../../components/OtherBrandReset';
 import { toast } from 'sonner';
 import { format } from 'date-fns';
 import * as XLSX from 'xlsx';
@@ -558,8 +559,9 @@ const AgentWorkspace = () => {
       {/* Persistent brand-context bar — lets sales agents switch brand (navigation
           keeps the URL in sync). Hidden on the CFO dashboard view. */}
       {!cfoConfig.isOpen && (
-        <div className="px-6 pt-4 flex items-center" data-testid="agent-brand-bar">
+        <div className="px-6 pt-4 flex items-center gap-3 flex-wrap" data-testid="agent-brand-bar">
           <BrandSwitcher brandId={brandId} agentId={agentId} />
+          <OtherBrandReset brandId={brandId} onReset={fetchData} />
         </div>
       )}
       {cfoConfig.isOpen ? (
