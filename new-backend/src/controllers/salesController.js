@@ -81,6 +81,14 @@ const getWorkingFiles = async (req, res, next) => {
     res.json(files);
 
   } catch (error) {
+    // In the unified DB, getDynamicModel.sync() is a no-op (colonel_app can't run
+    // DDL), so an agent that has no working-file table yet — e.g. a RECO agent
+    // reached via this sales-only endpoint, or a freshly-seeded agent never run —
+    // yields "relation ... does not exist". That just means zero working files;
+    // return an empty list instead of a 500 + raw stack echo.
+    if (/relation .* does not exist/i.test(error?.message || '')) {
+      return res.json([]);
+    }
     next(error);
   }
 };
