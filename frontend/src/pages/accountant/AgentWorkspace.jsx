@@ -12,6 +12,7 @@ import { Badge } from '../../components/ui/badge';
 import { Checkbox } from '../../components/ui/checkbox';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../../components/ui/modal';
 import api from '../../lib/api';
+import { sidebarFor } from '../../lib/adminNav';
 import { toast } from 'sonner';
 import { format } from 'date-fns';
 import * as XLSX from 'xlsx';
@@ -104,10 +105,13 @@ const AgentWorkspace = () => {
     multi_state_sale: false
   });
 
-  const sidebarItems = [
-    { path: `/brands/${brandId}/agents`, label: 'Agents', icon: Bot, testId: 'nav-agents' },
+  // Same full app shell as the RECO agents (admin → ADMIN_SIDEBAR, accountant →
+  // full brand menu). The brand-scoped overrides make Dashboard/All Agents point
+  // at THIS brand. Fixes sales/settlement/order-cycle agents showing a reduced menu.
+  const sidebarItems = sidebarFor([
     { path: `/brands/${brandId}/dashboard`, label: 'Dashboard', icon: LayoutDashboard, testId: 'nav-dashboard' },
-  ];
+    { path: `/brands/${brandId}/agents`, label: 'All Agents', icon: Bot, testId: 'nav-agents' },
+  ]);
 
   useEffect(() => {
     fetchData();
