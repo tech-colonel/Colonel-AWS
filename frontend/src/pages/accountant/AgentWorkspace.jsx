@@ -105,9 +105,8 @@ const AgentWorkspace = () => {
   });
 
   const sidebarItems = [
-    { path: `/brands/${brandId}/dashboard`, label: 'Agent Workspace', icon: LayoutDashboard, testId: 'nav-dashboard' },
     { path: `/brands/${brandId}/agents`, label: 'Agents', icon: Bot, testId: 'nav-agents' },
-    { path: `/brands/${brandId}/agents`, label: `${agent?.name} Dashboard`, icon: Bot, testId: 'nav-agents' }
+    { path: `/brands/${brandId}/dashboard`, label: 'Dashboard', icon: LayoutDashboard, testId: 'nav-dashboard' },
   ];
 
   useEffect(() => {
@@ -567,11 +566,11 @@ const AgentWorkspace = () => {
               <Button
                 variant="ghost"
                 size="sm"
-                onClick={() => navigate(`/brands/${brandId}/dashboard`)}
+                onClick={() => navigate(`/brands/${brandId}/agents`)}
                 className="mb-4"
                 data-testid="back-button"
               >
-                ← Back to Dashboard
+                ← Back to Agents
               </Button>
               <h1 className="text-3xl font-bold text-slate-900 tracking-tight">{agent?.name}</h1>
               <p className="text-slate-600 mt-1">{agent?.description}</p>
@@ -594,11 +593,11 @@ const AgentWorkspace = () => {
               <Button
                 variant="ghost"
                 size="sm"
-                onClick={() => navigate(`/brands/${brandId}/dashboard`)}
+                onClick={() => navigate(`/brands/${brandId}/agents`)}
                 className="mb-4"
                 data-testid="back-button"
               >
-                ← Back to Dashboard
+                ← Back to Agents
               </Button>
               <h1 className="text-3xl font-bold text-slate-900 tracking-tight">{agent?.name}</h1>
               <p className="text-slate-600 mt-1">{agent?.description}</p>
@@ -621,11 +620,11 @@ const AgentWorkspace = () => {
               <Button
                 variant="ghost"
                 size="sm"
-                onClick={() => navigate(`/brands/${brandId}/dashboard`)}
+                onClick={() => navigate(`/brands/${brandId}/agents`)}
                 className="mb-4"
                 data-testid="back-button"
               >
-                ← Back to Dashboard
+                ← Back to Agents
               </Button>
               <h1 className="text-3xl font-bold text-slate-900 tracking-tight">{agent?.name}</h1>
               <p className="text-slate-600 mt-1">{agent?.description}</p>
@@ -648,11 +647,11 @@ const AgentWorkspace = () => {
               <Button
                 variant="ghost"
                 size="sm"
-                onClick={() => navigate(`/brands/${brandId}/dashboard`)}
+                onClick={() => navigate(`/brands/${brandId}/agents`)}
                 className="mb-4"
                 data-testid="back-button"
               >
-                ← Back to Dashboard
+                ← Back to Agents
               </Button>
               <h1 className="text-3xl font-bold text-slate-900 tracking-tight">{agent?.name}</h1>
               <p className="text-slate-600 mt-1">{agent?.description}</p>
@@ -676,11 +675,11 @@ const AgentWorkspace = () => {
                 <Button
                   variant="ghost"
                   size="sm"
-                  onClick={() => navigate(`/brands/${brandId}/dashboard`)}
+                  onClick={() => navigate(`/brands/${brandId}/agents`)}
                   className="mb-4"
                   data-testid="back-button"
                 >
-                  ← Back to Dashboard
+                  ← Back to Agents
                 </Button>
                 <h1 className="text-3xl font-bold text-slate-900 tracking-tight">{agent?.name}</h1>
                 <p className="text-slate-600 mt-1">{agent?.description}</p>
