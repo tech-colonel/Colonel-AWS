@@ -44,24 +44,25 @@ const getWorkingFiles = async (req, res, next) => {
     // Ensure table exists (agents that have been seeded but never committed won't have a table yet)
     await WorkingFileModel.sync({ force: false });
 
-    const attributes = [
-      'id',
-      'filename',
-      'month',
-      'year',
-      'created_at'
-    ];
+    // Select ONLY columns that actually exist in the (possibly legacy-shaped)
+    // table. Older agent tables — e.g. the legacy "myntra" — predate
+    // file_type/inventory_type, so keying off the model's rawAttributes (which
+    // always define them) 500'd with "column ... does not exist". Introspect the
+    // real table instead.
+    let dbCols = {};
+    try { dbCols = await brandDb.getQueryInterface().describeTable(tableName); } catch (_) { dbCols = {}; }
+    const attributes = ['id', 'filename', 'month', 'year', 'created_at', 'file_type', 'inventory_type']
+      .filter((c) => dbCols[c]);
+    if (!attributes.length) return res.json([]); // table has none of the expected columns
 
-    if (WorkingFileModel.rawAttributes.file_type) attributes.push('file_type');
-    if (WorkingFileModel.rawAttributes.inventory_type) attributes.push('inventory_type');
+    const order = [];
+    if (dbCols.filename) order.push(['filename', 'ASC']);
+    if (dbCols.created_at) order.push(['created_at', 'DESC']);
 
     // ✅ Fetch all rows sorted (latest first)
     const rows = await WorkingFileModel.findAll({
       attributes: attributes,
-      order: [
-        ['filename', 'ASC'],
-        ['created_at', 'DESC']
-      ],
+      order: order,
       raw: true
     });
 
