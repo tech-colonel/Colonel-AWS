@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useParams, useNavigate, useLocation } from 'react-router-dom';
 import DashboardLayout from '../../components/layout/DashboardLayout';
 import Gstr1Dashboard from './Gstr1Dashboard';
 import ToolResultDashboard from '../../components/reco/ToolResultDashboard';
@@ -417,6 +417,18 @@ const RecoWorkspace = ({ agentTypeProp } = {}) => {
   const { brandId, agentType: agentTypeParam } = useParams();
   const agentType = agentTypeProp || agentTypeParam;
   const navigate = useNavigate();
+  const location = useLocation();
+
+  // Switch the active brand AND keep the URL in sync (URL = source of truth).
+  // The 'other' sentinel is a local testing mode (not a real brand route) → no nav.
+  const switchBrand = (bid) => {
+    setSelectedBrand(bid);
+    setBrandPickerOpen(false);
+    setBrandSearch('');
+    if (bid && bid !== 'other') {
+      navigate(location.pathname.replace(/\/brands\/[^/]+/, `/brands/${bid}`));
+    }
+  };
   const config = AGENT_CONFIG[agentType];
   const isDemo = localStorage.getItem('token') === 'demo-mode-token';
   const isDriveMode = !!config?.driveMode;
@@ -818,7 +830,7 @@ const RecoWorkspace = ({ agentTypeProp } = {}) => {
         <div style={{ maxHeight: 220, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 2 }}>
           {brands.filter(b => b.name.toLowerCase().includes(brandSearch.toLowerCase())).map(b => (
             <button key={b.id}
-              onClick={() => { setSelectedBrand(b.id); setBrandPickerOpen(false); setBrandSearch(''); }}
+              onClick={() => switchBrand(b.id)}
               style={{
                 display: 'flex', alignItems: 'center', gap: 10,
                 padding: '8px 10px', borderRadius: 8, textAlign: 'left',
@@ -848,7 +860,7 @@ const RecoWorkspace = ({ agentTypeProp } = {}) => {
           )}
           <div style={{ borderTop: '1px solid var(--card-border)', marginTop: 6, paddingTop: 6 }}>
             <button
-              onClick={() => { setSelectedBrand('other'); setBrandPickerOpen(false); setBrandSearch(''); }}
+              onClick={() => switchBrand('other')}
               style={{
                 display: 'flex', alignItems: 'center', gap: 10,
                 width: '100%', padding: '8px 10px', borderRadius: 8, textAlign: 'left',
