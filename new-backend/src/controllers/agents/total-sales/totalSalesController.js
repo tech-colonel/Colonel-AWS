@@ -269,20 +269,6 @@ const generateCommit = async (req, res, next) => {
 
         deletePending(taskId);
 
-        // fire-and-forget: record run for admin analytics (never blocks/breaks the agent)
-        try {
-            const { recordAgentRun } = require('../../../services/agentRunTracker');
-            recordAgentRun(Model.sequelize, {
-                brandId: req.params.brandId,
-                agentType: Model.tableName,
-                month: (pending.finalData && pending.finalData[0] && pending.finalData[0].month) || null,
-                year: (pending.finalData && pending.finalData[0] && pending.finalData[0].year) || null,
-                totalRows: (pending.finalData && pending.finalData.length) || 0,
-                outputFileId: null,
-                createdBy: (req.user && req.user.id) || null,
-            });
-        } catch (e) { /* tracking must never break the agent */ }
-
         res.json({
             message: 'Data saved successfully',
             recordsInserted: pending.finalData.length

@@ -310,20 +310,6 @@ const generateCommit = async (req, res, next) => {
         await Model.sync();
         await Model.bulkCreate(finalData);
 
-        // fire-and-forget: record run for admin analytics (never blocks/breaks the agent)
-        try {
-            const { recordAgentRun } = require('../../../services/agentRunTracker');
-            recordAgentRun(Model.sequelize, {
-                brandId: req.params.brandId,
-                agentType: Model.tableName,
-                month: (finalData && finalData[0] && finalData[0].month) || null,
-                year: (finalData && finalData[0] && finalData[0].year) || null,
-                totalRows: (finalData && finalData.length) || 0,
-                outputFileId: (typeof processFile !== 'undefined' ? processFile : null),
-                createdBy: (req.user && req.user.id) || null,
-            });
-        } catch (e) { /* tracking must never break the agent */ }
-
         XLSX.writeFile(workbook, processPath);
         deletePending(taskId);
 

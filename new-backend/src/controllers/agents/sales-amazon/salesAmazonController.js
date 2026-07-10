@@ -260,7 +260,11 @@ const generate = async (req, res, next) => {
             }
         }
 
-        console.log('Normalized:', { month, year, fileType, useInventory });
+        const multiStateSale = ['true', '1', 'yes', 'on'].includes(
+            String(req.body.multi_state_sale || '').toLowerCase().trim()
+        );
+
+        console.log('Normalized:', { month, year, fileType, useInventory, multiStateSale });
 
         // =====================================================
         // ✅ VALIDATION
@@ -353,7 +357,8 @@ const generate = async (req, res, next) => {
                     stateConfigData,
                     useInventory,
                     month,
-                    year
+                    year,
+                    multiStateSale
                 );
             } else if (fileType === 'b2c') {
                 processedData = await amazonB2CProcessor(
@@ -365,7 +370,8 @@ const generate = async (req, res, next) => {
                     stateConfigData,
                     useInventory,
                     month,
-                    year
+                    year,
+                    multiStateSale
                 );
             } else {
                 return res.status(400).json({ error: 'Invalid file_type' });
@@ -417,20 +423,6 @@ const generate = async (req, res, next) => {
         await Model.sync();
         const rows = await Model.bulkCreate(finalData, { returning: true });
 
-        // fire-and-forget: record run for admin analytics (never blocks/breaks the agent)
-        try {
-            const { recordAgentRun } = require('../../../services/agentRunTracker');
-            recordAgentRun(Model.sequelize, {
-                brandId: req.params.brandId,
-                agentType: Model.tableName || 'sales_amazon',
-                month: finalData?.[0]?.month ?? null,
-                year: finalData?.[0]?.year ?? null,
-                totalRows: finalData?.length || 0,
-                outputFileId: processFile || null,
-                createdBy: req.user?.id || null,
-            });
-        } catch (e) { /* tracking must never break the agent */ }
-
         // ==================================
         // 🔥 USE PROCESSOR WORKBOOK (ALL SHEETS INCLUDED)
         // ==================================
@@ -473,6 +465,9 @@ const generatePreview = async (req, res, next) => {
             const val = String(req.body.inventory_type).toLowerCase().trim();
             if (val === 'without' || val === 'false' || val === '0' || val === 'no') useInventory = false;
         }
+        const multiStateSale = ['true', '1', 'yes', 'on'].includes(
+            String(req.body.multi_state_sale || '').toLowerCase().trim()
+        );
 
         if (!req.file?.buffer)            return res.status(400).json({ error: 'File is required' });
         if (!month || !year || !fileType) return res.status(400).json({ error: 'month, year, file_type required' });
@@ -509,7 +504,8 @@ const generatePreview = async (req, res, next) => {
             const processorArgs = [
                 req.file.buffer, skuFileBuffer, brand.name,
                 new Date().toISOString(), sourceSheetData,
-                masterData.ledger_master || null, useInventory, month, year
+                masterData.ledger_master || null, useInventory, month, year,
+                multiStateSale
             ];
             if (fileType === 'b2b')      processedData = await amazonB2BProcessor(...processorArgs);
             else if (fileType === 'b2c') processedData = await amazonB2CProcessor(...processorArgs);
@@ -581,20 +577,6 @@ const generateCommit = async (req, res, next) => {
         await Model.sync({ alter: true });
         await Model.bulkCreate(finalData, { returning: true });
         await workbook.xlsx.writeFile(processPath);
-
-        // fire-and-forget: record run for admin analytics (never blocks/breaks the agent)
-        try {
-            const { recordAgentRun } = require('../../../services/agentRunTracker');
-            recordAgentRun(Model.sequelize, {
-                brandId: req.params.brandId,
-                agentType: Model.tableName || 'sales_amazon',
-                month: finalData?.[0]?.month ?? null,
-                year: finalData?.[0]?.year ?? null,
-                totalRows: finalData?.length || 0,
-                outputFileId: processFile || null,
-                createdBy: req.user?.id || null,
-            });
-        } catch (e) { /* tracking must never break the agent */ }
 
         deletePending(taskId);
 

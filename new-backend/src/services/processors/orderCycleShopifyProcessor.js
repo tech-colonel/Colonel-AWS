@@ -344,8 +344,8 @@ function buildBharatXLookup(rows) {
         if (!orderNo) continue;
         if (!map[orderNo]) {
             map[orderNo] = {
-                // Ledger Timestamp is an Excel serial date
-                settlement_date: safeDate(getCol(row, 'Ledger Timestamp', 'Settlement Timestamp')),
+                // Settlement Timestamp = payout date; Ledger Timestamp = transaction date (earlier)
+                settlement_date: safeDate(getCol(row, 'Settlement Timestamp', 'Ledger Timestamp')),
                 settlement_amount: 0
             };
         }

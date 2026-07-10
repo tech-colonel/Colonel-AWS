@@ -649,20 +649,6 @@ const flipkart = {
       await Model.sync({ alter: false });
       await Model.bulkCreate(finalData, { returning: true });
 
-      // fire-and-forget: record run for admin analytics (never blocks/breaks the agent)
-      try {
-          const { recordAgentRun } = require('../services/agentRunTracker');
-          recordAgentRun(Model.sequelize, {
-              brandId: req.params.brandId,
-              agentType: Model.tableName,
-              month: (finalData && finalData[0] && finalData[0].month) || null,
-              year: (finalData && finalData[0] && finalData[0].year) || null,
-              totalRows: (finalData && finalData.length) || 0,
-              outputFileId: (typeof processFile !== 'undefined' ? processFile : null),
-              createdBy: (req.user && req.user.id) || null,
-          });
-      } catch (e) { /* tracking must never break the agent */ }
-
       // Flipkart uses XLSX_STYLE.writeFile
       XLSX_STYLE.writeFile(workbook, processPath);
 

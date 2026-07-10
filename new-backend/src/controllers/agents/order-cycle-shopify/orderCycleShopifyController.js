@@ -404,6 +404,11 @@ const getReportData = async (req, res, next) => {
         const Model = getDynamicModel(brandDb, tableName, agent.columns);
         await Model.sync();
 
+        // Ensure filename index exists on tables created before the index was added to the model
+        await brandDb.query(
+            `CREATE INDEX IF NOT EXISTS idx_${tableName}_filename ON \`${tableName}\` (filename)`
+        ).catch(() => {}); // ignore if dialect doesn't support IF NOT EXISTS syntax
+
         const rows = await Model.findAll({ where: { filename: decodedFilename }, raw: true });
         if (!rows.length) return res.status(404).json({ error: 'No data found for this file' });
 
@@ -527,6 +532,96 @@ const getReportData = async (req, res, next) => {
     }
 };
 
+// ─── Get Paginated Transactions ───────────────────────────────────────────────
+
+const getTransactions = async (req, res, next) => {
+    try {
+        const { brandId, agentId, filename } = req.params;
+        const decodedFilename = decodeURIComponent(filename);
+
+        const page     = Math.max(1, parseInt(req.query.page)     || 1);
+        const pageSize = Math.min(100, Math.max(10, parseInt(req.query.pageSize) || 50));
+        const tab      = req.query.tab || 'all';    // matched|mismatched|unsettled|all|sales
+        const sub      = req.query.sub || 'less';   // less|more (mismatched only)
+        const search   = (req.query.search || '').trim();
+
+        const brand = await Brand.findByPk(brandId);
+        const agent = await Agent.findByPk(agentId);
+        if (!brand || !agent) return res.status(404).json({ error: 'Brand or Agent not found' });
+
+        const brandDb = getBrandConnection(brand.db_name);
+        const tableName = agent.name.replace(/[^a-zA-Z0-9]/g, '_').toLowerCase();
+        const Model = getDynamicModel(brandDb, tableName, agent.columns);
+        await Model.sync();
+
+        const { Op } = require('sequelize');
+        const SETTLED = ['RECONCILED', 'PENDING RECEIVABLE', 'OVERPAID / INVESTIGATE'];
+
+        // Build WHERE clause
+        let where;
+        if (tab === 'unsettled') {
+            where = {
+                [Op.and]: [
+                    { filename: decodedFilename },
+                    {
+                        [Op.or]: [
+                            { reconciliation_status: null },
+                            { reconciliation_status: { [Op.notIn]: SETTLED } },
+                        ],
+                    },
+                ],
+            };
+        } else {
+            where = { filename: decodedFilename };
+            if (tab === 'matched')                    where.reconciliation_status = 'RECONCILED';
+            if (tab === 'mismatched' && sub === 'less') where.reconciliation_status = 'PENDING RECEIVABLE';
+            if (tab === 'mismatched' && sub === 'more') where.reconciliation_status = 'OVERPAID / INVESTIGATE';
+            // tab === 'all' | 'sales' → no status filter
+        }
+
+        if (search) {
+            const searchCond = {
+                [Op.or]: [
+                    { sale_order_number: { [Op.like]: `%${search}%` } },
+                    { invoice_number:    { [Op.like]: `%${search}%` } },
+                ],
+            };
+            if (where[Op.and]) {
+                where[Op.and].push(searchCond);
+            } else {
+                where[Op.and] = [searchCond];
+            }
+        }
+
+        const { count: total, rows } = await Model.findAndCountAll({
+            where,
+            limit:  pageSize,
+            offset: (page - 1) * pageSize,
+            raw:    true,
+        });
+
+        const TX_OMIT = new Set(['year', 'month', 'date', 'filename', 'file_type', 'inventory_type', 'created_at']);
+        const txRows = rows.map(r => {
+            const out = {};
+            for (const k of Object.keys(r)) {
+                if (!TX_OMIT.has(k)) out[k] = r[k];
+            }
+            return out;
+        });
+
+        res.json({
+            rows: txRows,
+            total,
+            page,
+            pageSize,
+            totalPages: Math.ceil(total / pageSize),
+        });
+    } catch (error) {
+        console.error('[OrderCycle] Transactions Error:', error);
+        next(error);
+    }
+};
+
 module.exports = {
     generatePreview,
     generateCommit,
@@ -535,4 +630,5 @@ module.exports = {
     downloadFile,
     deleteFile,
     getReportData,
+    getTransactions,
 };

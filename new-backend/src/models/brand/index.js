@@ -76,7 +76,8 @@ const getDynamicModel = (sequelize, tableName, columns) => {
 
   return sequelize.define(tableName, schema, {
     tableName: tableName.toLowerCase(),
-    timestamps: false
+    timestamps: false,
+    indexes: [{ fields: ['filename'] }],
   });
 };
 

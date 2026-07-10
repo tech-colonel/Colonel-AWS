@@ -1,15 +1,15 @@
 import React, { useState, useEffect } from 'react';
 import { useParams, useNavigate, useLocation } from 'react-router-dom';
 import DashboardLayout from '../../components/layout/DashboardLayout';
-import { Bot, Upload, FileText, Download, Trash2, Eye, Plus, Loader2, BarChart3, Search, X, GitBranch } from 'lucide-react';
+import { LayoutDashboard, Bot, Upload, FileText, Download, Trash2, Eye, Plus, Loader2, BarChart3, Search, X, GitBranch } from 'lucide-react';
 import CFODashboardLauncher from '../cfo/CFODashboardLauncher';
-import { sidebarFor, isAdminUser } from '../../lib/adminNav';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../../components/ui/card';
 import { Button } from '../../components/ui/button';
 import { Input } from '../../components/ui/input';
 import { Label } from '../../components/ui/label';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../../components/ui/table';
 import { Badge } from '../../components/ui/badge';
+import { Checkbox } from '../../components/ui/checkbox';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../../components/ui/modal';
 import api from '../../lib/api';
 import { toast } from 'sonner';
@@ -21,7 +21,6 @@ import SettlementAmazonWorkspace from './SettlementAmazonWorkspace';
 import TotalSalesAnalyzerModal from './TotalSalesAnalyzerModal';
 import NykaaWorkspace from './NykaaWorkspace';
 import WorkflowApplyModal from './WorkflowApplyModal';
-import WorkflowManagerModal from '../admin/WorkflowManagerModal';
 
 const AgentWorkspace = () => {
   const { brandId, agentId } = useParams();
@@ -101,14 +100,15 @@ const AgentWorkspace = () => {
     rtoFile: null,
     rtFile: null,
     packedFile: null,
-    selling_state: ''
+    selling_state: '',
+    multi_state_sale: false
   });
 
-  // Use the SAME standard sidebar as the RECO/AWS agent workspaces (full nav for
-  // admin/accountant) + the "All Agents" link — instead of a stripped custom nav.
-  const sidebarItems = sidebarFor([
-    { path: `/brands/${brandId}/agents`, label: 'All Agents', icon: Bot, testId: 'nav-agents' },
-  ]);
+  const sidebarItems = [
+    { path: `/brands/${brandId}/dashboard`, label: 'Agent Workspace', icon: LayoutDashboard, testId: 'nav-dashboard' },
+    { path: `/brands/${brandId}/agents`, label: 'Agents', icon: Bot, testId: 'nav-agents' },
+    { path: `/brands/${brandId}/agents`, label: `${agent?.name} Dashboard`, icon: Bot, testId: 'nav-agents' }
+  ];
 
   useEffect(() => {
     fetchData();
@@ -116,43 +116,37 @@ const AgentWorkspace = () => {
 
   const fetchData = async () => {
     try {
-      // Load the agent first — this alone must succeed for the workspace to render.
-      const agentRes = await api.get(`/api/agents`);
+      const agentType = await detectAgentType();
+      const [agentRes, masterRes, filesRes] = await Promise.all([
+        api.get(`/api/agents`),
+        api.get(`/api/brands/${brandId}/agents/${agentId}/${agentType}/master`),
+        api.get(`/api/brands/${brandId}/agents/${agentId}/working-files`)
+      ]);
+
       const currentAgent = agentRes.data.find(a => a.id.toString() === agentId.toString());
+      console.log("currect agent", currentAgent);
       setAllAgents(agentRes.data);
       setAgent(currentAgent);
+      setMasterData(masterRes.data);
 
-      // Master data + working files are optional. Agents like invoice, order-cycle,
-      // settlement and CFO have no /master endpoint — their failure must NOT crash the page.
-      const agentType = await detectAgentType();
-      try {
-        const [masterRes, filesRes] = await Promise.all([
-          api.get(`/api/brands/${brandId}/agents/${agentId}/${agentType}/master`),
-          api.get(`/api/brands/${brandId}/agents/${agentId}/working-files`)
-        ]);
-        setMasterData(masterRes.data);
+      const monthOrder = {
+        'January': 1, 'February': 2, 'March': 3, 'April': 4,
+        'May': 5, 'June': 6, 'July': 7, 'August': 8,
+        'September': 9, 'October': 10, 'November': 11, 'December': 12
+      };
 
-        const monthOrder = {
-          'January': 1, 'February': 2, 'March': 3, 'April': 4,
-          'May': 5, 'June': 6, 'July': 7, 'August': 8,
-          'September': 9, 'October': 10, 'November': 11, 'December': 12
-        };
+      const sortedFiles = filesRes.data.sort((a, b) => {
+        const yearA = parseInt(a.year) || 0;
+        const yearB = parseInt(b.year) || 0;
+        if (yearA !== yearB) {
+          return yearB - yearA;
+        }
+        const monthA = monthOrder[a.month] || 0;
+        const monthB = monthOrder[b.month] || 0;
+        return monthB - monthA;
+      });
 
-        const sortedFiles = filesRes.data.sort((a, b) => {
-          const yearA = parseInt(a.year) || 0;
-          const yearB = parseInt(b.year) || 0;
-          if (yearA !== yearB) {
-            return yearB - yearA;
-          }
-          const monthA = monthOrder[a.month] || 0;
-          const monthB = monthOrder[b.month] || 0;
-          return monthB - monthA;
-        });
-
-        setFiles(sortedFiles);
-      } catch (e) {
-        console.warn('master/working-files not applicable for this agent:', e?.message);
-      }
+      setFiles(sortedFiles);
     } catch (error) {
       console.error('Failed to load data:', error);
       toast.error('Failed to load workspace data. Please refresh the page.');
@@ -165,18 +159,23 @@ const AgentWorkspace = () => {
     try {
       const response = await api.get(`/api/agents`);
       const currentAgent = response.data.find(a => a.id.toString() === agentId.toString());
-      if (currentAgent?.name?.toLowerCase().includes('amazon')) return 'amazon';
-      if (currentAgent?.name?.toLowerCase().includes('flipkart')) return 'flipkart';
-      if (currentAgent?.name?.toLowerCase().includes('myntra')) return 'myntra';
-      if (currentAgent?.name?.toLowerCase().includes('blinkit')) return 'blinkit';
-      if (currentAgent?.name?.toLowerCase().includes('zepto')) return 'zepto';
-      if (currentAgent?.name?.toLowerCase().includes('firstcry')) return 'firstcry';
-      if (currentAgent?.name?.toLowerCase().includes('jiomart')) return 'jiomart';
-      if (currentAgent?.name?.toLowerCase().includes('shopify')) return 'shopify';
-      if (currentAgent?.name?.toLowerCase().includes('total-sales')) return 'total-sales-analyzer';
-      if (currentAgent?.name?.toLowerCase().includes('mirrow')) return 'mirrow';
-      if (currentAgent?.name?.toLowerCase().includes('cread')) return 'cread';
-      if (currentAgent?.name?.toLowerCase().includes('limeroad')) return 'limeroad';
+      // Use explicit agentType field if set — avoids name-based misdetection
+      if (currentAgent?.agentType) return currentAgent.agentType;
+      // Fallback: name-based detection
+      const name = currentAgent?.name?.toLowerCase() || '';
+      if (name.includes('amazon')) return 'amazon';
+      if (name.includes('flipkart')) return 'flipkart';
+      if (name.includes('myntra')) return 'myntra';
+      if (name.includes('blinkit')) return 'blinkit';
+      if (name.includes('zepto')) return 'zepto';
+      if (name.includes('firstcry')) return 'firstcry';
+      if (name.includes('jiomart')) return 'jiomart';
+      if (name.includes('cread')) return 'cread';
+      if (name.includes('limeroad')) return 'limeroad';
+      if (name.includes('mirrow')) return 'mirrow';
+      if (name.includes('nykaa')) return 'nykaa';
+      if (name.includes('total-sales')) return 'total-sales-analyzer';
+      if (name.includes('shopify')) return 'shopify';
       return 'amazon';
     } catch (error) {
       return 'amazon';
@@ -381,6 +380,9 @@ const AgentWorkspace = () => {
     if (isZepto && formData.selling_state) {
       data.append('selling_state', formData.selling_state);
     }
+    if (isAmazon) {
+      data.append('multi_state_sale', formData.multi_state_sale);
+    }
 
     setIsGenerating(true);
     setShowInvoicePreviewModal(false);
@@ -565,11 +567,11 @@ const AgentWorkspace = () => {
               <Button
                 variant="ghost"
                 size="sm"
-                onClick={() => navigate(isAdminUser() ? '/admin/agents' : `/brands/${brandId}/agents`)}
+                onClick={() => navigate(`/brands/${brandId}/dashboard`)}
                 className="mb-4"
                 data-testid="back-button"
               >
-                ← Back to Agents
+                ← Back to Dashboard
               </Button>
               <h1 className="text-3xl font-bold text-slate-900 tracking-tight">{agent?.name}</h1>
               <p className="text-slate-600 mt-1">{agent?.description}</p>
@@ -592,11 +594,11 @@ const AgentWorkspace = () => {
               <Button
                 variant="ghost"
                 size="sm"
-                onClick={() => navigate(isAdminUser() ? '/admin/agents' : `/brands/${brandId}/agents`)}
+                onClick={() => navigate(`/brands/${brandId}/dashboard`)}
                 className="mb-4"
                 data-testid="back-button"
               >
-                ← Back to Agents
+                ← Back to Dashboard
               </Button>
               <h1 className="text-3xl font-bold text-slate-900 tracking-tight">{agent?.name}</h1>
               <p className="text-slate-600 mt-1">{agent?.description}</p>
@@ -619,11 +621,11 @@ const AgentWorkspace = () => {
               <Button
                 variant="ghost"
                 size="sm"
-                onClick={() => navigate(isAdminUser() ? '/admin/agents' : `/brands/${brandId}/agents`)}
+                onClick={() => navigate(`/brands/${brandId}/dashboard`)}
                 className="mb-4"
                 data-testid="back-button"
               >
-                ← Back to Agents
+                ← Back to Dashboard
               </Button>
               <h1 className="text-3xl font-bold text-slate-900 tracking-tight">{agent?.name}</h1>
               <p className="text-slate-600 mt-1">{agent?.description}</p>
@@ -646,11 +648,11 @@ const AgentWorkspace = () => {
               <Button
                 variant="ghost"
                 size="sm"
-                onClick={() => navigate(isAdminUser() ? '/admin/agents' : `/brands/${brandId}/agents`)}
+                onClick={() => navigate(`/brands/${brandId}/dashboard`)}
                 className="mb-4"
                 data-testid="back-button"
               >
-                ← Back to Agents
+                ← Back to Dashboard
               </Button>
               <h1 className="text-3xl font-bold text-slate-900 tracking-tight">{agent?.name}</h1>
               <p className="text-slate-600 mt-1">{agent?.description}</p>
@@ -674,11 +676,11 @@ const AgentWorkspace = () => {
                 <Button
                   variant="ghost"
                   size="sm"
-                  onClick={() => navigate(isAdminUser() ? '/admin/agents' : `/brands/${brandId}/agents`)}
+                  onClick={() => navigate(`/brands/${brandId}/dashboard`)}
                   className="mb-4"
                   data-testid="back-button"
                 >
-                  ← Back to Agents
+                  ← Back to Dashboard
                 </Button>
                 <h1 className="text-3xl font-bold text-slate-900 tracking-tight">{agent?.name}</h1>
                 <p className="text-slate-600 mt-1">{agent?.description}</p>
@@ -1220,6 +1222,25 @@ const AgentWorkspace = () => {
                   </select>
                 </div>
 
+                {isAmazon && (
+                  <div>
+                    <div className="flex items-center space-x-2">
+                      <Checkbox
+                        id="multi-state-sale"
+                        checked={formData.multi_state_sale}
+                        onCheckedChange={(checked) => setFormData({ ...formData, multi_state_sale: checked === true })}
+                        data-testid="multi-state-sale-checkbox"
+                      />
+                      <Label htmlFor="multi-state-sale" className="cursor-pointer">
+                        Multi State Sale
+                      </Label>
+                    </div>
+                    <p className="text-xs text-slate-500 mt-2">
+                      Adds the Bill From State's GST state number before the month suffix in the invoice number
+                    </p>
+                  </div>
+                )}
+
                 {isZepto && (
                   <div>
                     <Label htmlFor="selling-state">Selling State *</Label>
@@ -1759,14 +1780,12 @@ const AgentWorkspace = () => {
           )}
         </>
       )}
-      {(() => {
-        let role = '';
-        try { role = JSON.parse(localStorage.getItem('user') || '{}').role || ''; } catch {}
-        // Admins manage (create/edit) workflows; everyone else applies them.
-        return role === 'admin'
-          ? <WorkflowManagerModal agent={agent} open={showWorkflowModal} onClose={() => setShowWorkflowModal(false)} />
-          : <WorkflowApplyModal agentId={agentId} brandId={brandId} open={showWorkflowModal} onClose={() => setShowWorkflowModal(false)} />;
-      })()}
+      <WorkflowApplyModal
+        agentId={agentId}
+        brandId={brandId}
+        open={showWorkflowModal}
+        onClose={() => setShowWorkflowModal(false)}
+      />
     </DashboardLayout>
   );
 };

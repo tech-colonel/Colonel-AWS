@@ -11,6 +11,21 @@ function safeString(value) {
   return String(value).trim();
 }
 
+// Case-insensitive, space/dash/underscore-tolerant field lookup.
+// Tries each name in order: exact first, then normalized fallback.
+function findField(obj, ...names) {
+  for (const name of names) {
+    if (name in obj) return obj[name];
+  }
+  const objKeys = Object.keys(obj);
+  for (const name of names) {
+    const norm = name.toLowerCase().replace(/[\s_-]+/g, '');
+    const hit = objKeys.find(k => k.toLowerCase().replace(/[\s_-]+/g, '') === norm);
+    if (hit !== undefined) return obj[hit];
+  }
+  return undefined;
+}
+
 const MONTH_NUM = {
   january: '01', february: '02', march: '03', april: '04',
   may: '05', june: '06', july: '07', august: '08',
@@ -61,11 +76,11 @@ async function creadProcessor(
   const skuMap = {};
   skuData.forEach(item => {
     const key = safeString(
-      item['Sales Portal SKU'] || item['Portal SKU'] || item['SKU'] || item.sku || ''
+      findField(item, 'Sales Portal SKU', 'Portal SKU', 'SKU', 'sku') ?? ''
     ).toLowerCase();
     if (!key) return;
     skuMap[key] = safeString(
-      item['Tally SKU'] || item['Tally Item Name'] || item['Final SKU'] || item['FG'] || item.fg || ''
+      findField(item, 'Tally new SKU', 'Tally SKU', 'Tally Item Name', 'Final SKU', 'FG', 'fg') ?? ''
     );
   });
 
@@ -73,13 +88,13 @@ async function creadProcessor(
   const ledgerMap = {};
   ledgerData.forEach(item => {
     const stateKey = safeString(
-      item['State'] || item['Shipping State'] || item['States'] || item.state || ''
+      findField(item, 'State', 'Shipping State', 'States', 'state') ?? ''
     ).toLowerCase();
     if (!stateKey) return;
     ledgerMap[stateKey] = {
-      states: safeString(item['State'] || item['Shipping State'] || item['States'] || item.state || ''),
-      partyName: safeString(item['Party Name'] || item['Ledger'] || item['Tally Name'] || item.partyName || ''),
-      invoicePrefix: safeString(item['Invoice No.'] || item['Invoice No'] || item['Invoice Number'] || item.invoiceNo || '')
+      states: safeString(findField(item, 'State', 'Shipping State', 'States', 'state') ?? ''),
+      partyName: safeString(findField(item, 'Party Name', 'Ledger', 'Tally Name', 'partyName') ?? ''),
+      invoicePrefix: safeString(findField(item, 'Invoice No.', 'Invoice No', 'Invoice Number', 'invoiceNo') ?? '')
     };
   });
 

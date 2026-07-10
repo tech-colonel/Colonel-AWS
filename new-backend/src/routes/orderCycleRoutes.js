@@ -39,7 +39,8 @@ router.post(`${BASE}/generate/discard`, authenticateToken, ctrl.generateDiscard)
 // ─── File management ──────────────────────────────────────────────────────────
 router.get(`${BASE}/files`,                       authenticateToken, ctrl.getGeneratedFiles);
 router.get(`${BASE}/files/:filename/download`,    authenticateToken, ctrl.downloadFile);
-router.get(`${BASE}/files/:filename/report`,      authenticateToken, ctrl.getReportData);
+router.get(`${BASE}/files/:filename/report`,       authenticateToken, ctrl.getReportData);
+router.get(`${BASE}/files/:filename/transactions`, authenticateToken, ctrl.getTransactions);
 router.delete(`${BASE}/files`,                    authenticateToken, ctrl.deleteFile);
 
 module.exports = router;

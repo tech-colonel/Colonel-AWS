@@ -1,5 +1,6 @@
 const XLSX = require('xlsx-js-style');
 const ExcelJS = require('exceljs');
+const { getStateCodeFromName } = require('../../../utils/gstStateCodes');
 
 async function amazonB2BProcessor(
   rawFileBuffer,
@@ -10,7 +11,8 @@ async function amazonB2BProcessor(
   stateConfigData,
   useInventory,
   formMonth,
-  formYear
+  formYear,
+  multiStateSale
 ) {
   try {
     if (!rawFileBuffer) {
@@ -52,6 +54,16 @@ async function amazonB2BProcessor(
     if (!transactionColumn) throw new Error('Transaction Type column not found');
     if (!quantityColumn) throw new Error('Quantity column not found');
     if (!sellerGstinColumn) throw new Error('Seller Gstin column not found');
+
+    // Prefer Bill From/To State for the IGST/CGST/SGST split; fall back to
+    // Ship From/To State when the report doesn't carry Bill columns.
+    const findHeader = name => headers.find(h => h.toLowerCase().trim() === name);
+
+    const fromStateCol = findHeader('bill from state') || findHeader('ship from state');
+    const toStateCol = findHeader('bill to state') || findHeader('ship to state');
+
+    if (!fromStateCol) throw new Error('Bill From State / Ship From State column not found');
+    if (!toStateCol) throw new Error('Bill To State / Ship To State column not found');
 
     // ================================
     // STEP 3: FILTER Shipment & Refund
@@ -201,6 +213,17 @@ async function amazonB2BProcessor(
     // STEP 4.4: MAP STATE CONFIG DATA
     // ================================
 
+    // Builds the "-{monthNumber}" or "-{stateNumber}-{monthNumber}" invoice suffix
+    const getInvoiceSuffix = (row) => {
+      if (!multiStateSale) return monthNumber;
+      const stateCode = getStateCodeFromName(row[fromStateCol]);
+      if (!stateCode) {
+        console.warn(`[Amazon B2B] Multi-state sale: no GST state code match for "${fromStateCol}" value "${row[fromStateCol]}"`);
+        return monthNumber;
+      }
+      return `${stateCode}-${monthNumber}`;
+    };
+
     if (Array.isArray(stateConfigData) && stateConfigData.length > 0) {
 
       // Create lookup map
@@ -221,31 +244,31 @@ async function amazonB2BProcessor(
       // Map each row
       filteredRows.forEach(row => {
 
-        const shipFrom = (row["Ship From State"] || "")
+        const billFrom = (row[fromStateCol] || "")
           .toString()
           .trim()
           .toLowerCase();
 
-        const shipTo = (row["Ship To State"] || "")
+        const billTo = (row[toStateCol] || "")
           .toString()
           .trim()
           .toLowerCase();
 
         // ❌ Missing values
-        if (!shipFrom || !shipTo) {
+        if (!billFrom || !billTo) {
           row["Ship To State Tally Ledger"] = null;
           row["Final Invoice No."] = null;
           return;
         }
 
-        const isIntraState = shipFrom === shipTo;
+        const isIntraState = billFrom === billTo;
 
         if (isIntraState) {
           row["Ship To State Tally Ledger"] = "Amazon B2B Intra-State";
-          row["Final Invoice No."] = `AMZ-INTRA-${monthNumber}`;
+          row["Final Invoice No."] = `AMZ-INTRA-${getInvoiceSuffix(row)}`;
         } else {
           row["Ship To State Tally Ledger"] = "Amazon B2B Inter-State";
-          row["Final Invoice No."] = `AMZ-INTER-${monthNumber}`;
+          row["Final Invoice No."] = `AMZ-INTER-${getInvoiceSuffix(row)}`;
         }
 
       });
@@ -257,17 +280,17 @@ async function amazonB2BProcessor(
 
       filteredRows.forEach(row => {
 
-        const shipFrom = (row["Ship From State"] || "")
+        const billFrom = (row[fromStateCol] || "")
           .toString()
           .trim()
           .toLowerCase();
 
-        const shipTo = (row["Ship To State"] || "")
+        const billTo = (row[toStateCol] || "")
           .toString()
           .trim()
           .toLowerCase();
 
-        if (!shipFrom || !shipTo) {
+        if (!billFrom || !billTo) {
 
           row["Ship To State Tally Ledger"] = null;
           row["Final Invoice No."] = null;
@@ -275,17 +298,17 @@ async function amazonB2BProcessor(
           return;
         }
 
-        const isIntraState = shipFrom === shipTo;
+        const isIntraState = billFrom === billTo;
 
         if (isIntraState) {
 
           row["Ship To State Tally Ledger"] = "Amazon B2B Intra-State";
-          row["Final Invoice No."] = `AMZ-INTRA-${monthNumber}`;
+          row["Final Invoice No."] = `AMZ-INTRA-${getInvoiceSuffix(row)}`;
 
         } else {
 
           row["Ship To State Tally Ledger"] = "Amazon B2B Inter-State";
-          row["Final Invoice No."] = `AMZ-INTER-${monthNumber}`;
+          row["Final Invoice No."] = `AMZ-INTER-${getInvoiceSuffix(row)}`;
 
         }
 
@@ -371,7 +394,7 @@ async function amazonB2BProcessor(
         Number(row['Tax Exclusive Gross'] || 0) - shippingValue;
 
       const isIntraState =
-        row['Ship From State'] === row['Ship To State'];
+        row[fromStateCol] === row[toStateCol];
 
       row['Final Tax rate'] = finalTaxRate;
       row['Final Taxable Shipping Value'] = shippingValue;
@@ -453,8 +476,8 @@ async function amazonB2BProcessor(
       'Gift Wrap Promo Discount Basis',
       'Shipping Promo Discount Basis',
       'Tax Exclusive Gross',
-      'Ship From State',
-      'Ship To State',
+      fromStateCol,
+      toStateCol,
       'Tcs Cgst Amount',
       'Tcs Sgst Amount',
       'Tcs Igst Amount'
@@ -493,8 +516,8 @@ async function amazonB2BProcessor(
       const giftWrapPromoBasisCol = col('Gift Wrap Promo Discount Basis');
       const shipPromoBasisCol = col('Shipping Promo Discount Basis');
       const taxExclusiveCol = col('Tax Exclusive Gross');
-      const shipFromCol = col('Ship From State');
-      const shipToCol = col('Ship To State');
+      const billFromCol = col(fromStateCol);
+      const billToCol = col(toStateCol);
       const tcsCgstCol = col('Tcs Cgst Amount');
       const tcsSgstCol = col('Tcs Sgst Amount');
       const tcsIgstCol = col('Tcs Igst Amount');
@@ -516,32 +539,32 @@ async function amazonB2BProcessor(
 
       // 4️⃣ Final CGST Tax
       worksheet.getCell(`${finalCgstCol}${excelRowNumber}`).value = {
-        formula: `IF(${shipFromCol}${excelRowNumber}=${shipToCol}${excelRowNumber},${finalTaxableSalesCol}${excelRowNumber}*${cgstRateCol}${excelRowNumber},0)`
+        formula: `IF(${billFromCol}${excelRowNumber}=${billToCol}${excelRowNumber},${finalTaxableSalesCol}${excelRowNumber}*${cgstRateCol}${excelRowNumber},0)`
       };
 
       // 5️⃣ Final SGST Tax
       worksheet.getCell(`${finalSgstCol}${excelRowNumber}`).value = {
-        formula: `IF(${shipFromCol}${excelRowNumber}=${shipToCol}${excelRowNumber},${finalTaxableSalesCol}${excelRowNumber}*${sgstRateCol}${excelRowNumber},0)`
+        formula: `IF(${billFromCol}${excelRowNumber}=${billToCol}${excelRowNumber},${finalTaxableSalesCol}${excelRowNumber}*${sgstRateCol}${excelRowNumber},0)`
       };
 
       // 6️⃣ Final IGST Tax
       worksheet.getCell(`${finalIgstCol}${excelRowNumber}`).value = {
-        formula: `IF(${shipFromCol}${excelRowNumber}<>${shipToCol}${excelRowNumber},${finalTaxableSalesCol}${excelRowNumber}*${igstRateCol}${excelRowNumber},0)`
+        formula: `IF(${billFromCol}${excelRowNumber}<>${billToCol}${excelRowNumber},${finalTaxableSalesCol}${excelRowNumber}*${igstRateCol}${excelRowNumber},0)`
       };
 
       // 7️⃣ Final Shipping CGST
       worksheet.getCell(`${finalShipCgstCol}${excelRowNumber}`).value = {
-        formula: `IF(${shipFromCol}${excelRowNumber}=${shipToCol}${excelRowNumber},${finalTaxableShippingCol}${excelRowNumber}*${finalTaxRateCol}${excelRowNumber},0)`
+        formula: `IF(${billFromCol}${excelRowNumber}=${billToCol}${excelRowNumber},${finalTaxableShippingCol}${excelRowNumber}*${finalTaxRateCol}${excelRowNumber},0)`
       };
 
       // 8️⃣ Final Shipping SGST
       worksheet.getCell(`${finalShipSgstCol}${excelRowNumber}`).value = {
-        formula: `IF(${shipFromCol}${excelRowNumber}=${shipToCol}${excelRowNumber},${finalTaxableShippingCol}${excelRowNumber}*${finalTaxRateCol}${excelRowNumber},0)`
+        formula: `IF(${billFromCol}${excelRowNumber}=${billToCol}${excelRowNumber},${finalTaxableShippingCol}${excelRowNumber}*${finalTaxRateCol}${excelRowNumber},0)`
       };
 
       // 9️⃣ Final Shipping IGST
       worksheet.getCell(`${finalShipIgstCol}${excelRowNumber}`).value = {
-        formula: `IF(${shipFromCol}${excelRowNumber}<>${shipToCol}${excelRowNumber},${finalTaxableShippingCol}${excelRowNumber}*${finalTaxRateCol}${excelRowNumber},0)`
+        formula: `IF(${billFromCol}${excelRowNumber}<>${billToCol}${excelRowNumber},${finalTaxableShippingCol}${excelRowNumber}*${finalTaxRateCol}${excelRowNumber},0)`
       };
 
       // 🔟 Final Amount Receivable

@@ -1,5 +1,6 @@
 // shopifyProcessor.js
 const ExcelJS = require('exceljs');
+const { Readable } = require('stream');
 
 /**
  * Normalize SKU
@@ -103,10 +104,19 @@ const shopifyProcessor = async (
         });
 
         // =========================
-        // READ FILE (ExcelJS)
+        // READ FILE (ExcelJS — XLSX or CSV)
         // =========================
         const workbook = new ExcelJS.Workbook();
-        await workbook.xlsx.load(fileBuffer);
+        // XLSX files are ZIPs and start with PK magic bytes (0x50 0x4B)
+        const isXLSX = fileBuffer[0] === 0x50 && fileBuffer[1] === 0x4B;
+        if (isXLSX) {
+            await workbook.xlsx.load(fileBuffer);
+        } else {
+            const readable = new Readable();
+            readable.push(fileBuffer);
+            readable.push(null);
+            await workbook.csv.read(readable);
+        }
 
         const worksheet = workbook.worksheets[0];
 
@@ -214,7 +224,10 @@ const shopifyProcessor = async (
             const stateObj = stateMap[normBillingState] || {};
 
             const tallyLedger = stateObj.ledger || '';
-            const invoiceNumber = stateObj.invoice || '';
+            const baseInvoice = stateObj.invoice || '';
+            const invoiceNumber = baseInvoice
+                ? `${baseInvoice}-${String(month).padStart(2, '0')}`
+                : '';
 
             // -------------------------
             // SALES LEDGER

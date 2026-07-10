@@ -89,6 +89,22 @@ function safeNum(value) {
 }
 
 /**
+ * Parse a date value into a Postgres-safe ISO string (YYYY-MM-DD) or null.
+ * Handles: JS Date objects, ISO strings, and DD-MM-YYYY strings from Shopify CSV exports.
+ */
+function parseDate(value) {
+    if (!value) return null;
+    if (value instanceof Date) return isNaN(value) ? null : value.toISOString().slice(0, 10);
+    const s = String(value).trim();
+    // DD-MM-YYYY (Shopify CSV export format)
+    const ddmmyyyy = s.match(/^(\d{2})-(\d{2})-(\d{4})$/);
+    if (ddmmyyyy) return `${ddmmyyyy[3]}-${ddmmyyyy[2]}-${ddmmyyyy[1]}`;
+    // Fallback: try native parse (handles ISO, etc.)
+    const d = new Date(s);
+    return isNaN(d) ? null : d.toISOString().slice(0, 10);
+}
+
+/**
  * Map Processor Row to Shopify Database Schema
  * Based on shopify schema in seed-sales-shopify.js
  */
@@ -96,10 +112,10 @@ const mapRowToShopifySchema = (row, month, year, filename) => ({
     year: parseInt(year),
     month: monthToNumber(month),
     filename: filename,
-    date: row.date || row['Date'] || null,
+    date: parseDate(row.date || row['Date']),
 
     // Raw + Business Columns
-    day: row.day || row['Day'] || null,
+    day: parseDate(row.day || row['Day']),
     sales: String(row.sales || row['Sales'] || ''),
 
     product_variant_sku: String(row.product_variant_sku || row['Product Variant SKU'] || ''),
@@ -321,20 +337,6 @@ const generateCommit = async (req, res, next) => {
         await ensureDir();
         await Model.sync();
         await Model.bulkCreate(finalData);
-
-        // fire-and-forget: record run for admin analytics (never blocks/breaks the agent)
-        try {
-            const { recordAgentRun } = require('../../../services/agentRunTracker');
-            recordAgentRun(Model.sequelize, {
-                brandId: req.params.brandId,
-                agentType: Model.tableName,
-                month: (finalData && finalData[0] && finalData[0].month) || null,
-                year: (finalData && finalData[0] && finalData[0].year) || null,
-                totalRows: (finalData && finalData.length) || 0,
-                outputFileId: (typeof processFile !== 'undefined' ? processFile : null),
-                createdBy: (req.user && req.user.id) || null,
-            });
-        } catch (e) { /* tracking must never break the agent */ }
 
         if (workbook) {
             await workbook.xlsx.writeFile(processPath);

@@ -86,20 +86,6 @@ const generateCommit = async (req, res, next) => {
     XLSX_STYLE.writeFile(workbook, filepath);
     await Model.sync();
     await Model.bulkCreate(dbRows);
-
-    // fire-and-forget: record run for admin analytics (never blocks/breaks the agent)
-    try {
-        const { recordAgentRun } = require('../../../services/agentRunTracker');
-        recordAgentRun(Model.sequelize, {
-            brandId: req.params.brandId,
-            agentType: Model.tableName,
-            month: (dbRows && dbRows[0] && dbRows[0].month) || null,
-            year: (dbRows && dbRows[0] && dbRows[0].year) || null,
-            totalRows: (dbRows && dbRows.length) || 0,
-            outputFileId: (typeof filename !== 'undefined' ? filename : null),
-            createdBy: (req.user && req.user.id) || null,
-        });
-    } catch (e) { /* tracking must never break the agent */ }
     deletePending(taskId);
     res.json({ success: true, message: 'Nykaa working file committed successfully', filename, count: dbRows.length });
   } catch (err) { next(err); }

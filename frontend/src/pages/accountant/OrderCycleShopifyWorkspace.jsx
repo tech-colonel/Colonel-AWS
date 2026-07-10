@@ -180,11 +180,361 @@ function SegmentDonut({ segments, size = 160, stroke = 18 }) {
     );
 }
 
+// ─── Transaction Sheet helpers ────────────────────────────────────────────────
+function kvRow(k, v) {
+    return (
+        <div key={k} className="flex justify-between items-start gap-2 py-1 border-b border-slate-50 last:border-0">
+            <span className="text-[10px] text-slate-400 shrink-0 leading-relaxed">{k}</span>
+            <span className="text-[11px] text-right text-slate-700 leading-relaxed">{v != null && v !== '' ? v : '—'}</span>
+        </div>
+    );
+}
+
+function TxDrillRow({ row }) {
+    const toNum = v => { const n = Number(v); return isNaN(n) ? 0 : n; };
+    const ekAmt  = toNum(row.ekart_cod_amount);
+    const delAmt = toNum(row.delhivery_cod_amount);
+    const xpAmt  = toNum(row.xpressbees_net_payment);
+    const snAmt  = toNum(row.snapmint_settlement_value);
+    const bhAmt  = toNum(row.bharatx_ledger_amount);
+    const rzAmt  = toNum(row.razorpay_settlement_amount);
+    const totalSettled = toNum(row.total_settlement_received);
+    const bal = toNum(row.balance_amount_receivable);
+    const courierName = ekAmt > 0 ? 'Ekart' : delAmt > 0 ? 'Delhivery' : xpAmt > 0 ? 'Xpressbees' : 'Courier';
+    const gatewayName = snAmt > 0 ? 'Snapmint' : bhAmt > 0 ? 'BharatX' : rzAmt > 0 ? 'Razorpay' : 'Gateway';
+    const srcSection = (dot, label, file, children) => (
+        <div className="bg-white border border-slate-200 rounded-lg overflow-hidden">
+            <div className="flex items-center gap-1.5 px-3 py-2 border-b border-slate-100" style={{ background: `${dot}12` }}>
+                <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ background: dot }} />
+                <span className="text-[10px] font-bold uppercase tracking-wider" style={{ color: dot }}>{label}</span>
+                <span className="text-[9px] text-slate-400 ml-auto truncate">{file}</span>
+            </div>
+            <div className="px-3 py-2">{children}</div>
+        </div>
+    );
+    return (
+        <tr>
+            <td colSpan={11} className="p-0">
+                <div className="border-t border-slate-100 bg-slate-50/60 px-4 py-4">
+                    <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-3">
+                        {srcSection('#2a78d6', 'Tally GST', 'Export-Tally GST Report', <>
+                            {kvRow('Invoice No.', row.invoice_number)}
+                            {kvRow('Channel', row.platform)}
+                            {kvRow('AWB No.', row.awb_number)}
+                            {kvRow('Dispatch Date', formatDate(row.dispatch_or_cancellation_date))}
+                            {kvRow('Amount', fmtFull(row.total_amount))}
+                        </>)}
+                        {srcSection('#b45309', 'Return GST', 'Return GST Report', <>
+                            {kvRow('Return Date', formatDate(row.return_date))}
+                            {kvRow('SRN', row.srn)}
+                            {kvRow('Return Amount', fmtFull(row.return_amount))}
+                            {kvRow('Net Amount', `${fmtFull(row.total_amount)} − ${fmtFull(row.return_amount)} = ${fmtFull(row.net_amount)}`)}
+                        </>)}
+                        {srcSection('#1baf7a', courierName, `${courierName} settlement report`, <>
+                            {kvRow('Join Key (AWB)', row.awb_number)}
+                            {ekAmt > 0 && <>{kvRow('Remittance Date', formatDate(row.ekart_remittance_date))}{kvRow('Actual Date', formatDate(row.ekart_actual_remittance_date))}{kvRow('COD Amount', fmtFull(ekAmt))}</>}
+                            {delAmt > 0 && <>{kvRow('Delivery Date', formatDate(row.delhivery_delivery_date))}{kvRow('COD Amount', fmtFull(delAmt))}</>}
+                            {xpAmt > 0 && <>{kvRow('Delivery Date', formatDate(row.xpressbees_delivery_date))}{kvRow('Txn Date', formatDate(row.xpressbees_transaction_date))}{kvRow('Net Payment', fmtFull(xpAmt))}</>}
+                            {ekAmt === 0 && delAmt === 0 && xpAmt === 0 && kvRow('Amount', '— No record found')}
+                        </>)}
+                        {srcSection('#7c3aed', gatewayName, `${gatewayName} settlement report`, <>
+                            {snAmt > 0 && <>{kvRow('Join Key (Order No.)', row.sale_order_number)}{kvRow('Settlement Date', formatDate(row.snapmint_settlement_date))}{kvRow('Settlement Value', fmtFull(snAmt))}</>}
+                            {bhAmt > 0 && <>{kvRow('Join Key (Order ID)', row.sale_order_number)}{kvRow('Settlement Date', formatDate(row.bharatx_settlement_timestamp))}{kvRow('Ledger Amount', fmtFull(bhAmt))}</>}
+                            {rzAmt > 0 && <>{kvRow('receipt → SO', row.sale_order_number)}{kvRow('Settlement Date', formatDate(row.razorpay_settlement_date))}{kvRow('Amount', fmtFull(rzAmt))}</>}
+                            {snAmt === 0 && bhAmt === 0 && rzAmt === 0 && kvRow('Settlement', '— No record found')}
+                        </>)}
+                    </div>
+                    <div className="flex flex-wrap gap-4 items-center bg-white border border-slate-200 rounded-lg px-4 py-2.5 text-xs">
+                        <div><span className="text-slate-400">Net Order Value: </span><span className="font-semibold">{fmtFull(row.net_amount)}</span></div>
+                        <div className="text-slate-200">·</div>
+                        <div><span className="text-slate-400">Total Settlement: </span><span className="font-semibold">{totalSettled > 0 ? fmtFull(totalSettled) : '—'}</span></div>
+                        <div className="text-slate-200">·</div>
+                        <div>
+                            <span className="text-slate-400">Balance: </span>
+                            <span className={`font-bold ${bal === 0 ? 'text-emerald-600' : bal > 0 ? 'text-amber-600' : 'text-purple-600'}`}>{fmtFull(bal)}</span>
+                        </div>
+                        <div className="ml-auto text-[10px] italic text-slate-400">
+                            {fmtFull(row.net_amount)} (net) − {fmtFull(totalSettled)} (settled) = {fmtFull(bal)}
+                        </div>
+                    </div>
+                </div>
+            </td>
+        </tr>
+    );
+}
+
+function TransactionSheet({ brandId, agentId, filename, reconciliation }) {
+    const [txTab, setTxTab]         = useState('all');
+    const [mismatchSub, setMismatchSub] = useState('less');
+    const [expandedId, setExpandedId]   = useState(null);
+    const [searchInput, setSearchInput] = useState('');
+    const [search, setSearch]       = useState('');
+    const [page, setPage]           = useState(1);
+    const [rows, setRows]           = useState([]);
+    const [total, setTotal]         = useState(0);
+    const [totalPages, setTotalPages] = useState(1);
+    const [loading, setLoading]     = useState(true);
+    const [pageLoading, setPageLoading] = useState(false);
+
+    // Debounce search input → trigger fetch
+    useEffect(() => {
+        const t = setTimeout(() => { setSearch(searchInput); setPage(1); }, 400);
+        return () => clearTimeout(t);
+    }, [searchInput]);
+
+    // Fetch page whenever tab / sub / page / search changes
+    useEffect(() => {
+        let cancelled = false;
+        const isFirstLoad = page === 1 && rows.length === 0;
+        if (isFirstLoad) setLoading(true); else setPageLoading(true);
+
+        const params = new URLSearchParams({ tab: txTab, sub: mismatchSub, page, pageSize: 50 });
+        if (search) params.set('search', search);
+
+        api.get(`/api/brands/${brandId}/agents/${agentId}/order-cycle-shopify/files/${encodeURIComponent(filename)}/transactions?${params}`)
+            .then(r => {
+                if (cancelled) return;
+                setRows(r.data.rows);
+                setTotal(r.data.total);
+                setTotalPages(r.data.totalPages);
+                setExpandedId(null);
+            })
+            .catch(() => { if (!cancelled) setRows([]); })
+            .finally(() => { if (!cancelled) { setLoading(false); setPageLoading(false); } });
+
+        return () => { cancelled = true; };
+    }, [txTab, mismatchSub, page, search, brandId, agentId, filename]);
+
+    const toNum = v => { const n = Number(v); return isNaN(n) ? 0 : n; };
+
+    // Tab counts from parent reconciliation (already loaded, no extra fetch)
+    const rc = reconciliation || {};
+    const unsettledCount = Math.max(0, (rc.total || 0) - (rc.reconciled || 0) - (rc.pending || 0) - (rc.overpaid || 0));
+    const tabs = [
+        { key: 'matched',    label: 'Matched',     count: rc.reconciled },
+        { key: 'mismatched', label: 'Mismatched',  count: (rc.pending || 0) + (rc.overpaid || 0) },
+        { key: 'unsettled',  label: 'Unsettled',   count: unsettledCount },
+        { key: 'all',        label: 'All Orders',  count: rc.total },
+        { key: 'sales',      label: 'Sales Report', count: null },
+    ];
+
+    function switchTab(key) { setTxTab(key); setPage(1); setExpandedId(null); setRows([]); setLoading(true); }
+    function switchSub(key) { setMismatchSub(key); setPage(1); setExpandedId(null); setRows([]); setLoading(true); }
+
+    function statusBadge(row) {
+        const s = (row.reconciliation_status || '').toUpperCase().trim();
+        const ds = (row.delivery_status || '').toUpperCase();
+        if (s === 'RECONCILED')         return <span className="px-1.5 py-0.5 rounded-full text-[9px] font-bold bg-emerald-50 text-emerald-700">RECONCILED</span>;
+        if (s === 'PENDING RECEIVABLE') return <span className="px-1.5 py-0.5 rounded-full text-[9px] font-bold bg-amber-50 text-amber-700">PENDING</span>;
+        if (s.startsWith('OVERPAID'))   return <span className="px-1.5 py-0.5 rounded-full text-[9px] font-bold bg-purple-50 text-purple-700">OVERPAID</span>;
+        if (ds === 'RTO')               return <span className="px-1.5 py-0.5 rounded-full text-[9px] font-bold bg-red-50 text-red-700">RTO</span>;
+        if (ds === 'CANCELLED')         return <span className="px-1.5 py-0.5 rounded-full text-[9px] font-bold bg-slate-100 text-slate-500">CANCELLED</span>;
+        return <span className="px-1.5 py-0.5 rounded-full text-[9px] font-bold bg-slate-100 text-slate-400">UNSETTLED</span>;
+    }
+
+    function diffBadge(row) {
+        const bal = toNum(row.balance_amount_receivable);
+        if (bal === 0) return <span className="px-1.5 py-0.5 rounded-full text-[9px] font-bold bg-emerald-50 text-emerald-700">₹0</span>;
+        if (bal > 0)   return <span className="px-1.5 py-0.5 rounded-full text-[9px] font-bold bg-amber-50 text-amber-700">−{fmtINR(bal)}</span>;
+        return <span className="px-1.5 py-0.5 rounded-full text-[9px] font-bold bg-purple-50 text-purple-700">+{fmtINR(Math.abs(bal))}</span>;
+    }
+
+    function gatewayOf(row) {
+        if (toNum(row.snapmint_settlement_value) > 0) return 'Snapmint';
+        if (toNum(row.bharatx_ledger_amount) > 0)     return 'BharatX';
+        if (toNum(row.razorpay_settlement_amount) > 0) return 'Razorpay';
+        return '—';
+    }
+
+    function settlementDateOf(row) {
+        return row.snapmint_settlement_date || row.bharatx_settlement_timestamp || row.razorpay_settlement_date;
+    }
+
+    const showSales = txTab === 'sales';
+
+    return (
+        <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
+            {/* Header */}
+            <div className="px-5 py-4 border-b border-slate-100 flex items-center justify-between">
+                <div>
+                    <h3 className="text-sm font-bold text-slate-800">Transaction Sheet</h3>
+                    <p className="text-xs text-slate-400 mt-0.5">Click any row to see source file attribution for each value</p>
+                </div>
+                <input
+                    className="text-xs px-3 py-1.5 border border-slate-200 rounded-lg bg-slate-50 text-slate-700 placeholder-slate-400 focus:outline-none focus:border-slate-400 w-52"
+                    type="text"
+                    placeholder="Search order ID, invoice…"
+                    value={searchInput}
+                    onChange={e => setSearchInput(e.target.value)}
+                />
+            </div>
+
+            {/* Tabs */}
+            <div className="flex gap-0 border-b border-slate-100">
+                {tabs.map(t => (
+                    <button key={t.key} onClick={() => switchTab(t.key)}
+                        className={`px-4 py-2.5 text-xs font-semibold transition-colors whitespace-nowrap border-b-2 -mb-px
+                            ${txTab === t.key ? 'border-emerald-500 text-emerald-700' : 'border-transparent text-slate-400 hover:text-slate-600'}`}>
+                        {t.label}
+                        {t.count != null && (
+                            <span className={`ml-1.5 px-1.5 py-0.5 rounded-full text-[10px] ${txTab === t.key ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-400'}`}>
+                                {t.count.toLocaleString()}
+                            </span>
+                        )}
+                    </button>
+                ))}
+            </div>
+
+            {/* Mismatched sub-toggle */}
+            {txTab === 'mismatched' && (
+                <div className="px-5 pt-3 flex gap-2">
+                    {[
+                        { key: 'less', label: 'Less Received', cls: 'bg-amber-50 border-amber-300 text-amber-700' },
+                        { key: 'more', label: 'More Received', cls: 'bg-purple-50 border-purple-300 text-purple-700' },
+                    ].map(({ key, label, cls }) => (
+                        <button key={key} onClick={() => switchSub(key)}
+                            className={`px-3 py-1.5 text-xs rounded-lg border font-semibold transition-colors
+                                ${mismatchSub === key ? cls : 'bg-white border-slate-200 text-slate-500'}`}>
+                            {label}
+                        </button>
+                    ))}
+                </div>
+            )}
+
+            {/* Table body */}
+            {loading ? (
+                <div className="flex items-center justify-center py-16 gap-3 text-slate-400 text-sm">
+                    <Loader2 className="h-5 w-5 animate-spin" /> Loading transactions…
+                </div>
+            ) : (
+                <div className={`overflow-x-auto relative transition-opacity ${pageLoading ? 'opacity-50 pointer-events-none' : ''}`}>
+                    <table className="w-full text-xs">
+                        <thead>
+                            <tr className="bg-slate-50 border-b border-slate-200">
+                                <th className="w-8 px-3 py-2.5" />
+                                {!showSales ? (<>
+                                    <th className="px-3 py-2.5 text-left text-[10px] font-bold text-slate-400 uppercase tracking-wider whitespace-nowrap">Order ID</th>
+                                    <th className="px-3 py-2.5 text-left text-[10px] font-bold text-slate-400 uppercase tracking-wider whitespace-nowrap">Invoice No.</th>
+                                    <th className="px-3 py-2.5 text-right text-[10px] font-bold text-slate-400 uppercase tracking-wider whitespace-nowrap">Order Value</th>
+                                    <th className="px-3 py-2.5 text-right text-[10px] font-bold text-slate-400 uppercase tracking-wider whitespace-nowrap">Settlement</th>
+                                    <th className="px-3 py-2.5 text-right text-[10px] font-bold text-slate-400 uppercase tracking-wider whitespace-nowrap">Diff</th>
+                                    <th className="px-3 py-2.5 text-left text-[10px] font-bold text-slate-400 uppercase tracking-wider whitespace-nowrap">Order Date</th>
+                                    <th className="px-3 py-2.5 text-left text-[10px] font-bold text-slate-400 uppercase tracking-wider whitespace-nowrap">Settlement Date</th>
+                                    <th className="px-3 py-2.5 text-left text-[10px] font-bold text-slate-400 uppercase tracking-wider whitespace-nowrap">Status</th>
+                                    <th className="px-3 py-2.5 text-left text-[10px] font-bold text-slate-400 uppercase tracking-wider whitespace-nowrap">Courier</th>
+                                    <th className="px-3 py-2.5 text-left text-[10px] font-bold text-slate-400 uppercase tracking-wider whitespace-nowrap">Gateway</th>
+                                </>) : (<>
+                                    <th className="px-3 py-2.5 text-left text-[10px] font-bold text-slate-400 uppercase tracking-wider whitespace-nowrap">Order ID</th>
+                                    <th className="px-3 py-2.5 text-left text-[10px] font-bold text-slate-400 uppercase tracking-wider whitespace-nowrap">Invoice No.</th>
+                                    <th className="px-3 py-2.5 text-left text-[10px] font-bold text-slate-400 uppercase tracking-wider whitespace-nowrap">Invoice Date</th>
+                                    <th className="px-3 py-2.5 text-left text-[10px] font-bold text-slate-400 uppercase tracking-wider whitespace-nowrap">Channel</th>
+                                    <th className="px-3 py-2.5 text-right text-[10px] font-bold text-slate-400 uppercase tracking-wider whitespace-nowrap">GMV</th>
+                                    <th className="px-3 py-2.5 text-right text-[10px] font-bold text-slate-400 uppercase tracking-wider whitespace-nowrap">Return</th>
+                                    <th className="px-3 py-2.5 text-right text-[10px] font-bold text-slate-400 uppercase tracking-wider whitespace-nowrap">Net Amount</th>
+                                    <th className="px-3 py-2.5 text-right text-[10px] font-bold text-slate-400 uppercase tracking-wider whitespace-nowrap">Basic (÷1.12)</th>
+                                    <th className="px-3 py-2.5 text-right text-[10px] font-bold text-slate-400 uppercase tracking-wider whitespace-nowrap">GST @12%</th>
+                                    <th className="px-3 py-2.5 text-left text-[10px] font-bold text-slate-400 uppercase tracking-wider whitespace-nowrap">Status</th>
+                                </>)}
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {rows.length === 0 ? (
+                                <tr><td colSpan={11} className="text-center text-slate-400 py-10 text-xs">No records found</td></tr>
+                            ) : rows.map(row => {
+                                const rowId = row.id || row.sale_order_number;
+                                const isExp = expandedId === rowId;
+                                const totalSettled = toNum(row.total_settlement_received);
+                                const basic12 = Math.round(toNum(row.net_amount) / 1.12 * 100) / 100;
+                                const gst12   = Math.round((toNum(row.net_amount) - basic12) * 100) / 100;
+                                return (
+                                    <React.Fragment key={rowId}>
+                                        <tr
+                                            className={`border-b border-slate-100 cursor-pointer transition-colors ${isExp ? 'bg-emerald-50/30' : 'hover:bg-slate-50/50'}`}
+                                            onClick={() => setExpandedId(isExp ? null : rowId)}
+                                        >
+                                            <td className="px-3 py-2.5">
+                                                <ChevronRight className={`h-3.5 w-3.5 text-slate-400 transition-transform ${isExp ? 'rotate-90' : ''}`} />
+                                            </td>
+                                            {!showSales ? (<>
+                                                <td className="px-3 py-2.5 font-semibold text-slate-800 whitespace-nowrap">{row.sale_order_number || '—'}</td>
+                                                <td className="px-3 py-2.5 text-slate-500 whitespace-nowrap">{row.invoice_number || '—'}</td>
+                                                <td className="px-3 py-2.5 text-right font-medium tabular-nums whitespace-nowrap">{fmtFull(row.total_amount)}</td>
+                                                <td className="px-3 py-2.5 text-right tabular-nums text-slate-600 whitespace-nowrap">{totalSettled > 0 ? fmtFull(totalSettled) : '—'}</td>
+                                                <td className="px-3 py-2.5 text-right whitespace-nowrap">{diffBadge(row)}</td>
+                                                <td className="px-3 py-2.5 text-slate-500 whitespace-nowrap">{formatDate(row.dispatch_or_cancellation_date)}</td>
+                                                <td className="px-3 py-2.5 text-slate-500 whitespace-nowrap">{formatDate(settlementDateOf(row))}</td>
+                                                <td className="px-3 py-2.5 whitespace-nowrap">{statusBadge(row)}</td>
+                                                <td className="px-3 py-2.5 text-slate-500 whitespace-nowrap capitalize">{(row.shipping_partner || '—').toLowerCase()}</td>
+                                                <td className="px-3 py-2.5 text-slate-500 whitespace-nowrap">{gatewayOf(row)}</td>
+                                            </>) : (<>
+                                                <td className="px-3 py-2.5 font-semibold text-slate-800 whitespace-nowrap">{row.sale_order_number || '—'}</td>
+                                                <td className="px-3 py-2.5 text-slate-500 whitespace-nowrap">{row.invoice_number || '—'}</td>
+                                                <td className="px-3 py-2.5 text-slate-500 whitespace-nowrap">{formatDate(row.dispatch_or_cancellation_date)}</td>
+                                                <td className="px-3 py-2.5 text-slate-500 whitespace-nowrap">{row.platform || '—'}</td>
+                                                <td className="px-3 py-2.5 text-right font-medium tabular-nums whitespace-nowrap">{fmtFull(row.total_amount)}</td>
+                                                <td className="px-3 py-2.5 text-right tabular-nums whitespace-nowrap">
+                                                    {toNum(row.return_amount) > 0 ? <span className="text-red-500">{fmtFull(row.return_amount)}</span> : '—'}
+                                                </td>
+                                                <td className="px-3 py-2.5 text-right font-medium tabular-nums whitespace-nowrap">{fmtFull(row.net_amount)}</td>
+                                                <td className="px-3 py-2.5 text-right tabular-nums text-slate-500 whitespace-nowrap">{fmtFull(basic12)}</td>
+                                                <td className="px-3 py-2.5 text-right tabular-nums text-slate-500 whitespace-nowrap">{fmtFull(gst12)}</td>
+                                                <td className="px-3 py-2.5 whitespace-nowrap">{statusBadge(row)}</td>
+                                            </>)}
+                                        </tr>
+                                        {isExp && <TxDrillRow row={row} />}
+                                    </React.Fragment>
+                                );
+                            })}
+                        </tbody>
+                    </table>
+
+                    {/* Pagination */}
+                    {totalPages > 1 && (
+                        <div className="flex items-center justify-between px-5 py-3 border-t border-slate-100">
+                            <span className="text-xs text-slate-400">
+                                {((page - 1) * 50 + 1).toLocaleString()}–{Math.min(page * 50, total).toLocaleString()} of {total.toLocaleString()} orders
+                            </span>
+                            <div className="flex items-center gap-1">
+                                <button
+                                    disabled={page <= 1}
+                                    onClick={() => setPage(p => p - 1)}
+                                    className="px-2.5 py-1.5 text-xs border border-slate-200 rounded-lg disabled:opacity-40 disabled:cursor-not-allowed hover:bg-slate-50 transition-colors"
+                                >
+                                    ← Prev
+                                </button>
+                                {Array.from({ length: Math.min(5, totalPages) }, (_, i) => {
+                                    const start = Math.max(1, Math.min(page - 2, totalPages - 4));
+                                    const p = start + i;
+                                    return (
+                                        <button key={p} onClick={() => setPage(p)}
+                                            className={`w-8 h-7 text-xs rounded-lg border transition-colors
+                                                ${p === page ? 'bg-emerald-500 border-emerald-500 text-white font-bold' : 'border-slate-200 hover:bg-slate-50 text-slate-600'}`}>
+                                            {p}
+                                        </button>
+                                    );
+                                })}
+                                <button
+                                    disabled={page >= totalPages}
+                                    onClick={() => setPage(p => p + 1)}
+                                    className="px-2.5 py-1.5 text-xs border border-slate-200 rounded-lg disabled:opacity-40 disabled:cursor-not-allowed hover:bg-slate-50 transition-colors"
+                                >
+                                    Next →
+                                </button>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            )}
+        </div>
+    );
+}
+
 // ─── Reconciliation Visualization Panel ───────────────────────────────────────
 function ReconciliationView({ file, brandId, agentId, onBack, onDownload }) {
-    const [data, setData]   = useState(null);
+    const [data, setData]       = useState(null);
     const [loading, setLoading] = useState(true);
-    const [tab, setTab]     = useState('settled');       // 'settled' | 'unsettled'
+    const [tab, setTab]         = useState('settled');   // 'settled' | 'unsettled'
+    const [showTxSheet, setShowTxSheet] = useState(false);
 
     useEffect(() => {
         let cancelled = false;
@@ -315,6 +665,29 @@ function ReconciliationView({ file, brandId, agentId, onBack, onDownload }) {
                     </div>
                 </div>
             </div>
+
+            {/* ── Transaction Sheet ── */}
+            {!showTxSheet ? (
+                <div className="flex items-center justify-between bg-white border border-slate-200 rounded-xl px-5 py-4">
+                    <div>
+                        <p className="text-sm font-semibold text-slate-800">Transaction Data</p>
+                        <p className="text-xs text-slate-400 mt-0.5">Row-level order data with drill-down source attribution</p>
+                    </div>
+                    <button
+                        onClick={() => setShowTxSheet(true)}
+                        className="inline-flex items-center gap-2 px-4 py-2 text-sm font-semibold bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg transition-colors"
+                    >
+                        <BarChart2 className="h-4 w-4" /> View Transaction Data
+                    </button>
+                </div>
+            ) : (
+                <TransactionSheet
+                    brandId={brandId}
+                    agentId={agentId}
+                    filename={file.filename}
+                    reconciliation={reconciliation}
+                />
+            )}
 
             {/* ── Settlements by Providers + Provider Breakdown ── */}
             <div className="grid grid-cols-5 gap-4">
@@ -482,6 +855,7 @@ function ReconciliationView({ file, brandId, agentId, onBack, onDownload }) {
                     </div>
                 ))}
             </div>
+
         </div>
     );
 }
