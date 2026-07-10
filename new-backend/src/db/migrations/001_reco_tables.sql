@@ -36,6 +36,10 @@ CREATE UNIQUE INDEX IF NOT EXISTS reco_jobs_idempotency_idx
 CREATE INDEX IF NOT EXISTS reco_jobs_brand_type_idx ON reco_jobs (brand_id, agent_type);
 CREATE INDEX IF NOT EXISTS reco_jobs_created_at_idx ON reco_jobs (created_at DESC);
 
+-- Universal run-log: sales/marketplace agent runs also record here (via middleware).
+-- source_name = the uploaded file name ("from where"). Idempotent.
+ALTER TABLE reco_jobs ADD COLUMN IF NOT EXISTS source_name TEXT;
+
 -- ────────────────────────────────────────────────────────────
 -- 2.  bank_reco_results  — classified bank statement rows
 -- ────────────────────────────────────────────────────────────

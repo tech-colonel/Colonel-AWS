@@ -52,7 +52,9 @@ const complianceRoutes      = require('./routes/complianceRoutes');
 const attachmentsRoutes     = require('./routes/attachmentsRoutes');
 const statutoryRoutes       = require('./routes/statutoryRoutes');
 const databaseRoutes        = require('./routes/databaseRoutes');
+const { salesRunLogger }    = require('./middleware/salesRunLogger');
 
+app.use(salesRunLogger);  // logs sales/marketplace agent runs → reco_jobs (who/which/brand/from-where)
 app.use('/api/auth',      authRoutes);
 app.use('/api',           brandRoutes);
 app.use('/api',           userRoutes);
