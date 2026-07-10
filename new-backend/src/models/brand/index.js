@@ -1,4 +1,5 @@
-const { DataTypes } = require('sequelize');
+const { DataTypes, Sequelize } = require('sequelize');
+const { UNIFIED } = require('../../config/database');
 
 /**
  * Factory function to create the BrandAgent model on a specific brand connection
@@ -63,10 +64,21 @@ const getDynamicModel = (sequelize, tableName, columns) => {
     }
   };
 
+  // UNIFIED DB: every tenant row carries brand_id. Defined in the model (so
+  // sync/alter never drops it) with a DB-side default that auto-stamps from the
+  // request's brand context (set on the connection) — controllers don't pass it.
+  if (UNIFIED) {
+    schema.brand_id = {
+      type: DataTypes.UUID,
+      allowNull: false,
+      defaultValue: Sequelize.literal("NULLIF(current_setting('app.brand_id', true), '')::uuid"),
+    };
+  }
+
   // Add custom columns if provided
   if (columns && Array.isArray(columns)) {
     columns.forEach(col => {
-      if (col.name === 'id') return;
+      if (col.name === 'id' || col.name === 'brand_id') return;
 
       schema[col.name] = {
         type: DataTypes[col.type?.toUpperCase()] || DataTypes.STRING
@@ -74,11 +86,20 @@ const getDynamicModel = (sequelize, tableName, columns) => {
     });
   }
 
-  return sequelize.define(tableName, schema, {
+  const model = sequelize.define(tableName, schema, {
     tableName: tableName.toLowerCase(),
     timestamps: false,
     indexes: [{ fields: ['filename'] }],
   });
+
+  if (UNIFIED) {
+    // Tables are pre-built + RLS-protected and owned by 'postgres' in the unified
+    // DB. The app role (colonel_app) can't run DDL, and alter would drop brand_id.
+    // Make sync a no-op — schema is managed by the db-restructure migrations.
+    model.sync = async () => model;
+  }
+
+  return model;
 };
 
 module.exports = {
