@@ -26,7 +26,7 @@ const MAX_CONCURRENT_RECO = parseInt(process.env.MAX_CONCURRENT_RECO || '8', 10)
 const { loadCorrectionMap, normalizeNarration } = require('./bankCorrectionsController');
 
 // ── KOPARO-specific: Tally Debit/Credit ledger output ─────────────────────────
-const KOPARO_BRAND_ID = 'b0000000-0000-0000-0000-000000000003';
+const KOPARO_BRAND_ID = '546976a5-6ca5-42d1-8b7d-2c6379ffa221';
 
 const KOPARO_BANK_ACCOUNTS = [
   { pattern: '50200060142961',  name: 'HDFC Bank Ltd-50200060142961'   },

@@ -7,7 +7,7 @@ const { masterSequelize } = require('./src/config/database');
 const { migrateStatutory } = require('./src/db/statutoryMigrate');
 const { seedStatutoryForBrand } = require('./src/controllers/statutoryController');
 
-const STROOM_BRAND_ID = 'b0000000-0000-0000-0000-000000000002';
+const STROOM_BRAND_ID = 'a882ea99-5650-40be-9b6b-c28d99db131a';
 
 (async () => {
   try {
