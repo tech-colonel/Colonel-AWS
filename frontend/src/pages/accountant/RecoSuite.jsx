@@ -45,7 +45,7 @@ const RECO_AGENTS = [
     color: '#0748EE', bg: '#E8EFFE', border: '#A3BFF8',
     description: 'Convert any Indian bank statement PDF (HDFC, ICICI, SBI, Axis, Kotak) to Excel with Check Point validation columns — ready for the Universal Bank Statement classifier.',
     fields: ['Bank Statement PDF'], accuracy: 'Auto-detect',
-    agentId: 'd0000000-0000-0000-0000-000000000007',
+    agentId: '974ac4f2-1437-4ccc-826c-c2ea68e5b5e3',
   },
   {
     id: 'zepto_receivables', category: 'Bank & Finance',

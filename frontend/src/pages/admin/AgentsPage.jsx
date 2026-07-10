@@ -418,7 +418,7 @@ const AgentsPage = () => {
                 </div>
                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
                   {section.items.map(a => (
-                    (a.id === 'd0000000-0000-0000-0000-000000000009' || a.name === 'Myntra Ticket Finder')
+                    (a.id === '6fcb5c0e-7397-495c-af1e-9b1fe5faa2ad' || a.name === 'Myntra Ticket Finder')
                       ? <MyntraCard key={a.id} onClick={() => openAgent(a)} />
                       : RICH_META[a.name]
                         ? <RichAgentCard key={a.id} meta={RICH_META[a.name]} description={a.description} onClick={() => openAgent(a)} />

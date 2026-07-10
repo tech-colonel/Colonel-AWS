@@ -21,7 +21,7 @@ function isRecoOnly() {
 const RECO_ONLY = isRecoOnly();
 
 const HIDDEN_WHEN_RECO_ONLY = new Set([
-  'd0000000-0000-0000-0000-000000000001', // GSTR-2B vs Books (single-state) — accountants use multi-state
+  '4e02cc5b-8fc8-4c79-8013-e7f510c850d5', // GSTR-2B vs Books (single-state) — accountants use multi-state
 ]);
 
 // Rich metadata for RECO + MTR + Bank agents (matched by DB `name`).

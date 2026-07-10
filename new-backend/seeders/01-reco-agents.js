@@ -10,7 +10,7 @@
 
 const RECO_AGENTS = [
   {
-    id: 'd0000000-0000-0000-0000-000000000001',
+    id: '4e02cc5b-8fc8-4c79-8013-e7f510c850d5',
     name: 'gstr_2b_books',
     description: 'GSTR-2B vs Purchase Register + Debit Note Register reconciliation',
     columns: JSON.stringify([]),
@@ -18,7 +18,7 @@ const RECO_AGENTS = [
     updatedAt: new Date(),
   },
   {
-    id: 'd0000000-0000-0000-0000-000000000002',
+    id: '855fe095-84c6-4947-a5e4-a73da83b2fd6',
     name: 'gstr_2b_books_multistate',
     description: 'GSTR-2B vs Books for multi-state brands — detects cross-state booking errors',
     columns: JSON.stringify([]),
@@ -26,7 +26,7 @@ const RECO_AGENTS = [
     updatedAt: new Date(),
   },
   {
-    id: 'd0000000-0000-0000-0000-000000000003',
+    id: 'b2d3fad4-0d90-4b49-acdc-d243cfa9c8d5',
     name: 'gstr_3b_tally_entry',
     description: 'Parse GSTR-3B and generate ready-to-post Tally journal entries',
     columns: JSON.stringify([]),
@@ -34,7 +34,7 @@ const RECO_AGENTS = [
     updatedAt: new Date(),
   },
   {
-    id: 'd0000000-0000-0000-0000-000000000004',
+    id: '93d027ac-4333-403b-b448-9c637ebfc13c',
     name: 'universal_bank_statement',
     description: 'Brand-agnostic bank statement classifier mapped to Tally chart of accounts',
     columns: JSON.stringify([]),
@@ -42,7 +42,7 @@ const RECO_AGENTS = [
     updatedAt: new Date(),
   },
   {
-    id: 'd0000000-0000-0000-0000-000000000005',
+    id: '8b8d0876-3169-4511-96d8-2a7467478007',
     name: 'gstr_1_vs_books',
     description: 'GSTR-1 outward supplies vs Tally Sales Register + Amazon books reconciliation',
     columns: JSON.stringify([]),
@@ -50,7 +50,7 @@ const RECO_AGENTS = [
     updatedAt: new Date(),
   },
   {
-    id: 'd0000000-0000-0000-0000-000000000007',
+    id: '974ac4f2-1437-4ccc-826c-c2ea68e5b5e3',
     name: 'pdf_bank_extract',
     description: 'Convert any Indian bank statement PDF (HDFC, ICICI, SBI, Axis, Kotak) to Excel with Check Point validation columns',
     columns: JSON.stringify([]),
@@ -58,7 +58,7 @@ const RECO_AGENTS = [
     updatedAt: new Date(),
   },
   {
-    id: 'd0000000-0000-0000-0000-000000000006',
+    id: 'b2300af8-26d0-4299-b233-0cd48c2b96ec',
     name: 'amazon_mtr_consolidator',
     description: 'Consolidate Amazon B2B & B2C Merchant Tax Reports from all resellers into one workbook with Vendor Name + Month columns',
     columns: JSON.stringify([]),
@@ -66,7 +66,7 @@ const RECO_AGENTS = [
     updatedAt: new Date(),
   },
   {
-    id: 'd0000000-0000-0000-0000-000000000010',
+    id: 'ebcc3f8c-3e05-4132-860c-70e63b2380f1',
     name: 'zepto_receivables',
     description: 'Zepto receivables tracker — reads a Google Drive folder (Tally + Zepto files), reconciles per-invoice, outputs the Invoice Tracker with live formulas',
     columns: JSON.stringify([]),
@@ -75,7 +75,7 @@ const RECO_AGENTS = [
   },
   {
     // Superset UUID ...008 (matches AWS agents table; zepto_receivables moved to ...010)
-    id: 'd0000000-0000-0000-0000-000000000008',
+    id: 'dcb5d5e9-9857-4925-b55d-b581bd6dec1e',
     name: 'einvoice_reco',
     description: 'E-Invoice Register (B2B/SEZ/DE + CDNR) vs Books (Sales + Credit Note) reconciliation',
     columns: JSON.stringify([]),

@@ -32,10 +32,10 @@ const PRIORITY = {
 
 // Deep-link the 4 RECO agents from a linked task.
 const AGENT_META = {
-  'd0000000-0000-0000-0000-000000000001': 'GSTR-2B vs Books',
-  'd0000000-0000-0000-0000-000000000003': 'GSTR-3B Tally Entry',
-  'd0000000-0000-0000-0000-000000000004': 'Universal Bank Statement',
-  'd0000000-0000-0000-0000-000000000005': 'GSTR-1 vs Books',
+  '4e02cc5b-8fc8-4c79-8013-e7f510c850d5': 'GSTR-2B vs Books',
+  'b2d3fad4-0d90-4b49-acdc-d243cfa9c8d5': 'GSTR-3B Tally Entry',
+  '93d027ac-4333-403b-b448-9c637ebfc13c': 'Universal Bank Statement',
+  '8b8d0876-3169-4511-96d8-2a7467478007': 'GSTR-1 vs Books',
 };
 
 const catColor = (t) => t.category_color || '#64748B';

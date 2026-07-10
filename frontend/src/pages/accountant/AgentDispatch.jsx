@@ -9,16 +9,16 @@ import Gstr3bTallyWorkspace from './Gstr3bTallyWorkspace';
 
 // Stable UUIDs assigned by seed.js — one per RECO agent
 export const RECO_ID_TO_TYPE = {
-  'd0000000-0000-0000-0000-000000000001': 'gstr_2b_books',
-  'd0000000-0000-0000-0000-000000000002': 'gstr_2b_books_multistate',
-  'd0000000-0000-0000-0000-000000000003': 'gstr_3b_tally_entry',
-  'd0000000-0000-0000-0000-000000000004': 'universal_bank_statement',
-  'd0000000-0000-0000-0000-000000000005': 'gstr_1_vs_books',
-  'd0000000-0000-0000-0000-000000000006': 'amazon_mtr_consolidator',
-  'd0000000-0000-0000-0000-000000000007': 'pdf_bank_extract',
-  'd0000000-0000-0000-0000-000000000008': 'einvoice_reco',
-  'd0000000-0000-0000-0000-000000000009': 'myntra_ticket_finder',
-  'd0000000-0000-0000-0000-000000000010': 'zepto_receivables',
+  '4e02cc5b-8fc8-4c79-8013-e7f510c850d5': 'gstr_2b_books',
+  '855fe095-84c6-4947-a5e4-a73da83b2fd6': 'gstr_2b_books_multistate',
+  'b2d3fad4-0d90-4b49-acdc-d243cfa9c8d5': 'gstr_3b_tally_entry',
+  '93d027ac-4333-403b-b448-9c637ebfc13c': 'universal_bank_statement',
+  '8b8d0876-3169-4511-96d8-2a7467478007': 'gstr_1_vs_books',
+  'b2300af8-26d0-4299-b233-0cd48c2b96ec': 'amazon_mtr_consolidator',
+  '974ac4f2-1437-4ccc-826c-c2ea68e5b5e3': 'pdf_bank_extract',
+  'dcb5d5e9-9857-4925-b55d-b581bd6dec1e': 'einvoice_reco',
+  '6fcb5c0e-7397-495c-af1e-9b1fe5faa2ad': 'myntra_ticket_finder',
+  'ebcc3f8c-3e05-4132-860c-70e63b2380f1': 'zepto_receivables',
 };
 
 export default function AgentDispatch() {
