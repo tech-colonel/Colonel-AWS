@@ -157,11 +157,17 @@ Done. The 5 RECO agents are now active for all brands.
 
 ## RECO Agent UUIDs
 
-These stable UUIDs are seeded by `seed.js` and never change. Every RECO agent workspace is
-now accessed at `/brands/:brandId/agents/:agentId` — the same pattern as sales agents.
-`AgentDispatch.jsx` maps UUID → workspace component.
+> ⚠️ **UPDATED 2026-07-10:** the old sequential vanity UUIDs (`d0000000-…-000N`) were
+> enumerable and have been **regenerated as random UUIDv4** (`db-restructure/008_regen_agent_ids.js`).
+> The DB name → new-UUID mapping lives in `db-restructure/008-agent-id-remap.json` and is the
+> single source of truth; `AgentDispatch.jsx`'s `RECO_ID_TO_TYPE` map and the seeder hold the
+> same new ids. The table below shows the **legacy** ids for reference only — query `agents` or
+> read the mapping file for current values. The DB name (agent key) is stable; the UUID is not.
 
-| Agent | DB name | UUID |
+Every RECO agent workspace is accessed at `/brands/:brandId/agents/:agentId` — the same pattern
+as sales agents. `AgentDispatch.jsx` maps UUID → workspace component.
+
+| Agent | DB name | Legacy UUID (pre-2026-07-10) |
 |---|---|---|
 | GSTR-2B vs Books | `gstr_2b_books` | `d0000000-0000-0000-0000-000000000001` |
 | GSTR-2B vs Books (Multi-State) | `gstr_2b_books_multistate` | `d0000000-0000-0000-0000-000000000002` |
