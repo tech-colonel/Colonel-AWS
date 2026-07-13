@@ -1816,12 +1816,34 @@ const AgentWorkspace = () => {
         open={showWorkflowModal}
         onClose={() => setShowWorkflowModal(false)}
       />
+      {/* Render the manager the proven way the friend uses it: inline=true inside a
+          PLAIN overlay (no Radix Dialog). Radix's focus-trap prevents the file
+          picker from opening for the sample-file upload; a plain overlay doesn't. */}
       {showWorkflowManager && agent && (
-        <WorkflowManagerModal
-          agent={agent}
-          open={showWorkflowManager}
-          onClose={() => setShowWorkflowManager(false)}
-        />
+        <div
+          style={{ position: 'fixed', inset: 0, zIndex: 200, background: 'var(--page-bg)', overflowY: 'auto' }}
+          data-testid="workflow-manager-overlay"
+        >
+          <div style={{ maxWidth: 1000, margin: '0 auto', padding: '24px 28px' }}>
+            <div className="flex items-center gap-3 mb-6">
+              <button
+                onClick={() => setShowWorkflowManager(false)}
+                style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 14, color: 'var(--text-muted)', background: 'none', border: 'none', cursor: 'pointer' }}
+              >
+                ← Back to {agent.name}
+              </button>
+              <span style={{ color: 'var(--card-border)' }}>/</span>
+              <GitBranch className="h-5 w-5" style={{ color: '#4f46e5' }} />
+              <h1 style={{ fontSize: 20, fontWeight: 700, color: 'var(--text-heading)' }}>Workflows — {agent.name}</h1>
+            </div>
+            <WorkflowManagerModal
+              agent={agent}
+              open={true}
+              inline={true}
+              onClose={() => setShowWorkflowManager(false)}
+            />
+          </div>
+        </div>
       )}
     </DashboardLayout>
   );
