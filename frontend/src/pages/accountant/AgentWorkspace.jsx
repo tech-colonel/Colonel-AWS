@@ -12,7 +12,7 @@ import { Badge } from '../../components/ui/badge';
 import { Checkbox } from '../../components/ui/checkbox';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../../components/ui/modal';
 import api from '../../lib/api';
-import { sidebarFor } from '../../lib/adminNav';
+import { sidebarFor, isAdminUser } from '../../lib/adminNav';
 import BrandSwitcher from '../../components/BrandSwitcher';
 import OtherBrandReset from '../../components/OtherBrandReset';
 import { toast } from 'sonner';
@@ -24,6 +24,7 @@ import SettlementAmazonWorkspace from './SettlementAmazonWorkspace';
 import TotalSalesAnalyzerModal from './TotalSalesAnalyzerModal';
 import NykaaWorkspace from './NykaaWorkspace';
 import WorkflowApplyModal from './WorkflowApplyModal';
+import WorkflowManagerModal from '../admin/WorkflowManagerModal';
 
 const AgentWorkspace = () => {
   const { brandId, agentId } = useParams();
@@ -74,6 +75,7 @@ const AgentWorkspace = () => {
   const [showInvoicePreviewModal, setShowInvoicePreviewModal] = useState(false);
   const [showTotalSalesAnalyzer, setShowTotalSalesAnalyzer] = useState(false);
   const [showWorkflowModal, setShowWorkflowModal] = useState(false);
+  const [showWorkflowManager, setShowWorkflowManager] = useState(false);
 
   // MIS Modal States
   const [showConfigMISModal, setShowConfigMISModal] = useState(false);
@@ -562,6 +564,21 @@ const AgentWorkspace = () => {
         <div className="px-6 pt-4 flex items-center gap-3 flex-wrap" data-testid="agent-brand-bar">
           <BrandSwitcher brandId={brandId} agentId={agentId} />
           <OtherBrandReset brandId={brandId} onReset={fetchData} />
+          {/* Admins create/edit workflows for this agent (the "Workflows" button
+              only APPLIES existing ones). Non-admins don't see this. */}
+          {isAdminUser() && agent && (
+            <button
+              onClick={() => setShowWorkflowManager(true)}
+              data-testid="manage-workflows-btn"
+              style={{
+                display: 'inline-flex', alignItems: 'center', gap: 6, padding: '6px 12px',
+                borderRadius: 9, border: '1px solid var(--card-border)', background: 'var(--surface)',
+                cursor: 'pointer', fontSize: 13, fontWeight: 600, color: '#4f46e5',
+              }}
+            >
+              <GitBranch style={{ width: 15, height: 15 }} /> Manage Workflows
+            </button>
+          )}
         </div>
       )}
       {cfoConfig.isOpen ? (
@@ -1799,6 +1816,13 @@ const AgentWorkspace = () => {
         open={showWorkflowModal}
         onClose={() => setShowWorkflowModal(false)}
       />
+      {showWorkflowManager && agent && (
+        <WorkflowManagerModal
+          agent={agent}
+          open={showWorkflowManager}
+          onClose={() => setShowWorkflowManager(false)}
+        />
+      )}
     </DashboardLayout>
   );
 };
