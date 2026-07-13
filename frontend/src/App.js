@@ -40,6 +40,7 @@ import PdfBankExtractorWorkspace from './pages/accountant/PdfBankExtractorWorksp
 import RecoJobDashboard      from './pages/accountant/RecoJobDashboard';
 import ComplianceTracker     from './pages/accountant/ComplianceTracker';
 import StatutoryTracker      from './pages/accountant/StatutoryTracker';
+import StatutoryRedirect     from './pages/accountant/StatutoryRedirect';
 
 // Statutory Compliance is a private feature — only this owner can reach the page.
 const STATUTORY_OWNER_EMAIL = 'chauhandhaval932@gmail.com';
@@ -222,6 +223,15 @@ function App() {
           />
 
           {/* ── Statutory Compliance (private: owner email only) ─────────── */}
+          {/* Brandless entry — resolves to the right brand (no more /brands bounce). */}
+          <Route
+            path="/statutory-compliance"
+            element={
+              <ProtectedRoute allowedRoles={['accountant', 'admin']}>
+                <StatutoryRedirect />
+              </ProtectedRoute>
+            }
+          />
           <Route
             path="/brands/:brandId/statutory-compliance"
             element={

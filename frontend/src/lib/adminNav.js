@@ -67,7 +67,9 @@ export const sidebarFor = (brandItems = []) => {
   const dashPath = bid ? `/brands/${bid}/dashboard` : '/brands';
   const agentsPath = bid ? `/brands/${bid}/agents` : '/brands';
   const compliancePath = bid ? `/brands/${bid}/compliance-tracker` : '/brands';
-  const statutoryPath = bid ? `/brands/${bid}/statutory-compliance` : '/brands';
+  // Brandless entry — StatutoryRedirect resolves the brand at nav time, so this
+  // never falls back to /brands (which caused the intermittent bounce).
+  const statutoryPath = '/statutory-compliance';
   const base = [
     { path: dashPath,        label: 'Dashboard',   icon: LayoutDashboard, testId: 'nav-dashboard' },
     { path: agentsPath,      label: 'Agents',      icon: Bot,             testId: 'nav-agents' },
