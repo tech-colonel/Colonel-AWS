@@ -34,6 +34,96 @@ function evaluateFormula(formula, scope) {
   }
 }
 
+// ─── Excel Formula Evaluator (cross-row: SUMIF, VLOOKUP, etc.) ───────────────
+
+function evaluateFormulaWithHelpers(formula, rowScope, allRows) {
+  try {
+    // Replace {ColumnName} with current row values
+    let expr = formula.replace(/\{([^}]+)\}/g, (_, colRef) => {
+      const val = rowScope[colRef];
+      if (val === null || val === undefined || val === '') return '0';
+      const num = parseFloat(String(val).replace(/,/g, ''));
+      if (!isNaN(num)) return String(num);
+      return `"${String(val).replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+    });
+
+    // IF() → ternary (word-boundary \b prevents matching SUMIF / COUNTIF)
+    expr = expr.replace(
+      /\bIF\s*\(([^,()]+(?:\([^()]*\)[^,()]*)*)\s*,\s*([^,()]+(?:\([^()]*\)[^,()]*)*)\s*,\s*([^()]+(?:\([^()]*\)[^()]*)*)\)/gi,
+      '(($1) ? ($2) : ($3))'
+    );
+
+    const toNum = v => {
+      const n = parseFloat(String(v === null || v === undefined ? '' : v).replace(/,/g, ''));
+      return isNaN(n) ? null : n;
+    };
+    const cmp = v => String(v === null || v === undefined ? '' : v).trim().toLowerCase();
+
+    /* ── injected helpers — column args are plain column-name strings ── */
+
+    const SUMIF = (rangeCol, criteria, sumCol) => {
+      const crit = cmp(criteria);
+      return allRows.reduce((acc, r) => {
+        if (cmp(r[rangeCol]) === crit) { const n = toNum(r[sumCol]); if (n !== null) acc += n; }
+        return acc;
+      }, 0);
+    };
+
+    const SUMIFS = (sumCol, ...pairs) => {
+      const conds = [];
+      for (let i = 0; i + 1 < pairs.length; i += 2) conds.push({ col: String(pairs[i]), val: cmp(pairs[i + 1]) });
+      return allRows.reduce((acc, r) => {
+        if (conds.every(c => cmp(r[c.col]) === c.val)) { const n = toNum(r[sumCol]); if (n !== null) acc += n; }
+        return acc;
+      }, 0);
+    };
+
+    const COUNTIF = (rangeCol, criteria) => {
+      const crit = cmp(criteria);
+      return allRows.filter(r => cmp(r[rangeCol]) === crit).length;
+    };
+
+    const COUNTIFS = (...pairs) => {
+      const conds = [];
+      for (let i = 0; i + 1 < pairs.length; i += 2) conds.push({ col: String(pairs[i]), val: cmp(pairs[i + 1]) });
+      return allRows.filter(r => conds.every(c => cmp(r[c.col]) === c.val)).length;
+    };
+
+    const AVERAGEIF = (rangeCol, criteria, avgCol) => {
+      const crit = cmp(criteria);
+      const nums = allRows.filter(r => cmp(r[rangeCol]) === crit).map(r => toNum(r[avgCol])).filter(n => n !== null);
+      return nums.length ? nums.reduce((a, b) => a + b, 0) / nums.length : '';
+    };
+
+    const VLOOKUP = (lookupVal, lookupCol, returnCol) => {
+      const lv = cmp(lookupVal);
+      const found = allRows.find(r => cmp(r[lookupCol]) === lv);
+      return found ? (found[returnCol] ?? '') : '';
+    };
+
+    const MAXIF = (rangeCol, criteria, maxCol) => {
+      const nums = allRows.filter(r => cmp(r[rangeCol]) === cmp(criteria)).map(r => toNum(r[maxCol])).filter(n => n !== null);
+      return nums.length ? Math.max(...nums) : '';
+    };
+
+    const MINIF = (rangeCol, criteria, minCol) => {
+      const nums = allRows.filter(r => cmp(r[rangeCol]) === cmp(criteria)).map(r => toNum(r[minCol])).filter(n => n !== null);
+      return nums.length ? Math.min(...nums) : '';
+    };
+
+    // eslint-disable-next-line no-new-func
+    const result = new Function(
+      'SUMIF', 'SUMIFS', 'COUNTIF', 'COUNTIFS', 'AVERAGEIF', 'VLOOKUP', 'MAXIF', 'MINIF',
+      '"use strict"; return (' + expr + ');'
+    )(SUMIF, SUMIFS, COUNTIF, COUNTIFS, AVERAGEIF, VLOOKUP, MAXIF, MINIF);
+
+    if (result === null || result === undefined || (typeof result === 'number' && isNaN(result))) return '';
+    return result;
+  } catch {
+    return '';
+  }
+}
+
 // ─── Row Filters ──────────────────────────────────────────────────────────────
 
 function testFilter(row, filter) {
@@ -74,6 +164,19 @@ function applyFilters(rows, filters) {
   return rows.filter(row => filters.every(f => testFilter(row, f)));
 }
 
+// ─── Master Field Resolver ─────────────────────────────────────────────────────
+// Matches a field name against an object key using: exact match first, then
+// case-insensitive + collapsed-whitespace/underscore/dash fallback.
+// This handles "salesPortalSku" matching "Sales Portal SKU" and vice versa.
+
+function findMasterField(obj, fieldName) {
+  if (!fieldName) return undefined;
+  if (fieldName in obj) return obj[fieldName];
+  const norm = fieldName.trim().toLowerCase().replace(/[\s_-]+/g, '');
+  const key = Object.keys(obj).find(k => k.trim().toLowerCase().replace(/[\s_-]+/g, '') === norm);
+  return key !== undefined ? obj[key] : undefined;
+}
+
 // ─── Master Data Lookup ───────────────────────────────────────────────────────
 
 function resolveMasterLookup(col, row, masterData) {
@@ -88,97 +191,342 @@ function resolveMasterLookup(col, row, masterData) {
   const keyField = masterType === 'sku' ? (matchField || 'salesPortalSku') : (matchField || '');
 
   const match = master.find(entry => {
-    const entryVal = String(entry[keyField] || '').trim().toLowerCase();
+    const entryVal = String(findMasterField(entry, keyField) ?? '').trim().toLowerCase();
     return entryVal === lookupValue;
   });
 
   if (!match) return '';
-  return match[returnField] !== undefined ? match[returnField] : '';
+  const val = findMasterField(match, returnField);
+  return val !== undefined ? val : '';
 }
 
-// ─── File Header Extraction ───────────────────────────────────────────────────
+// ─── Master Data Validate ─────────────────────────────────────────────────────
 
-function extractHeadersFromBuffer(buffer) {
+function resolveMasterValidate(col, row, masterData) {
+  const { masterType, lookupColumn, matchField, matchLabel = 'Matched', noMatchLabel = 'Not Matched' } = col;
+  const lookupValue = String(row[lookupColumn] || '').trim().toLowerCase();
+  if (!lookupValue) return noMatchLabel;
+
+  const master = masterType === 'sku'
+    ? (masterData.sku_master || [])
+    : (masterData.ledger_master || []);
+
+  const keyField = masterType === 'sku' ? (matchField || 'salesPortalSku') : (matchField || '');
+
+  const found = master.some(entry =>
+    String(findMasterField(entry, keyField) ?? '').trim().toLowerCase() === lookupValue
+  );
+
+  return found ? matchLabel : noMatchLabel;
+}
+
+// ─── File Header Extraction (all sheets) ─────────────────────────────────────
+
+function extractAllSheetsFromBuffer(buffer) {
   const workbook = XLSX.read(buffer, { type: 'buffer', cellDates: true, raw: false });
-  const sheetName = workbook.SheetNames[0];
-  const sheet = workbook.Sheets[sheetName];
-  const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '' });
+  return workbook.SheetNames.map(sheetName => {
+    const ws   = workbook.Sheets[sheetName];
+    const rows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' });
+    let columns = [];
+    for (const row of rows) {
+      const headers = row.map(h => String(h || '').trim()).filter(h => h !== '');
+      if (headers.length > 0) { columns = headers; break; }
+    }
+    return { name: sheetName, columns };
+  });
+}
 
-  for (const row of rows) {
-    const headers = row.map(h => String(h || '').trim()).filter(h => h !== '');
-    if (headers.length > 0) return headers;
+// ─── Group By / Aggregation ───────────────────────────────────────────────────
+
+function aggregate(values, method) {
+  const nums = values
+    .map(v => parseFloat(String(v === null || v === undefined ? '' : v).replace(/,/g, '')))
+    .filter(n => !isNaN(n));
+  switch (method) {
+    case 'sum':    return nums.reduce((a, b) => a + b, 0);
+    case 'avg':    return nums.length ? nums.reduce((a, b) => a + b, 0) / nums.length : '';
+    case 'count':  return values.length;
+    case 'min':    return nums.length ? Math.min(...nums) : '';
+    case 'max':    return nums.length ? Math.max(...nums) : '';
+    case 'first':  return values[0] ?? '';
+    case 'last':   return values[values.length - 1] ?? '';
+    case 'concat': return values.filter(v => v !== '' && v !== null && v !== undefined).join(', ');
+    default:       return values[0] ?? '';
   }
-  return [];
+}
+
+function applyGroupBy(outputRows, groupByConfig) {
+  if (!groupByConfig?.enabled || !groupByConfig.columns?.length || !outputRows.length) return outputRows;
+
+  const groupColumns  = groupByConfig.columns;
+  const aggregations  = groupByConfig.aggregations || {};
+  const allColLabels  = Object.keys(outputRows[0]);
+  const nonGroupLabels = allColLabels.filter(l => !groupColumns.includes(l));
+
+  const groupMap = new Map();
+  for (const row of outputRows) {
+    const key = groupColumns.map(c => String(row[c] ?? '')).join('\x00');
+    if (!groupMap.has(key)) groupMap.set(key, []);
+    groupMap.get(key).push(row);
+  }
+
+  return Array.from(groupMap.values()).map(groupRows => {
+    const result = {};
+    for (const col of groupColumns)    result[col] = groupRows[0][col];
+    for (const col of nonGroupLabels)  result[col] = aggregate(groupRows.map(r => r[col]), aggregations[col] || 'sum');
+    return result;
+  });
+}
+
+// ─── Merge Sheet Apply ────────────────────────────────────────────────────────
+
+function applyMerge(mergeConfig, rawSheetMap, sheetResults, wfSheets) {
+  const { mergeType = 'join', sources = [] } = mergeConfig;
+  const cmp = v => String(v === null || v === undefined ? '' : v).trim().toLowerCase();
+
+  function getSourceRows(source) {
+    if (source.type === 'raw') return rawSheetMap[source.sheetName] || [];
+    const idx = wfSheets.findIndex(s => s.name === source.sheetName);
+    return idx >= 0 && sheetResults[idx] ? sheetResults[idx] : [];
+  }
+
+  function pickCols(row, selectedCols) {
+    if (!selectedCols || selectedCols.length === 0) return { ...row };
+    const out = {};
+    selectedCols.forEach(col => { out[col] = row[col] ?? ''; });
+    return out;
+  }
+
+  if (mergeType === 'stack') {
+    const result = [];
+    for (const src of sources) {
+      getSourceRows(src).forEach(row => result.push(pickCols(row, src.columns)));
+    }
+    return result;
+  }
+
+  if (mergeType === 'column_combine') {
+    const [srcA, srcB] = sources;
+    if (!srcA || !srcB) return [];
+    const rowsA = getSourceRows(srcA);
+    const rowsB = getSourceRows(srcB);
+    const maxLen = Math.max(rowsA.length, rowsB.length);
+    return Array.from({ length: maxLen }, (_, i) => ({
+      ...pickCols(rowsA[i] || {}, srcA.columns),
+      ...pickCols(rowsB[i] || {}, srcB.columns),
+    }));
+  }
+
+  // join — N-source sequential left join using a common key column
+  const commonKey = mergeConfig.commonJoinKey;
+  if (commonKey) {
+    if (sources.length === 0) return [];
+    // Seed result with source A's selected columns, always keeping the join key
+    let resultRows = getSourceRows(sources[0]).map(row => {
+      const picked = pickCols(row, sources[0].columns);
+      if (!(commonKey in picked)) picked[commonKey] = row[commonKey] ?? '';
+      return picked;
+    });
+    // Join each subsequent source onto the running result
+    for (let i = 1; i < sources.length; i++) {
+      const src = sources[i];
+      const rightRows = getSourceRows(src);
+      const rightMap = new Map();
+      for (const row of rightRows) {
+        const k = cmp(row[commonKey]);
+        if (!rightMap.has(k)) rightMap.set(k, row);
+      }
+      resultRows = resultRows.map(leftRow => ({
+        ...leftRow,
+        ...pickCols(rightMap.get(cmp(leftRow[commonKey])) || {}, src.columns),
+      }));
+    }
+    return resultRows;
+  }
+
+  // Legacy: 2-source join with per-source joinKey (backward compat)
+  const [srcA, srcB] = sources;
+  if (!srcA || !srcB) return [];
+  const rowsA = getSourceRows(srcA);
+  const rowsB = getSourceRows(srcB);
+  const bMap  = new Map();
+  for (const row of rowsB) {
+    const key = cmp(row[srcB.joinKey]);
+    if (!bMap.has(key)) bMap.set(key, row);
+  }
+  return rowsA.map(rowA => ({
+    ...pickCols(rowA, srcA.columns),
+    ...pickCols(bMap.get(cmp(rowA[srcA.joinKey])) || {}, srcB.columns),
+  }));
+}
+
+// ─── Formula Reference Sheet ──────────────────────────────────────────────────
+
+function buildFormulaReferenceSheet(sheets) {
+  const rows = [['Sheet', 'Column / Info', 'Type', 'Formula / Details']];
+
+  for (const sheet of sheets) {
+    if (sheet.type === 'merge') {
+      const mc = sheet.mergeConfig || {};
+      rows.push([sheet.name, '— Merge Sheet —', mc.mergeType || 'join',
+        `Sources: ${(mc.sources || []).map(s => `${s.sheetName} [${s.type}]`).join(' + ')}`]);
+      (mc.sources || []).forEach((src, i) => {
+        const lbl = ['Source A', 'Source B', 'Source C'][i] || `Source ${i + 1}`;
+        rows.push([
+          sheet.name, lbl, `${src.type} → ${src.sheetName}`,
+          `Columns: ${(src.columns || []).join(', ')}${mc.mergeType === 'join' && src.joinKey ? ` | Join key: ${src.joinKey}` : ''}`
+        ]);
+      });
+      continue;
+    }
+
+    const orderedCols = [...(sheet.columns || [])].sort((a, b) => a.order - b.order);
+    if (sheet.rawSheetName) rows.push([sheet.name, '— Source Sheet —', 'Input', sheet.rawSheetName]);
+
+    for (const col of orderedCols) {
+      let typeLabel, details;
+      switch (col.type) {
+        case 'source':        typeLabel = 'Source';                   details = col.key || col.label; break;
+        case 'computed':      typeLabel = 'Math Formula';             details = col.formula || ''; break;
+        case 'excel':         typeLabel = 'Excel Formula (cross-row)'; details = col.formula || ''; break;
+        case 'master_lookup': typeLabel = 'Master Lookup';
+          details = `Match column "${col.lookupColumn}" in ${col.masterType || 'sku'} master → return field "${col.returnField}"`; break;
+        case 'master_validate': typeLabel = 'Master Validate';
+          details = `Check "${col.lookupColumn}" exists in ${col.masterType || 'ledger'} master field "${col.matchField}" → "${col.matchLabel || 'Matched'}" / "${col.noMatchLabel || 'Not Matched'}"`; break;
+        default:              typeLabel = col.type || ''; details = col.formula || '';
+      }
+      rows.push([sheet.name || '', col.label || '', typeLabel, details]);
+    }
+
+    if (sheet.groupBy?.enabled && sheet.groupBy?.columns?.length) {
+      const aggStr = Object.entries(sheet.groupBy.aggregations || {}).map(([c, m]) => `${c}:${m}`).join(', ');
+      rows.push([sheet.name || '', '— Group By —', 'Aggregation',
+        `Group by: ${sheet.groupBy.columns.join(', ')}${aggStr ? ' | Aggregations: ' + aggStr : ''}`]);
+    }
+  }
+
+  return XLSX.utils.aoa_to_sheet(rows);
 }
 
 // ─── Multi-Sheet Workflow Apply ───────────────────────────────────────────────
 
-function applyMultiSheetWorkflow(sheets, fileBuffer, masterData = {}) {
-  const workbook = XLSX.read(fileBuffer, { type: 'buffer', cellDates: true, raw: false });
-  const firstSheet = workbook.Sheets[workbook.SheetNames[0]];
-  const allRawRows = XLSX.utils.sheet_to_json(firstSheet, { defval: '' });
+// fileBufferOrMap: Buffer (legacy / single-file) OR { [fileInputId]: Buffer } (multi-file)
+function applyMultiSheetWorkflow(sheets, fileBufferOrMap, masterData = {}, fileInputs = []) {
+  const normalizeRow = (row) => {
+    const out = {};
+    for (const [k, v] of Object.entries(row)) {
+      out[String(k).trim()] = v;
+    }
+    return out;
+  };
 
-  const outBook = XLSX.utils.book_new();
-  const sheetResults = []; // sheetResults[i][rowIdx] = outputRow for cross-sheet refs
+  const buildRSM = (buf) => {
+    const wb = XLSX.read(buf, { type: 'buffer', cellDates: true, raw: false });
+    const rsm = {};
+    for (const sn of wb.SheetNames) {
+      rsm[sn] = XLSX.utils.sheet_to_json(wb.Sheets[sn], { defval: '' }).map(normalizeRow);
+    }
+    return rsm;
+  };
 
-  for (let sheetIdx = 0; sheetIdx < sheets.length; sheetIdx++) {
-    const wfSheet = sheets[sheetIdx];
-
-    // 1. Apply per-sheet row filters
-    const rawRows = applyFilters(allRawRows, wfSheet.filters || []);
-
-    const orderedCols = [...(wfSheet.columns || [])].sort((a, b) => a.order - b.order);
-    const sheetRowResults = [];
-
-    const outputRows = rawRows.map((rawRow, rowIdx) => {
-      const scope = {};
-
-      // Seed source columns
-      for (const col of orderedCols) {
-        if (col.type === 'source') {
-          scope[col.label] = rawRow[col.key] !== undefined ? rawRow[col.key] : '';
-        }
-      }
-
-      // Seed cross-sheet refs: {PrevSheetName.ColumnLabel}
-      for (let prevIdx = 0; prevIdx < sheetIdx; prevIdx++) {
-        const prevSheet = sheets[prevIdx];
-        const prevRowData = sheetResults[prevIdx]?.[rowIdx] || {};
-        for (const [colLabel, value] of Object.entries(prevRowData)) {
-          scope[`${prevSheet.name}.${colLabel}`] = value;
-        }
-      }
-
-      const outputRow = {};
-      for (const col of orderedCols) {
-        let val;
-        if (col.type === 'source') {
-          val = scope[col.label];
-        } else if (col.type === 'master_lookup') {
-          val = resolveMasterLookup(col, rawRow, masterData);
-          scope[col.label] = val;
-        } else {
-          // computed (formula or prev-sheet ref)
-          val = evaluateFormula(col.formula || '', scope);
-          scope[col.label] = val;
-        }
-        outputRow[col.label] = val;
-      }
-
-      sheetRowResults.push({ ...outputRow });
-      return outputRow;
-    });
-
-    sheetResults.push(sheetRowResults);
-
-    const safeSheetName = (wfSheet.name || `Sheet${sheetIdx + 1}`)
-      .replace(/[:\\/?*[\]]/g, '')
-      .slice(0, 31);
-
-    const outSheet = XLSX.utils.json_to_sheet(outputRows);
-    XLSX.utils.book_append_sheet(outBook, outSheet, safeSheetName);
+  // Build per-file rawSheetMaps keyed by fileInputId
+  const fileRSMs = {};
+  if (Buffer.isBuffer(fileBufferOrMap)) {
+    fileRSMs['file_0'] = buildRSM(fileBufferOrMap);
+  } else {
+    for (const [fid, buf] of Object.entries(fileBufferOrMap)) {
+      fileRSMs[fid] = buildRSM(buf);
+    }
   }
 
+  const defaultFileId = fileInputs[0]?.id || 'file_0';
+  const getFileRSM = (fid) =>
+    fileRSMs[fid] || fileRSMs[defaultFileId] || fileRSMs['file_0'] || Object.values(fileRSMs)[0] || {};
+
+
+  const outBook      = XLSX.utils.book_new();
+  const sheetResults = []; // sheetResults[i] = allRowsData (pre-grouped) for cross-sheet refs
+
+  for (let sheetIdx = 0; sheetIdx < sheets.length; sheetIdx++) {
+    const wfSheet       = sheets[sheetIdx];
+    const safeSheetName = (wfSheet.name || `Sheet${sheetIdx + 1}`)
+      .replace(/[:\\/?*[\]]/g, '').slice(0, 31);
+
+    // Resolve which file this sheet reads from
+    const sheetFileId = wfSheet.fileInputId || defaultFileId;
+    const rawSheetMap = getFileRSM(sheetFileId);
+    const sheetDefaultRows = Object.values(rawSheetMap)[0] || [];
+
+    // ── Merge sheet ───────────────────────────────────────────────────────────
+    if (wfSheet.type === 'merge') {
+      const mergeRows = applyMerge(wfSheet.mergeConfig || {}, rawSheetMap, sheetResults, sheets);
+      sheetResults.push(mergeRows);
+      XLSX.utils.book_append_sheet(
+        outBook,
+        XLSX.utils.json_to_sheet(mergeRows.length ? mergeRows : [{}]),
+        safeSheetName
+      );
+      continue;
+    }
+
+    // ── Normal sheet ──────────────────────────────────────────────────────────
+    // Source rows: from a previous sheet's output OR from a raw input sheet
+    let sourceRows;
+    if (wfSheet.sourceType === 'prev_sheet' && wfSheet.prevSheetName) {
+      const prevIdx = sheets.slice(0, sheetIdx).findIndex(s => s.name === wfSheet.prevSheetName);
+      sourceRows = prevIdx >= 0 && sheetResults[prevIdx] ? sheetResults[prevIdx] : sheetDefaultRows;
+    } else {
+      sourceRows = rawSheetMap[wfSheet.rawSheetName] || sheetDefaultRows;
+    }
+    const rawRows     = applyFilters(sourceRows, wfSheet.filters || []);
+    const orderedCols = [...(wfSheet.columns || [])].sort((a, b) => a.order - b.order);
+
+    // Pass 1: seed source + master + cross-sheet refs for ALL rows
+    const allRowsData = rawRows.map((rawRow, rowIdx) => {
+      const row = {};
+      for (let prevIdx = 0; prevIdx < sheetIdx; prevIdx++) {
+        const prevSheet   = sheets[prevIdx];
+        const prevRowData = sheetResults[prevIdx]?.[rowIdx] || {};
+        for (const [label, value] of Object.entries(prevRowData)) {
+          row[`${prevSheet.name}.${label}`] = value;
+        }
+      }
+      for (const col of orderedCols) {
+        if (col.type === 'source') {
+          row[col.label] = rawRow[col.key] !== undefined ? rawRow[col.key] : '';
+        } else if (col.type === 'master_lookup') {
+          row[col.label] = resolveMasterLookup(col, rawRow, masterData);
+        } else if (col.type === 'master_validate') {
+          row[col.label] = resolveMasterValidate(col, rawRow, masterData);
+        }
+      }
+      return row;
+    });
+
+    // Pass 2: evaluate derived columns across ALL rows before moving to next col
+    for (const col of orderedCols) {
+      if (col.type !== 'computed' && col.type !== 'excel') continue;
+      const vals = allRowsData.map(rowScope =>
+        col.type === 'excel'
+          ? evaluateFormulaWithHelpers(col.formula || '', rowScope, allRowsData)
+          : evaluateFormula(col.formula || '', rowScope)
+      );
+      vals.forEach((v, i) => { allRowsData[i][col.label] = v; });
+    }
+
+    const outputRows = allRowsData.map(row => {
+      const out = {};
+      for (const col of orderedCols) out[col.label] = row[col.label] ?? '';
+      return out;
+    });
+
+    sheetResults.push(allRowsData); // preserve pre-grouped for cross-sheet refs
+
+    const finalRows = applyGroupBy(outputRows, wfSheet.groupBy);
+    XLSX.utils.book_append_sheet(outBook, XLSX.utils.json_to_sheet(finalRows), safeSheetName);
+  }
+
+  XLSX.utils.book_append_sheet(outBook, buildFormulaReferenceSheet(sheets), 'Formula Reference');
   return XLSX.write(outBook, { type: 'buffer', bookType: 'xlsx' });
 }
 
@@ -251,6 +599,13 @@ async function scanMasterSchema(agentId) {
 
 // ─── Controllers ──────────────────────────────────────────────────────────────
 
+const normalizeWorkflow = (wf) => {
+  const data = wf.toJSON ? wf.toJSON() : { ...wf };
+  data.fileInputs = data.file_inputs || [];
+  delete data.file_inputs;
+  return data;
+};
+
 const getWorkflows = async (req, res, next) => {
   try {
     const { agentId } = req.params;
@@ -258,7 +613,7 @@ const getWorkflows = async (req, res, next) => {
       where: { agent_id: agentId },
       order: [['createdAt', 'ASC']]
     });
-    res.json(workflows);
+    res.json(workflows.map(normalizeWorkflow));
   } catch (error) {
     next(error);
   }
@@ -269,7 +624,7 @@ const getWorkflow = async (req, res, next) => {
     const { workflowId } = req.params;
     const workflow = await AgentWorkflow.findByPk(workflowId);
     if (!workflow) return res.status(404).json({ error: 'Workflow not found' });
-    res.json(workflow);
+    res.json(normalizeWorkflow(workflow));
   } catch (error) {
     next(error);
   }
@@ -278,7 +633,7 @@ const getWorkflow = async (req, res, next) => {
 const createWorkflow = async (req, res, next) => {
   try {
     const { agentId } = req.params;
-    const { name, description, sample_columns, sheets } = req.body;
+    const { name, description, sample_columns, sheets, fileInputs } = req.body;
 
     const agent = await Agent.findByPk(agentId);
     if (!agent) return res.status(404).json({ error: 'Agent not found' });
@@ -291,6 +646,7 @@ const createWorkflow = async (req, res, next) => {
       description:    description || '',
       sample_columns: sample_columns || [],
       sheets:         sheets || [],
+      file_inputs:    fileInputs || [],
       columns:        []
     });
 
@@ -303,7 +659,7 @@ const createWorkflow = async (req, res, next) => {
 const updateWorkflow = async (req, res, next) => {
   try {
     const { workflowId } = req.params;
-    const { name, description, sample_columns, sheets } = req.body;
+    const { name, description, sample_columns, sheets, fileInputs } = req.body;
 
     const workflow = await AgentWorkflow.findByPk(workflowId);
     if (!workflow) return res.status(404).json({ error: 'Workflow not found' });
@@ -312,7 +668,8 @@ const updateWorkflow = async (req, res, next) => {
       ...(name           !== undefined && { name: name.trim() }),
       ...(description    !== undefined && { description }),
       ...(sample_columns !== undefined && { sample_columns }),
-      ...(sheets         !== undefined && { sheets })
+      ...(sheets         !== undefined && { sheets }),
+      ...(fileInputs     !== undefined && { file_inputs: fileInputs })
     });
 
     res.json({ message: 'Workflow updated', workflow });
@@ -338,9 +695,10 @@ const extractColumns = [
   async (req, res, next) => {
     try {
       if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
-      const headers = extractHeadersFromBuffer(req.file.buffer);
-      if (headers.length === 0) return res.status(400).json({ error: 'Could not extract columns from file' });
-      res.json({ columns: headers });
+      const sheets = extractAllSheetsFromBuffer(req.file.buffer);
+      if (sheets.length === 0) return res.status(400).json({ error: 'Could not extract sheets from file' });
+      // `columns` kept for backward compatibility (first sheet's columns)
+      res.json({ sheets, columns: sheets[0]?.columns || [] });
     } catch (error) {
       next(error);
     }
@@ -348,14 +706,36 @@ const extractColumns = [
 ];
 
 const applyWorkflow = [
-  upload.single('file'),
+  upload.any(),
   async (req, res, next) => {
     try {
       const { workflowId } = req.params;
-      if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
-
       const workflow = await AgentWorkflow.findByPk(workflowId);
       if (!workflow) return res.status(404).json({ error: 'Workflow not found' });
+
+      const fileInputs = workflow.file_inputs || [];
+      const allFiles   = req.files || [];
+
+      // Build file buffer map: { [fileInputId]: Buffer }
+      // Single-file (legacy): field name 'file' → maps to first fileInput id or 'file_0'
+      // Multi-file: field names 'file_0', 'file_1', ... → mapped by index to fileInputs[i].id
+      let fileBufferOrMap;
+      if (fileInputs.length <= 1) {
+        const singleFile = allFiles.find(f => f.fieldname === 'file' || f.fieldname === 'file_0');
+        if (!singleFile) return res.status(400).json({ error: 'No file uploaded' });
+        fileBufferOrMap = singleFile.buffer;
+      } else {
+        fileBufferOrMap = {};
+        const missing = [];
+        fileInputs.forEach((fi, i) => {
+          const f = allFiles.find(f => f.fieldname === `file_${i}`);
+          if (f) fileBufferOrMap[fi.id] = f.buffer;
+          else   missing.push(fi.label || `File ${i + 1}`);
+        });
+        if (missing.length > 0) {
+          return res.status(400).json({ error: `Missing required files: ${missing.join(', ')}` });
+        }
+      }
 
       // Fetch master data if brand/agent context provided
       const brandId = req.body.brandId;
@@ -364,9 +744,10 @@ const applyWorkflow = [
 
       let outputBuffer;
       if (workflow.sheets && workflow.sheets.length > 0) {
-        outputBuffer = applyMultiSheetWorkflow(workflow.sheets, req.file.buffer, masterData);
+        outputBuffer = applyMultiSheetWorkflow(workflow.sheets, fileBufferOrMap, masterData, fileInputs);
       } else if (workflow.columns && workflow.columns.length > 0) {
-        outputBuffer = applyLegacyWorkflow(workflow.columns, req.file.buffer);
+        const singleBuf = Buffer.isBuffer(fileBufferOrMap) ? fileBufferOrMap : Object.values(fileBufferOrMap)[0];
+        outputBuffer = applyLegacyWorkflow(workflow.columns, singleBuf);
       } else {
         return res.status(400).json({ error: 'Workflow has no sheets defined' });
       }
@@ -418,5 +799,6 @@ module.exports = {
   extractColumns,
   applyWorkflow,
   downloadWorkflowOutput,
-  getMasterSchema
+  getMasterSchema,
+  extractAllSheetsFromBuffer
 };

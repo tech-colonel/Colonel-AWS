@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../../components/ui/modal';
 import { Button } from '../../components/ui/button';
 import { Badge } from '../../components/ui/badge';
-import { GitBranch, Upload, Download, Loader2, Check, ChevronRight, TableIcon } from 'lucide-react';
+import { GitBranch, Upload, Download, Loader2, Check, ChevronRight, TableIcon, GitMerge } from 'lucide-react';
 import api from '../../lib/api';
 import { toast } from 'sonner';
 
@@ -43,6 +43,7 @@ const WorkflowSelector = ({ agentId, onSelect }) => {
       {workflows.map(wf => {
         const sheets        = wf.sheets || [];
         const computedCount = sheets.reduce((n, s) => n + (s.columns || []).filter(c => c.type === 'computed').length, 0);
+        const groupedCount  = sheets.filter(s => s.groupBy?.enabled && s.groupBy?.columns?.length > 0).length;
         return (
           <button
             key={wf.id}
@@ -61,6 +62,11 @@ const WorkflowSelector = ({ agentId, onSelect }) => {
                     {computedCount} computed
                   </Badge>
                 )}
+                {groupedCount > 0 && (
+                  <Badge variant="outline" className="text-xs text-teal-700 border-teal-200">
+                    {groupedCount} grouped
+                  </Badge>
+                )}
               </div>
               {wf.description && (
                 <p className="text-xs text-slate-400 mt-0.5">{wf.description}</p>
@@ -70,13 +76,21 @@ const WorkflowSelector = ({ agentId, onSelect }) => {
                 {sheets.map(s => {
                   const srcCount  = (s.columns || []).filter(c => c.type === 'source').length;
                   const compCount = (s.columns || []).filter(c => c.type === 'computed').length;
+                  const isGrouped = s.groupBy?.enabled && s.groupBy?.columns?.length > 0;
                   return (
-                    <div key={s.id} className="flex items-center gap-1 rounded-lg bg-slate-50 border border-slate-200 px-2 py-1">
-                      <TableIcon className="h-3 w-3 text-slate-400" />
-                      <span className="text-xs font-medium text-slate-700">{s.name}</span>
-                      <span className="text-xs text-slate-400">
-                        {srcCount}src{compCount > 0 ? ` +${compCount}` : ''}
-                      </span>
+                    <div key={s.id} className={`flex items-center gap-1 rounded-lg border px-2 py-1 ${
+                      s.type === 'merge' ? 'bg-purple-50 border-purple-200' : 'bg-slate-50 border-slate-200'
+                    }`}>
+                      {s.type === 'merge'
+                        ? <GitMerge className="h-3 w-3 text-purple-400" />
+                        : <TableIcon className="h-3 w-3 text-slate-400" />}
+                      <span className={`text-xs font-medium ${s.type === 'merge' ? 'text-purple-700' : 'text-slate-700'}`}>{s.name}</span>
+                      {s.type === 'merge'
+                        ? <span className="text-xs text-purple-400">{s.mergeConfig?.mergeType || 'join'}</span>
+                        : <span className="text-xs text-slate-400">{srcCount}src{compCount > 0 ? ` +${compCount}` : ''}</span>}
+                      {isGrouped && (
+                        <span className="text-xs font-medium text-teal-600">· grouped</span>
+                      )}
                     </div>
                   );
                 })}
@@ -93,22 +107,36 @@ const WorkflowSelector = ({ agentId, onSelect }) => {
 // ─── Step 2: Upload & apply ───────────────────────────────────────────────────
 
 const ApplyStep = ({ workflow, agentId, brandId, onBack, onClose }) => {
-  const [file,           setFile]           = useState(null);
+  const fileInputs = workflow.fileInputs?.length > 0
+    ? workflow.fileInputs
+    : [{ id: 'file_0', label: 'Input File' }];
+
+  const [files,          setFiles]          = useState({});
   const [applying,       setApplying]       = useState(false);
   const [outputFilename, setOutputFilename] = useState(null);
   const [downloading,    setDownloading]    = useState(false);
 
-  const sheets = workflow.sheets || [];
+  const sheets           = workflow.sheets || [];
+  const allFilesSelected = fileInputs.every(fi => !!files[fi.id]);
+
+  const setFile = (fileInputId, file) => {
+    setFiles(prev => ({ ...prev, [fileInputId]: file || undefined }));
+    setOutputFilename(null);
+  };
 
   const handleApply = async () => {
-    if (!file) { toast.error('Please select a file'); return; }
+    if (!allFilesSelected) { toast.error('Please select all required files'); return; }
     setApplying(true);
     setOutputFilename(null);
     try {
       const fd = new FormData();
-      fd.append('file', file);
       if (brandId) fd.append('brandId', brandId);
       if (agentId) fd.append('agentId', agentId);
+      if (fileInputs.length === 1) {
+        fd.append('file', files[fileInputs[0].id]);
+      } else {
+        fileInputs.forEach((fi, i) => fd.append(`file_${i}`, files[fi.id]));
+      }
       const res = await api.post(`/api/workflows/${workflow.id}/apply`, fd, {
         headers: { 'Content-Type': 'multipart/form-data' }
       });
@@ -149,13 +177,15 @@ const ApplyStep = ({ workflow, agentId, brandId, onBack, onClose }) => {
       <div className="rounded-xl border border-indigo-200 bg-indigo-50 px-4 py-3">
         <div className="flex items-center justify-between">
           <p className="font-semibold text-sm text-indigo-800">{workflow.name}</p>
-          <button
-            type="button"
-            onClick={onBack}
-            className="text-xs text-indigo-500 hover:text-indigo-700 underline underline-offset-2"
-          >
-            Change
-          </button>
+          {onBack && (
+            <button
+              type="button"
+              onClick={onBack}
+              className="text-xs text-indigo-500 hover:text-indigo-700 underline underline-offset-2"
+            >
+              Change
+            </button>
+          )}
         </div>
         {workflow.description && (
           <p className="text-xs text-indigo-500 mt-0.5">{workflow.description}</p>
@@ -190,24 +220,36 @@ const ApplyStep = ({ workflow, agentId, brandId, onBack, onClose }) => {
         </div>
       </div>
 
-      {/* File upload */}
-      <div>
-        <p className="text-sm font-medium text-slate-700 mb-2">Upload your file</p>
-        <label className="flex flex-col items-center justify-center border-2 border-dashed border-slate-200 rounded-xl p-6 cursor-pointer hover:border-indigo-300 hover:bg-indigo-50/30 transition-all">
-          <Upload className="h-6 w-6 text-slate-300 mb-2" />
-          {file ? (
-            <span className="text-sm font-medium text-slate-700">{file.name}</span>
-          ) : (
-            <>
-              <span className="text-sm text-slate-500">Click to choose file</span>
-              <span className="text-xs text-slate-400 mt-0.5">.xlsx, .xls, .csv</span>
-            </>
-          )}
-          <input
-            type="file" accept=".xlsx,.xls,.csv" className="hidden"
-            onChange={e => { setFile(e.target.files[0] || null); setOutputFilename(null); }}
-          />
-        </label>
+      {/* File upload(s) */}
+      <div className="space-y-3">
+        <p className="text-sm font-medium text-slate-700">
+          {fileInputs.length === 1 ? 'Upload your file' : `Upload ${fileInputs.length} files`}
+        </p>
+        {fileInputs.map((fi, i) => (
+          <div key={fi.id}>
+            {fileInputs.length > 1 && (
+              <p className="text-xs font-semibold text-slate-500 mb-1.5 flex items-center gap-1.5">
+                <span className="w-4 h-4 rounded-full bg-indigo-100 text-indigo-700 text-[10px] font-bold flex items-center justify-center">{i + 1}</span>
+                {fi.label}
+              </p>
+            )}
+            <label className="flex items-center gap-3 border-2 border-dashed border-slate-200 rounded-xl px-4 py-3.5 cursor-pointer hover:border-indigo-300 hover:bg-indigo-50/30 transition-all">
+              <Upload className="h-5 w-5 text-slate-300 shrink-0" />
+              {files[fi.id] ? (
+                <span className="text-sm font-medium text-slate-700 truncate">{files[fi.id].name}</span>
+              ) : (
+                <div>
+                  <span className="text-sm text-slate-500">Click to choose file</span>
+                  <span className="text-xs text-slate-400 block">.xlsx, .xls, .csv</span>
+                </div>
+              )}
+              <input
+                type="file" accept=".xlsx,.xls,.csv" className="hidden"
+                onChange={e => setFile(fi.id, e.target.files[0])}
+              />
+            </label>
+          </div>
+        ))}
       </div>
 
       {/* Output result */}
@@ -236,7 +278,7 @@ const ApplyStep = ({ workflow, agentId, brandId, onBack, onClose }) => {
       {/* Actions */}
       <div className="flex gap-3">
         <Button variant="secondary" onClick={onClose} className="flex-1">Close</Button>
-        <Button onClick={handleApply} disabled={!file || applying} className="flex-1">
+        <Button onClick={handleApply} disabled={!allFilesSelected || applying} className="flex-1">
           {applying
             ? <><Loader2 className="h-4 w-4 animate-spin mr-2" />Applying...</>
             : 'Apply Workflow'}
@@ -248,12 +290,13 @@ const ApplyStep = ({ workflow, agentId, brandId, onBack, onClose }) => {
 
 // ─── Main Modal ────────────────────────────────────────────────────────────────
 
-const WorkflowApplyModal = ({ agentId, brandId, open, onClose }) => {
-  const [selectedWorkflow, setSelectedWorkflow] = useState(null);
+// initialWorkflow: if provided, skips the selector and goes straight to ApplyStep
+const WorkflowApplyModal = ({ agentId, brandId, open, onClose, initialWorkflow = null }) => {
+  const [selectedWorkflow, setSelectedWorkflow] = useState(initialWorkflow);
 
   useEffect(() => {
-    if (open) setSelectedWorkflow(null);
-  }, [open]);
+    if (open) setSelectedWorkflow(initialWorkflow || null);
+  }, [open, initialWorkflow]);
 
   return (
     <Dialog open={open} onOpenChange={onClose}>
@@ -277,7 +320,7 @@ const WorkflowApplyModal = ({ agentId, brandId, open, onClose }) => {
             workflow={selectedWorkflow}
             agentId={agentId}
             brandId={brandId}
-            onBack={() => setSelectedWorkflow(null)}
+            onBack={initialWorkflow ? null : () => setSelectedWorkflow(null)}
             onClose={onClose}
           />
         )}

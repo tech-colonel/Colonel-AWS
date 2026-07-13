@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const wf = require('../controllers/workflowController');
+const wfai = require('../controllers/workflowAiController');
 const { authenticateToken, authorize } = require('../middleware/authMiddleware');
 
 // Per-agent workflow list (accessible to accountants too)
@@ -13,6 +14,9 @@ router.get('/agents/:agentId/master-schema', authenticateToken, authorize('admin
 
 // Extract columns from a sample file (admin, during workflow building)
 router.post('/workflows/extract-columns', authenticateToken, authorize('admin'), ...wf.extractColumns);
+
+// AI SOP-to-workflow chat (admin, draft generation)
+router.post('/workflows/ai/chat', authenticateToken, authorize('admin'), wfai.aiChat);
 
 // Download generated output file (static segment 'download' before :workflowId)
 router.get('/workflows/download/:filename', authenticateToken, wf.downloadWorkflowOutput);
