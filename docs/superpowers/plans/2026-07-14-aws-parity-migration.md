@@ -586,3 +586,10 @@ git worktree remove ../colonel-aws-parity 2>/dev/null || echo "(remove manually 
 - 4.5 relaunch: backend+reco-engine+ngrok online; boot log = unified mode, zoho/compliance/statutory ready, port 8001, no boot errors.
 - 5.1 LIVE smoke: site 200, admin login OK (dhaval.colonel/dhaval123), statutory admin summary = 5 brands, dashboard analytics live (lastRun 2026-07-14T10:16).
 - PENDING: rotate Composio+GenSpark keys (user), broad feature verification, push branch to colonel-aws.
+
+## Phase 5 — BROAD VERIFICATION PASSED 2026-07-14 (4-agent live check)
+- Statutory (accountant): dynamic todo/in_progress/done + workflow cats + 624 filings ✅
+- Compliance JSON ✅; Zoho real data (SPATIAL AI, 95 vouchers) ✅
+- Fireflies Meetings 7 real records ✅; Database explorer db=colonel_agent_accountant 61 tables/22589 rows (UNIFIED active) ✅; analytics real ✅
+- 16 brands, 29 brand agents, 129 reco runs feeding analytics ✅
+- MIGRATION COMPLETE. Remaining: rotate Composio+GenSpark keys (user), optional Google Calendar fold-in.
