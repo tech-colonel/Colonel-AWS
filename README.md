@@ -1,336 +1,261 @@
-# Colonel Automation — RECO Branch
+# 🪖 Colonel-AWS
 
-AI-powered reconciliation platform for Indian CA firms. Five production-ready agents that automate the manual work accountants do today — upload files, run matching, download Excel.
+**Full-stack automation platform for an Indian CA firm** — GST reconciliation, sales MIS, CFO
+dashboards, compliance & statutory trackers, a Zoho Books mirror, a bank-statement classifier, and
+an AI copilot. This repo is a **complete, runnable superset of the live production app** (the
+port-3000 `colonel-automation` / AWS-EC2 deployment), shipped with a snapshot of the real database
+so you can stand up an exact working copy.
 
----
-
-## Agents
-
-| Agent | What It Does | Input Files |
-|---|---|---|
-| **GSTR-2B vs Books** | Matches GSTR-2B portal data against Purchase Register + Debit Note Register. Invoice-level Remark 1 (match status) + Remark 2 (mismatches, RCM, duplicates) + Vendor Summary tab | GSTR-2B (Excel/JSON/CSV), Purchase Register, Debit Note Register |
-| **GSTR-2B vs Books (Multi-State)** | Same as above for brands with multiple GSTINs/states. Adds Remark 3 for cross-state booking errors | GSTR-2B × N states, Purchase Register × N states, Debit Note × N states |
-| **GSTR-3B Journal Entry** | Parses a GSTR-3B file and generates ready-to-post Tally journal entries — ITC credit transfer, output liability set-off, RCM | GSTR-3B (Excel) |
-| **Universal Bank Statement** | Brand-agnostic classifier that maps any Indian bank statement to your Tally chart of accounts. Learns from accountant corrections over time | Bank Statement (Excel), Ledger Master/Chart of Accounts (Tally export, optional after first upload) |
-| **GSTR-1 vs Books** | Matches GSTR-1 outward supplies against Tally sales register + Amazon RTF data | Tally Sales Export, GSTR-1 File, Amazon RTF (optional) |
+> **New here? Read this top to bottom** — it walks you from clone → running app. Deep dives live in
+> the focused docs (see [Documentation map](#-documentation-map)). For AI assistants working in this
+> repo, start at **[CLAUDE.md](CLAUDE.md)**.
 
 ---
 
-## RECO Agent UUIDs
-
-Stable UUIDs seeded by `seed.js` — never change. Every agent opens at `/brands/:brandId/agents/:agentId`.
-
-| Agent | DB name | UUID |
-|---|---|---|
-| GSTR-2B vs Books | `gstr_2b_books` | `d0000000-0000-0000-0000-000000000001` |
-| GSTR-2B vs Books (Multi-State) | `gstr_2b_books_multistate` | `d0000000-0000-0000-0000-000000000002` |
-| GSTR-3B Tally Entry | `gstr_3b_tally_entry` | `d0000000-0000-0000-0000-000000000003` |
-| Universal Bank Statement | `universal_bank_statement` | `d0000000-0000-0000-0000-000000000004` |
-| GSTR-1 vs Books | `gstr_1_vs_books` | `d0000000-0000-0000-0000-000000000005` |
+## 📑 Table of contents
+1. [What it is](#-what-it-is)
+2. [Tech stack](#-tech-stack)
+3. [Architecture at a glance](#-architecture-at-a-glance)
+4. [Repository tree](#-repository-tree)
+5. [Quick start (clone → running app)](#-quick-start-clone--running-app)
+6. [Environment variables](#-environment-variables)
+7. [The database & the seed data](#-the-database--the-seed-data)
+8. [Agent catalog (33 agents)](#-agent-catalog)
+9. [Feature map](#-feature-map)
+10. [Roles & login](#-roles--login)
+11. [Request flow (end to end)](#-request-flow-end-to-end)
+12. [Documentation map](#-documentation-map)
+13. [What's NOT in the repo](#-whats-not-in-the-repo)
 
 ---
 
-## Tech Stack
+## 🎯 What it is
+Automates the work accountants do by hand — GST reconciliation, sales MIS, invoice processing, CFO
+dashboards, compliance workflows — behind a clean, role-based web app. One backend serves many D2C /
+e-commerce **brands**, each with its own isolated database.
 
+This **Colonel-AWS** repo is the **superset**: it merges the live AWS production app + all local
+features into one tree, and ships committed database dumps (`db-seed/`) of the real data. Clone it,
+restore the DB, start three services, and you have a byte-for-byte working copy of production.
+
+---
+
+## 🧱 Tech stack
 | Layer | Technology |
 |---|---|
-| Frontend | React 18, React Router v6, TailwindCSS, Recharts, craco |
-| Backend | Node.js + Express, PostgreSQL (pg), JWT auth, Multer, ExcelJS |
-| Reco Engine | Python 3, pandas, openpyxl, xlrd, thefuzz (HTTP server on port 8765) |
-| Database | PostgreSQL — one database per brand, Row Level Security enforced |
+| **Frontend** | React 18, React Router v6, TailwindCSS, Recharts, `@xyflow/react`, **craco** — port **3000** |
+| **Backend** | Node.js + Express, **Sequelize** over PostgreSQL, JWT auth (bcryptjs), Multer, ExcelJS — port **8001** |
+| **Reco engine** | Python 3 **stdlib** HTTP server, pandas / openpyxl / xlrd / thefuzz — port **8765** |
+| **Database** | PostgreSQL 16 — `colonel-master` + **one DB per brand**, Row-Level Security |
+| **AI / external** | Gemini + Claude (bank classifier + PDF→Bank fallback), Zoho Books, Fireflies, Google Drive/Sheets, n8n, Shopify |
+| **Deploy** | AWS EC2 (t3.small, Mumbai) → served publicly via ngrok; `pm2` process manager |
 
 ---
 
-## Project Structure
-
+## 🏛 Architecture at a glance
 ```
-colonel-automation/
-├── frontend/                              ← React 18 SPA (port 3000)
-│   └── src/pages/accountant/
-│       ├── AgentDispatch.jsx              ← routes /agents/:agentId → correct RECO workspace
-│       ├── BrandAgentsInventory.jsx       ← agent card grid (all agents)
-│       ├── RecoWorkspace.jsx              ← upload + run + results for GST/bank agents
-│       ├── RecoMultiStateWorkspace.jsx    ← multi-state file slot UI
-│       ├── RecoJobDashboard.jsx           ← job analytics + row-level results + download
-│       └── Gstr1Dashboard.jsx            ← GSTR-1 results inline view
-│
-├── new-backend/                           ← Node.js / Express API (port 8001)
-│   ├── server.js                          ← entry point — auto-seeds agents + runs migrations
-│   ├── seed.js                            ← RECO delta seeder (run once after merging)
-│   ├── seeders/01-reco-agents.js          ← inserts 5 RECO agents + brand assignments
-│   ├── .env.example                       ← copy to .env, fill in credentials
-│   ├── scripts/
-│   │   └── classify.py                    ← Universal Bank Statement CLI (subprocess)
-│   └── src/
-│       ├── controllers/
-│       │   ├── recoController.js          ← upload handler, Python proxy, DB saves, Layer 0
-│       │   ├── bankCorrectionsController.js ← corrections CRUD (Layer 0)
-│       │   └── dashboardController.js     ← job history + analytics
-│       └── db/migrations/001_reco_tables.sql ← 8 tables, auto-runs on backend start
-│
-└── reco-engine/                           ← Python Reco Engine (port 8765)
-    ├── server.py                          ← HTTP server entry point
-    ├── requirements.txt                   ← pip install -r this
-    └── recon/
-        ├── gstr_2b_books.py              ← GSTR-2B vs Books core engine (1000+ lines)
-        ├── gstr_2b_books_multistate.py   ← multi-state engine (imports from gstr_2b_books)
-        ├── gstr_3b_tally_entry.py        ← GSTR-3B → Tally journal entries
-        ├── gstr_3b_vs_2b.py             ← GSTR-3B vs 2B comparison
-        ├── gstr_1_vs_books.py           ← GSTR-1 vs Books engine
-        ├── bank_reco.py                 ← bank statement classifier
-        ├── core.py                      ← shared dataclasses
-        └── parsers.py                   ← generic xlsx/xls/csv/json reader
+┌─────────────────────┐   axios    ┌───────────────────────┐  axios proxy  ┌─────────────────────┐
+│  React SPA (craco)   │ ─────────▶ │  Express REST API      │ ────────────▶ │ Python Reco Engine   │
+│  frontend/  :3000    │ ◀───────── │  new-backend/ :8001    │ ◀──────────── │ stdlib http :8765    │
+│  Tailwind + xyflow   │   JSON     │  Sequelize + pg + JWT  │  Excel/JSON   │ pandas / openpyxl    │
+└─────────────────────┘            └──────────┬────────────┘               └─────────────────────┘
+                                              │ pg (5432)
+                                    ┌─────────▼──────────┐   external: Zoho · Fireflies · n8n ·
+                                    │ PostgreSQL          │            Google Drive/Sheets · Shopify
+                                    │ colonel-master +    │
+                                    │ 16 per-brand DBs    │
+                                    └────────────────────┘
 ```
+On EC2 the Node backend also serves the compiled React `build/` — no separate frontend server.
+Full breakdown → **[ARCHITECTURE.md](ARCHITECTURE.md)**.
 
 ---
 
-## Prerequisites
-
-- Node.js 18+
-- Python 3.10+
-- PostgreSQL 14+ (running locally)
-
----
-
-## Setup — Adding RECO to an Existing colonel-automation DB
-
-> This is the common case — you already have users, brands, and sales agents in the DB.
-> The seeder only adds the 5 new RECO agents and never touches existing data.
-
-```bash
-# 1. Pull this branch
-git pull origin RECO
-
-# 2. Backend — install new deps + run the RECO seeder
-cd new-backend
-npm install
-node seed.js
-
-# Expected output:
-# [DB] ✅ Connected to colonel-master
-# [SEED] ✅ RECO agents + brand assignments done
-# [MIGRATE] ✅ colonel-stroom — hero tables ready
-# [MIGRATE] ✅ colonel-koparo — hero tables ready
-# ... one line per brand ...
-# Done. The 5 RECO agents are now active for all brands.
-
-# 3. Install Python deps + start the reco engine (keep it running)
-cd ../reco-engine
-pip install -r requirements.txt
-python3 server.py
-
-# 4. Restart the Node backend (picks up new routes + runs migrations on start)
-cd ../new-backend
-node server.js
-
-# 5. Restart frontend
-cd ../frontend
-npm install
-npx craco start
+## 🌳 Repository tree
+```
+Colonel-AWS/
+├── frontend/                     ← React 18 SPA (craco, :3000)
+│   └── src/{pages,components,lib,context,hooks}
+├── new-backend/                  ← Express API (:8001) — entry: server.js
+│   ├── server.js                 ← boots, runs migrations, seeds agents, app.listen(8001)
+│   ├── seed.js · seeders/        ← agent + assignment seeders
+│   ├── scripts/classify.py       ← Universal Bank Statement CLI (subprocess)
+│   └── src/{controllers,routes,services,models,db,middleware}
+├── reco-engine/                  ← Python reco engine (:8765)
+│   ├── server.py                 ← stdlib HTTP; POST /api/reconcile dispatch on reco_type
+│   └── recon/*.py                ← per-agent reconciliation logic
+├── db-seed/                      ← ★ committed DB snapshots + restore script
+│   ├── dumps/*.dump              ← colonel-master + 16 per-brand DBs (pg_dump custom format)
+│   └── restore.sh                ← one command to rebuild all DBs
+├── README.md · CLAUDE.md · AWS.md · SERVERS.md · RECO.md · DATABASES.md · ARCHITECTURE.md
+└── start-reco.sh · nightly-data-purge.sh · .gitignore
 ```
 
 ---
 
-## Setup — Fresh Install (No Existing DB)
+## 🚀 Quick start (clone → running app)
+**Prerequisites:** Node.js 18+, Python 3.10+, PostgreSQL 16 running locally.
 
 ```bash
 # 1. Clone
-git clone <repo-url>
-cd colonel-automation
+git clone https://github.com/tech-colonel/Colonel-AWS.git
+cd Colonel-AWS
 
-# 2. Configure
+# 2. Restore the real database (creates colonel-master + 16 brand DBs from db-seed/dumps)
+cd db-seed && ./restore.sh          # uses postgres/postgres @ 127.0.0.1:5432 by default
+cd ..
+
+# 3. Backend config + deps
 cd new-backend
-cp .env.example .env
-# Edit .env — set DB_PASSWORD and JWT_SECRET at minimum
+cp .env.example .env                # then edit: DB_PASSWORD, JWT_SECRET, (optional) API keys
 npm install
+cd ..
 
-# 3. Create PostgreSQL databases
-psql -U postgres -c 'CREATE DATABASE "colonel-master"'
-psql -U postgres -c 'CREATE DATABASE "colonel-stroom"'
-psql -U postgres -c 'CREATE DATABASE "colonel-koparo"'
-# Add one per brand — see list in seeders/01-reco-agents.js
+# 4. Python reco-engine deps
+cd reco-engine && pip install -r requirements.txt && cd ..
 
-# 4. Python deps
-cd ../reco-engine
-pip install -r requirements.txt
-
-# 5. Start all three (3 separate terminals)
-
-# Terminal 1 — Python reco engine (must stay running for GST agents)
+# 5. Start all three services (three terminals)
+#    Terminal 1 — Python reco engine (must stay running for GST agents)
 cd reco-engine && python3 server.py
-
-# Terminal 2 — Node backend (auto-creates all tables + seeds agents on first run)
+#    Terminal 2 — Node backend (runs migrations on boot, then listens on 8001)
 cd new-backend && node server.js
-
-# Terminal 3 — Frontend
-cd frontend && npm install && npx craco start
+#    Terminal 3 — Frontend
+cd frontend && npm install && npx craco start     # opens http://localhost:3000
 ```
+Then log in (see [Roles & login](#-roles--login)). Ports/process management → **[SERVERS.md](SERVERS.md)**.
 
-> On first start, `server.js` automatically creates all 8 reco tables and seeds the 5 RECO
-> agent rows. You do NOT need to run `node seed.js` on a completely fresh install.
-> Run `seed.js` only when merging RECO onto an existing DB that already has users/brands.
-
----
-
-## Environment Variables
-
-Copy `new-backend/.env.example` → `new-backend/.env`:
-
-| Variable | Required | Default | Description |
-|---|---|---|---|
-| `DB_PASSWORD` | ✅ | — | PostgreSQL password |
-| `JWT_SECRET` | ✅ | — | Any long random string |
-| `DB_HOST` | — | `localhost` | PostgreSQL host |
-| `DB_PORT` | — | `5432` | PostgreSQL port |
-| `DB_USER` | — | `postgres` | PostgreSQL user |
-| `DB_NAME` | — | `colonel-master` | Master DB name |
-| `PORT` | — | `8001` | Backend port |
-| `PYTHON_RECO_URL` | — | `http://localhost:8765` | Python reco engine URL |
-| `BANK_CLASSIFIER_PATH` | — | `scripts/classify.py` (project-relative) | Path to classify.py |
-| `RECO_TEMP_DIR` | — | `output/temp` (project-relative) | Temp dir for reco jobs |
-| `RECO_OUTPUT_DIR` | — | `output/reco` (project-relative) | Excel output dir |
-| `LEDGER_MASTER_DIR` | — | `output/ledgers` (project-relative) | Saved CoA files per brand |
-| `MAX_CONCURRENT_RECO` | — | `8` | Max parallel reco jobs |
-
----
-
-## Verify Everything is Running
-
+**Verify:**
 ```bash
-curl http://localhost:8001/api/health   # → {"status":"ok","env":"development"}
-curl http://localhost:8765/             # → HTML (Python engine up)
-# Frontend at http://localhost:3000
+curl http://localhost:8001/api/health   # {"status":"ok",...}
+curl http://localhost:8765/             # HTML → engine up
+# Frontend → http://localhost:3000
 ```
 
 ---
 
-## Key API Endpoints
+## 🔐 Environment variables
+Copy `new-backend/.env.example` → `new-backend/.env`. Minimum to run: `DB_PASSWORD`, `JWT_SECRET`.
 
-```
-POST /api/reco/upload                                    ← upload files + run agent
-GET  /api/reco/export/:jobId                             ← download Excel output
-GET  /api/reco/ledger-status/:brandId                    ← check if CoA saved for brand
+| Variable | Required | Purpose |
+|---|---|---|
+| `DB_PASSWORD` | ✅ | PostgreSQL password |
+| `JWT_SECRET` | ✅ | Any long random string (login tokens) |
+| `DB_HOST` / `DB_PORT` / `DB_USER` / `DB_NAME` | — | default `localhost` / `5432` / `postgres` / `colonel-master` |
+| `PYTHON_RECO_URL` | — | default `http://localhost:8765` |
+| `GEMINI_API_KEY` / `ANTHROPIC_API_KEY` | optional | bank classifier + PDF→Bank LLM fallback |
+| Zoho / Google / n8n keys | optional | Zoho Books mirror, Drive/Sheets, invoice webhooks |
+| `SEED_USER_PASSWORD` | optional | password used by `seed-user.js` (was hardcoded; now env-driven) |
 
-GET  /api/dashboard/reco/job/:jobId?brandId=xxx          ← job metadata + row-level results
-GET  /api/dashboard/reco/history/:brandId                ← last 50 jobs for brand
-
-POST /api/bank-reco/corrections/:brandId                 ← save inline UI corrections
-POST /api/bank-reco/corrections/:brandId/upload-excel    ← upload reviewed Excel (CHANGES col)
-POST /api/bank-reco/corrections/:brandId/upload-output   ← bulk-import from previous output
-
-POST /api/auth/login                                     ← JWT login
-GET  /api/brands/my-brands                               ← brands assigned to logged-in user
-GET  /api/brands/:brandId/agents                         ← agents for a brand
-```
+> The core app + reco agents run with just DB + JWT set. Gemini/Anthropic/Zoho/Google keys unlock
+> those specific features. Full DB/connection detail → **[DATABASES.md](DATABASES.md)**.
 
 ---
 
-## Frontend Routing
-
-All agents (RECO and sales) use the same URL pattern:
-
-```
-/brands/:brandId/agents                          ← agent card grid
-/brands/:brandId/agents/:agentId                 ← AgentDispatch → correct workspace
-/brands/:brandId/reco/:agentType/results/:jobId  ← job results / analytics
-```
-
-`AgentDispatch.jsx` maps UUID → workspace:
-- `d0000000-...-000000000002` → `RecoMultiStateWorkspace`
-- Any other RECO UUID → `RecoWorkspace` (with `agentTypeProp`)
-- Sales agent UUID → `AgentWorkspace`
-
----
-
-## Database Schema (per-brand PostgreSQL)
-
-Auto-created on backend startup via `001_reco_tables.sql` (idempotent).
-
-| Table | Purpose |
-|---|---|
-| `reco_jobs` | One row per agent run — agent type, file hash, row counts, Excel download ID |
-| `bank_reco_results` | Bank statement rows — ledger, confidence (High/Medium/Low), corrected flag |
-| `gstr_2b_results` | GSTR-2B vs Books invoice rows (also used by multi-state + 2A+2B agents) |
-| `gstr_2a_2b_results` | 3-way reco rows |
-| `gstr_3b_results` | GSTR-3B vs 2B rows |
-| `gstr_1_results` | GSTR-1 vs Books rows |
-| `gstr_3b_tally_results` | Tally journal entry rows |
-| `bank_reco_corrections` | Per-brand narration → correct ledger corrections (Layer 0) |
-
-Row Level Security on all tables — each brand's data is fully isolated.
-
----
-
-## Universal Bank Statement — How the Learning Loop Works
-
-```
-Run 1: Upload bank statement + Chart of Accounts (Tally ledger export)
-         → CoA saved to disk for this brand — auto-loads on all future runs
-         → Layer 0: checks saved corrections first (instant High confidence)
-         → Layer 1: CoA fuzzy match (thefuzz) → High ≥87 | Medium 72–86 | Low <72
-         → Fallback: Suspense A/c
-
-Accountant reviews results → corrects wrong ledger names → Save
-         → Stored in bank_reco_corrections table
-
-Run 2+: Upload only the bank statement (CoA loads automatically)
-         → More Layer 0 hits → higher percentage of High confidence rows
-         → Accuracy improves with every correction session
-```
-
-CoA files live at `new-backend/output/ledgers/<brandId>.xlsx` — gitignored, not committed.
-
----
-
-## Troubleshooting
-
-**5 RECO agents don't appear after pulling**
+## 🗄 The database & the seed data
+This repo ships the **real database** as `pg_dump` snapshots in `db-seed/dumps/` — `colonel-master`
+(users, brands, agents, assignments, Zoho/compliance/statutory data) + 16 per-brand DBs (reco jobs,
+ledgers, bank corrections, GSTR-3B data). Rebuild everything with:
 ```bash
-cd new-backend && node seed.js
-# Then restart: node server.js
+cd db-seed && ./restore.sh
 ```
-
-**GST agent fails — "Reconciliation engine is not running"**
-```bash
-cd reco-engine && python3 server.py
-curl http://localhost:8765/   # must return HTML
-```
-
-**Universal Bank Statement fails**
-- Python engine does NOT need to be running (uses subprocess, not HTTP)
-- Check `new-backend/scripts/classify.py` exists
-- Check backend logs for `[RECO-UNIVERSAL]` or `[RECO-CORRECTIONS]` lines
-
-**`node seed.js` fails — DB connection error**
-```bash
-brew services list | grep postgresql   # macOS
-# Ensure DB_PASSWORD and DB_USER are correct in new-backend/.env
-```
-
-**CoA not loading for Universal Bank Statement**
-- First run: upload a multi-tab Excel (one tab = bank statement, other = Chart of Accounts)
-- Or use the "Upload Ledger Master" button in the workspace
-- Confirm in backend logs: `[RECO] Ledger master saved for brand ...`
-
-**Migration errors on startup**
-- All SQL uses `IF NOT EXISTS` — safe to restart; existing tables are skipped
+This **DROP+CREATE**s each `colonel*` DB from its dump. After restore, `node new-backend/server.js`
+idempotently (re)ensures per-brand reco tables + master zoho/compliance/statutory tables. Schema,
+RLS, retention, and the superset agent-UUID notes → **[DATABASES.md](DATABASES.md)**.
 
 ---
 
-## Demo Credentials
+## 🤖 Agent catalog
+**33 agents** total. Reco + Bank agents run through the Python engine (`reco_type` dispatch);
+sales/marketplace agents run in Node and persist to per-brand dynamic tables. Deep dive → **[RECO.md](RECO.md)**.
 
-> Passwords are **not** committed. They are set by the local seed scripts
-> (`seed-accountants.js`, etc., which are gitignored) using the convention
-> `<name-before-dot>123`. Ask an admin for credentials.
+**GST Reconciliation**
+- `gstr_2b_books` — GSTR-2B vs Purchase Register + Debit Note Register
+- `gstr_2b_books_multistate` — multi-state variant (adds Remark 3, cross-state)
+- `gstr_1_vs_books` — GSTR-1 outward vs Tally sales + Amazon RTF
+- `einvoice_reco` — E-Invoice Register (B2B/SEZ/DE + CDNR) vs Books  *(UUID `…-008`)*
+- `gstr_3b_tally_entry` — GSTR-3B → ready-to-post Tally journal entries *(standalone tool: multi-file, COA + voucher-type masters, run history)*
 
+**Bank & Finance**
+- `universal_bank_statement` — any Indian bank statement → Tally CoA (learning loop; Gemini/Claude assist)
+- `pdf_bank_extract` — bank statement PDF → Excel (deterministic + Claude fallback)
+
+**Marketplace MIS / Sales** (Node, per-brand tables)
+- Amazon, Blinkit, Cread, FirstCry, Flipkart, JioMart, Limeroad, Mirrow, Myntra, Nykaa, Shopify, Zepto
+- Settlement-Amazon, Total-Sales-Analyzer, Amazon MTR Consolidator
+- `zepto_receivables` — Zepto receivables tracker (Drive-fed)  *(UUID `…-010`)*
+- Order-Cycle (Shopify), Invoice-Processing (n8n → Google Sheet)
+
+---
+
+## 🧩 Feature map
+Beyond agents, the platform includes:
+- **CFO dashboards** — brand financial analytics
+- **Colonel AI** — chat copilot over reconciliations/ledgers (chat/conversation/mcp controllers)
+- **Meetings** — Fireflies meeting notes, per-user
+- **Zoho Books** — read-only mirror of the firm's Zoho org (vendors/customers/vouchers/CoA/items)
+- **Compliance Tracker** — per-brand monthly workflow board (Kanban / List / Calendar)
+- **Statutory Compliance** — 15 filing types, per-brand register (owner-gated)
+- **Composio Marketplace** — 1000+ connectable apps on the Integrations page
+- **Plans / Feedback / Tasks** — admin plan builder, feedback loop, task board
+- **Admin analytics** — real-time cross-brand usage (fed by `reco_jobs`; sales runs recorded via `agentRunTracker`)
+
+> Statutory / Zoho / Composio are **owner-gated to `chauhandhaval932@gmail.com` (an accountant)** —
+> don't change that user's role to admin.
+
+---
+
+## 👤 Roles & login
+Three sidebar roles (from `frontend/src/lib/adminNav.js` → `sidebarFor()`): **admin**, **accountant**,
+**developer**. Admin sees all brands + analytics; accountant is brand-scoped; developer sees Colonel
+AI / Feedback / Plans.
+
+Seed logins (from the shipped DB; passwords are bcrypt hashes — these are the known demo ones):
 | Role | Email | Password |
 |---|---|---|
-| Admin | `chauhandhaval932@gmail.com` | `<set via seed script>` |
-| Accountant | `priya@colonel.app` | `<set via seed script>` |
-| Accountant | `rahul@colonel.app` | `<set via seed script>` |
+| Admin | `admin@colonel.app` | `Admin@123` |
+| Admin | `dhaval.colonel@gmail.com` | `dhaval123` |
+| **Accountant (feature owner)** | `chauhandhaval932@gmail.com` | `Admin@123` |
 
 ---
 
-## License
+## 🔄 Request flow (end to end)
+```
+Browser (RecoWorkspace / Gstr3bTallyWorkspace / sales workspace)
+   │  multipart upload (files + agent type)
+   ▼
+Node backend  new-backend/src/controllers/*      ──┐ fire-and-forget DB save (setImmediate)
+   POST /api/reco/upload  |  /api/brands/:id/gstr3b/upload  │  → per-brand Postgres
+   │  axios proxy, field reco_type                          ▼
+   ▼                                              reco_jobs + *_results  (admin analytics feed)
+Python engine :8765  POST /api/reconcile
+   dispatch on reco_type → recon/<agent>.py → build Excel
+   │
+   ▼  GET /api/jobs/{id}/export.xlsx → download
+```
+Reco internals → [RECO.md](RECO.md) · persistence → [DATABASES.md](DATABASES.md).
 
-Private — Colonel Automation © 2025
+---
+
+## 📚 Documentation map
+| Doc | Read it when… |
+|---|---|
+| **[CLAUDE.md](CLAUDE.md)** | You're an AI assistant / new dev — lean index: overview, stack, tree, flow, golden rules, doc pointers |
+| **[ARCHITECTURE.md](ARCHITECTURE.md)** | You need the full app map — every page, route mount, controller, service, agent |
+| **[SERVERS.md](SERVERS.md)** | Starting/restarting services, ports, pm2, health checks, fresh-machine bring-up |
+| **[RECO.md](RECO.md)** | Working on the Python reco engine or any agent (2B/2A-2B/3B/GSTR-1/E-Invoice/bank/GSTR-3B Tally/Zepto) |
+| **[DATABASES.md](DATABASES.md)** | Touching the DB — schema, RLS, migrations, per-brand tables, seed/restore |
+| **[AWS.md](AWS.md)** | Deploying/operating the live EC2 site — deploy flow, crons, backups, the Nov 7 2026 deadline |
+
+---
+
+## 🚫 What's NOT in the repo
+Standard for any project — regenerate/provide these locally:
+- `node_modules/` — run `npm install` (frontend + new-backend)
+- `new-backend/.env` — copy from `.env.example` and fill in secrets (DB, JWT, API keys)
+- `new-backend/output/ledgers/*.xlsx` — per-deployment Chart-of-Accounts files
+- Real third-party API keys (Gemini, Anthropic, Zoho, Google service account) — supply your own
+
+Everything else — full source, seeders, and the real database snapshot — is here.
+
+---
+*Private — Colonel Automation. Superset of the live production platform.*
