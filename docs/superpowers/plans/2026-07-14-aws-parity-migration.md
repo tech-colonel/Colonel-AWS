@@ -557,3 +557,8 @@ git worktree remove ../colonel-aws-parity 2>/dev/null || echo "(remove manually 
 - 3000 untouched except DB data ✅ · UUIDs from 3000 ✅ · both sides backed up ✅ · unified-only end state ✅
 
 **Fill at execution time:** `<ami-id>`, dump dir ts, AWS admin password (smoke tests), rotated key values (box `.env` only).
+
+## Phase 0 — EXECUTED 2026-07-14
+- **AMI (pre-parity rollback):** `ami-07d0e3d7f7b1c44a7` (colonel-pre-parity-20260714-191534) — state `available`.
+- **Local unified DB backup:** `scratchpad-backups/aws-parity-20260714-191531/local_unified_PHASE0.dump` (1.23 MB).
+- **On-box backups:** `/tmp/opt_colonel_backup_1784036729.tgz` (137M) + `/tmp/fe_build_backup_1784036729` (11M) + `/tmp/app.js_backup_1784036729` + `/tmp/backend_env_backup_1784036729`.
