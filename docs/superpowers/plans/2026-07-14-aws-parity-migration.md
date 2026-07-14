@@ -567,3 +567,8 @@ git worktree remove ../colonel-aws-parity 2>/dev/null || echo "(remove manually 
 - AWS FROZEN: `colonel-backend` + `ngrok` stopped (reco-engine up); public URL 404.
 - All 17 DBs dumped (stdout-redirect to avoid postgres-user perm issue) → `scratchpad-backups/aws-parity-20260714-191531/aws-dumps/`.
 - Freshness verified: colonel-koparo latest reco_job = 2026-07-14 15:46 IST (post-snapshot run captured).
+
+## Phase 2 — EXECUTED 2026-07-14
+- Rebuilt unified from frozen AWS dumps (refresh-from-aws.sh): 16 brands loaded, reco_jobs=129 (latest 2026-07-14 17:21 IST), statutory_filings=2367, statutory_config=4, agents=32, legacy d0000000 ids=0 (3000 UUIDs), chauhandhaval932 → 7 brands.
+- Swapped clone → live local `colonel_agent_accountant`; old kept as `colonel_agent_accountant_preparity` (rollback). Local backend restarted, admin login OK.
+- Deploy dump refreshed + committed: `db-seed/dumps/colonel_agent_accountant.dump` (1.26 MB) = Phase-4 deploy artifact.
