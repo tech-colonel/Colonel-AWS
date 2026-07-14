@@ -36,6 +36,13 @@ logger = logging.getLogger(__name__)
 # learned template), never by full re-extraction.
 _MAX_LLM_EXTRACT_PAGES = 5
 
+# OCR fallback caps — OCR (rasterise + re-parse a big image PDF) is memory-heavy and
+# the production reco engine runs on a small (2 GB) shared box; an OOM there would
+# crash ALL agents. So only OCR scans within these limits; larger scans get a clear
+# "too large for the server" message instead of risking the engine.
+_MAX_OCR_BYTES = 40_000_000     # ~40 MB input (≈35 high-res scanned pages)
+_MAX_OCR_PAGES = 35
+
 # ──────────────────────────────────────────────────────────────────
 # Column header keyword lists (lowercase substring match)
 # ──────────────────────────────────────────────────────────────────
@@ -299,7 +306,7 @@ def _data_bands(data_lines, lo: float, hi: float, page_w: int) -> list[list[int]
     return bands
 
 
-_AMOUNT_TOKEN_RE = re.compile(r'^\(?-?[\d,]*\d\.\d{1,2}\)?(?:\s*[dc]r\.?)?$', re.I)
+_AMOUNT_TOKEN_RE = re.compile(r'^\(?-?[\d,]*\d\.\d{1,2}\)?(?:\s*\(?[dc]r\.?\)?)?$', re.I)
 
 
 def _looks_amount(text: str) -> bool:
@@ -374,6 +381,34 @@ def _split_region(data_lines, lo, hi, page_w, hwords) -> Optional[list[dict]]:
     return best
 
 
+def _text_boundary(data_lines: list, lo: float, hi: float, n: int = 300) -> Optional[float]:
+    """For two adjacent LEFT-aligned text columns, find the vertical whitespace
+    corridor in the DATA between them (within [lo, hi]) and return its midpoint.
+    Returns None when there's no clear corridor — i.e. the right column is (nearly)
+    empty, so the caller keeps the left column extended to the next header. This
+    handles both a right column whose data starts LEFT of its header (Union Bank
+    Remarks) and an empty right column that must not steal overflow (IDFC ref)."""
+    spans = []
+    for ln in data_lines[:n]:
+        for w in ln['words']:
+            if w['x1'] > lo and w['x0'] < hi:
+                spans.append((max(w['x0'], lo), min(w['x1'], hi)))
+    if len(spans) < 2:
+        return None
+    spans.sort()
+    merged = [list(spans[0])]
+    for a, b in spans[1:]:
+        if a <= merged[-1][1] + 0.5:
+            merged[-1][1] = max(merged[-1][1], b)
+        else:
+            merged.append([a, b])
+    if len(merged) < 2:
+        return None
+    gap, mid = max(((a2 - b1, (b1 + a2) / 2.0) for (_, b1), (a2, _) in zip(merged, merged[1:])),
+                   key=lambda t: t[0])
+    return mid if gap >= 3.0 else None
+
+
 def _detect_columns(page, header: dict, data_lines: list[dict]) -> Optional[list[dict]]:
     """Cluster header words into columns by X-gap (cleanly separates text
     columns from right-aligned amount columns), then split any cluster whose
@@ -408,9 +443,12 @@ def _detect_columns(page, header: dict, data_lines: list[dict]) -> Optional[list
 
     def _boundary(i: int) -> float:
         cl, nxt = clusters[i], clusters[i + 1]
-        if ctags[i] not in _NUMERIC_TAGS and ctags[i + 1] not in _NUMERIC_TAGS:
-            return float(nxt['x0'])                       # text → text: left column owns the gap
-        return (cl['x1'] + nxt['x0']) / 2.0               # midpoint otherwise
+        if ctags[i] in _NUMERIC_TAGS or ctags[i + 1] in _NUMERIC_TAGS:
+            return (cl['x1'] + nxt['x0']) / 2.0           # amount involved → header midpoint
+        # text → text: split at the DATA whitespace corridor between the two columns;
+        # if none (right column empty), the left column owns the gap up to next header.
+        b = _text_boundary(data_lines, float(cl['x0']), float(nxt['x1']))
+        return b if b is not None else float(nxt['x0'])
 
     regions: list[tuple[float, float, dict]] = []
     for i, cl in enumerate(clusters):
@@ -519,6 +557,15 @@ def _tag_key(columns: list[dict], tag: str) -> Optional[str]:
 
 
 def _is_header_like(cells: dict, columns: list[dict]) -> bool:
+    # A real data row is never a repeated header: bail out if the date column holds a
+    # real date, or any amount/balance cell holds a money value. (Guards against a
+    # narration like "CARDLESS DEPOSIT" tripping the header-keyword count below.)
+    dk = _primary_date_key(columns)
+    if dk and _leading_date(cells.get(dk, ''))[0]:
+        return False
+    for c in columns:
+        if c['tag'] in _NUMERIC_TAGS and _looks_amount((cells.get(c['key'], '') or '').strip()):
+            return False
     hits = 0
     for c in columns:
         if c['tag'] != 'other' and _tag_for(cells.get(c['key'], '')):
@@ -544,11 +591,20 @@ def _build_transactions(all_lines: list[dict], columns: list[dict]) -> list[dict
         d = max(0.0, _parse_amount(cells.get(debit_key))) if debit_key else 0.0
         c = max(0.0, _parse_amount(cells.get(credit_key))) if credit_key else 0.0
         if amount_key and not (debit_key or credit_key):
-            amt = abs(_parse_amount(cells.get(amount_key)))
+            raw = str(cells.get(amount_key, '') or '')
+            amt = abs(_parse_amount(raw))
             flag = (cells.get(drcr_key, '') if drcr_key else '').strip().upper()
-            if flag.startswith('C'):       # CR → money in (payment/refund) = credit
+            if not flag:
+                # No separate DR/CR column — direction is embedded in the amount cell
+                # itself, e.g. Union Bank "228.00(Dr)" / "1500.00(Cr)".
+                low = raw.lower()
+                if '(cr)' in low or low.rstrip().endswith('cr'):
+                    flag = 'C'
+                elif '(dr)' in low or low.rstrip().endswith('dr'):
+                    flag = 'D'
+            if flag.startswith('C'):        # CR → money in (payment/refund) = credit
                 c = amt
-            else:                           # DR / blank → money out (purchase) = debit
+            else:                            # DR / blank → money out (purchase) = debit
                 d = amt
         return d, c
 
@@ -671,7 +727,13 @@ def _build_transactions(all_lines: list[dict], columns: list[dict]) -> list[dict
         cells_out: dict = {}
         for c in columns:
             k = c['key']
-            if c['tag'] in _NUMERIC_TAGS:
+            if c['tag'] == 'amount':
+                # A single amount column may embed the direction ("1500.00(Cr)").
+                # Preserve that text verbatim so Cr/Dr isn't lost; keep a plain amount
+                # numeric (e.g. credit-card statements) so totals/format still work.
+                raw = str(a['raw_cells'].get(k, '') or '').strip()
+                cells_out[k] = _clean_text(raw) if re.search(r'[A-Za-z]', raw) else max(0.0, _parse_amount(raw))
+            elif c['tag'] in _NUMERIC_TAGS:
                 amt = _parse_amount(a['raw_cells'].get(k))
                 cells_out[k] = amt if c['tag'] == 'balance' else max(0.0, amt)
             elif k == date_key:
@@ -1196,6 +1258,23 @@ def _looks_like_statement(text: str) -> bool:
     return pos >= 1 and pos >= neg       # else require an explicit statement indicator
 
 
+def _reject_scanned(too_large: bool = False) -> dict:
+    """Scanned / image-only PDF (no text layer) where OCR was unavailable, failed, or
+    the scan was too large to OCR safely on the server."""
+    msg = ("This scanned PDF is too large for the server to OCR right now (limit ~12 MB / 15 pages). "
+           "Please upload a smaller / lower-resolution scan, or a text-based digital statement."
+           if too_large else
+           "This looks like a scanned / image-only PDF (no text layer) and automatic OCR could not "
+           "read it. Please upload a text-based (digital) statement, or a clearer scan.")
+    return {
+        "bank_name": "", "account_no": "", "account_name": "",
+        "period_from": "", "period_to": "", "columns": [],
+        "transaction_count": 0, "transactions": [],
+        "validation": {"verified": False, "verify_method": "scanned", "error": msg},
+        "preview_rows": [],
+    }
+
+
 def _reject_unreadable() -> dict:
     """Graceful message for an encrypted / password-protected / corrupt PDF that
     pdfplumber cannot open — never a 500. (iLovePDF auto-unlock / a UI password
@@ -1257,7 +1336,69 @@ def _llm_extract_safe(pdf_bytes: bytes, all_text: str, meta: dict) -> Optional[d
         return None
 
 
-def extract_bank_statement(pdf_bytes: bytes, password: str = "") -> dict:
+def _infer_columns_headerless(raw_lines: list, page_w: float) -> Optional[list[dict]]:
+    """Infer a column layout for a statement that prints NO column-header row.
+    Uses the DATA geometry: rows that start with a date are anchors; right-aligned
+    money tokens cluster into the amount columns (rightmost = balance); the left
+    date token(s) and the wide middle text become Date/Value Date/Narration.
+    Returns columns (same shape as _detect_columns) or None. The caller accepts the
+    result only if the running balance reconciles, so a wrong guess is discarded."""
+    import statistics
+    anchors = []
+    for ln in raw_lines:
+        ws = sorted(ln['words'], key=lambda w: w['x0'])
+        if ws and _leading_date(ws[0]['text'])[0]:
+            anchors.append(ws)
+    if len(anchors) < 5:
+        return None
+    rights = sorted(_right_edge_columns([{'words': ws} for ws in anchors], 0.0, page_w, tol=6.0))
+    if len(rights) < 2:
+        return None
+    amt_left = max(0.0, 2 * rights[0] - rights[1])   # left edge of the amount block
+
+    # Leading date column(s): first token is a date; an optional 2nd date = value date.
+    d1x1 = statistics.median([ws[0]['x1'] for ws in anchors])
+    d2 = [ws[1] for ws in anchors if len(ws) > 1 and _leading_date(ws[1]['text'])[0] and ws[1]['x1'] < amt_left]
+    has_vdate = len(d2) >= 0.6 * len(anchors)
+
+    cols: list[dict] = []
+    def add(header, tag, x0, x1, primary=False, right_x=None):
+        cols.append({'key': f'c{len(cols)}', 'header': header, 'tag': tag,
+                     'x0': float(x0), 'x1': float(x1), 'is_primary_date': primary, 'right_x': right_x})
+
+    if has_vdate:
+        d2x0 = statistics.median([w['x0'] for w in d2]); d2x1 = statistics.median([w['x1'] for w in d2])
+        date_x1 = (d1x1 + d2x0) / 2
+        add('Date', 'date', 0.0, date_x1, primary=True)
+        add('Value Date', 'date', date_x1, d2x1 + 3)
+        narr_x0 = d2x1 + 3
+    else:
+        date_x1 = d1x1 + 3
+        add('Date', 'date', 0.0, date_x1, primary=True)
+        narr_x0 = date_x1
+    if narr_x0 >= amt_left - 5:
+        return None                                   # no room for a description column
+    add('Narration', 'narr', narr_x0, amt_left)
+
+    # Amount columns: rightmost = balance; 3 → Withdrawal/Deposit/Balance; 2 → Amount/Balance.
+    n = len(rights)
+    tags = ['other'] * n
+    tags[-1] = 'balance'
+    hdrs = {'balance': 'Balance'}
+    if n >= 3:
+        tags[-3], tags[-2] = 'debit', 'credit'
+        hdrs.update({'debit': 'Withdrawal', 'credit': 'Deposit'})
+    elif n == 2:
+        tags[-2] = 'debit'
+        hdrs['debit'] = 'Amount'
+    for i, R in enumerate(rights):
+        x0 = amt_left if i == 0 else (rights[i - 1] + R) / 2
+        x1 = page_w if i == n - 1 else (R + rights[i + 1]) / 2
+        add(hdrs.get(tags[i], f'Amount {i + 1}'), tags[i], x0, x1, right_x=R)
+    return cols
+
+
+def extract_bank_statement(pdf_bytes: bytes, password: str = "", _allow_ocr: bool = True) -> dict:
     import pdfplumber
 
     columns: Optional[list[dict]] = None
@@ -1275,19 +1416,55 @@ def extract_bank_statement(pdf_bytes: bytes, password: str = "") -> dict:
         return _reject_unreadable()
     with _pdf as pdf:
         n_pages = len(pdf.pages)
-        all_text = "\n".join(pg.extract_text() or "" for pg in pdf.pages)
+        # Extract text page-by-page and flush each page's cache — bounds memory on large
+        # / image-heavy (OCR'd) PDFs so pdfplumber never holds all pages at once (a 30-page
+        # OCR'd scan otherwise balloons to >1 GB and OOMs the small shared box).
+        _parts = []
+        for pg in pdf.pages:
+            _parts.append(pg.extract_text() or "")
+            try:
+                pg.flush_cache()
+            except Exception:
+                pass
+        all_text = "\n".join(_parts)
+        # No-text-layer PDF (scanned, or fonts flattened to vector outlines): pdfplumber
+        # sees no words. OCR it ONCE via iLovePDF (fallback only — gated to this case so
+        # normal statements never incur OCR cost) and re-extract on the searchable copy.
+        if _allow_ocr and not all_text.strip() and \
+                sum(len(pg.extract_words()) for pg in pdf.pages[:8]) == 0:
+            # Protect the small shared box: OCR (rasterise + re-parse) is memory-heavy,
+            # so skip very large scans rather than risk OOM-ing the engine for all agents.
+            if len(pdf_bytes) > _MAX_OCR_BYTES or n_pages > _MAX_OCR_PAGES:
+                logger.warning("Scanned PDF too large for server OCR (%.1f MB, %d pages) — skipping.",
+                               len(pdf_bytes) / 1e6, n_pages)
+                return _reject_scanned(too_large=True)
+            from recon import ilovepdf_ocr
+            logger.info("No text layer in %d-page PDF — attempting iLovePDF OCR fallback.", n_pages)
+            ocr_bytes = ilovepdf_ocr.ocr_pdf(pdf_bytes, filename="statement.pdf")
+            if ocr_bytes:
+                res = extract_bank_statement(ocr_bytes, password="", _allow_ocr=False)
+                ocr_bytes = None
+                import gc
+                gc.collect()
+                return res
+            return _reject_scanned()
         p0 = pdf.pages[0]
         header_text = " ".join(w['text'] for w in p0.extract_words()
                                if w['top'] < p0.height * 0.40)
         meta = _extract_metadata(pdf, header_text, all_text)
 
         y_offset = 0.0
+        all_raw_lines: list[dict] = []   # every positioned line — for the headerless fallback
+        page_w = 0.0
         for page_num, page in enumerate(pdf.pages):
+            page_w = max(page_w, float(page.width))
             words = page.extract_words(x_tolerance=1.5, y_tolerance=3, keep_blank_chars=False)
             if not words:
                 y_offset += float(page.height)
                 continue
             lines = _group_lines(words)
+            for ln in lines:
+                all_raw_lines.append({'y': y_offset + ln['y'], 'words': ln['words']})
 
             if columns is None:
                 header = _find_header_band(lines)
@@ -1310,6 +1487,27 @@ def extract_bank_statement(pdf_bytes: bytes, password: str = "") -> dict:
                     'cells': _assign_cells(ln['words'], columns),
                 })
             y_offset += float(page.height)
+            try:
+                page.flush_cache()      # release this page before the next (memory-bounded)
+            except Exception:
+                pass
+
+    # Headerless-table fallback: some statements (e.g. SBI) print NO column-header row,
+    # so _find_header_band never fires. Infer the columns from the DATA geometry and
+    # accept ONLY if the running balance reconciles — a wrong guess can't self-verify,
+    # so this can't silently corrupt output.
+    if columns is None:
+        inferred = _infer_columns_headerless(all_raw_lines, page_w)
+        if inferred:
+            hl_lines = [{'y': ln['y'], 'cells': _assign_cells(ln['words'], inferred)} for ln in all_raw_lines]
+            hl_txns = _build_transactions(hl_lines, inferred)
+            hl_res = _finalize(hl_txns, inferred, meta)
+            if hl_txns and hl_res["validation"].get("verified"):
+                logger.info("Headerless inference verified: %d txns, %d cols.", len(hl_txns), len(inferred))
+                hl_res["validation"]["verify_method"] += "+headerless"
+                return hl_res
+            logger.info("Headerless inference did not verify (%d txns) — falling through.",
+                        len(hl_txns) if hl_txns else 0)
 
     if columns is not None:
         bank = meta.get("bank_name", "")
@@ -1551,9 +1749,19 @@ def build_pdf_bank_excel(data: dict) -> bytes:
         put(summ + 1, credit_i, f"=SUM({get_column_letter(credit_i)}2:{get_column_letter(credit_i)}{last_row})",
             VAL_FILL, VAL_FONT, RIGHT, '#,##0.00')
     if amount_i and not (debit_i or credit_i):
+        amt_key = columns[amount_i - 1]["key"]
+        amount_is_text = any(isinstance(t.get("cells", {}).get(amt_key), str) and t["cells"][amt_key].strip()
+                             for t in txns)
         put(summ, amount_i, f"Total {_hdr(amount_i)}", LBL_FILL, LBL_FONT, CENTER)
-        put(summ + 1, amount_i, f"=SUM({get_column_letter(amount_i)}2:{get_column_letter(amount_i)}{last_row})",
-            VAL_FILL, VAL_FONT, RIGHT, '#,##0.00')
+        if amount_is_text:
+            # Direction embedded in the amount text (Cr/Dr) — a raw SUM mixes deposits
+            # and withdrawals, so show the parsed Deposit(Cr) / Withdrawal(Dr) totals.
+            put(summ + 1, amount_i,
+                f"Cr {val.get('computed_total_credit', 0):,.2f}  |  Dr {val.get('computed_total_debit', 0):,.2f}",
+                VAL_FILL, VAL_FONT, RIGHT)
+        else:
+            put(summ + 1, amount_i, f"=SUM({get_column_letter(amount_i)}2:{get_column_letter(amount_i)}{last_row})",
+                VAL_FILL, VAL_FONT, RIGHT, '#,##0.00')
     if bal_i:
         put(summ, bal_i, f"Closing {_hdr(bal_i)}", LBL_FILL, LBL_FONT, CENTER)
         put(summ + 1, bal_i, val.get("closing_balance"), VAL_FILL, VAL_FONT, RIGHT, '#,##0.00')

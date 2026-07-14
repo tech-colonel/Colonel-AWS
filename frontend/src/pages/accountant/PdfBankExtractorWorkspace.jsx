@@ -85,7 +85,7 @@ export default function PdfBankExtractorWorkspace() {
         onUploadProgress: (evt) => {
           if (evt.total) setUploadProgress(Math.round((evt.loaded / evt.total) * 100));
         },
-        timeout: 300000, // 5 min for large PDFs
+        timeout: 600000, // 10 min — covers large scanned PDFs that go through OCR (+ retry)
       });
       // Password-protected / unreadable PDF → prompt for the password instead of showing a result.
       if (res.data?.validation?.verify_method === 'unreadable') {
