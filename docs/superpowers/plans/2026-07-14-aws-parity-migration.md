@@ -572,3 +572,8 @@ git worktree remove ../colonel-aws-parity 2>/dev/null || echo "(remove manually 
 - Rebuilt unified from frozen AWS dumps (refresh-from-aws.sh): 16 brands loaded, reco_jobs=129 (latest 2026-07-14 17:21 IST), statutory_filings=2367, statutory_config=4, agents=32, legacy d0000000 ids=0 (3000 UUIDs), chauhandhaval932 → 7 brands.
 - Swapped clone → live local `colonel_agent_accountant`; old kept as `colonel_agent_accountant_preparity` (rollback). Local backend restarted, admin login OK.
 - Deploy dump refreshed + committed: `db-seed/dumps/colonel_agent_accountant.dump` (1.26 MB) = Phase-4 deploy artifact.
+
+## Phase 3 — EXECUTED 2026-07-14 (read-only prep; NO 3000 code edits, per constraint)
+- PDF→Bank: box == local IDENTICAL (pdf_bank_extractor.py + ilovepdf_ocr.py) — rsync safe, nothing lost.
+- AWS Meetings = Google Calendar `GET /api/calendar/upcoming` (upcoming events + Meet links via googleCalendarService). Complementary to 3000's Fireflies. Decision: deploy 3000 Fireflies at cutover; fold in Google Calendar "upcoming" as a POST-cutover follow-up (needs service+frontend+app.js = 3000 code edits, deferred).
+- All 3 feature keys present in local .env (COMPOSIO_API_KEY, GSK_API_KEY, FIREFLIES_API_KEY). box.env.template built = box .env + DB_NAME=colonel_agent_accountant + USE_UNIFIED_DB=true + the 3 keys. (Composio+GenSpark keys were exposed → rotate.)
