@@ -577,3 +577,12 @@ git worktree remove ../colonel-aws-parity 2>/dev/null || echo "(remove manually 
 - PDF→Bank: box == local IDENTICAL (pdf_bank_extractor.py + ilovepdf_ocr.py) — rsync safe, nothing lost.
 - AWS Meetings = Google Calendar `GET /api/calendar/upcoming` (upcoming events + Meet links via googleCalendarService). Complementary to 3000's Fireflies. Decision: deploy 3000 Fireflies at cutover; fold in Google Calendar "upcoming" as a POST-cutover follow-up (needs service+frontend+app.js = 3000 code edits, deferred).
 - All 3 feature keys present in local .env (COMPOSIO_API_KEY, GSK_API_KEY, FIREFLIES_API_KEY). box.env.template built = box .env + DB_NAME=colonel_agent_accountant + USE_UNIFIED_DB=true + the 3 keys. (Composio+GenSpark keys were exposed → rotate.)
+
+## Phase 4 + 5 — EXECUTED 2026-07-14 (CUTOVER SUCCESSFUL)
+- 4.1 rsync code (excludes preserved output/reco 70 files); all 7 missing routes + zepto_receivables.py landed.
+- 4.2 restore.sh over TCP → colonel_agent_accountant created (brands=16, statutory=2367, reco_jobs=129), colonel_app+RLS; 17 per-brand DBs kept (18 DBs).
+- 4.3 uploaded unified .env (USE_UNIFIED_DB=true, DB_NAME=colonel_agent_accountant, COMPOSIO/GSK/FIREFLIES keys). Box .env pre-cutover backed up to /tmp.
+- 4.4 frontend rebuilt on box (npm install --legacy-peer-deps + build OK).
+- 4.5 relaunch: backend+reco-engine+ngrok online; boot log = unified mode, zoho/compliance/statutory ready, port 8001, no boot errors.
+- 5.1 LIVE smoke: site 200, admin login OK (dhaval.colonel/dhaval123), statutory admin summary = 5 brands, dashboard analytics live (lastRun 2026-07-14T10:16).
+- PENDING: rotate Composio+GenSpark keys (user), broad feature verification, push branch to colonel-aws.
