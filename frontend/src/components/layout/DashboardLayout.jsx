@@ -155,11 +155,15 @@ const Sidebar = ({ items, isOpen, setIsOpen }) => {
 
           {/* Nav */}
           <nav className="flex-1 px-3 py-4 space-y-1 overflow-y-auto" data-testid="sidebar-nav">
-            {items.map((item) => {
+            {items.map((item, idx) => {
               const active = location.pathname === item.path;
               return (
                 <button
-                  key={item.path}
+                  // Key by unique testId (falls back to path+index). Brand-scoped
+                  // items (Dashboard/Agents/Tracker) all resolve to /brands when no
+                  // brand is selected yet, so keying by path collided → React
+                  // "duplicate key" warning on global pages (Tasks/Plans).
+                  key={item.testId || `${item.path}-${idx}`}
                   onClick={() => { navigate(item.path); setIsOpen(false); }}
                   data-testid={item.testId}
                   className="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-semibold transition-colors"
