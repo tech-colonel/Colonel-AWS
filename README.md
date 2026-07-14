@@ -319,11 +319,15 @@ brew services list | grep postgresql   # macOS
 
 ## Demo Credentials
 
+> Passwords are **not** committed. They are set by the local seed scripts
+> (`seed-accountants.js`, etc., which are gitignored) using the convention
+> `<name-before-dot>123`. Ask an admin for credentials.
+
 | Role | Email | Password |
 |---|---|---|
-| Admin | `chauhandhaval932@gmail.com` | `Admin@123` |
-| Accountant | `priya@colonel.app` | `Accountant@123` |
-| Accountant | `rahul@colonel.app` | `Accountant@123` |
+| Admin | `chauhandhaval932@gmail.com` | `<set via seed script>` |
+| Accountant | `priya@colonel.app` | `<set via seed script>` |
+| Accountant | `rahul@colonel.app` | `<set via seed script>` |
 
 ---
 

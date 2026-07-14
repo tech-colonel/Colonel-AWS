@@ -1,48 +1,52 @@
 #!/usr/bin/env bash
-# db-seed/restore.sh — restore the full Colonel-AWS superset databases from the
-# committed pg_dump snapshots in ./dumps/.
+# db-seed/restore.sh — restore the SINGLE unified Colonel database.
 #
-# Recreates colonel-master + every per-brand DB (colonel-<brand>) with the real
-# superset data (16 brands, reco history, ledgers, users, agents, assignments).
+# The app is unified by default now: all brands share ONE database
+# (colonel_agent_accountant) with Postgres RLS isolation, instead of one DB per
+# brand. Just restore this one dump and go.
 #
-# Usage:
-#   cd db-seed && ./restore.sh
+# Usage:   cd db-seed && ./restore.sh
+# Connection (override via env; sensible local defaults):
+#   PGHOST (127.0.0.1)  PGPORT (5432)  PGSUPER (postgres)  PGPASSWORD (postgres)
 #
-# Connection (override via env, sensible local defaults):
-#   PGHOST (127.0.0.1)  PGPORT (5432)  PGUSER (postgres)  PGPASSWORD (postgres)
-#
-# WARNING: this DROPs and recreates each colonel* database it finds a dump for.
-# It only touches databases present in ./dumps/. Back up first if you have local data.
+# WARNING: DROPs and recreates the unified database. Back up first if you have local data.
 set -euo pipefail
 
 export PGHOST="${PGHOST:-127.0.0.1}"
 export PGPORT="${PGPORT:-5432}"
-export PGUSER="${PGUSER:-postgres}"
+export PGSUPER="${PGSUPER:-postgres}"
 export PGPASSWORD="${PGPASSWORD:-postgres}"
 
-DIR="$(cd "$(dirname "$0")/dumps" && pwd)"
-echo "Restoring superset DBs from: $DIR"
-echo "Target: $PGUSER@$PGHOST:$PGPORT"
+HERE="$(cd "$(dirname "$0")" && pwd)"
+DB="${UNIFIED_DB_NAME:-colonel_agent_accountant}"
+APP_USER="${DB_APP_USER:-colonel_app}"
+APP_PASS="${DB_APP_PASSWORD:-colonel_app_local}"
+DUMP="$HERE/dumps/colonel_agent_accountant.dump"
+
+[ -f "$DUMP" ] || { echo "ERROR: dump not found at $DUMP"; exit 1; }
+echo "Restoring unified DB '$DB' from $DUMP"
+echo "Target: $PGSUPER@$PGHOST:$PGPORT"
 echo
 
-shopt -s nullglob
-dumps=("$DIR"/*.dump)
-if [ ${#dumps[@]} -eq 0 ]; then echo "No .dump files found in $DIR"; exit 1; fi
+echo "==> Ensuring non-superuser app role '$APP_USER' (RLS bites only for non-superusers)"
+psql -U "$PGSUPER" -d postgres -tc "SELECT 1 FROM pg_roles WHERE rolname='$APP_USER'" | grep -q 1 \
+  || psql -U "$PGSUPER" -d postgres -c "CREATE ROLE \"$APP_USER\" LOGIN PASSWORD '$APP_PASS';"
 
-for dump in "${dumps[@]}"; do
-  db="$(basename "$dump" .dump)"
-  echo "==> $db"
-  # terminate any live connections so DROP can proceed
-  psql -d postgres -tAc \
-    "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='$db' AND pid<>pg_backend_pid()" \
-    >/dev/null 2>&1 || true
-  dropdb --if-exists "$db"
-  createdb "$db"
-  pg_restore --no-owner --no-privileges -d "$db" "$dump" 2>&1 | grep -vi "already exists" || true
-  echo "    restored $db"
-done
+echo "==> (Re)creating database $DB"
+psql -U "$PGSUPER" -d postgres -tAc \
+  "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='$DB' AND pid<>pg_backend_pid()" >/dev/null 2>&1 || true
+dropdb -U "$PGSUPER" --if-exists "$DB"
+createdb -U "$PGSUPER" "$DB"
+
+echo "==> Restoring (schema + data + RLS policies + brand_id defaults)"
+pg_restore -U "$PGSUPER" --no-owner -d "$DB" "$DUMP" 2>&1 | grep -vi "already exists" || true
+
+echo "==> Ensuring $APP_USER privileges (RLS policies in the dump scope it per-brand)"
+psql -U "$PGSUPER" -d "$DB" -c "GRANT USAGE ON SCHEMA public TO \"$APP_USER\";"
+psql -U "$PGSUPER" -d "$DB" -c "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO \"$APP_USER\";"
+psql -U "$PGSUPER" -d "$DB" -c "GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO \"$APP_USER\";"
 
 echo
-echo "Done. All superset databases restored."
-echo "Start the backend (new-backend: node server.js) — boot migrations will (re)ensure"
-echo "the per-brand reco tables + master zoho/compliance/statutory tables idempotently."
+echo "✅ Done. Unified DB '$DB' restored."
+echo "   Next: cp new-backend/.env.example new-backend/.env  (unified mode is the default),"
+echo "         fill in the API keys, then start the backend (node server.js)."

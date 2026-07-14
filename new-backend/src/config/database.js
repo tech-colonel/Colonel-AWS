@@ -6,13 +6,14 @@ const dotenv = require('dotenv');
 dotenv.config({ path: path.resolve(__dirname, '../../.env') });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// UNIFIED-DB MODE (DB restructure).  Default OFF → behaviour identical to before
-// (one physical DB per brand). When USE_UNIFIED_DB=true, every brand shares ONE
-// database (colonel_agent_accountant); tenant isolation is enforced by Postgres
-// RLS + a per-request `app.brand_id`, and the app connects as a NON-superuser
-// role so RLS actually bites.
+// UNIFIED-DB MODE (DB restructure).  Default ON → every brand shares ONE database
+// (colonel_agent_accountant); tenant isolation is enforced by Postgres RLS + a
+// per-request `app.brand_id`, and the app connects as a NON-superuser role so RLS
+// actually bites. This is the canonical architecture — a fresh clone runs unified
+// with no extra config. The legacy one-DB-per-brand path is an explicit escape
+// hatch: set USE_UNIFIED_DB=false to re-enable it.
 // ─────────────────────────────────────────────────────────────────────────────
-const UNIFIED = process.env.USE_UNIFIED_DB === 'true';
+const UNIFIED = process.env.USE_UNIFIED_DB !== 'false';
 const UNIFIED_DB_NAME = process.env.UNIFIED_DB_NAME || 'colonel_agent_accountant';
 const APP_USER = process.env.DB_APP_USER || 'colonel_app';
 const APP_PASSWORD = process.env.DB_APP_PASSWORD || 'colonel_app_local';
