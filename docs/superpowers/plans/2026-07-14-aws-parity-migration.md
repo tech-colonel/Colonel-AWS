@@ -562,3 +562,8 @@ git worktree remove ../colonel-aws-parity 2>/dev/null || echo "(remove manually 
 - **AMI (pre-parity rollback):** `ami-07d0e3d7f7b1c44a7` (colonel-pre-parity-20260714-191534) — state `available`.
 - **Local unified DB backup:** `scratchpad-backups/aws-parity-20260714-191531/local_unified_PHASE0.dump` (1.23 MB).
 - **On-box backups:** `/tmp/opt_colonel_backup_1784036729.tgz` (137M) + `/tmp/fe_build_backup_1784036729` (11M) + `/tmp/app.js_backup_1784036729` + `/tmp/backend_env_backup_1784036729`.
+
+## Phase 1 — EXECUTED 2026-07-14
+- AWS FROZEN: `colonel-backend` + `ngrok` stopped (reco-engine up); public URL 404.
+- All 17 DBs dumped (stdout-redirect to avoid postgres-user perm issue) → `scratchpad-backups/aws-parity-20260714-191531/aws-dumps/`.
+- Freshness verified: colonel-koparo latest reco_job = 2026-07-14 15:46 IST (post-snapshot run captured).
