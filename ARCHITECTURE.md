@@ -24,10 +24,10 @@
 └──────────────────────┘                      │ pg                  ▲
                                    ┌───────────▼────────────┐        │ subprocess: classify.py
                                    │ PostgreSQL (:5432)      │        │ (Universal Bank — NOT 8765)
-                                   │ colonel-master + N      │
-                                   │ per-brand DBs (RLS)     │   ┌────┴──────────────────────────┐
-                                   └────────────────────────┘   │ External integrations          │
-                                                                 │ Zoho Books · Fireflies · n8n · │
+                                   │ ONE unified DB          │
+                                   │ colonel_agent_accountant│   ┌────┴──────────────────────────┐
+                                   │ (brand_id column + RLS) │   │ External integrations          │
+                                   └────────────────────────┘   │ Zoho Books · Fireflies · n8n · │
                                                                  │ Google Drive/Sheets · Shopify ·│
                                                                  │ Composio · marketplace parsers │
                                                                  └────────────────────────────────┘
@@ -41,8 +41,13 @@
 - **Tier 2 → Tier 3**: `recoController` proxies to Python `http://localhost:8765/api/reconcile` for GST
   agents. `universal_bank_statement` runs `new-backend/scripts/classify.py` as a **subprocess** (does
   NOT use :8765).
-- **Tier 2 → DB**: multi-DB Sequelize (`config/database.js`) — one master DB + one DB per brand,
-  `FORCE ROW LEVEL SECURITY` on per-brand reco tables (bypass only inside a `seq.transaction()`).
+- **Tier 2 → DB**: Sequelize (`config/database.js`) in **unified mode** (default: `USE_UNIFIED_DB !== 'false'`)
+  — every brand shares ONE database `colonel_agent_accountant`. Tenant isolation is `brand_id` +
+  `FORCE ROW LEVEL SECURITY`: the master connection uses the superuser (`postgres`) for boot DDL, while
+  brand connections use the non-superuser `colonel_app` role and preset `app.brand_id` (via an
+  `afterConnect` hook, looked up from `brands.db_name`) so RLS scopes every query and `brand_id`
+  auto-stamps on insert via column DEFAULT. RLS bypass only works inside a `seq.transaction()`.
+  Legacy one-DB-per-brand is an escape hatch (`USE_UNIFIED_DB=false`).
 
 ---
 
@@ -75,7 +80,8 @@ frontend/src/
     ├── ColonelChat.jsx           ← Colonel AI chat (chat/conversation/mcp controllers)
     ├── accountant/
     │   ├── AgentDispatch.jsx      ← routes /agents/:agentId → correct workspace by UUID
-    │   ├── AgentWorkspace.jsx     ← generic agent run UI
+    │   ├── AgentWorkspace.jsx     ← generic agent run UI (+ BrandSwitcher bar to change brand on sales agents)
+    │   ├── ../../components/BrandSwitcher.jsx ← persistent brand-context switcher
     │   ├── BrandSelection.jsx · BrandDashboard.jsx
     │   ├── BrandAgentsInventory.jsx ← ★ rich CATEGORIZED agents grid (see §5)
     │   ├── RecoSuite.jsx · RecoWorkspace.jsx · RecoMultiStateWorkspace.jsx · RecoJobDashboard.jsx
@@ -101,7 +107,10 @@ frontend/src/
     │   ├── IntegrationsPage.jsx    ← integration status/config
     │   ├── ComposioMarketplace.jsx ← 1000+ app Composio marketplace (connect/showcase)
     │   ├── PlansPage.jsx · PlanEditor.jsx  ← plan builder
-    │   ├── WorkflowManagerModal.jsx ← @xyflow flow builder
+    │   ├── DatabasePage.jsx        ← Database explorer (@xyflow/react ERD, route /database)
+    │   ├── WorkflowManagerModal.jsx ← @xyflow flow builder ("Manage Workflows")
+    │   ├── WorkflowAIChatModal.jsx ← AI-drafted workflow generation
+    │   ├── AdminUserDetailPage.jsx ← per-user analytics drill-down (/analysis/user/:userId)
     │   └── ToolDetails.jsx
     └── cfo/
         ├── CFODashboardLauncher.jsx · AmazonCFODashboard.jsx · BrandFinancialDetails.jsx
@@ -114,7 +123,7 @@ signal (guards against a lagging role read).
 
 | Role | Constant | Sidebar items |
 |---|---|---|
-| **admin** | `ADMIN_SIDEBAR` | Dashboard · Colonel AI · Brands · Agents · Users · Tasks · Chats · Statutory · Plans · Feedback · Integrations · Assignments |
+| **admin** | `ADMIN_SIDEBAR` | Dashboard · Colonel AI · Brands · Agents · Users · Database · Tasks · Chats · Statutory · Plans · Feedback · Integrations · Assignments |
 | **accountant** | base array | Dashboard · Agents · Tracker · **(Statutory Compliance — owner email only)** · Colonel AI · Meetings · Tasks · Feedback · Integrations · Zoho Books · Plans · Switch brands |
 | **developer** | `DEVELOPER_SIDEBAR` | Colonel AI · Feedback · Plans |
 
@@ -135,7 +144,8 @@ new-backend/
 └── src/
     ├── app.js                     ← EXPORTS app; mounts EVERY route group (see §4)
     │                                + serves frontend/build (express.static) + SPA fallback LAST
-    ├── config/database.js         ← multi-DB Sequelize; createBrandDatabase / migrateBrandDb
+    ├── config/database.js         ← unified-DB Sequelize (default); superuser master + colonel_app
+    │                                brand conns (RLS via app.brand_id); createBrandDatabase = no-op in unified
     ├── middleware/                ← auth (JWT), upload (multer), error handler
     ├── routes/                    ← 24 route files (mount list in §4)
     ├── controllers/               ← see §4 + agents/ subfolders in §5
@@ -188,6 +198,7 @@ GET /api/health       → health check
 /api                  → complianceRoutes
 /api                  → attachmentsRoutes
 /api                  → statutoryRoutes       (owner-gated statutory tracker)
+/api                  → databaseRoutes         (admin Database explorer / ERD data)
 ──────────────────────── tail (LAST) ─────────────────────────
 error-handling middleware
 if fs.existsSync(frontendBuild):
@@ -202,11 +213,13 @@ if fs.existsSync(frontendBuild):
 ### Controllers (`new-backend/src/controllers/`)
 
 `authController` · `brandController` · `userController` · `agentController` · `recoController`
-(upload handler, Python proxy, DB saves, Layer 0 corrections) · `dashboardController` ·
+(upload handler, Python proxy, DB saves, Layer 0 corrections; also the ephemeral master-data reset for
+the catch-all **"Other"** brand — no-op for real brands) · `dashboardController` ·
 `bankCorrectionsController` · `taskController` · `gstr3bController` · `salesController` ·
 `cfoAnalyticsController` · (`cfoController` — dead) · `mtrController` · `plansController` ·
 `integrationController` · `attachmentsController` · `complianceController` · `statutoryController` ·
-`composioController` · `workflowController` · `meetingController` (Fireflies) · `zohoController`
+`composioController` · `workflowController` · `workflowAiController` (AI-drafted workflows) ·
+`databaseController` (Database explorer / ERD) · `meetingController` (Fireflies) · `zohoController`
 (Zoho Books) · **Colonel-AI stack**: `chatController` · `conversationController` · `mcpController`.
 
 ---
@@ -246,8 +259,12 @@ view; `localhost` shows all agents.
 
 ## 6. Agent inventory (33 agents), grouped by category
 
-Stable UUIDs (`d0000000-0000-0000-0000-0000000000NN`) are seeded by `seeders/01-reco-agents.js`;
-sales channels via `seed-sales-*.js` / DB rows. `AgentDispatch.jsx` maps UUID → workspace component.
+Agent IDs are **random UUIDv4** (query the `agents` table by `name`) — the old sequential
+`d0000000-0000-0000-0000-0000000000NN` pattern was regenerated for security (mappings in
+`db-restructure/008-agent-id-remap.json`; brand IDs likewise in `009-brand-id-remap.json`). Agents are
+seeded by `seeders/01-reco-agents.js`; sales channels via `seed-sales-*.js` / DB rows. The stable key
+is the DB `name`; `AgentDispatch.jsx` maps each agent's UUID → workspace component. The `…-0000000000NN`
+suffixes shown below are the **old** IDs kept only as a legacy cross-reference — the live values are random.
 
 ### GST Reconciliation
 | Agent (DB `name`) | UUID | Notes |
@@ -288,18 +305,25 @@ Shopify · Zepto — plus:
 
 ## 7. Models — `new-backend/src/models/`
 
-| Bundle | Exports | DB |
+> In **unified mode** (default) all four bundles resolve to the single `colonel_agent_accountant`
+> database: master/org tables have no RLS (superuser connection), while brand-scoped tables carry a
+> `brand_id` column + RLS and are reached over the `colonel_app` brand connections. The "DB" column
+> below reflects the legacy per-brand-DB model; unified collapses it to one DB + `brand_id`.
+
+| Bundle | Exports | DB (legacy) → unified |
 |---|---|---|
-| `master/index.js` | `User`, `Brand`, `Agent`, `BrandUser`, `BrandAgent`, `Plan`, `Integration`, `Conversation`, `McpServer`, `AgentWorkflow` | `colonel-master` |
-| `brand/index.js` | brand-agent + dynamic per-upload models (sales/MIS tables) | per-brand DBs |
-| `reco/index.js` | factories: `getRecoJobModel` (`reco_jobs`), `getBankRecoResultModel` (`bank_reco_results`), `getGstr2bResultModel` (`gstr_2b_results`) — all `underscored` | per-brand DBs |
-| `task/index.js` | `Task`, `TaskMessage` (+ `syncTaskTables`) | `colonel-master` |
+| `master/index.js` | `User`, `Brand`, `Agent`, `BrandUser`, `BrandAgent`, `Plan`, `Integration`, `Conversation`, `McpServer`, `AgentWorkflow` | `colonel-master` → unified (no RLS) |
+| `brand/index.js` | brand-agent + dynamic per-upload models (sales/MIS tables) | per-brand DBs → unified (`brand_id` + RLS) |
+| `reco/index.js` | factories: `getRecoJobModel` (`reco_jobs`), `getBankRecoResultModel` (`bank_reco_results`), `getGstr2bResultModel` (`gstr_2b_results`) — all `underscored` | per-brand DBs → unified (`brand_id` + RLS) |
+| `task/index.js` | `Task`, `TaskMessage` (+ `syncTaskTables`) | `colonel-master` → unified (no RLS) |
 
 - **Access gating**: `brand_users` rows gate brand access (`GET /api/brands/my-brands`);
   `brand_agents` rows gate per-brand agent runnability.
-- **Per-brand reco tables** (created by `db/migrations/001_reco_tables.sql`, idempotent, runs on every
+- **Brand-scoped reco tables** (created by `db/migrations/001_reco_tables.sql`, idempotent, runs on every
   boot): `reco_jobs`, `bank_reco_results`, `gstr_2b_results`, `gstr_2a_2b_results`, `gstr_3b_results`,
-  `gstr_1_results`, `gstr_3b_tally_results`, `bank_reco_corrections` — all `FORCE ROW LEVEL SECURITY`.
+  `gstr_1_results`, `gstr_3b_tally_results`, `bank_reco_corrections` — each carries a `brand_id` and is
+  under `FORCE ROW LEVEL SECURITY`. Dynamic sales/agent tables (`db-restructure/002_dynamic_agent_tables.sql`)
+  likewise carry `brand_id` + RLS + `colonel_app` grants — brand is no longer implicit in "which DB".
 - Full schema, RLS rules, `IS NOT DISTINCT FROM` and `toSqlDate()` conventions → [DATABASES.md](DATABASES.md).
 
 ---

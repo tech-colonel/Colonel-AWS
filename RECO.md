@@ -14,7 +14,7 @@
         │  multipart upload (files + reco_type / agent)
         ▼
  Node backend (8001)   recoController.js  runReco()          ──┐  fire-and-forget DB save
-   POST /api/reco/run                                          │  (setImmediate) → per-brand
+   POST /api/reco/run                                          │  (setImmediate) → unified-DB
         │  RECO_TYPE_MAP: frontend key → engine reco_type      │  Postgres tables (see DATABASES.md)
         │  _activeRecoJobs gate → 429 if ≥ MAX_CONCURRENT_RECO │
         │  axios/FormData proxy                                ▼
@@ -126,6 +126,8 @@ zepto_receivables         → zepto_receivables
 einvoice_reco             → einvoice_reco
 ```
 
+> **DB note (unified DB):** reco tables no longer live in per-brand databases — they now sit in the **single unified DB `colonel_agent_accountant`**, with tenant isolation via a **`brand_id` column + Row-Level Security** (RLS bypass inside a `seq.transaction()` for saves). The reco result tables and the reco flow are otherwise unchanged. (Legacy per-brand DBs remain an escape hatch via `USE_UNIFIED_DB=false`; see [DATABASES.md](DATABASES.md).)
+
 **DB-save routing** in `runReco()` (all fire-and-forget via `setImmediate`, inside an RLS-bypass transaction):
 
 | Engine result set | Save fn | Table |
@@ -145,7 +147,11 @@ einvoice_reco             → einvoice_reco
 
 ## Reco agent catalog (frontend keys → UUIDs)
 
-| Agent | DB name / key | UUID |
+> ⚠️ **UUIDs are now random UUIDv4 — the sequential `d0000000-…-0000000N` ids below are LEGACY (pre-2026-07).** The reco agent ids were regenerated as random UUIDv4 for security. The **agent DB-name / key (e.g. `gstr_2b_books`) is stable; the UUID is not.** For current ids, query the `agents` table or read the single source of truth **`db-restructure/008-agent-id-remap.json`** (old→new mapping); `AgentDispatch.jsx`'s `RECO_ID_TO_TYPE` map + the DB seeder hold the same new ids. Do **not** hardcode a UUID from this table.
+
+**LEGACY id table (pre-2026-07 — no longer valid; kept for historical reference):**
+
+| Agent | DB name / key | LEGACY UUID (superseded) |
 |---|---|---|
 | GSTR-2B vs Books | `gstr_2b_books` | `d0000000-0000-0000-0000-000000000001` |
 | GSTR-2B vs Books (Multi-State) | `gstr_2b_books_multistate` | `d0000000-0000-0000-0000-000000000002` |
@@ -155,7 +161,7 @@ einvoice_reco             → einvoice_reco
 | **E-Invoice Reco** | `einvoice_reco` | `d0000000-0000-0000-0000-000000000008` |
 | **Zepto Receivables** | `zepto_receivables` | `d0000000-0000-0000-0000-000000000010` |
 
-> Frontend routing: `/brands/:brandId/agents/:agentId` → `AgentDispatch.jsx` maps UUID → workspace. GST-family agents run through `RecoWorkspace.jsx` / `RecoMultiStateWorkspace.jsx`; results deep-links use `/brands/:brandId/reco/:agentType/results/:jobId` → `RecoJobDashboard.jsx`.
+> Frontend routing: `/brands/:brandId/agents/:agentId` → `AgentDispatch.jsx` maps UUID → workspace via `RECO_ID_TO_TYPE` (now keyed by the new random UUIDs). GST-family agents run through `RecoWorkspace.jsx` / `RecoMultiStateWorkspace.jsx`; results deep-links use `/brands/:brandId/reco/:agentType/results/:jobId` → `RecoJobDashboard.jsx`.
 
 Also present (engine-only, no seeded card): `gstr_3b_vs_2b`, `gstr_2a_2b_books`, `pdf_bank_extract`.
 
@@ -189,7 +195,7 @@ A self-contained subsystem separate from `recoController`. Frontend: **`frontend
 | `GET /api/brands/:brandId/gstr3b/coa-status` | `getCoaStatus` | `{ hasLedger, count, hasVt, vtCount }` |
 | `GET /api/brands/:brandId/gstr3b/history` | `getHistory` | Last 20 `gstr3b_runs` rows |
 
-- **Self-creating tables** (per-brand DB, via `ensureTables()` on every call, RLS-bypassed): `gstr3b_coa_master` (brand_id + ledger_name), `gstr3b_vt_master` (brand_id + voucher_name), `gstr3b_runs` (job_id, period, totals, `monthly_data` JSONB).
+- **Self-creating tables** (in the unified DB, `brand_id`-scoped + RLS, via `ensureTables()` on every call, RLS-bypassed): `gstr3b_coa_master` (brand_id + ledger_name), `gstr3b_vt_master` (brand_id + voucher_name), `gstr3b_runs` (job_id, period, totals, `monthly_data` JSONB).
 - **CoA/VT reuse:** if no `coa`/`vouchertype` file is uploaded, `tryAttachSavedCoa` / `tryAttachSavedVt` inject saved ledger/voucher lists as `coa_ledgers` / `vt_ledgers` form fields. After a run, `persistAfterRun` (fire-and-forget) saves any newly-uploaded CoA/VT (`data.coa_ledgers_parsed` / `vt_ledgers_parsed`) and records a `gstr3b_runs` summary. **Note:** this tool records to `gstr3b_runs`, NOT to `reco_jobs`.
 - Engine down → 503 `"Python reco engine is not running (port 8765)"`.
 
@@ -240,7 +246,7 @@ Located in `new-backend/src/controllers/agents/`. These parse raw marketplace re
 **Sales agents (14):** Amazon, Blinkit, Cread, Firstcry, Flipkart, JioMart, Limeroad, Mirrow, Myntra, Nykaa, Shopify, Zepto, plus **settlement-amazon** and **total-sales**. Also **order-cycle-shopify** and **invoice-process**.
 
 **Persistence pattern (confirmed):**
-- Normalised rows are written to **per-brand dynamic tables** via Sequelize **`bulkCreate`** (`getDynamicModel` in `models/brand`).
+- Normalised rows are written to **`brand_id`-scoped dynamic tables** (in the unified DB, RLS-isolated) via Sequelize **`bulkCreate`** (`getDynamicModel` in `models/brand`).
 - Each successful commit records **one `reco_jobs` row** via **`services/agentRunTracker.js` → `recordAgentRun()`** — so admin analytics (which read `reco_jobs`) show who / when / which brand for every agent run. It mirrors `saveRecoJob`'s RLS-bypass pattern, never throws, and does not touch agent tables/logic. `output_file_id` (varchar(36)) only stores the value if it fits a UUID, else NULL.
 - Sales data itself carries **no user attribution** — only the `reco_jobs` row records `created_by`.
 

@@ -5,6 +5,9 @@
 >
 > **This repo (Colonel-AWS) is the code — a superset of what's live.** It carries every production feature plus local-only work not yet deployed. The **running production** lives on EC2 at `/opt/colonel` and is a subset compiled/rsynced from here. When in doubt, **the code in this repo is the source of truth**; the box is where a chosen slice of it runs.
 >
+> ### 🔴 DB divergence — repo is UNIFIED, live EC2 is still PER-BRAND
+> **Do NOT assume EC2 is on the unified DB.** The **repo** now defaults to the **single unified DB `colonel_agent_accountant`** (brands isolated by a `brand_id` column + RLS; see [DATABASES.md](DATABASES.md)). The **LIVE EC2 box still runs the OLD per-brand multi-DB layout** (`colonel-master` + 16 per-brand DBs) — **the unified migration has NOT been deployed to EC2.** That deploy is a separate, permission-gated step (checklist under [Deploy flow](#deploy-flow)). Until it runs, everything below about the box's DBs (topology, crons, backups, restore) describes the **per-brand** live state.
+>
 > App architecture (pages, controllers, agents) is documented in [ARCHITECTURE.md](ARCHITECTURE.md); this doc is the **deployment + operations** reference. See also [SERVERS.md](SERVERS.md) for ports/process management, [RECO.md](RECO.md) for the reco engine, [DATABASES.md](DATABASES.md) for the schema, and [CLAUDE.md](CLAUDE.md) / [README.md](README.md) for the top-level index.
 
 ---
@@ -41,9 +44,9 @@
              │ pg (localhost:5432)                                │ axios proxy (600s timeout)
              ▼                                                    ▼
   ┌── PostgreSQL (local, 127.0.0.1) ──┐         ┌── pm2: reco-engine  Python stdlib  :8765 ──┐
-  │  17 DBs: colonel-master           │         │  POST /api/reconcile  (dispatch reco_type)  │
-  │  + 16 per-brand DBs               │         │  GET  /api/jobs/{id}[/export.xlsx]          │
-  │  (mixed hyphen/underscore names)  │         │  recon/*.py   MAX_CONCURRENT_RECO=1         │
+  │  LIVE = per-brand (NOT unified):  │         │  POST /api/reconcile  (dispatch reco_type)  │
+  │  17 DBs: colonel-master           │         │  GET  /api/jobs/{id}[/export.xlsx]          │
+  │  + 16 per-brand DBs               │         │  recon/*.py   MAX_CONCURRENT_RECO=1         │
   └───────────────────────────────────┘         └─────────────────────────────────────────────┘
 ```
 > **Only TWO ports listen: 8001 + 8765.** No nginx, no `serve`, no separate static server. ngrok → 8001; the Node backend serves BOTH the REST API and the React `build/`. Frontend is React 18 + craco (dev server on :3000; production is the compiled `build/`).
@@ -62,7 +65,7 @@
 | Security group | **SSH(22) from your current IP only** + ngrok. `5432` / `8001` / `8765` blocked on the public IP. Postgres binds `127.0.0.1` only. `.env` is `chmod 600` and not web-served. |
 | IAM deploy user | **`colonel-deploy`** (AmazonEC2FullAccess); access key in local `aws` CLI (`/opt/homebrew/bin/aws`) — **keep it** (needed for future pushes). |
 | Postgres creds | local `postgres`/`postgres` |
-| `dhaval.colonel@gmail.com` | **ADMIN on AWS** (pw `dhaval123`) — note: admin here, not "developer" |
+| `dhaval.colonel@gmail.com` | **ADMIN on AWS** (pw `<set via seed script>` — passwords are not committed) — note: admin here, not "developer" |
 
 > **SSH times out?** Your public IP changed → re-add it to the SG:
 > `aws ec2 authorize-security-group-ingress --group-id <sg> --protocol tcp --port 22 --cidr <your.ip>/32`
@@ -148,6 +151,14 @@ Known extra deps the build needs: `react-is`, `html-to-image`, `@xyflow/react`.
 - `/opt/colonel` is rsync-deployed. To redeploy after code changes here: rsync `new-backend/` (and `reco-engine/`) → `/opt/colonel`, re-migrate/re-seed DBs if needed, `pm2 restart colonel-backend` / `reco-engine`.
 - Because this repo is a **superset**, deploy only the slice you intend to make live — don't blindly push local-only features onto the box.
 - **EC2 → local mirror** (make a local checkout a true clone of live): SSH in, `pg_dump -Fc --no-owner --no-privileges` every `colonel%` DB (read-only, AWS untouched) → tar → scp down → restore locally (DROP+CREATE local DBs — destructive to local only). Both PG are v16. See [DATABASES.md](DATABASES.md) and `db-seed/restore.sh` (restores all 17 DBs).
+
+### Unified-DB migration to EC2 (NOT done yet — gated)
+The live box is still **per-brand** (see the DB-divergence note at top). Migrating it to the repo's unified `colonel_agent_accountant` is a **separate, permission-gated deploy**. When it runs, it must:
+1. Apply the **db-restructure schema** (unified DB + `brand_id` columns + RLS + `colonel_app` non-superuser role).
+2. Apply the **committed `008` / `009` ID-remap mappings** — **do NOT regenerate them** (regenerating would mint different ids and break references). Agent/brand IDs in the repo are now **random UUIDs** (the old sequential ids were regenerated), so the remap must use the committed mappings verbatim.
+3. **Rename the on-disk COA files** to match the remapped ids.
+4. Run the **`007` sales fixes**.
+See [DATABASES.md](DATABASES.md) for the migration scripts and full detail.
 
 ### Reco-engine notes (why the small box works)
 `gc.collect()` + `malloc_trim(0)` in `reco-engine/server.py` (`_CappedJobs`/`_reclaim_memory`) stops CPython hoarding openpyxl/pandas memory; `MAX_CONCURRENT_RECO=1`; backend→engine axios timeout raised to **600s** in `recoController.js`; `pdfplumber` (GSTR-3B PDF) + pinned deps (pandas etc.) required on EC2. Multi-state is the heavy case. Details in [RECO.md](RECO.md).

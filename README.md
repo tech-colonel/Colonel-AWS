@@ -32,7 +32,8 @@ so you can stand up an exact working copy.
 ## 🎯 What it is
 Automates the work accountants do by hand — GST reconciliation, sales MIS, invoice processing, CFO
 dashboards, compliance workflows — behind a clean, role-based web app. One backend serves many D2C /
-e-commerce **brands**, each with its own isolated database.
+e-commerce **brands** out of a **single unified database**, isolated per-tenant by a `brand_id`
+column + PostgreSQL Row-Level Security.
 
 This **Colonel-AWS** repo is the **superset**: it merges the live AWS production app + all local
 features into one tree, and ships committed database dumps (`db-seed/`) of the real data. Clone it,
@@ -46,7 +47,7 @@ restore the DB, start three services, and you have a byte-for-byte working copy 
 | **Frontend** | React 18, React Router v6, TailwindCSS, Recharts, `@xyflow/react`, **craco** — port **3000** |
 | **Backend** | Node.js + Express, **Sequelize** over PostgreSQL, JWT auth (bcryptjs), Multer, ExcelJS — port **8001** |
 | **Reco engine** | Python 3 **stdlib** HTTP server, pandas / openpyxl / xlrd / thefuzz — port **8765** |
-| **Database** | PostgreSQL 16 — `colonel-master` + **one DB per brand**, Row-Level Security |
+| **Database** | PostgreSQL 16 — **single unified DB** `colonel_agent_accountant` (`brand_id` + Row-Level Security); app connects as non-superuser `colonel_app` |
 | **AI / external** | Gemini + Claude (bank classifier + PDF→Bank fallback), Zoho Books, Fireflies, Google Drive/Sheets, n8n, Shopify |
 | **Deploy** | AWS EC2 (t3.small, Mumbai) → served publicly via ngrok; `pm2` process manager |
 
@@ -62,8 +63,9 @@ restore the DB, start three services, and you have a byte-for-byte working copy 
                                               │ pg (5432)
                                     ┌─────────▼──────────┐   external: Zoho · Fireflies · n8n ·
                                     │ PostgreSQL          │            Google Drive/Sheets · Shopify
-                                    │ colonel-master +    │
-                                    │ 16 per-brand DBs    │
+                                    │ single unified DB   │
+                                    │ colonel_agent_...   │
+                                    │ brand_id + RLS      │
                                     └────────────────────┘
 ```
 On EC2 the Node backend also serves the compiled React `build/` — no separate frontend server.
@@ -84,9 +86,9 @@ Colonel-AWS/
 ├── reco-engine/                  ← Python reco engine (:8765)
 │   ├── server.py                 ← stdlib HTTP; POST /api/reconcile dispatch on reco_type
 │   └── recon/*.py                ← per-agent reconciliation logic
-├── db-seed/                      ← ★ committed DB snapshots + restore script
-│   ├── dumps/*.dump              ← colonel-master + 16 per-brand DBs (pg_dump custom format)
-│   └── restore.sh                ← one command to rebuild all DBs
+├── db-seed/                      ← ★ committed DB snapshot + restore script
+│   ├── dumps/colonel_agent_accountant.dump  ← single unified DB (pg_dump custom format)
+│   └── restore.sh                ← one command to rebuild the DB + colonel_app role
 ├── README.md · CLAUDE.md · AWS.md · SERVERS.md · RECO.md · DATABASES.md · ARCHITECTURE.md
 └── start-reco.sh · nightly-data-purge.sh · .gitignore
 ```
@@ -101,13 +103,14 @@ Colonel-AWS/
 git clone https://github.com/tech-colonel/Colonel-AWS.git
 cd Colonel-AWS
 
-# 2. Restore the real database (creates colonel-master + 16 brand DBs from db-seed/dumps)
+# 2. Restore the real database (single unified DB + creates the colonel_app role)
 cd db-seed && ./restore.sh          # uses postgres/postgres @ 127.0.0.1:5432 by default
 cd ..
 
 # 3. Backend config + deps
 cd new-backend
 cp .env.example .env                # then edit: DB_PASSWORD, JWT_SECRET, (optional) API keys
+                                    # unified DB is the default — no flag needed
 npm install
 cd ..
 
@@ -140,7 +143,9 @@ Copy `new-backend/.env.example` → `new-backend/.env`. Minimum to run: `DB_PASS
 |---|---|---|
 | `DB_PASSWORD` | ✅ | PostgreSQL password |
 | `JWT_SECRET` | ✅ | Any long random string (login tokens) |
-| `DB_HOST` / `DB_PORT` / `DB_USER` / `DB_NAME` | — | default `localhost` / `5432` / `postgres` / `colonel-master` |
+| `DB_HOST` / `DB_PORT` / `DB_USER` | — | default `localhost` / `5432` / `postgres` (superuser for admin ops) |
+| `UNIFIED_DB_NAME` / `DB_APP_USER` / `DB_APP_PASSWORD` | — | default `colonel_agent_accountant` / `colonel_app` / `colonel_app_local` — the unified DB + non-superuser role the app runs as |
+| `USE_UNIFIED_DB` | — | unified is the default (`!== 'false'`); set `=false` only to fall back to the legacy per-brand path |
 | `PYTHON_RECO_URL` | — | default `http://localhost:8765` |
 | `GEMINI_API_KEY` / `ANTHROPIC_API_KEY` | optional | bank classifier + PDF→Bank LLM fallback |
 | Zoho / Google / n8n keys | optional | Zoho Books mirror, Drive/Sheets, invoice webhooks |
@@ -152,15 +157,18 @@ Copy `new-backend/.env.example` → `new-backend/.env`. Minimum to run: `DB_PASS
 ---
 
 ## 🗄 The database & the seed data
-This repo ships the **real database** as `pg_dump` snapshots in `db-seed/dumps/` — `colonel-master`
-(users, brands, agents, assignments, Zoho/compliance/statutory data) + 16 per-brand DBs (reco jobs,
-ledgers, bank corrections, GSTR-3B data). Rebuild everything with:
+This repo ships the **real database** as a single `pg_dump` snapshot,
+`db-seed/dumps/colonel_agent_accountant.dump` — the whole app in **one unified DB** (users, brands,
+agents, assignments, Zoho/compliance/statutory data **plus** every brand's reco jobs, ledgers, bank
+corrections, GSTR-3B and sales data), each row carrying a `brand_id` and protected by RLS. Rebuild
+with:
 ```bash
 cd db-seed && ./restore.sh
 ```
-This **DROP+CREATE**s each `colonel*` DB from its dump. After restore, `node new-backend/server.js`
-idempotently (re)ensures per-brand reco tables + master zoho/compliance/statutory tables. Schema,
-RLS, retention, and the superset agent-UUID notes → **[DATABASES.md](DATABASES.md)**.
+This creates the non-superuser `colonel_app` role, **DROP+CREATE**s `colonel_agent_accountant` from
+the dump, and restores schema + data + RLS policies + `brand_id` defaults. Unified mode is the
+default — no flag needed. Schema, RLS, retention, and the superset agent-UUID notes →
+**[DATABASES.md](DATABASES.md)**.
 
 ---
 
@@ -183,7 +191,7 @@ sales/marketplace agents run in Node and persist to per-brand dynamic tables. De
 - Amazon, Blinkit, Cread, FirstCry, Flipkart, JioMart, Limeroad, Mirrow, Myntra, Nykaa, Shopify, Zepto
 - Settlement-Amazon, Total-Sales-Analyzer, Amazon MTR Consolidator
 - `zepto_receivables` — Zepto receivables tracker (Drive-fed)  *(UUID `…-010`)*
-- Order-Cycle (Shopify), Invoice-Processing (n8n → Google Sheet)
+- Order-Cycle (Shopify), Invoice Process (consolidated single invoice agent; n8n → Google Sheet)
 
 ---
 
@@ -202,19 +210,32 @@ Beyond agents, the platform includes:
 > Statutory / Zoho / Composio are **owner-gated to `chauhandhaval932@gmail.com` (an accountant)** —
 > don't change that user's role to admin.
 
+### Recent changes
+- **Single unified DB** — moved from `colonel-master` + per-brand DBs to one `colonel_agent_accountant` (`brand_id` + RLS, app runs as `colonel_app`); unified is the default.
+- **Random-UUID hardening** — old sequential agent/brand IDs regenerated as random UUIDs.
+- New **sales / order-cycle / invoice** agents; the invoice agents consolidated into one **Invoice Process**.
+- **Workflow** feature — AI-drafted workflows via GenSpark + multi-file input + admin **Manage Workflows**.
+- **Brand switcher** on the sales agents.
+- Ephemeral **"Other" brand** data with a **Reset**.
+- **Shopify Order-Cycle** amount fix; **Statutory** bounce fix.
+- Admin **Database** explorer page.
+- **PDF→Bank** OCR fallback.
+
 ---
 
 ## 👤 Roles & login
-Three sidebar roles (from `frontend/src/lib/adminNav.js` → `sidebarFor()`): **admin**, **accountant**,
-**developer**. Admin sees all brands + analytics; accountant is brand-scoped; developer sees Colonel
-AI / Feedback / Plans.
+Four roles: **admin**, **accountant**, **brand_executive**, **developer** (sidebar from
+`frontend/src/lib/adminNav.js` → `sidebarFor()`). Admin sees all brands + analytics; accountant is
+brand-scoped; brand_executive is scoped to its own brand; developer sees Colonel AI / Feedback / Plans.
 
-Seed logins (from the shipped DB; passwords are bcrypt hashes — these are the known demo ones):
+Seed logins (users ship in the DB as **bcrypt hashes — no plaintext passwords are committed**).
+Passwords are set by the gitignored provisioning scripts (`seed-accountants.js`, `seed-user.js`)
+using the `<name-before-dot>123` convention:
 | Role | Email | Password |
 |---|---|---|
-| Admin | `admin@colonel.app` | `Admin@123` |
-| Admin | `dhaval.colonel@gmail.com` | `dhaval123` |
-| **Accountant (feature owner)** | `chauhandhaval932@gmail.com` | `Admin@123` |
+| Admin | `admin@colonel.app` | `<set via seed script>` |
+| Admin | `dhaval.colonel@gmail.com` | `<set via seed script>` |
+| **Accountant (feature owner)** | `chauhandhaval932@gmail.com` | `<set via seed script>` |
 
 ---
 
@@ -224,7 +245,7 @@ Browser (RecoWorkspace / Gstr3bTallyWorkspace / sales workspace)
    │  multipart upload (files + agent type)
    ▼
 Node backend  new-backend/src/controllers/*      ──┐ fire-and-forget DB save (setImmediate)
-   POST /api/reco/upload  |  /api/brands/:id/gstr3b/upload  │  → per-brand Postgres
+   POST /api/reco/upload  |  /api/brands/:id/gstr3b/upload  │  → unified Postgres (brand_id + RLS)
    │  axios proxy, field reco_type                          ▼
    ▼                                              reco_jobs + *_results  (admin analytics feed)
 Python engine :8765  POST /api/reconcile
