@@ -25,11 +25,16 @@ export const STATUTORY_CATEGORIES = [
 ];
 export const CATEGORY_BY_KEY = Object.fromEntries(STATUTORY_CATEGORIES.map(c => [c.key, c]));
 
-// Kanban columns = statutory statuses (drag between them updates status).
+// Build a { key → category } lookup for ANY (per-brand dynamic) category list.
+export const buildCategoryMap = (cats) => Object.fromEntries((cats || []).map(c => [c.key, c]));
+
+// Default Kanban columns = statutory statuses (drag between them updates status).
+// `terminal: true` marks the "done" column — drives completion % + filing_date.
+// Brands with a statutory_config row supply their own columns instead.
 export const STATUTORY_STATUS_COLUMNS = [
   { key: 'not_due',        label: 'Not Due',        color: '#64748B' },
   { key: 'pending',        label: 'Pending',        color: '#D97706' },
-  { key: 'filed',          label: 'Filed',          color: '#059669' },
+  { key: 'filed',          label: 'Filed',          color: '#059669', terminal: true },
   { key: 'not_applicable', label: 'Not Applicable', color: '#94A3B8' },
 ];
 

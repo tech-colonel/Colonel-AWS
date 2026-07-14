@@ -11,15 +11,19 @@ import { toast } from 'sonner';
 import { sidebarFor } from '../../lib/adminNav';
 import AdminChatPanel from '../../components/AdminChatPanel';
 import {
-  STATUTORY_CATEGORIES, CATEGORY_BY_KEY, STATUTORY_STATUS_COLUMNS,
+  STATUTORY_CATEGORIES, CATEGORY_BY_KEY, STATUTORY_STATUS_COLUMNS, buildCategoryMap,
   GST_STATES, PT_STATES, ALL_STATES,
 } from '../../lib/statutoryMeta';
 import StatutoryFilters, { applyStatutoryFilters } from '../../components/StatutoryFilters';
 
 const MONTHS = ['', 'January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
-const COLUMNS = STATUTORY_STATUS_COLUMNS;
-const catColor = (r) => CATEGORY_BY_KEY[r.compliance_type]?.color || '#64748B';
-const catName = (r) => CATEGORY_BY_KEY[r.compliance_type]?.name || r.compliance_type;
+// Active brand's category map — set once per render from the fetched config, so
+// the small stateless helpers (cards, calendars) resolve colors/names for ANY
+// brand's dynamic categories. The page shows one brand at a time, so a module
+// var is safe here and avoids threading a map through every sub-component.
+let CAT_MAP = CATEGORY_BY_KEY;
+const catColor = (r) => CAT_MAP[r.compliance_type]?.color || '#64748B';
+const catName = (r) => CAT_MAP[r.compliance_type]?.name || r.compliance_type;
 const nowMonth = () => new Date().getMonth() + 1;
 const fmtDay = (d) => { try { return new Date(d).toLocaleDateString('en-GB', { day: '2-digit', month: 'short' }); } catch { return ''; } };
 const fmtSize = (b) => (b == null ? '' : b < 1024 ? `${b} B` : b < 1048576 ? `${Math.round(b / 1024)} KB` : `${(b / 1048576).toFixed(1)} MB`);
@@ -127,15 +131,15 @@ function StatutoryAttachments({ filingId, brandId }) {
 }
 
 /* ── create / detail slide-over ──────────────────────────────────────────── */
-function FilingPanel({ mode, row, brandId, onClose, onSaved }) {
+function FilingPanel({ mode, row, brandId, categories, statusColumns, catMap, onClose, onSaved }) {
   const isCreate = mode === 'create';
   const [form, setForm] = useState(() => ({
-    compliance_type: row?.compliance_type || 'gstr_1',
+    compliance_type: row?.compliance_type || categories[0]?.key || 'other_secretarial',
     title: row?.title || '',
     period_label: row?.period_label || '',
     period_type: row?.period_type || 'monthly',
     state: row?.state || '',
-    status: row?.status || 'not_due',
+    status: row?.status || statusColumns[0]?.key || 'not_due',
     due_date: row?.due_date ? row.due_date.slice(0, 10) : '',
     filing_date: row?.filing_date ? row.filing_date.slice(0, 10) : '',
     ack_no: row?.ack_no || '',
@@ -144,7 +148,7 @@ function FilingPanel({ mode, row, brandId, onClose, onSaved }) {
   const [saving, setSaving] = useState(false);
   const [createdId, setCreatedId] = useState(row?.id || null);
   const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
-  const cat = CATEGORY_BY_KEY[form.compliance_type];
+  const cat = catMap[form.compliance_type];
   const accent = cat?.color || '#0748EE';
 
   const save = async () => {
@@ -179,7 +183,7 @@ function FilingPanel({ mode, row, brandId, onClose, onSaved }) {
 
           <MetaRow icon={Tag} label="Compliance">
             <select value={form.compliance_type} onChange={e => set('compliance_type', e.target.value)} style={ctrl}>
-              {STATUTORY_CATEGORIES.map(c => <option key={c.key} value={c.key}>{c.name}</option>)}
+              {categories.map(c => <option key={c.key} value={c.key}>{c.name}</option>)}
             </select>
           </MetaRow>
           {cat?.stateWise && (
@@ -197,7 +201,7 @@ function FilingPanel({ mode, row, brandId, onClose, onSaved }) {
           {!isCreate && (
             <MetaRow icon={FileCheck2} label="Status" align="top">
               <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                {COLUMNS.map(c => (
+                {statusColumns.map(c => (
                   <button key={c.key} onClick={() => quickStatus(c.key)} style={{ ...chip, borderColor: form.status === c.key ? c.color : 'var(--card-border)', color: form.status === c.key ? c.color : 'var(--text-muted)', background: form.status === c.key ? `${c.color}12` : 'transparent', fontWeight: 700 }}>{c.label}</button>
                 ))}
               </div>
@@ -413,6 +417,7 @@ export default function StatutoryTracker() {
   const { brandId } = useParams();
   const [brands, setBrands] = useState([]);
   const [allRows, setAllRows] = useState([]);
+  const [config, setConfig] = useState(null);
   const [loading, setLoading] = useState(true);
   const [denied, setDenied] = useState(false);
   const [year, setYear] = useState(2026);
@@ -438,6 +443,24 @@ export default function StatutoryTracker() {
   }, [brandId, year]);
   useEffect(() => { load(); }, [load]);
 
+  // Per-brand dynamic config (categories + status columns). Falls back to the
+  // built-in filing types + default columns when a brand has no custom config.
+  useEffect(() => {
+    if (!brandId) return;
+    setConfig(null);
+    api.get(`/api/brands/${brandId}/statutory/config`).then(r => setConfig(r.data)).catch(() => setConfig(null));
+  }, [brandId]);
+
+  const categories = (config?.categories?.length ? config.categories : STATUTORY_CATEGORIES);
+  const statusColumns = (config?.statuses?.length ? config.statuses : STATUTORY_STATUS_COLUMNS);
+  const catMap = useMemo(() => buildCategoryMap(categories), [categories]);
+  CAT_MAP = catMap; // make the active brand's categories available to the stateless helpers
+  const doneKeys = useMemo(() => {
+    const t = statusColumns.filter(s => s.terminal).map(s => s.key);
+    return t.length ? t : [statusColumns[statusColumns.length - 1]?.key];
+  }, [statusColumns]);
+  const isTerminal = useCallback((key) => doneKeys.includes(key), [doneKeys]);
+
   const brand = brands.find(b => b.id === brandId);
   const brandStates = ALL_STATES;
 
@@ -461,11 +484,13 @@ export default function StatutoryTracker() {
   }, [allRows, activeCat, filters]);
 
   const grouped = useMemo(() => {
-    const g = { not_due: [], pending: [], filed: [], not_applicable: [] };
-    scoped.forEach(r => { (g[r.status] || g.not_due).push(r); });
+    const g = {};
+    statusColumns.forEach(c => { g[c.key] = []; });
+    const fallback = statusColumns[0]?.key;
+    scoped.forEach(r => { (g[r.status] || g[fallback]).push(r); });
     return g;
-  }, [scoped]);
-  const filedCount = grouped.filed.length;
+  }, [scoped, statusColumns]);
+  const filedCount = scoped.filter(r => doneKeys.includes(r.status)).length;
   const pct = scoped.length ? Math.round((filedCount / scoped.length) * 100) : 0;
 
   const stepMonth = (dir) => setMonth(m => { let nm = m + dir; if (nm < 1) { nm = 12; setYear(y => y - 1); } else if (nm > 12) { nm = 1; setYear(y => y + 1); } return nm; });
@@ -473,7 +498,7 @@ export default function StatutoryTracker() {
   const moveFiling = async (id, status) => {
     const r = allRows.find(x => x.id === id);
     if (!r || r.status === status) return;
-    setAllRows(prev => prev.map(x => x.id === id ? { ...x, status, filing_date: status === 'filed' && !x.filing_date ? new Date().toISOString().slice(0, 10) : x.filing_date } : x));
+    setAllRows(prev => prev.map(x => x.id === id ? { ...x, status, filing_date: isTerminal(status) && !x.filing_date ? new Date().toISOString().slice(0, 10) : x.filing_date } : x));
     try { await api.patch(`/api/statutory/${id}`, { status }); } catch { toast.error('Could not move filing'); load(); }
   };
   const onDropCol = (colKey) => (e) => { e.preventDefault(); const id = e.dataTransfer.getData('text/plain'); setDragOverCol(null); setDragId(null); if (id) moveFiling(id, colKey); };
@@ -532,7 +557,7 @@ export default function StatutoryTracker() {
         {/* category tabs */}
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 14 }}>
           <CatTab active={activeCat === 'all'} onClick={() => setActiveCat('all')} label="All" color="#0748EE" />
-          {STATUTORY_CATEGORIES.map(c => <CatTab key={c.key} active={activeCat === c.key} onClick={() => setActiveCat(c.key)} label={c.name} color={c.color} />)}
+          {categories.map(c => <CatTab key={c.key} active={activeCat === c.key} onClick={() => setActiveCat(c.key)} label={c.name} color={c.color} />)}
         </div>
 
         {/* premium filter bar */}
@@ -548,8 +573,8 @@ export default function StatutoryTracker() {
         ) : (view === 'calendar' ? calRows.length === 0 : scoped.length === 0) ? (
           <Empty title="No filings match" sub="Adjust the month, category or filters — or add a filing with New Filing." />
         ) : view === 'kanban' ? (
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, minmax(240px, 1fr))', gap: 14, overflowX: 'auto' }}>
-            {COLUMNS.map(col => {
+          <div style={{ display: 'grid', gridTemplateColumns: `repeat(${statusColumns.length}, minmax(240px, 1fr))`, gap: 14, overflowX: 'auto' }}>
+            {statusColumns.map(col => {
               const over = dragOverCol === col.key;
               return (
                 <div key={col.key}
@@ -577,7 +602,7 @@ export default function StatutoryTracker() {
         ) : view === 'list' ? (
           <div className="glass-card" style={{ padding: 0, overflow: 'hidden' }}>
             {scoped.map((r, i) => {
-              const col = COLUMNS.find(c => c.key === r.status) || COLUMNS[0];
+              const col = statusColumns.find(c => c.key === r.status) || statusColumns[0];
               return (
                 <button key={r.id} onClick={() => setPanel({ mode: 'edit', row: r })} style={{ width: '100%', textAlign: 'left', display: 'flex', alignItems: 'center', gap: 12, padding: '12px 16px', border: 'none', borderTop: i ? '1px solid var(--card-border)' : 'none', borderLeft: `3px solid ${catColor(r)}`, background: 'var(--surface)', cursor: 'pointer' }}>
                   <span style={{ fontSize: 10, fontWeight: 700, textTransform: 'uppercase', padding: '2px 8px', borderRadius: 999, background: `${catColor(r)}18`, color: catColor(r), whiteSpace: 'nowrap' }}>{catName(r)}</span>
@@ -605,7 +630,7 @@ export default function StatutoryTracker() {
         )}
       </div>
 
-      {panel && <FilingPanel mode={panel.mode} row={panel.row} brandId={brandId} onClose={() => setPanel(null)} onSaved={load} />}
+      {panel && <FilingPanel mode={panel.mode} row={panel.row} brandId={brandId} categories={categories} statusColumns={statusColumns} catMap={catMap} onClose={() => setPanel(null)} onSaved={load} />}
       {showChat && <AdminChatPanel brandId={brandId} brandName={brand?.name || 'Brand'} onClose={() => setShowChat(false)} />}
     </DashboardLayout>
   );

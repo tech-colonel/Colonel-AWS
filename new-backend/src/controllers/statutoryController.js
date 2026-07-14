@@ -1,13 +1,25 @@
 /**
- * statutoryController.js — Statutory Compliance module (PRIVATE).
- * Working surface is gated to a single owner email; the admin cross-brand
- * summary is gated to role 'admin'. Data is per-brand shared, in the master DB.
+ * statutoryController.js — Statutory Compliance module.
+ * Brand-scoped: any user assigned to a brand (via brand_users) can work its
+ * register; the admin cross-brand summary is gated to role 'admin'. Data is
+ * per-brand shared, in the master (unified) DB.
+ *
+ * DYNAMIC per brand: categories (filter chips) and status columns (Kanban) come
+ * from statutory_config when a brand has a row there, else from the built-in
+ * defaults below (so brands like Stroom keep their filing types + Not-Due/Filed
+ * set unchanged). See db-restructure/010-statutory-config.sql.
  */
 const { masterSequelize } = require('../config/database');
 const { STATUTORY_SEED, STATUTORY_NOTES } = require('../data/statutoryTemplate');
 
-const OWNER_EMAIL = 'chauhandhaval932@gmail.com';
-const VALID_STATUS = ['not_due', 'pending', 'filed', 'not_applicable'];
+// Default status columns — used when a brand has no custom statuses in config.
+// `terminal: true` marks the "done" column (drives completion % + filing_date).
+const DEFAULT_STATUSES = [
+  { key: 'not_due',        label: 'Not Due',        color: '#64748B' },
+  { key: 'pending',        label: 'Pending',        color: '#D97706' },
+  { key: 'filed',          label: 'Filed',          color: '#059669', terminal: true },
+  { key: 'not_applicable', label: 'Not Applicable', color: '#94A3B8' },
+];
 
 // 15 statutory obligations — keys/colors mirror frontend/src/lib/statutoryMeta.js
 const STATUTORY_CATEGORIES = [
@@ -28,14 +40,9 @@ const STATUTORY_CATEGORIES = [
   { key: 'other_secretarial', name: 'Other Secretarial',  color: '#0EA5E9', group: 'ROC',        stateWise: false },
 ];
 
-/* Working surface is restricted to the single owner. Returns true if allowed. */
-const ownerOnly = (req, res) => {
-  if (req.user.email !== OWNER_EMAIL) {
-    res.status(403).json({ error: 'Not available for this account' });
-    return false;
-  }
-  return true;
-};
+/* Statutory is now brand-visible (no longer owner-only). Access is scoped by
+   canAccessBrand below; this hook is kept as a no-op so call sites stay stable. */
+const ownerOnly = () => true;
 
 const canAccessBrand = async (user, brandId) => {
   if (user.role === 'admin') return true;
@@ -44,6 +51,19 @@ const canAccessBrand = async (user, brandId) => {
     { bind: [user.id, brandId] }
   );
   return rows.length > 0;
+};
+
+/* Per-brand dynamic config → { categories, statuses }. Falls back to the
+   built-in filing types + default status columns when a brand has no row. */
+const getBrandConfig = async (brandId) => {
+  const [rows] = await masterSequelize.query(
+    `SELECT categories, statuses FROM statutory_config WHERE brand_id = $1 LIMIT 1`,
+    { bind: [brandId] }
+  );
+  const cfg = rows[0];
+  const categories = Array.isArray(cfg?.categories) && cfg.categories.length ? cfg.categories : STATUTORY_CATEGORIES;
+  const statuses   = Array.isArray(cfg?.statuses)   && cfg.statuses.length   ? cfg.statuses   : DEFAULT_STATUSES;
+  return { categories, statuses };
 };
 
 const listSelect = `
@@ -81,8 +101,21 @@ const listFilings = async (req, res, next) => {
 /* ── GET /api/brands/:brandId/statutory/categories ── */
 const listCategories = async (req, res, next) => {
   try {
-    if (!ownerOnly(req, res)) return;
-    res.json(STATUTORY_CATEGORIES);
+    const { brandId } = req.params;
+    if (!(await canAccessBrand(req.user, brandId)))
+      return res.status(403).json({ error: 'Access denied for this brand' });
+    const { categories } = await getBrandConfig(brandId);
+    res.json(categories);
+  } catch (err) { next(err); }
+};
+
+/* ── GET /api/brands/:brandId/statutory/config → { categories, statuses } ── */
+const getConfig = async (req, res, next) => {
+  try {
+    const { brandId } = req.params;
+    if (!(await canAccessBrand(req.user, brandId)))
+      return res.status(403).json({ error: 'Access denied for this brand' });
+    res.json(await getBrandConfig(brandId));
   } catch (err) { next(err); }
 };
 
@@ -96,7 +129,10 @@ const createFiling = async (req, res, next) => {
 
     const b = req.body;
     if (!b.title?.trim()) return res.status(400).json({ error: 'title is required' });
-    const status = VALID_STATUS.includes(b.status) ? b.status : 'not_due';
+    const cfg = await getBrandConfig(brandId);
+    const statusKeys = cfg.statuses.map(s => s.key);
+    const status = statusKeys.includes(b.status) ? b.status : statusKeys[0];
+    const defaultType = cfg.categories[0]?.key || 'other_secretarial';
 
     const [rows] = await masterSequelize.query(
       `INSERT INTO statutory_filings
@@ -105,7 +141,7 @@ const createFiling = async (req, res, next) => {
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
        RETURNING *`,
       { bind: [
-        brandId, b.compliance_type || 'other_secretarial', b.title.trim(),
+        brandId, b.compliance_type || defaultType, b.title.trim(),
         b.period_label || null, b.period_type || 'monthly',
         b.year || null, b.month || null, b.quarter || null,
         b.state || null, status,
@@ -138,10 +174,14 @@ const updateFiling = async (req, res, next) => {
     for (const col of ['title', 'period_label', 'compliance_type', 'state', 'ack_no', 'note', 'drive_url', 'due_date', 'filing_date']) {
       if (b[col] !== undefined) set(col, b[col] === '' ? null : b[col]);
     }
-    if (b.status !== undefined && VALID_STATUS.includes(b.status)) {
-      set('status', b.status);
-      set('completed_at', b.status === 'filed' ? new Date() : null);
-      if (b.status === 'filed' && b.filing_date === undefined && !filing.filing_date) set('filing_date', new Date());
+    if (b.status !== undefined) {
+      const { statuses } = await getBrandConfig(filing.brand_id);
+      const stat = statuses.find(s => s.key === b.status);
+      if (stat) {
+        set('status', b.status);
+        set('completed_at', stat.terminal ? new Date() : null);
+        if (stat.terminal && b.filing_date === undefined && !filing.filing_date) set('filing_date', new Date());
+      }
     }
     if (!sets.length) return res.status(400).json({ error: 'No updatable fields provided' });
 
@@ -214,8 +254,11 @@ const seedStatutoryForBrand = async ({ brandId }) => {
 };
 
 /* ── GET /api/statutory/admin/summary  (admin only) ──
-   Cross-brand completion: for each brand × compliance_type, how many filings
-   are done vs total, plus per-status counts. Powers the admin overview. */
+   Cross-brand completion. Each brand carries its OWN dynamic categories +
+   statuses (from statutory_config, else defaults) so the admin cards render
+   correctly whether a brand uses filing types or a monthly workflow.
+   Shape: { brands: [{ brand_id, brand_name, categories, statuses,
+                        counts: { [type]: { [status]: n } }, total, done }] } */
 const adminSummary = async (req, res, next) => {
   try {
     if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
@@ -226,24 +269,36 @@ const adminSummary = async (req, res, next) => {
     const clause = where.length ? `WHERE ${where.join(' AND ')}` : '';
 
     const [rows] = await masterSequelize.query(
-      `SELECT f.brand_id, b.name AS brand_name, f.compliance_type,
-              count(*)::int AS total,
-              count(*) FILTER (WHERE f.status = 'filed')::int AS filed,
-              count(*) FILTER (WHERE f.status = 'pending')::int AS pending,
-              count(*) FILTER (WHERE f.status = 'not_due')::int AS not_due,
-              count(*) FILTER (WHERE f.status = 'not_applicable')::int AS not_applicable
+      `SELECT f.brand_id, b.name AS brand_name, f.compliance_type, f.status, count(*)::int AS n
        FROM statutory_filings f
        LEFT JOIN brands b ON b.id = f.brand_id
        ${clause}
-       GROUP BY f.brand_id, b.name, f.compliance_type
-       ORDER BY b.name, f.compliance_type`,
+       GROUP BY f.brand_id, b.name, f.compliance_type, f.status`,
       { bind }
     );
-    res.json({ categories: STATUTORY_CATEGORIES, rows });
+    const [cfgRows] = await masterSequelize.query(`SELECT brand_id, categories, statuses FROM statutory_config`);
+    const cfgById = {};
+    for (const c of cfgRows) cfgById[c.brand_id] = c;
+
+    const byBrand = new Map();
+    for (const r of rows) {
+      if (!byBrand.has(r.brand_id)) {
+        const c = cfgById[r.brand_id];
+        const categories = Array.isArray(c?.categories) && c.categories.length ? c.categories : STATUTORY_CATEGORIES;
+        const statuses   = Array.isArray(c?.statuses)   && c.statuses.length   ? c.statuses   : DEFAULT_STATUSES;
+        byBrand.set(r.brand_id, { brand_id: r.brand_id, brand_name: r.brand_name || 'Brand', categories, statuses, counts: {}, total: 0, done: 0 });
+      }
+      const node = byBrand.get(r.brand_id);
+      (node.counts[r.compliance_type] = node.counts[r.compliance_type] || {})[r.status] = r.n;
+      node.total += r.n;
+      if (node.statuses.find(s => s.key === r.status)?.terminal) node.done += r.n;
+    }
+    const brands = Array.from(byBrand.values()).sort((a, b) => a.brand_name.localeCompare(b.brand_name));
+    res.json({ brands, categories: STATUTORY_CATEGORIES, defaultStatuses: DEFAULT_STATUSES });
   } catch (err) { next(err); }
 };
 
 module.exports = {
-  listFilings, listCategories, createFiling, updateFiling, deleteFiling,
-  seedBrand, adminSummary, seedStatutoryForBrand, STATUTORY_CATEGORIES,
+  listFilings, listCategories, getConfig, createFiling, updateFiling, deleteFiling,
+  seedBrand, adminSummary, seedStatutoryForBrand, STATUTORY_CATEGORIES, DEFAULT_STATUSES,
 };

@@ -42,12 +42,6 @@ import ComplianceTracker     from './pages/accountant/ComplianceTracker';
 import StatutoryTracker      from './pages/accountant/StatutoryTracker';
 import StatutoryRedirect     from './pages/accountant/StatutoryRedirect';
 
-// Statutory Compliance is a private feature — only this owner can reach the page.
-const STATUTORY_OWNER_EMAIL = 'chauhandhaval932@gmail.com';
-const isStatutoryOwner = () => {
-  try { return JSON.parse(localStorage.getItem('user') || '{}').email === STATUTORY_OWNER_EMAIL; }
-  catch { return false; }
-};
 // ── Colonel AI (Round 3) ──────────────────────────────────────────────────────
 import ColonelChat           from './pages/ColonelChat';
 import './App.css';
@@ -222,7 +216,7 @@ function App() {
             }
           />
 
-          {/* ── Statutory Compliance (private: owner email only) ─────────── */}
+          {/* ── Statutory Compliance (brand-scoped: any assigned accountant) ─ */}
           {/* Brandless entry — resolves to the right brand (no more /brands bounce). */}
           <Route
             path="/statutory-compliance"
@@ -236,7 +230,7 @@ function App() {
             path="/brands/:brandId/statutory-compliance"
             element={
               <ProtectedRoute allowedRoles={['accountant', 'admin']}>
-                {isStatutoryOwner() ? <StatutoryTracker /> : <Navigate to="/brands" replace />}
+                <StatutoryTracker />
               </ProtectedRoute>
             }
           />

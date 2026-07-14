@@ -1,0 +1,1034 @@
+{
+ "SHUMEE": [
+  {
+   "window": "1st – 5th",
+   "num": "1",
+   "task": "Bank Statement Update in Accounting Software - Record all transactions",
+   "source": "Self Downloaded",
+   "freq": "Weekly",
+   "remarks": "HDFC Bank Playrooms – 3983  – Weekly\nHSBC Bank Playrooms – 001    – Weekly\nHSBC Bank Playrooms – 002    – Weekly\nHDFC Bank Toys         – 7538  – Weekly \nHSBC Bank Toys         – 001    – Weekly  \nHSBC Bank Toys         – 002    – Weekly",
+   "field": "Accounting"
+  },
+  {
+   "window": "1st – 5th",
+   "num": "2",
+   "task": "Bank Reconciliation Statement (BRS) Preparation",
+   "source": "Accounting Work",
+   "freq": "Weekly",
+   "remarks": "Match bank statement transactions with books to identify discrepancies",
+   "field": "Accounting"
+  },
+  {
+   "window": "1st – 5th",
+   "num": "3",
+   "task": "Previous Month Books Closing",
+   "source": "Internal Working",
+   "freq": "Monthly",
+   "remarks": "Finalize and close previous month's books before starting new month's entries",
+   "field": "Accounting"
+  },
+  {
+   "window": "1st – 5th",
+   "num": "4",
+   "task": "Routine Accounting",
+   "source": "-",
+   "freq": "Daily",
+   "remarks": "Day-to-day recording of routine transactions",
+   "field": "Accounting"
+  },
+  {
+   "window": "1st – 5th",
+   "num": "5",
+   "task": "Invoice Booking for automation tool with TDS",
+   "source": "Accounting Work",
+   "freq": "Weekly",
+   "remarks": "Book invoices in automation tool along with applicable TDS",
+   "field": "Accounting"
+  },
+  {
+   "window": "6th – 7th",
+   "num": "1",
+   "task": "Identify TDS Applicable Transactions",
+   "source": "Internal Working",
+   "freq": "-",
+   "remarks": "Review transactions to identify those liable for TDS deduction",
+   "field": "TDS"
+  },
+  {
+   "window": "6th – 7th",
+   "num": "2",
+   "task": "Prepare TDS Working",
+   "source": "Internal Working",
+   "freq": "Monthly",
+   "remarks": "Compute TDS liability for the month",
+   "field": "TDS"
+  },
+  {
+   "window": "6th – 7th",
+   "num": "3",
+   "task": "Pass TDS Accounting Entries",
+   "source": "Internal Working",
+   "freq": "Monthly",
+   "remarks": "Record TDS deduction entries in the books",
+   "field": "TDS"
+  },
+  {
+   "window": "6th – 7th",
+   "num": "4",
+   "task": "TDS Payment",
+   "source": "At Income Tax Portal",
+   "freq": "-",
+   "remarks": "Working and payment done by Colonel",
+   "field": "TDS"
+  },
+  {
+   "window": "6th – 7th",
+   "num": "5",
+   "task": "TDS Return 26Q and 24Q Working - Quarterly - If Applicable",
+   "source": "Monthly TDS Payment Working",
+   "freq": "Quarterly",
+   "remarks": "Prepare quarterly TDS return working based on monthly TDS payment data",
+   "field": "TDS"
+  },
+  {
+   "window": "8th – 11th",
+   "num": "1",
+   "task": "Sales Invoice Booking for Previous Month\n- Zepto, ATB, Swiggy Instamart. Flipkart and Other B2B sales\n- Amazon\n- Flipkart\n- Shopify \n- Suspire",
+   "source": "Zoho Seller Portal \nAmazon Seller Portal \nFlipkart Seller Portal \nShopify Seller Portal\nSuspire repord received from mail",
+   "freq": "Weekly \nMonthly \nMonthly \nMonthly",
+   "remarks": "From Respective Seller Portal & for suspire received on email",
+   "field": "Accounting"
+  },
+  {
+   "window": "8th – 11th",
+   "num": "2",
+   "task": "Reconcile Sales with System / Marketplace Reports",
+   "source": "Internal Working",
+   "freq": "Monthly",
+   "remarks": "Match booked sales with marketplace/system reports for accuracy",
+   "field": "Accounting"
+  },
+  {
+   "window": "8th – 11th",
+   "num": "3",
+   "task": "Verify Debit Notes / Credit Notes",
+   "source": "Internal Working",
+   "freq": "Daily",
+   "remarks": "Check and validate debit/credit notes issued or received",
+   "field": "Accounting"
+  },
+  {
+   "window": "8th – 11th",
+   "num": "4",
+   "task": "Credit Card Statement Booking",
+   "source": "Internal Working",
+   "freq": "Monthly",
+   "remarks": "Record credit card transactions in books from the statement",
+   "field": "Accounting"
+  },
+  {
+   "window": "8th – 11th",
+   "num": "4",
+   "task": "Revenue MIS",
+   "source": "Internal Working",
+   "freq": "Monthly",
+   "remarks": "The client may require this on the 8th or 9th. The exact date depends on the schedule of their monthly meeting.",
+   "field": "Reporting"
+  },
+  {
+   "window": "8th – 11th",
+   "num": "5",
+   "task": "Cash Flow",
+   "source": "Internal Working",
+   "freq": "Monthly",
+   "remarks": "Prepare monthly cash flow statement",
+   "field": "Reporting"
+  },
+  {
+   "window": "8th – 11th",
+   "num": "4",
+   "task": "Prepare GSTR-1 Working",
+   "source": "Internal Working",
+   "freq": "Monthly",
+   "remarks": "to be completed till 10th of every month",
+   "field": "GST"
+  },
+  {
+   "window": "8th – 11th",
+   "num": "5",
+   "task": "Review GST Classification (B2B / B2C / Export)",
+   "source": "Internal Working",
+   "freq": "Monthly",
+   "remarks": "Verify correct classification of sales for GST reporting",
+   "field": "GST"
+  },
+  {
+   "window": "8th – 11th",
+   "num": "6",
+   "task": "File GSTR-1",
+   "source": "Internal Working",
+   "freq": "Monthly",
+   "remarks": "Submit GSTR-1 return on the GST portal",
+   "field": "GST"
+  },
+  {
+   "window": "8th – 11th",
+   "num": "7",
+   "task": "Book Salary Expense as per Payroll Register",
+   "source": "Internal Working",
+   "freq": "Monthly",
+   "remarks": "Record salary expense entries based on payroll register",
+   "field": "Accounting"
+  },
+  {
+   "window": "12th – 13th",
+   "num": "1",
+   "task": "Record Vendor Purchase Invoices",
+   "source": "Internal Working",
+   "freq": "Weekly",
+   "remarks": "Shumee Mail credentials available",
+   "field": "Accounting"
+  },
+  {
+   "window": "12th – 13th",
+   "num": "2",
+   "task": "Verify GSTIN and GST Rates",
+   "source": "Internal Working",
+   "freq": "Weekly",
+   "remarks": "Confirm vendor GSTIN validity and correct GST rate applied on invoices",
+   "field": "GST"
+  },
+  {
+   "window": "12th – 13th",
+   "num": "3",
+   "task": "Match Invoice with Purchase Orders",
+   "source": "Internal Working",
+   "freq": "Weekly",
+   "remarks": "Cross-check vendor invoices against purchase orders",
+   "field": "Accounting"
+  },
+  {
+   "window": "14th – 15th",
+   "num": "1",
+   "task": "Download GSTR-2A & GSTR-2B",
+   "source": "OCTA GST",
+   "freq": "Monthly",
+   "remarks": "Login Credentials Available",
+   "field": "GST"
+  },
+  {
+   "window": "14th – 15th",
+   "num": "2",
+   "task": "Reconcile GSTR-2B and 2A with Purchase Register",
+   "source": "Internal Working",
+   "freq": "Monthly",
+   "remarks": "Match ITC available in GSTR-2A/2B with the purchase register",
+   "field": "GST"
+  },
+  {
+   "window": "14th – 15th",
+   "num": "3",
+   "task": "Identify Missing ITC Invoices",
+   "source": "Internal Working",
+   "freq": "Monthly",
+   "remarks": "Flag invoices where ITC is not reflected in GSTR-2A/2B",
+   "field": "GST"
+  },
+  {
+   "window": "14th – 15th",
+   "num": "4",
+   "task": "Vendor Follow-up for Missing GST Invoices",
+   "source": "Internal Working",
+   "freq": "Monthly",
+   "remarks": "Follow up with vendors to obtain missing GST invoices",
+   "field": "GST"
+  },
+  {
+   "window": "16th – 20th",
+   "num": "1",
+   "task": "Daily Bookkeeping Entries",
+   "source": "Internal Working",
+   "freq": "Daily",
+   "remarks": "Record day-to-day accounting entries",
+   "field": "Accounting"
+  },
+  {
+   "window": "16th – 20th",
+   "num": "2",
+   "task": "Calculate GST Liability",
+   "source": "Internal Working",
+   "freq": "-",
+   "remarks": "Compute net GST payable for the month",
+   "field": "GST"
+  },
+  {
+   "window": "16th – 20th",
+   "num": "3",
+   "task": "Prepare GSTR-3B Working",
+   "source": "Internal Working",
+   "freq": "-",
+   "remarks": "Prepare summary working for GSTR-3B filing",
+   "field": "GST"
+  },
+  {
+   "window": "16th – 20th",
+   "num": "4",
+   "task": "Review Input Tax Credit Eligibility",
+   "source": "Internal Working",
+   "freq": "-",
+   "remarks": "Verify eligibility of Input Tax Credit before claiming in GSTR-3B",
+   "field": "GST"
+  },
+  {
+   "window": "16th – 20th",
+   "num": "5",
+   "task": "File GSTR-3B",
+   "source": "-",
+   "freq": "-",
+   "remarks": "Submit GSTR-3B return on the GST portal",
+   "field": "GST"
+  },
+  {
+   "window": "16th – 20th",
+   "num": "6",
+   "task": "Pass GSTR-3B entries in Books of accounts",
+   "source": "GSTr -3B",
+   "freq": "Monthly",
+   "remarks": "Record GSTR-3B related entries in books post filing",
+   "field": "GST"
+  },
+  {
+   "window": "16th – 20th",
+   "num": "7",
+   "task": "Monthly MIS",
+   "source": "Internal Working",
+   "freq": "Monthly",
+   "remarks": "Prepare monthly MIS report",
+   "field": "Reporting"
+  },
+  {
+   "window": "20th – 23rd",
+   "num": "2",
+   "task": "Daily Bookkeeping Entries",
+   "source": "Internal Working",
+   "freq": "Daily",
+   "remarks": "Record day-to-day accounting entries",
+   "field": "Accounting"
+  },
+  {
+   "window": "20th – 23rd",
+   "num": "3",
+   "task": "Knockoff Entries",
+   "source": "Internal Working",
+   "freq": "Monthly",
+   "remarks": "Match and settle open receivable/payable entries against payments",
+   "field": "Accounting"
+  },
+  {
+   "window": "20th – 23rd",
+   "num": "4",
+   "task": "Follow up to customore for payment",
+   "source": "Internal Working",
+   "freq": "Monthly",
+   "remarks": "Coordinate with customers for pending payment collection",
+   "field": "Follow Up"
+  },
+  {
+   "window": "20th – 23rd",
+   "num": "5",
+   "task": "Firstcry Invoices Booking",
+   "source": "Internal Working",
+   "freq": "Daily",
+   "remarks": "Book Firstcry sales invoices in accounting software",
+   "field": "Accounting"
+  },
+  {
+   "window": "20th – 23rd",
+   "num": "6",
+   "task": "Firstcry Signed invoices upload for firstcry portal",
+   "source": "Internal Working",
+   "freq": "Daily",
+   "remarks": "Upload signed invoices to the Firstcry portal",
+   "field": "Accounting"
+  },
+  {
+   "window": "24th – 27th",
+   "num": "1",
+   "task": "Daily Bookkeeping Entries",
+   "source": "Internal Working",
+   "freq": "-",
+   "remarks": "Record day-to-day accounting entries",
+   "field": "Accounting"
+  },
+  {
+   "window": "24th – 27th",
+   "num": "2",
+   "task": "Vendor Ledger Reconciliation",
+   "source": "Mail",
+   "freq": "Monthly",
+   "remarks": "Sent on Email",
+   "field": "Accounting"
+  },
+  {
+   "window": "24th – 27th",
+   "num": "3",
+   "task": "Customer Ledger Reconciliation",
+   "source": "Mail",
+   "freq": "Monthly",
+   "remarks": "Sent on Email",
+   "field": "Accounting"
+  },
+  {
+   "window": "24th – 27th",
+   "num": "4",
+   "task": "GST Ledger Review",
+   "source": "Internal Working",
+   "freq": "Monthly",
+   "remarks": "Review GST ledger for accuracy before month-end",
+   "field": "GST"
+  },
+  {
+   "window": "24th – 27th",
+   "num": "5",
+   "task": "Prepare for Current Month Closing",
+   "source": "Internal Working",
+   "freq": "Monthly",
+   "remarks": "Complete pending entries in preparation for closing the current month",
+   "field": "Accounting"
+  },
+  {
+   "window": "Month End",
+   "num": "1",
+   "task": "Review Advances (Customer & Vendor)",
+   "source": "Internal Working",
+   "freq": "Monthly",
+   "remarks": "Verify outstanding advances given to / received from customers and vendors",
+   "field": "Accounting"
+  },
+  {
+   "window": "Month End",
+   "num": "2",
+   "task": "Review Receivables (Customer & Vendor)",
+   "source": "Internal Working",
+   "freq": "Monthly",
+   "remarks": "Check outstanding receivable and payable balances",
+   "field": "Accounting"
+  },
+  {
+   "window": "Month End",
+   "num": "3",
+   "task": "Ledger Scrutiny",
+   "source": "Internal Working",
+   "freq": "Monthly",
+   "remarks": "Detailed review of ledger accounts to identify errors or mismatches",
+   "field": "Accounting"
+  },
+  {
+   "window": "Month End",
+   "num": "4",
+   "task": "Check Company's Email",
+   "source": "Internal Working",
+   "freq": "Daily",
+   "remarks": "Login credentials available",
+   "field": "Accounting"
+  },
+  {
+   "window": "Other Task",
+   "num": "1",
+   "task": "Preparing Payable Sheet",
+   "source": "Internal Working",
+   "freq": "Every Tuesday",
+   "remarks": "Send mail of Client",
+   "field": "Reporting"
+  },
+  {
+   "window": "Other Task",
+   "num": "2",
+   "task": "Receivable Sheet",
+   "source": "Internal Working",
+   "freq": "Every Tuesday",
+   "remarks": "Send mail of Client",
+   "field": "Reporting"
+  },
+  {
+   "window": "Other Task",
+   "num": "3",
+   "task": "Invoice Creating",
+   "source": "Internal Working",
+   "freq": "Daily-Weekly-Monthly",
+   "remarks": "Received on Email & Shumee Team also confirm on Call & Whatsapp",
+   "field": "Accounting"
+  },
+  {
+   "window": "Other Task",
+   "num": "4",
+   "task": "Payment uploading in Bank",
+   "source": "Internal Working",
+   "freq": "Daily-Weekly",
+   "remarks": "My responsibility is to upload payments in the bank portal whenever payment instructions are received from the finance group.",
+   "field": "Accounting"
+  }
+ ],
+ "MBRANDS": [
+  {
+   "window": "1st – 5th",
+   "num": "1",
+   "task": "Expense Bills Received-Entry",
+   "source": "Parvez",
+   "freq": "Monthly",
+   "remarks": "Some of Bills Downloaded by Us",
+   "field": "Accounting"
+  },
+  {
+   "window": "1st – 5th",
+   "num": "2",
+   "task": "E invoiceing Generation",
+   "source": "1.Ajio \n2.Firstcry\n3. Mirraw",
+   "freq": "Daily",
+   "remarks": "Download the Excel file from the portal, prepare the working, pass the accounting entry, and then generate the e-invoice in Tally.",
+   "field": "Accounting"
+  },
+  {
+   "window": "1st – 5th",
+   "num": "3",
+   "task": "Inventory",
+   "source": "OMS Software",
+   "freq": "Monthly",
+   "remarks": "Download on 1st of Every month",
+   "field": "Reporting"
+  },
+  {
+   "window": "6th – 7th",
+   "num": "1",
+   "task": "Prepare TDS Working",
+   "source": "Internal Working",
+   "freq": "Monthly",
+   "remarks": "Working done by Colonel But Payment is handled by Parvez",
+   "field": "TDS"
+  },
+  {
+   "window": "6th – 7th",
+   "num": "2",
+   "task": "TDS Payment",
+   "source": "At Income Tax Portal",
+   "freq": "-",
+   "remarks": "Working done by Colonel But Payment is handled by Parvez",
+   "field": "TDS"
+  },
+  {
+   "window": "6th – 7th",
+   "num": "3",
+   "task": "TDS Return 26Q and 24Q Working - Quarterly - If Applicable",
+   "source": "Monthly TDS Payment Working",
+   "freq": "Quarterly",
+   "remarks": "",
+   "field": "TDS"
+  },
+  {
+   "window": "6th – 7th",
+   "num": "4",
+   "task": "Sales Working-\n1. Amazon\n2. Myntra\n3. Flipkart\n4.TATA Cliq\n5. Nykaa",
+   "source": "Amazon Seller Portal\nMyntra Seller Porta\nFlipkart Seller Portal\nTata Cliq Seller Portal\nNykaa Seller Portal",
+   "freq": "Monthly",
+   "remarks": "",
+   "field": "Accounting"
+  },
+  {
+   "window": "8th – 11th",
+   "num": "1",
+   "task": "Sales Working-\n1. Shopify",
+   "source": "Harshali",
+   "freq": "Monthly",
+   "remarks": "Report is received by Client. With Updates and Correction",
+   "field": "Accounting"
+  },
+  {
+   "window": "8th – 11th",
+   "num": "2",
+   "task": "Reconcile Sales with System / Marketplace Reports",
+   "source": "Internal Working",
+   "freq": "Monthly",
+   "remarks": "",
+   "field": "Accounting"
+  },
+  {
+   "window": "8th – 11th",
+   "num": "3",
+   "task": "Prepare GSTR-1 Working",
+   "source": "Internal Working",
+   "freq": "Monthly",
+   "remarks": "to be completed till 9th of every month",
+   "field": "GST"
+  },
+  {
+   "window": "8th – 11th",
+   "num": "4",
+   "task": "Review GST Classification (B2B / B2C / Export)",
+   "source": "Internal Working",
+   "freq": "-",
+   "remarks": "",
+   "field": "GST"
+  },
+  {
+   "window": "8th – 11th",
+   "num": "5",
+   "task": "File GSTR-1",
+   "source": "-",
+   "freq": "-",
+   "remarks": "",
+   "field": "GST"
+  },
+  {
+   "window": "8th – 11th",
+   "num": "6",
+   "task": "Book Salary Expense as per Salary Register",
+   "source": "Parvez",
+   "freq": "Monthly",
+   "remarks": "",
+   "field": "Accounting"
+  },
+  {
+   "window": "12th – 13th",
+   "num": "1",
+   "task": "Record Vendor Purchase Invoices",
+   "source": "Parvez +Internal Working",
+   "freq": "Monthly",
+   "remarks": "Download Monhtly Purchase from OMS Software",
+   "field": "Accounting"
+  },
+  {
+   "window": "12th – 13th",
+   "num": "2",
+   "task": "Verify GSTIN and GST Rates",
+   "source": "-",
+   "freq": "-",
+   "remarks": "",
+   "field": "GST"
+  },
+  {
+   "window": "12th – 13th",
+   "num": "4",
+   "task": "Bank Entry",
+   "source": "Parvez",
+   "freq": "Monthly",
+   "remarks": "1.KOTAK MAHINDRA BANK 1646119491\n2.RBL Bank 409001964647",
+   "field": "Accounting"
+  },
+  {
+   "window": "14th – 15th",
+   "num": "1",
+   "task": "Download GSTR-2B",
+   "source": "GST",
+   "freq": "Monthly",
+   "remarks": "Login Credentials Available",
+   "field": "GST"
+  },
+  {
+   "window": "14th – 15th",
+   "num": "2",
+   "task": "Reconcile GSTR-2B with Purchase Register",
+   "source": "Internal Working",
+   "freq": "Monthly",
+   "remarks": "",
+   "field": "GST"
+  },
+  {
+   "window": "14th – 15th",
+   "num": "3",
+   "task": "Identify Missing ITC Invoices",
+   "source": "Internal Working",
+   "freq": "Monthly",
+   "remarks": "",
+   "field": "GST"
+  },
+  {
+   "window": "14th – 15th",
+   "num": "4",
+   "task": "Vendor Follow-up for Missing GST Invoices",
+   "source": "-",
+   "freq": "-",
+   "remarks": "",
+   "field": "GST"
+  },
+  {
+   "window": "16th – 20th",
+   "num": "1",
+   "task": "Daily Bookkeeping Entries",
+   "source": "Internal Working",
+   "freq": "Daily",
+   "remarks": "",
+   "field": "Accounting"
+  },
+  {
+   "window": "16th – 20th",
+   "num": "2",
+   "task": "Calculate GST Liability",
+   "source": "Internal Working",
+   "freq": "-",
+   "remarks": "",
+   "field": "GST"
+  },
+  {
+   "window": "16th – 20th",
+   "num": "3",
+   "task": "Prepare GSTR-3B Working",
+   "source": "Internal Working",
+   "freq": "-",
+   "remarks": "",
+   "field": "GST"
+  },
+  {
+   "window": "16th – 20th",
+   "num": "4",
+   "task": "Review Input Tax Credit Eligibility",
+   "source": "Internal Working",
+   "freq": "-",
+   "remarks": "",
+   "field": "GST"
+  },
+  {
+   "window": "16th – 20th",
+   "num": "5",
+   "task": "File GSTR-3B",
+   "source": "-",
+   "freq": "-",
+   "remarks": "",
+   "field": "GST"
+  },
+  {
+   "window": "16th – 20th",
+   "num": "6",
+   "task": "Pass GSTR-3B entries in Books of accounts",
+   "source": "GSTR-3B",
+   "freq": "Monthly",
+   "remarks": "",
+   "field": "GST"
+  },
+  {
+   "window": "20th – 23rd",
+   "num": "1",
+   "task": "MIS",
+   "source": "",
+   "freq": "",
+   "remarks": "",
+   "field": "Reporting"
+  },
+  {
+   "window": "20th – 23rd",
+   "num": "2",
+   "task": "P&L/Revenue MIS",
+   "source": "Tally",
+   "freq": "Monthly",
+   "remarks": "",
+   "field": "Reporting"
+  },
+  {
+   "window": "20th – 23rd",
+   "num": "3",
+   "task": "Channelwise MIS",
+   "source": "Tally",
+   "freq": "Monthly",
+   "remarks": "",
+   "field": "Reporting"
+  },
+  {
+   "window": "24th – 30th",
+   "num": "1",
+   "task": "Daily Bookkeeping Entries",
+   "source": "Internal Working",
+   "freq": "-",
+   "remarks": "",
+   "field": "Accounting"
+  },
+  {
+   "window": "24th – 30th",
+   "num": "2",
+   "task": "Vendor Ledger Reconciliation",
+   "source": "Mail",
+   "freq": "Monthly",
+   "remarks": "Send mail to Client",
+   "field": "Accounting"
+  },
+  {
+   "window": "Month End",
+   "num": "1",
+   "task": "Review Accounting",
+   "source": "Internal Working",
+   "freq": "Monthly",
+   "remarks": "",
+   "field": "Accounting"
+  }
+ ],
+ "URBAN": [
+  {
+   "window": "1st – 7th",
+   "num": "1",
+   "task": "Prepare TDS Working",
+   "source": "Internal Working",
+   "freq": "Monthly",
+   "remarks": "Working done by Colonel.",
+   "field": "TDS"
+  },
+  {
+   "window": "1st – 7th",
+   "num": "2",
+   "task": "TDS Payment",
+   "source": "At Income Tax Portal",
+   "freq": "-",
+   "remarks": "Working done by Colonel But Payment is handled by Harsh",
+   "field": "TDS"
+  },
+  {
+   "window": "1st – 7th",
+   "num": "3",
+   "task": "TDS Return 26Q and 24Q Working - Quarterly - If Applicable",
+   "source": "Monthly TDS Payment Working",
+   "freq": "Quarterly",
+   "remarks": "",
+   "field": "TDS"
+  },
+  {
+   "window": "1st – 7th",
+   "num": "4",
+   "task": "Sales Working-\n1. Amazon\n2.Blinkit\n3.Flipkart",
+   "source": "Amazon Seller Portal\nBlikit B2B Bill-Harsh\nFlipkart Seller Portal",
+   "freq": "Monthly",
+   "remarks": "",
+   "field": "Accounting"
+  },
+  {
+   "window": "8th – 11th",
+   "num": "1",
+   "task": "Sales Working-\n1. Shopify",
+   "source": "Harsh",
+   "freq": "Monthly",
+   "remarks": "Report is received by harsh With Updates and Correction",
+   "field": "Accounting"
+  },
+  {
+   "window": "8th – 11th",
+   "num": "2",
+   "task": "Reconcile Sales with System / Marketplace Reports",
+   "source": "Internal Working",
+   "freq": "Monthly",
+   "remarks": "",
+   "field": "Accounting"
+  },
+  {
+   "window": "8th – 11th",
+   "num": "3",
+   "task": "Prepare GSTR-1 Working",
+   "source": "Internal Working",
+   "freq": "Monthly",
+   "remarks": "to be completed till 9th of every month",
+   "field": "GST"
+  },
+  {
+   "window": "8th – 11th",
+   "num": "4",
+   "task": "Review GST Classification (B2B / B2C / Export)",
+   "source": "Internal Working",
+   "freq": "-",
+   "remarks": "",
+   "field": "GST"
+  },
+  {
+   "window": "8th – 11th",
+   "num": "5",
+   "task": "File GSTR-1",
+   "source": "-",
+   "freq": "-",
+   "remarks": "",
+   "field": "GST"
+  },
+  {
+   "window": "8th – 11th",
+   "num": "6",
+   "task": "Book Salary/ESIC Expense as per Salary Register",
+   "source": "Harsh",
+   "freq": "Monthly",
+   "remarks": "Salary Sheet Receive by Harsh",
+   "field": "Accounting"
+  },
+  {
+   "window": "12th – 13th",
+   "num": "1",
+   "task": "Record Vendor Purchase Invoices",
+   "source": "Harsh",
+   "freq": "Monthly",
+   "remarks": "Bill received from Harsh",
+   "field": "Accounting"
+  },
+  {
+   "window": "12th – 13th",
+   "num": "2",
+   "task": "Verify GSTIN and GST Rates",
+   "source": "-",
+   "freq": "-",
+   "remarks": "",
+   "field": "GST"
+  },
+  {
+   "window": "12th – 13th",
+   "num": "4",
+   "task": "Bank Entry",
+   "source": "Harsh",
+   "freq": "Monthly",
+   "remarks": "1.HDFC Bank-275\n2.ICICI Bank-425",
+   "field": "Accounting"
+  },
+  {
+   "window": "12th – 13th",
+   "num": "5",
+   "task": "Cash Entry",
+   "source": "Harsh",
+   "freq": "Monthly",
+   "remarks": "",
+   "field": "Accounting"
+  },
+  {
+   "window": "14th – 15th",
+   "num": "1",
+   "task": "Download GSTR-2B",
+   "source": "GST",
+   "freq": "Monthly",
+   "remarks": "Login Credentials Available",
+   "field": "GST"
+  },
+  {
+   "window": "14th – 15th",
+   "num": "2",
+   "task": "Reconcile GSTR-2B with Purchase Register",
+   "source": "Internal Working",
+   "freq": "Monthly",
+   "remarks": "",
+   "field": "GST"
+  },
+  {
+   "window": "14th – 15th",
+   "num": "3",
+   "task": "Identify Missing ITC Invoices",
+   "source": "Internal Working",
+   "freq": "Monthly",
+   "remarks": "",
+   "field": "GST"
+  },
+  {
+   "window": "14th – 15th",
+   "num": "4",
+   "task": "Vendor Follow-up for Missing GST Invoices",
+   "source": "-",
+   "freq": "-",
+   "remarks": "",
+   "field": "GST"
+  },
+  {
+   "window": "16th – 20th",
+   "num": "1",
+   "task": "Daily Bookkeeping Entries",
+   "source": "Internal Working",
+   "freq": "Daily",
+   "remarks": "",
+   "field": "Accounting"
+  },
+  {
+   "window": "16th – 20th",
+   "num": "2",
+   "task": "Calculate GST Liability",
+   "source": "Internal Working",
+   "freq": "-",
+   "remarks": "",
+   "field": "GST"
+  },
+  {
+   "window": "16th – 20th",
+   "num": "3",
+   "task": "Prepare GSTR-3B Working",
+   "source": "Internal Working",
+   "freq": "-",
+   "remarks": "",
+   "field": "GST"
+  },
+  {
+   "window": "16th – 20th",
+   "num": "4",
+   "task": "Review Input Tax Credit Eligibility",
+   "source": "Internal Working",
+   "freq": "-",
+   "remarks": "",
+   "field": "GST"
+  },
+  {
+   "window": "16th – 20th",
+   "num": "5",
+   "task": "File GSTR-3B",
+   "source": "-",
+   "freq": "-",
+   "remarks": "",
+   "field": "GST"
+  },
+  {
+   "window": "16th – 20th",
+   "num": "6",
+   "task": "Pass GSTR-3B entries in Books of accounts",
+   "source": "GSTR-3B",
+   "freq": "Monthly",
+   "remarks": "",
+   "field": "GST"
+  },
+  {
+   "window": "20th – 23rd",
+   "num": "1",
+   "task": "MIS",
+   "source": "",
+   "freq": "",
+   "remarks": "",
+   "field": "Reporting"
+  },
+  {
+   "window": "20th – 23rd",
+   "num": "2",
+   "task": "P&L/Revenue MIS",
+   "source": "Tally",
+   "freq": "Monthly",
+   "remarks": "",
+   "field": "Reporting"
+  },
+  {
+   "window": "20th – 23rd",
+   "num": "3",
+   "task": "Channelwise MIS",
+   "source": "Tally",
+   "freq": "Monthly",
+   "remarks": "",
+   "field": "Reporting"
+  },
+  {
+   "window": "24th – 30th",
+   "num": "1",
+   "task": "Daily Bookkeeping Entries",
+   "source": "Internal Working",
+   "freq": "-",
+   "remarks": "",
+   "field": "Accounting"
+  },
+  {
+   "window": "24th – 30th",
+   "num": "2",
+   "task": "Vendor Ledger Reconciliation",
+   "source": "Mail",
+   "freq": "Monthly",
+   "remarks": "Send mail to Client and Discussion",
+   "field": "Accounting"
+  },
+  {
+   "window": "Month End",
+   "num": "1",
+   "task": "Review Accounting",
+   "source": "Internal Working",
+   "freq": "Monthly",
+   "remarks": "",
+   "field": "Accounting"
+  }
+ ]
+}

@@ -1,13 +1,7 @@
-import { LayoutDashboard, Building2, Bot, Users as UsersIcon, Link as LinkIcon, ClipboardList, Workflow, Plug, Flag, Sparkles, Video, BookOpen, CalendarCheck, MessageSquare, Landmark, Database } from 'lucide-react';
-
-const STATUTORY_OWNER_EMAIL = 'chauhandhaval932@gmail.com';
+import { LayoutDashboard, Building2, Bot, Users as UsersIcon, Link as LinkIcon, ClipboardList, Workflow, Plug, Flag, Sparkles, Video, BookOpen, MessageSquare, Landmark, Database } from 'lucide-react';
 
 const readRole = () => {
   try { return JSON.parse(localStorage.getItem('user') || '{}').role || ''; }
-  catch { return ''; }
-};
-const readEmail = () => {
-  try { return JSON.parse(localStorage.getItem('user') || '{}').email || ''; }
   catch { return ''; }
 };
 
@@ -66,18 +60,15 @@ export const sidebarFor = (brandItems = []) => {
   const bid = lastBrandId();
   const dashPath = bid ? `/brands/${bid}/dashboard` : '/brands';
   const agentsPath = bid ? `/brands/${bid}/agents` : '/brands';
-  const compliancePath = bid ? `/brands/${bid}/compliance-tracker` : '/brands';
   // Brandless entry — StatutoryRedirect resolves the brand at nav time, so this
   // never falls back to /brands (which caused the intermittent bounce).
   const statutoryPath = '/statutory-compliance';
   const base = [
     { path: dashPath,        label: 'Dashboard',   icon: LayoutDashboard, testId: 'nav-dashboard' },
     { path: agentsPath,      label: 'Agents',      icon: Bot,             testId: 'nav-agents' },
-    { path: compliancePath,  label: 'Tracker',     icon: CalendarCheck,   testId: 'nav-compliance' },
-    // Statutory Compliance — private to the owner email only.
-    ...(readEmail() === STATUTORY_OWNER_EMAIL
-      ? [{ path: statutoryPath, label: 'Statutory Compliance', icon: Landmark, testId: 'nav-statutory' }]
-      : []),
+    // Statutory Compliance — brand-scoped, visible to every assigned accountant.
+    // (The old monthly "Tracker" is folded into Statutory Compliance and hidden.)
+    { path: statutoryPath,   label: 'Statutory Compliance', icon: Landmark, testId: 'nav-statutory' },
     { path: '/chat',         label: 'Colonel AI',  icon: Sparkles,        testId: 'nav-chat' },
     { path: '/meetings',     label: 'Meetings',    icon: Video,           testId: 'nav-meetings' },
     { path: '/tasks',        label: 'Tasks',       icon: ClipboardList,   testId: 'nav-tasks' },

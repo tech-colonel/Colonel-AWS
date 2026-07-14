@@ -1,7 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { Navigate } from 'react-router-dom';
 import api from '../../lib/api';
-import { STATUTORY_OWNER_EMAIL } from '../../lib/statutoryMeta';
 
 /**
  * Brandless entry point for Statutory Compliance (sidebar link → /statutory-compliance).
@@ -30,11 +29,6 @@ export default function StatutoryRedirect() {
       .catch(() => { if (on) setTarget('/brands'); });
     return () => { on = false; };
   }, []);
-
-  // Owner-gate mirrors the page's own gate; non-owners never see the sidebar item,
-  // but guard here too for safety.
-  const email = (() => { try { return JSON.parse(localStorage.getItem('user') || '{}').email; } catch { return ''; } })();
-  if (email && email !== STATUTORY_OWNER_EMAIL) return <Navigate to="/brands" replace />;
 
   if (!target) {
     return (
