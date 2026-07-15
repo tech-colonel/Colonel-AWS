@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import DashboardLayout from '../../components/layout/DashboardLayout';
-import { Building2, Bot, Plus, ShoppingBag, TrendingUp, CheckCircle2, ChevronRight, Activity, FileSpreadsheet, Target, Layers, PieChart as PieIcon } from 'lucide-react';
+import { Building2, Bot, Plus, TrendingUp, ChevronRight, Activity, FileSpreadsheet, Target, Layers, PieChart as PieIcon } from 'lucide-react';
 import { Button } from '../../components/ui/button';
 import { Input } from '../../components/ui/input';
 import { Label } from '../../components/ui/label';
@@ -50,6 +50,49 @@ const sectionOf = (agent) => {
   return 'other';
 };
 
+// Per-section styling for agents without rich meta (mirrors the accountant inventory).
+const SECTION_STYLE = {
+  reco:        { category: 'GST Reconciliation', color: '#0748EE', bg: '#E8EFFE', border: '#A3BFF8' },
+  bank:        { category: 'Bank & Finance',     color: '#059669', bg: '#ECFDF5', border: '#A7F3D0' },
+  invoice:     { category: 'Invoice',            color: '#7C3AED', bg: '#F5F3FF', border: '#C4B5FD' },
+  marketplace: { category: 'Marketplace MIS',    color: '#D97706', bg: '#FFFBEB', border: '#FDE68A' },
+  other:       { category: 'Other',              color: '#64748B', bg: '#F1F5F9', border: '#CBD5E1' },
+};
+const CHANNEL_ICON = {
+  amazon: '🛒', flipkart: '🛍️', myntra: '👗', nykaa: '💄', zepto: '⚡', blinkit: '🛒',
+  jiomart: '🏬', firstcry: '🧸', shopify: '🛍️', mirrow: '🪞', cread: '📦', limeroad: '👜',
+  settlement: '💰', total: '📊', meesho: '🏷️', ajio: '👕',
+};
+const channelIcon = (name) => {
+  const n = (name || '').toLowerCase();
+  for (const k in CHANNEL_ICON) if (n.includes(k)) return CHANNEL_ICON[k];
+  return '🛍️';
+};
+// Brand-colored monogram tiles per marketplace (brand color + short label — NOT logo artwork).
+const CHANNEL_BRAND = {
+  settlement: { bg: '#FF9900', fg: '#1A1A1A', label: 'A$' },
+  total:      { bg: '#0748EE', fg: '#FFFFFF', label: 'TS' },
+  amazon:     { bg: '#FF9900', fg: '#1A1A1A', label: 'a' },
+  flipkart:   { bg: '#2874F0', fg: '#FFFFFF', label: 'F' },
+  myntra:     { bg: '#FF3F6C', fg: '#FFFFFF', label: 'M' },
+  nykaa:      { bg: '#E80071', fg: '#FFFFFF', label: 'N' },
+  zepto:      { bg: '#6C2BD9', fg: '#FFFFFF', label: 'Z' },
+  blinkit:    { bg: '#F8CB46', fg: '#1A1A1A', label: 'b' },
+  jiomart:    { bg: '#0C51A1', fg: '#FFFFFF', label: 'J' },
+  firstcry:   { bg: '#F7941D', fg: '#FFFFFF', label: 'FC' },
+  shopify:    { bg: '#95BF47', fg: '#FFFFFF', label: 'S' },
+  meesho:     { bg: '#F43397', fg: '#FFFFFF', label: 'Me' },
+  ajio:       { bg: '#2C4152', fg: '#FFFFFF', label: 'AJ' },
+  limeroad:   { bg: '#8CC63F', fg: '#1A1A1A', label: 'LR' },
+  mirrow:     { bg: '#334155', fg: '#FFFFFF', label: 'Mi' },
+  cread:      { bg: '#475569', fg: '#FFFFFF', label: 'Cr' },
+};
+const channelBrand = (name) => {
+  const n = (name || '').toLowerCase();
+  for (const k in CHANNEL_BRAND) if (n.includes(k)) return CHANNEL_BRAND[k];
+  return null;
+};
+
 // ── Rich card (RECO + MTR + Bank) ───────────────────────────────────────────
 const RichAgentCard = ({ meta, description, onClick }) => (
   <button onClick={onClick}
@@ -79,27 +122,37 @@ const RichAgentCard = ({ meta, description, onClick }) => (
   </button>
 );
 
-// ── Simple card (marketplace / invoice / other) ─────────────────────────────
-const SimpleAgentCard = ({ agent, onClick }) => (
-  <button onClick={onClick}
-    className="text-left w-full rounded-2xl border bg-white p-5 transition-shadow hover:shadow-md group" style={{ borderColor: '#E2E8F0' }}>
-    <div className="flex items-center gap-3 mb-3">
-      <div className="w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0 bg-slate-100 border border-slate-200">
-        <ShoppingBag className="w-4 h-4 text-slate-500" />
+// ── Colorful card (marketplace / invoice / other) — matches the accountant inventory ──
+const SimpleAgentCard = ({ agent, onClick }) => {
+  const s = SECTION_STYLE[sectionOf(agent)] || SECTION_STYLE.other;
+  const mono = channelBrand(agent.name);
+  return (
+    <button onClick={onClick}
+      className="text-left w-full rounded-2xl border bg-white transition-all duration-200 flex flex-col overflow-hidden hover:shadow-lg hover:-translate-y-0.5 group"
+      style={{ borderColor: s.border }}>
+      <div className="p-5 flex-1">
+        <div className="flex items-start justify-between mb-3">
+          {mono ? (
+            <div className="w-11 h-11 rounded-xl flex items-center justify-center font-extrabold text-base tracking-tight"
+              style={{ background: mono.bg, color: mono.fg }}>{mono.label}</div>
+          ) : (
+            <div className="w-11 h-11 rounded-xl flex items-center justify-center text-2xl"
+              style={{ background: s.bg, border: `1.5px solid ${s.border}` }}>{channelIcon(agent.name)}</div>
+          )}
+        </div>
+        <h3 className="font-bold text-slate-900 text-base mb-1 leading-snug">{agent.name}</h3>
+        <p className="text-slate-500 text-xs leading-relaxed line-clamp-2">{agent.description || 'Marketplace / data agent'}</p>
       </div>
-      <h3 className="text-sm font-bold text-slate-900">{agent.name}</h3>
-    </div>
-    <p className="text-xs leading-relaxed mb-4 text-slate-500 line-clamp-2">{agent.description || 'Marketplace / data agent'}</p>
-    <div className="flex items-center justify-between">
-      <span className="flex items-center gap-1 text-xs font-semibold text-emerald-600">
-        <CheckCircle2 className="w-3 h-3" /> Active
-      </span>
-      <span className="flex items-center gap-1 text-xs font-semibold text-slate-500 transition-all group-hover:gap-1.5">
-        Open <ChevronRight className="w-3.5 h-3.5 group-hover:translate-x-0.5 transition-transform" />
-      </span>
-    </div>
-  </button>
-);
+      <div className="px-5 py-3 flex items-center justify-between border-t"
+        style={{ borderColor: s.border, background: s.bg }}>
+        <span className="text-xs font-bold uppercase tracking-wide" style={{ color: s.color }}>{s.category}</span>
+        <span className="flex items-center gap-1 text-xs font-semibold transition-all group-hover:gap-1.5" style={{ color: s.color }}>
+          Open <ChevronRight className="w-3.5 h-3.5 group-hover:translate-x-0.5 transition-transform" />
+        </span>
+      </div>
+    </button>
+  );
+};
 
 // Myntra Ticket Finder — distinctive cream / monospace card (D'Chica ops-hub style).
 const MyntraCard = ({ onClick }) => (
