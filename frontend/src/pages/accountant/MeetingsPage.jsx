@@ -14,7 +14,6 @@ import {
 import {
   initials, AV, D, fmtDate, fmtDateShort, fmtTimeRange, fmtFF, platformOf, platformName,
   daysLabel, hashStr, isPastOf, deriveType, statusOf, readProgress, persistProgress,
-  SAMPLE_EVENTS, SAMPLE_MEETINGS,
 } from '../../lib/sampleCalendar';
 
 /* ── small UI ─────────────────────────────────────────────────────────────── */
@@ -192,6 +191,8 @@ export default function MeetingsPage() {
   const sidebarItems = sidebarFor([]);
   const [tab, setTab] = useState('upcoming');
   const [cal, setCal] = useState({ past: [], upcoming: [] });
+  const [conn, setConn] = useState({ composio: true, calendar: false, drive: false });
+  const [connecting, setConnecting] = useState(false);
   const [recordings, setRecordings] = useState([]);
   const [allDay, setAllDay] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -227,16 +228,28 @@ export default function MeetingsPage() {
       api.get('/api/meetings/calendar').then((r) => r.data || {}).catch(() => ({})),
       api.get('/api/meetings/recent').then((r) => r.data?.meetings || []).catch(() => []),
       api.get('/api/meetings/upcoming').then((r) => (r.data?.events || []).filter((e) => e.allDay)).catch(() => []),
-    ]).then(([c, rec, ad]) => { setCal({ past: c.past || [], upcoming: c.upcoming || [] }); setRecordings(rec); setAllDay(ad); }).finally(() => setLoading(false));
+      api.get('/api/meetings/connection').then((r) => r.data || {}).catch(() => ({})),
+    ]).then(([c, rec, ad, cn]) => { setCal({ past: c.past || [], upcoming: c.upcoming || [] }); setRecordings(rec); setAllDay(ad); setConn({ composio: cn.composio !== false, calendar: !!cn.calendar, drive: !!cn.drive }); }).finally(() => setLoading(false));
   }, []);
   useEffect(() => { load(); }, [load]);
 
+  // Connect the logged-in user's OWN Google (via Composio's verified OAuth — no
+  // "unverified app" warning). No brandId → the connection is per-user.
+  const connectGoogle = async (slug = 'googlecalendar') => {
+    setConnecting(true);
+    try {
+      const r = await api.post(`/api/composio/${slug}/connect`, {});
+      if (r.data?.redirectUrl) { window.location.href = r.data.redirectUrl; return; }
+      toast.error('Could not start Google connection'); setConnecting(false);
+    } catch (e) { toast.error(e?.response?.data?.error || 'Could not start Google connection'); setConnecting(false); }
+  };
+
   const withMeet = (a) => a.filter((m) => m.joinLink);
   const noMeet = (a) => a.filter((m) => !m.joinLink);
-  const allMeet = [...withMeet(cal.upcoming), ...withMeet(cal.past), ...SAMPLE_MEETINGS];
+  const allMeet = [...withMeet(cal.upcoming), ...withMeet(cal.past)];
   const mUpcoming = allMeet.filter((m) => !isPastOf(m)).sort((a, b) => (D(a.start) || 0) - (D(b.start) || 0));
   const mPast = allMeet.filter((m) => isPastOf(m)).sort((a, b) => (D(b.start) || 0) - (D(a.start) || 0));
-  const allEvents = [...noMeet(cal.upcoming), ...allDay, ...noMeet(cal.past), ...SAMPLE_EVENTS];
+  const allEvents = [...noMeet(cal.upcoming), ...allDay, ...noMeet(cal.past)];
   const evUpcoming = allEvents.filter((m) => !isPastOf(m)).sort((a, b) => (D(a.start) || 0) - (D(b.start) || 0));
   const evPast = allEvents.filter((m) => isPastOf(m)).sort((a, b) => (D(b.start) || 0) - (D(a.start) || 0));
   const meetingCount = mUpcoming.length + mPast.length;
@@ -303,6 +316,21 @@ export default function MeetingsPage() {
             </button>
           ))}
         </div>
+
+        {!loading && !conn.calendar && (tab === 'upcoming' || tab === 'events') && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 14, padding: '16px 18px', marginBottom: 18, borderRadius: 14, border: '1px solid var(--card-border)', background: 'var(--surface)' }}>
+            <div style={{ width: 40, height: 40, borderRadius: 11, background: '#E8EFFE', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+              <CalendarDays style={{ width: 20, height: 20, color: '#0748EE' }} />
+            </div>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontWeight: 700, fontSize: 14, color: 'var(--text-heading)' }}>Connect your Google Calendar</div>
+              <div style={{ fontSize: 12.5, color: 'var(--text-muted)', marginTop: 2 }}>Sign in with your own Google account to see your meetings &amp; events here — secured via Composio (no “unverified app” warning).</div>
+            </div>
+            <button onClick={() => connectGoogle('googlecalendar')} disabled={connecting} style={{ display: 'inline-flex', alignItems: 'center', gap: 7, fontSize: 13, fontWeight: 700, padding: '9px 16px', borderRadius: 11, background: '#0748EE', color: '#fff', border: 'none', cursor: connecting ? 'wait' : 'pointer', flexShrink: 0 }}>
+              {connecting ? <Loader2 className="animate-spin" style={{ width: 15, height: 15 }} /> : <ExternalLink style={{ width: 15, height: 15 }} />} Connect Google
+            </button>
+          </div>
+        )}
 
         {loading ? (
           <div style={{ textAlign: 'center', padding: '60px 0', color: '#94A3B8' }}><Loader2 className="animate-spin" style={{ width: 28, height: 28, margin: '0 auto 12px' }} /><div>Loading meetings…</div></div>

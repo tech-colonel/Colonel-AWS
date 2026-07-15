@@ -18,7 +18,23 @@ const path = require('path');
 const fs = require('fs');
 const { google } = require('googleapis');
 const { getGoogleClient } = require('../services/googleClient');
+const composio = require('../services/composioClient');
 const { masterSequelize } = require('../config/database');
+
+// Google Calendar / Drive are accessed PER-USER through Composio's verified
+// OAuth app (no "unverified app" warning). The Composio entity = the app user id.
+const CAL_TOOLKIT = 'googlecalendar';
+const DRIVE_TOOLKIT = 'googledrive';
+/* Pull raw Google-Calendar events for a user THROUGH Composio. Returns
+   Google events.list-shaped items so dedupeRecurring/mapEvent work unchanged. */
+const listUserCalendarEvents = async (userId, { timeMin, timeMax, maxResults = 50 }) => {
+  const r = await composio.executeTool(userId, 'GOOGLECALENDAR_EVENTS_LIST', {
+    calendarId: 'primary', timeMin, timeMax, maxResults, singleEvents: true, orderBy: 'startTime',
+  });
+  if (r && r.successful === false) throw new Error(typeof r.error === 'string' ? r.error : 'Composio calendar error');
+  const d = (r && r.data) || r || {};
+  return d.items || d.events || (d.data && (d.data.items || d.data.events)) || [];
+};
 const { QueryTypes } = require('sequelize');
 
 const FIREFLIES_API = 'https://api.fireflies.ai/graphql';
@@ -103,26 +119,12 @@ function getServiceCalendar() {
  *  calendar); falls back to a service-account-shared GOOGLE_CALENDAR_ID. */
 const getUpcomingMeetings = async (req, res) => {
   try {
-    let cal = null;
-    let calendarId = 'primary';
+    const userId = String(req.user?.id || '');
+    if (!(await composio.hasConnection(userId, CAL_TOOLKIT)))
+      return res.json({ configured: false, connected: false, reason: 'google_not_connected', events: [] });
 
-    const g = await getGoogleClient();
-    if (g) {
-      cal = google.calendar({ version: 'v3', auth: g.client });
-    } else if (CALENDAR_ID) {
-      cal = getServiceCalendar();
-      calendarId = CALENDAR_ID;
-    }
-    if (!cal) return res.json({ configured: false, reason: 'google_not_connected', events: [] });
-
-    const r = await cal.events.list({
-      calendarId,
-      timeMin: new Date().toISOString(),
-      maxResults: 30,
-      singleEvents: true,
-      orderBy: 'startTime',
-    });
-    const events = dedupeRecurring(r.data.items || []).slice(0, 15).map((e) => ({
+    const raw = await listUserCalendarEvents(userId, { timeMin: new Date().toISOString(), maxResults: 30 });
+    const events = dedupeRecurring(raw).slice(0, 15).map((e) => ({
       id: e.id,
       title: e.summary || '(no title)',
       start: e.start?.dateTime || e.start?.date || null,
@@ -135,10 +137,9 @@ const getUpcomingMeetings = async (req, res) => {
       htmlLink: e.htmlLink || null,
       description: e.description || null,
     }));
-    res.json({ configured: true, events });
+    res.json({ configured: true, connected: true, events });
   } catch (err) {
-    // Calendar not shared with the SA / transient error → empty, never 500.
-    res.json({ configured: true, error: err.message, events: [] });
+    res.json({ configured: true, connected: true, error: err.message, events: [] });
   }
 };
 
@@ -278,24 +279,22 @@ const mapEvent = (e, now) => ({
  *  window (past 45d + next 60d), split into past + upcoming. Calendar + Meet. */
 const getCalendarMeetings = async (req, res) => {
   try {
-    const g = await getGoogleClient();
-    if (!g) return res.json({ configured: false, reason: 'google_not_connected', past: [], upcoming: [] });
-    const cal = google.calendar({ version: 'v3', auth: g.client });
+    const userId = String(req.user?.id || '');
+    if (!(await composio.hasConnection(userId, CAL_TOOLKIT)))
+      return res.json({ configured: false, connected: false, reason: 'google_not_connected', past: [], upcoming: [] });
     const now = new Date();
     const from = new Date(now.getTime() - 45 * 24 * 3600 * 1000);
     const to = new Date(now.getTime() + 60 * 24 * 3600 * 1000);
-    const r = await cal.events.list({
-      calendarId: 'primary', timeMin: from.toISOString(), timeMax: to.toISOString(),
-      maxResults: 100, singleEvents: true, orderBy: 'startTime',
-    });
-    const timed = dedupeRecurring(r.data.items || []).filter((e) => e.start && e.start.dateTime).map((e) => mapEvent(e, now));
+    const raw = await listUserCalendarEvents(userId, { timeMin: from.toISOString(), timeMax: to.toISOString(), maxResults: 100 });
+    const timed = dedupeRecurring(raw).filter((e) => e.start && e.start.dateTime).map((e) => mapEvent(e, now));
     res.json({
       configured: true,
+      connected: true,
       upcoming: timed.filter((m) => !m.isPast),
       past: timed.filter((m) => m.isPast).reverse(),  // most-recent first
     });
   } catch (err) {
-    res.json({ configured: true, error: err.message, past: [], upcoming: [] });
+    res.json({ configured: true, connected: true, error: err.message, past: [], upcoming: [] });
   }
 };
 
@@ -303,28 +302,27 @@ const getCalendarMeetings = async (req, res) => {
  *  (optionally with a Google Meet link). body: {title,start,end,description,attendees,addMeet} */
 const createCalendarEvent = async (req, res) => {
   try {
-    const g = await getGoogleClient();
-    if (!g) return res.status(400).json({ error: 'Google Calendar is not connected.' });
+    const userId = String(req.user?.id || '');
+    if (!(await composio.hasConnection(userId, CAL_TOOLKIT)))
+      return res.status(400).json({ error: 'Connect Google Calendar first.' });
     const { title, description, start, end, attendees, addMeet } = req.body;
     if (!title || !start) return res.status(400).json({ error: 'title and start are required' });
 
-    const cal = google.calendar({ version: 'v3', auth: g.client });
     const startDt = new Date(start);
     const endDt = end ? new Date(end) : new Date(startDt.getTime() + 30 * 60000);
-    const requestBody = {
+    const r = await composio.executeTool(userId, 'GOOGLECALENDAR_CREATE_EVENT', {
+      calendar_id: 'primary',
       summary: title,
       description: description || '',
-      start: { dateTime: startDt.toISOString() },
-      end: { dateTime: endDt.toISOString() },
-      attendees: Array.isArray(attendees) ? attendees.filter(Boolean).map((e) => ({ email: e })) : [],
-    };
-    const params = { calendarId: 'primary', requestBody, sendUpdates: 'all' };
-    if (addMeet) {
-      requestBody.conferenceData = { createRequest: { requestId: 'colonel-' + Date.now(), conferenceSolutionKey: { type: 'hangoutsMeet' } } };
-      params.conferenceDataVersion = 1;
-    }
-    const r = await cal.events.insert(params);
-    res.status(201).json({ id: r.data.id, htmlLink: r.data.htmlLink || null, meetLink: r.data.hangoutLink || null });
+      start_datetime: startDt.toISOString(),
+      end_datetime: endDt.toISOString(),
+      attendees: Array.isArray(attendees) ? attendees.filter(Boolean) : [],
+      create_meeting_room: !!addMeet,
+      send_updates: 'all',
+    });
+    if (r && r.successful === false) return res.status(502).json({ error: typeof r.error === 'string' ? r.error : 'Could not create event' });
+    const d = (r && r.data) || {};
+    res.status(201).json({ id: d.id || null, htmlLink: d.htmlLink || d.html_link || null, meetLink: d.hangoutLink || d.hangout_link || null });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -389,4 +387,41 @@ const unpinMeeting = async (req, res) => {
   }
 };
 
-module.exports = { getUpcomingMeetings, getRecentMeetings, getCalendarMeetings, createCalendarEvent, firefliesJoin, pinMeeting, unpinMeeting };
+/* GET /api/meetings/connection — which per-user Google apps this user has
+   connected via Composio (drives the "Connect Google" CTAs). */
+const getConnectionStatus = async (req, res) => {
+  try {
+    const userId = String(req.user?.id || '');
+    if (!composio.isConfigured()) return res.json({ composio: false, calendar: false, drive: false });
+    const [calendar, drive] = await Promise.all([
+      composio.hasConnection(userId, CAL_TOOLKIT).catch(() => false),
+      composio.hasConnection(userId, DRIVE_TOOLKIT).catch(() => false),
+    ]);
+    res.json({ composio: true, calendar, drive });
+  } catch (err) { res.json({ composio: true, calendar: false, drive: false, error: err.message }); }
+};
+
+/* GET /api/meetings/drive-recent — the user's recently-viewed Google Drive files
+   (via Composio). Powers the dashboard "Previously viewed files" — real, per-user. */
+const getRecentDriveFiles = async (req, res) => {
+  try {
+    const userId = String(req.user?.id || '');
+    if (!(await composio.hasConnection(userId, DRIVE_TOOLKIT)))
+      return res.json({ connected: false, files: [] });
+    const r = await composio.executeTool(userId, 'GOOGLEDRIVE_LIST_FILES', {
+      orderBy: 'viewedByMeTime desc', pageSize: 10,
+      fields: 'files(id,name,mimeType,size,webViewLink,viewedByMeTime,modifiedTime)',
+    });
+    if (r && r.successful === false) throw new Error(typeof r.error === 'string' ? r.error : 'Composio drive error');
+    const d = (r && r.data) || r || {};
+    const raw = d.files || (d.data && d.data.files) || [];
+    const files = raw.map((f) => ({
+      id: f.id, name: f.name, mimeType: f.mimeType,
+      size: f.size ? Number(f.size) : null, url: f.webViewLink || null,
+      viewedAt: f.viewedByMeTime || f.modifiedTime || null,
+    }));
+    res.json({ connected: true, files });
+  } catch (err) { res.json({ connected: true, files: [], error: err.message }); }
+};
+
+module.exports = { getUpcomingMeetings, getRecentMeetings, getCalendarMeetings, createCalendarEvent, firefliesJoin, pinMeeting, unpinMeeting, getConnectionStatus, getRecentDriveFiles };

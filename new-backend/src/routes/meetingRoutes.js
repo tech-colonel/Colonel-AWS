@@ -3,6 +3,8 @@ const router = express.Router();
 const { authenticateToken } = require('../middleware/authMiddleware');
 const meetingController = require('../controllers/meetingController');
 
+router.get('/meetings/connection', authenticateToken, meetingController.getConnectionStatus);
+router.get('/meetings/drive-recent', authenticateToken, meetingController.getRecentDriveFiles);
 router.get('/meetings/upcoming', authenticateToken, meetingController.getUpcomingMeetings);
 router.get('/meetings/recent', authenticateToken, meetingController.getRecentMeetings);
 router.get('/meetings/calendar', authenticateToken, meetingController.getCalendarMeetings);

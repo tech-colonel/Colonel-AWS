@@ -224,6 +224,26 @@ async function disconnect(connectedAccountId) {
   return composio.connectedAccounts.delete(connectedAccountId);
 }
 
+/* ── Tool execution (fetch real data through a user's connected account) ─────── */
+/**
+ * Execute a Composio tool/action for `userId`'s connected account.
+ * @param {string} userId  the Composio entity bucket (we use the app user id)
+ * @param {string} slug    action slug, e.g. 'GOOGLECALENDAR_EVENTS_LIST'
+ * @param {object} args    the action arguments
+ * @returns {Promise<{successful?:boolean, data?:any, error?:any}>}
+ */
+async function executeTool(userId, slug, args = {}) {
+  const composio = getClient();
+  return composio.tools.execute(slug, { userId, arguments: args });
+}
+
+/** True when `userId` has an ACTIVE connection to `toolkitSlug` (e.g. 'googlecalendar'). */
+async function hasConnection(userId, toolkitSlug) {
+  const want = String(toolkitSlug || '').toLowerCase();
+  const conns = await listConnections(userId);
+  return conns.some((c) => String(c.slug || '').toLowerCase() === want);
+}
+
 module.exports = {
   isConfigured,
   listToolkits,
@@ -233,4 +253,6 @@ module.exports = {
   connectWithCredentials,
   listConnections,
   disconnect,
+  executeTool,
+  hasConnection,
 };

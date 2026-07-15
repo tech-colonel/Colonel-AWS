@@ -16,7 +16,6 @@ import api from '../../lib/api';
 import { toast } from 'sonner';
 import { sidebarFor } from '../../lib/adminNav';
 import { useAuth } from '../../context/AuthContext';
-import { SAMPLE_EVENTS, isPastOf } from '../../lib/sampleCalendar';
 
 const RECO_ROUTE_MAP = {
   'gstr_2b_books':            'gstr_2b_books',
@@ -81,14 +80,6 @@ const SRC = {
 // Sample Drive files — shown ONLY when the real per-brand Drive listing is
 // empty (locally the Google creds live on AWS, so the mirror is empty here).
 // On AWS with a linked+shared folder, the real files replace these.
-const SAMPLE_DRIVE_FILES = [
-  { id: 's1', name: 'GSTR-2B Recon — June.xlsx', mimeType: 'application/vnd.ms-excel', size: 2100000, webViewLink: '#', sample: true },
-  { id: 's2', name: 'Purchase Register — May.pdf', mimeType: 'application/pdf', size: 840000, webViewLink: '#', sample: true },
-  { id: 's3', name: 'Ledger Master — Stroom.gsheet', mimeType: 'application/vnd.google-apps.spreadsheet', size: null, webViewLink: '#', sample: true },
-  { id: 's4', name: 'Bank Statement — HDFC Q1.xlsx', mimeType: 'application/vnd.ms-excel', size: 1500000, webViewLink: '#', sample: true },
-  { id: 's5', name: 'Board review — Q1 FY27.mp4', mimeType: 'video/mp4', size: 42000000, webViewLink: '#', sample: true },
-];
-
 // ─── Small presentational atoms ──────────────────────────────────────────────
 const SECTION_TITLE = { fontSize: '12px', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--text-muted)', marginBottom: '10px', display: 'flex', alignItems: 'center', gap: '8px' };
 
@@ -154,6 +145,9 @@ const BrandDashboard = () => {
   const [viewerFile, setViewerFile] = useState(null);
   const [viewerFull, setViewerFull] = useState(false);
   const [recentOpened, setRecentOpened] = useState([]);
+  const [driveRecent, setDriveRecent] = useState([]);
+  const [conn, setConn] = useState({ calendar: false, drive: false });
+  const [connecting, setConnecting] = useState(false);
   const [showNewTask, setShowNewTask] = useState(false);
   const [ntTitle, setNtTitle] = useState('');
   const [ntDesc, setNtDesc] = useState('');
@@ -199,9 +193,23 @@ const BrandDashboard = () => {
     // Drive contents are loaded (and navigable) via loadDrive() below.
     api.get('/api/meetings/upcoming').then((r) => setUpcoming(Array.isArray(r.data?.events) ? r.data.events : [])).catch(() => setUpcoming([]));
     api.get('/api/meetings/recent').then((r) => setRecentMeetings(Array.isArray(r.data?.meetings) ? r.data.meetings : [])).catch(() => setRecentMeetings([]));
+    // Real per-user Google (via Composio) — recent Drive files + connection state.
+    api.get('/api/meetings/drive-recent').then((r) => setDriveRecent(Array.isArray(r.data?.files) ? r.data.files : [])).catch(() => setDriveRecent([]));
+    api.get('/api/meetings/connection').then((r) => setConn({ calendar: !!r.data?.calendar, drive: !!r.data?.drive })).catch(() => {});
   }, [brandId]);
 
   useEffect(() => { fetchData(); }, [fetchData]);
+
+  // Connect the logged-in user's OWN Google (Composio verified OAuth — no
+  // "unverified app" warning). No brandId → per-user connection.
+  const connectGoogle = async (slug = 'googlecalendar') => {
+    setConnecting(true);
+    try {
+      const r = await api.post(`/api/composio/${slug}/connect`, {});
+      if (r.data?.redirectUrl) { window.location.href = r.data.redirectUrl; return; }
+      toast.error('Could not start Google connection'); setConnecting(false);
+    } catch (e) { toast.error(e?.response?.data?.error || 'Could not start Google connection'); setConnecting(false); }
+  };
 
   // Per-brand Drive listing — supports drilling into subfolders (?folderId).
   const loadDrive = useCallback((folderId) => {
@@ -336,8 +344,8 @@ const BrandDashboard = () => {
   // Previously viewed = files opened from the UI (persisted); sample fallback
   // until the accountant opens something, so the card is never empty.
   const recentFiles = useMemo(
-    () => (recentOpened.length ? recentOpened.slice(0, 5) : SAMPLE_DRIVE_FILES.slice(0, 5)),
-    [recentOpened]
+    () => (recentOpened.length ? recentOpened.slice(0, 5) : driveRecent.slice(0, 5)),
+    [recentOpened, driveRecent]
   );
 
   const prettySize = (b) => { if (b == null) return ''; if (b < 1024) return `${b} B`; if (b < 1048576) return `${Math.round(b / 1024)} KB`; return `${(b / 1048576).toFixed(1)} MB`; };
@@ -545,7 +553,14 @@ const BrandDashboard = () => {
             ) : (
               <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '4px 0 10px' }}>
                 <BrandLogo type="google_meet" size={30} />
-                <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>No upcoming meeting. Recent recordings below.</div>
+                {conn.calendar ? (
+                  <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>No upcoming meeting. Recent recordings below.</div>
+                ) : (
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+                    <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>Connect your Google Calendar to see your meetings.</div>
+                    <button onClick={() => connectGoogle('googlecalendar')} disabled={connecting} style={{ fontSize: 12, fontWeight: 700, padding: '6px 12px', borderRadius: 9, background: '#0748EE', color: '#fff', border: 'none', cursor: connecting ? 'wait' : 'pointer' }}>{connecting ? 'Connecting…' : 'Connect Google'}</button>
+                  </div>
+                )}
               </div>
             )}
             {recentMeetings.length > 0 && (
