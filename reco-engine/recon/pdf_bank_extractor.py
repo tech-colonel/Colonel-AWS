@@ -199,8 +199,21 @@ def _leading_date(s: str) -> tuple[str, str]:
 # ──────────────────────────────────────────────────────────────────
 # Line grouping
 # ──────────────────────────────────────────────────────────────────
+# OCR renderings of table ruling (vertical) lines. On scanned statements a standalone
+# one of these merges adjacent header columns (Axis "Tran Date"|"Chq No" → loses the date
+# tag) or sticks to an amount ("737166.42]"). Dropped in line grouping + tolerated in amount
+# recognition. NEVER stripped from narration content (only whole-token / leading-trailing).
+_OCR_SEP_CHARS = "|│┃¦‖∣ǀ︱❘][‹›"
+_OCR_SEP_SET = set(_OCR_SEP_CHARS)
+
+
 def _group_lines(words: list, tol: float = 3.5) -> list[dict]:
     """Group extracted words into visual lines by Y (top). Returns [{y, words[]}] sorted top→bottom."""
+    # Drop standalone ruling-line glyphs (a token made ONLY of separator chars) so they
+    # don't bridge column gaps on scanned/OCR'd statements. A narration token that merely
+    # contains a '|' among other chars is kept (set difference is non-empty).
+    words = [w for w in words
+             if (w.get('text') or '').strip() and (set(w['text'].strip()) - _OCR_SEP_SET)]
     lines: list[dict] = []
     for w in sorted(words, key=lambda w: (w['top'], w['x0'])):
         placed = False
@@ -237,10 +250,11 @@ def _find_header_band(lines: list[dict]) -> Optional[dict]:
     or (debit/credit) column so summary tables above don't win."""
     best = None
     for i in range(len(lines)):
-        for span in (1, 2):
+        for span in (1, 2, 3):
             if i + span > len(lines):
                 continue
-            # span=2 is for headers wrapped across two lines (e.g. "Running"/"Balance").
+            # span 2-3 is for headers wrapped across multiple lines (e.g. "Running"/"Balance",
+            # or ICICI's 3-line "Withdrawal|Deposit|Balance" / "S No.|Cheque|Remarks" / "Date|Amount(INR)").
             # Never merge a DATA row into the header — a real date value in the extra
             # line means it's a transaction row, not a wrapped header.
             if span >= 2 and any(_parse_date(w['text'])
@@ -313,7 +327,8 @@ def _looks_amount(text: str) -> bool:
     """A right-aligned money value: digits with a 1–2 dp decimal (₹4,601.31),
     optional (), optional Dr/Cr. Deliberately excludes long ref numbers (no
     decimal) so we don't mistake them for amounts."""
-    return bool(_AMOUNT_TOKEN_RE.match((text or "").strip().replace('₹', '')))
+    return bool(_AMOUNT_TOKEN_RE.match(
+        (text or "").strip().replace('₹', '').strip(_OCR_SEP_CHARS + " ")))
 
 
 def _right_edge_columns(data_lines, lo: float, hi: float, tol: float = 6.0) -> list[float]:
