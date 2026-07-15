@@ -234,7 +234,9 @@ async function disconnect(connectedAccountId) {
  */
 async function executeTool(userId, slug, args = {}) {
   const composio = getClient();
-  return composio.tools.execute(slug, { userId, arguments: args });
+  // dangerouslySkipVersionCheck: use the toolkit's "latest" version (required for
+  // manual execution; else @composio/core throws ComposioToolVersionRequiredError).
+  return composio.tools.execute(slug, { userId, arguments: args, dangerouslySkipVersionCheck: true });
 }
 
 /** True when `userId` has an ACTIVE connection to `toolkitSlug` (e.g. 'googlecalendar'). */
