@@ -71,6 +71,7 @@ const initModal = () => ({
     selectedGateways:  [],
     selectedLogistics: [],
     unicommerceFile: null,
+    returnGSTFile: null,
     salesOrderReportFile: null,
     gatewayFiles:  {},
     logisticsFiles: {},
@@ -275,6 +276,7 @@ function TransactionSheet({ brandId, agentId, filename, reconciliation }) {
     const [totalPages, setTotalPages] = useState(1);
     const [loading, setLoading]     = useState(true);
     const [pageLoading, setPageLoading] = useState(false);
+    const [downloading, setDownloading] = useState(false);
 
     // Debounce search input → trigger fetch
     useEffect(() => {
@@ -321,6 +323,30 @@ function TransactionSheet({ brandId, agentId, filename, reconciliation }) {
     function switchTab(key) { setTxTab(key); setPage(1); setExpandedId(null); setRows([]); setLoading(true); }
     function switchSub(key) { setMismatchSub(key); setPage(1); setExpandedId(null); setRows([]); setLoading(true); }
 
+    async function handleDownloadSheet() {
+        setDownloading(true);
+        try {
+            const params = new URLSearchParams();
+            if (search) params.set('search', search);
+            const res = await api.get(
+                `/api/brands/${brandId}/agents/${agentId}/order-cycle-shopify/files/${encodeURIComponent(filename)}/transactions/download?${params}`,
+                { responseType: 'blob' }
+            );
+            const cd = res.headers?.['content-disposition'] || '';
+            const match = cd.match(/filename="([^"]+)"/);
+            const outName = match ? match[1] : `${filename.replace(/\.[^.]+$/, '')}_transaction_sheet.xlsx`;
+            const url = window.URL.createObjectURL(new Blob([res.data]));
+            const a = document.createElement('a'); a.href = url;
+            a.setAttribute('download', outName); document.body.appendChild(a); a.click(); a.remove();
+            window.URL.revokeObjectURL(url);
+            toast.success('Transaction sheet downloaded');
+        } catch {
+            toast.error('Failed to download transaction sheet');
+        } finally {
+            setDownloading(false);
+        }
+    }
+
     function statusBadge(row) {
         const s = (row.reconciliation_status || '').toUpperCase().trim();
         const ds = (row.delivery_status || '').toUpperCase();
@@ -360,13 +386,26 @@ function TransactionSheet({ brandId, agentId, filename, reconciliation }) {
                     <h3 className="text-sm font-bold text-slate-800">Transaction Sheet</h3>
                     <p className="text-xs text-slate-400 mt-0.5">Click any row to see source file attribution for each value</p>
                 </div>
-                <input
-                    className="text-xs px-3 py-1.5 border border-slate-200 rounded-lg bg-slate-50 text-slate-700 placeholder-slate-400 focus:outline-none focus:border-slate-400 w-52"
-                    type="text"
-                    placeholder="Search order ID, invoice…"
-                    value={searchInput}
-                    onChange={e => setSearchInput(e.target.value)}
-                />
+                <div className="flex items-center gap-2">
+                    <input
+                        className="text-xs px-3 py-1.5 border border-slate-200 rounded-lg bg-slate-50 text-slate-700 placeholder-slate-400 focus:outline-none focus:border-slate-400 w-52"
+                        type="text"
+                        placeholder="Search order ID, invoice…"
+                        value={searchInput}
+                        onChange={e => setSearchInput(e.target.value)}
+                    />
+                    <button
+                        onClick={handleDownloadSheet}
+                        disabled={downloading}
+                        title="Download the full Transaction Sheet as Excel (Matched, Mismatched, Unsettled, All Orders & Sales Report sheets)"
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold border border-slate-200 rounded-lg bg-white hover:bg-slate-50 text-slate-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap"
+                    >
+                        {downloading
+                            ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                            : <Download className="h-3.5 w-3.5" />}
+                        {downloading ? 'Preparing…' : 'Download Sheet'}
+                    </button>
+                </div>
             </div>
 
             {/* Tabs */}
@@ -389,8 +428,10 @@ function TransactionSheet({ brandId, agentId, filename, reconciliation }) {
             {txTab === 'mismatched' && (
                 <div className="px-5 pt-3 flex gap-2">
                     {[
-                        { key: 'less', label: 'Less Received', cls: 'bg-amber-50 border-amber-300 text-amber-700' },
-                        { key: 'more', label: 'More Received', cls: 'bg-purple-50 border-purple-300 text-purple-700' },
+                        { key: 'less',      label: 'Less Received',      cls: 'bg-amber-50 border-amber-300 text-amber-700' },
+                        { key: 'more',      label: 'More Received',      cls: 'bg-purple-50 border-purple-300 text-purple-700' },
+                        { key: 'return',    label: 'MismatchedReturn',   cls: 'bg-rose-50 border-rose-300 text-rose-700' },
+                        { key: 'notreturn', label: 'MismatchedNotReturn', cls: 'bg-sky-50 border-sky-300 text-sky-700' },
                     ].map(({ key, label, cls }) => (
                         <button key={key} onClick={() => switchSub(key)}
                             className={`px-3 py-1.5 text-xs rounded-lg border font-semibold transition-colors
@@ -560,7 +601,10 @@ function ReconciliationView({ file, brandId, agentId, onBack, onDownload }) {
         </div>
     );
 
-    const { summary, reconciliation, providers, totalSettled, couriers } = data;
+    const { summary, reconciliation, settled, unsettled, couriers } = data;
+
+    const active   = tab === 'unsettled' ? unsettled : settled;
+    const providers = active.providers;
 
     const codProviders     = providers.filter(p => p.type === 'COD');
     const prepaidProviders = providers.filter(p => p.type === 'Prepaid');
@@ -706,8 +750,10 @@ function ReconciliationView({ file, brandId, agentId, onBack, onDownload }) {
 
                     <div className="px-5 py-3 border-b border-slate-50">
                         <div className="flex items-baseline gap-3">
-                            <p className="text-2xl font-bold text-slate-900">{fmtFull(totalSettled)}</p>
-                            <p className="text-xs text-slate-400">{reconciliation.reconciled.toLocaleString()} Orders Matched</p>
+                            <p className="text-2xl font-bold text-slate-900">{fmtFull(active.total)}</p>
+                            <p className="text-xs text-slate-400">
+                                {active.orders.toLocaleString()} {tab === 'unsettled' ? 'Orders Unsettled' : 'Orders Matched'}
+                            </p>
                             <div className="ml-auto text-right">
                                 <p className="text-xs text-slate-400">Gross Sales</p>
                                 <p className="text-sm font-bold text-slate-700">{fmtFull(summary.grossSales)}</p>
@@ -929,6 +975,7 @@ const OrderCycleShopifyWorkspace = ({ agent }) => {
         fd.append('logisticsNames', JSON.stringify(lpNames));
         fd.append('unicommerceFile', modal.unicommerceFile);
         fd.append('salesOrderReportFile', modal.salesOrderReportFile);
+        if (modal.returnGSTFile) fd.append('returnGSTFile', modal.returnGSTFile);
         modal.selectedGateways.forEach((id, i) => { if (modal.gatewayFiles[id]) fd.append(`paymentGateway_${i}`, modal.gatewayFiles[id]); });
         modal.selectedLogistics.forEach((id, i) => { if (modal.logisticsFiles[id]) fd.append(`logistics_${i}`, modal.logisticsFiles[id]); });
         setIsGenerating(true);
@@ -1228,6 +1275,8 @@ const OrderCycleShopifyWorkspace = ({ agent }) => {
                                         accept=".xlsx,.xls,.csv" value={modal.unicommerceFile} onChange={f => setField('unicommerceFile', f)} />
                                     <FileDropZone id="oc-sales-order" label="Sales Order Report" icon={FileText} color="#475569"
                                         accept=".xlsx,.xls,.csv" value={modal.salesOrderReportFile} onChange={f => setField('salesOrderReportFile', f)} />
+                                    <FileDropZone id="oc-return-gst" label="Return GST Report (optional)" icon={FileText} color="#b45309"
+                                        accept=".xlsx,.xls,.csv" value={modal.returnGSTFile} onChange={f => setField('returnGSTFile', f)} />
                                 </div>
                             </div>
                             {modal.selectedGateways.length > 0 && (

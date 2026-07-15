@@ -21,6 +21,7 @@ const { setPending, getPending, deletePending } = require('../../../services/pen
 const path = require('path');
 const fs = require('fs-extra');
 const { v4: uuidv4 } = require('uuid');
+const ExcelJS = require('exceljs');
 
 const OUTPUT_DIR = path.join(__dirname, '../../../../outputs');
 
@@ -420,19 +421,31 @@ const getReportData = async (req, res, next) => {
         let reconciledCount = 0, pendingCount = 0, overpaidCount = 0;
 
         const providers = {
-            'Ekart COD':     { type: 'COD',     amount: 0, orders: 0, matched: 0, color: '#10b981' },
-            'Delhivery COD': { type: 'COD',     amount: 0, orders: 0, matched: 0, color: '#6366f1' },
-            'Xpressbees':    { type: 'COD',     amount: 0, orders: 0, matched: 0, color: '#f59e0b' },
-            'Snapmint':      { type: 'Prepaid', amount: 0, orders: 0, matched: 0, color: '#8b5cf6' },
-            'BharatX':       { type: 'Prepaid', amount: 0, orders: 0, matched: 0, color: '#ec4899' },
-            'Razorpay':      { type: 'Prepaid', amount: 0, orders: 0, matched: 0, color: '#3b82f6' },
+            'Ekart COD':     { type: 'COD',     amount: 0, orders: 0, matched: 0, settledAmount: 0, settledOrders: 0, unsettledAmount: 0, unsettledOrders: 0, color: '#10b981' },
+            'Delhivery COD': { type: 'COD',     amount: 0, orders: 0, matched: 0, settledAmount: 0, settledOrders: 0, unsettledAmount: 0, unsettledOrders: 0, color: '#6366f1' },
+            'Xpressbees':    { type: 'COD',     amount: 0, orders: 0, matched: 0, settledAmount: 0, settledOrders: 0, unsettledAmount: 0, unsettledOrders: 0, color: '#f59e0b' },
+            'Snapmint':      { type: 'Prepaid', amount: 0, orders: 0, matched: 0, settledAmount: 0, settledOrders: 0, unsettledAmount: 0, unsettledOrders: 0, color: '#8b5cf6' },
+            'BharatX':       { type: 'Prepaid', amount: 0, orders: 0, matched: 0, settledAmount: 0, settledOrders: 0, unsettledAmount: 0, unsettledOrders: 0, color: '#ec4899' },
+            'Razorpay':      { type: 'Prepaid', amount: 0, orders: 0, matched: 0, settledAmount: 0, settledOrders: 0, unsettledAmount: 0, unsettledOrders: 0, color: '#3b82f6' },
         };
 
         const courierMap = {};
 
+        // "Settled" = order fully reconciled (balance receivable is zero).
+        // Everything else (pending, overpaid, RTO, cancelled) counts as "unsettled".
+        const addProvider = (key, amount, isReconciled) => {
+            if (amount <= 0) return;
+            const p = providers[key];
+            p.amount += amount;
+            p.orders++;
+            if (isReconciled) { p.matched++; p.settledAmount += amount; p.settledOrders++; }
+            else              { p.unsettledAmount += amount; p.unsettledOrders++; }
+        };
+
         for (const row of rows) {
             const status = (row.reconciliation_status || '').toUpperCase();
             const ds     = (row.delivery_status      || '').toUpperCase();
+            const isReconciled = status === 'RECONCILED';
 
             const ga = toNum(row.total_amount);
             const ra = toNum(row.return_amount);
@@ -445,28 +458,17 @@ const getReportData = async (req, res, next) => {
             if (ds === 'CANCELLED') { cancelledCount++; cancelledAmount += ga; }
             if (ds === 'RTO')       rtoCount++;
 
-            if (status === 'RECONCILED')            reconciledCount++;
-            else if (status === 'PENDING RECEIVABLE') pendingCount++;
+            if (isReconciled)                             reconciledCount++;
+            else if (status === 'PENDING RECEIVABLE')     pendingCount++;
             else if (status === 'OVERPAID / INVESTIGATE') overpaidCount++;
 
             // Provider amounts
-            const ekAmt = toNum(row.ekart_cod_amount);
-            if (ekAmt > 0) { providers['Ekart COD'].amount += ekAmt; providers['Ekart COD'].orders++; if (status === 'RECONCILED') providers['Ekart COD'].matched++; }
-
-            const delAmt = toNum(row.delhivery_cod_amount);
-            if (delAmt > 0) { providers['Delhivery COD'].amount += delAmt; providers['Delhivery COD'].orders++; if (status === 'RECONCILED') providers['Delhivery COD'].matched++; }
-
-            const xpAmt = toNum(row.xpressbees_net_payment);
-            if (xpAmt > 0) { providers['Xpressbees'].amount += xpAmt; providers['Xpressbees'].orders++; if (status === 'RECONCILED') providers['Xpressbees'].matched++; }
-
-            const snAmt = toNum(row.snapmint_settlement_value);
-            if (snAmt > 0) { providers['Snapmint'].amount += snAmt; providers['Snapmint'].orders++; if (status === 'RECONCILED') providers['Snapmint'].matched++; }
-
-            const bhAmt = toNum(row.bharatx_ledger_amount);
-            if (bhAmt > 0) { providers['BharatX'].amount += bhAmt; providers['BharatX'].orders++; if (status === 'RECONCILED') providers['BharatX'].matched++; }
-
-            const rzAmt = toNum(row.razorpay_settlement_amount);
-            if (rzAmt > 0) { providers['Razorpay'].amount += rzAmt; providers['Razorpay'].orders++; if (status === 'RECONCILED') providers['Razorpay'].matched++; }
+            addProvider('Ekart COD',     toNum(row.ekart_cod_amount),        isReconciled);
+            addProvider('Delhivery COD', toNum(row.delhivery_cod_amount),    isReconciled);
+            addProvider('Xpressbees',    toNum(row.xpressbees_net_payment),  isReconciled);
+            addProvider('Snapmint',      toNum(row.snapmint_settlement_value), isReconciled);
+            addProvider('BharatX',       toNum(row.bharatx_ledger_amount),   isReconciled);
+            addProvider('Razorpay',      toNum(row.razorpay_settlement_amount), isReconciled);
 
             // Courier map
             const courier = (row.shipping_partner || 'Unknown').toLowerCase().trim();
@@ -480,18 +482,23 @@ const getReportData = async (req, res, next) => {
             ? Math.round((reconciledCount / totalOrders) * 1000) / 10
             : 0;
 
-        const providerList = Object.entries(providers)
-            .filter(([, v]) => v.orders > 0)
+        const buildProviderList = (amountKey, ordersKey) => Object.entries(providers)
+            .filter(([, v]) => v[ordersKey] > 0)
             .map(([name, v]) => ({
                 name,
                 type: v.type,
-                amount: Math.round(v.amount * 100) / 100,
-                orders: v.orders,
+                amount: Math.round(v[amountKey] * 100) / 100,
+                orders: v[ordersKey],
                 matchPct: v.orders > 0 ? Math.round((v.matched / v.orders) * 1000) / 10 : 0,
                 color: v.color,
             }));
 
-        const totalSettled = providerList.reduce((s, p) => s + p.amount, 0);
+        const settledProviderList   = buildProviderList('settledAmount', 'settledOrders');
+        const unsettledProviderList = buildProviderList('unsettledAmount', 'unsettledOrders');
+        const unsettledOrdersCount  = totalOrders - reconciledCount;
+
+        const totalSettled   = settledProviderList.reduce((s, p) => s + p.amount, 0);
+        const totalUnsettled = unsettledProviderList.reduce((s, p) => s + p.amount, 0);
 
         const couriers = Object.entries(courierMap)
             .sort((a, b) => b[1].sales - a[1].sales)
@@ -521,8 +528,19 @@ const getReportData = async (req, res, next) => {
                 cancelled: cancelledCount,
                 matchPct,
             },
-            providers: providerList,
+            // Backward-compatible defaults (settled view)
+            providers: settledProviderList,
             totalSettled: Math.round(totalSettled * 100) / 100,
+            settled: {
+                providers: settledProviderList,
+                total: Math.round(totalSettled * 100) / 100,
+                orders: reconciledCount,
+            },
+            unsettled: {
+                providers: unsettledProviderList,
+                total: Math.round(totalUnsettled * 100) / 100,
+                orders: unsettledOrdersCount,
+            },
             couriers,
         });
 
@@ -533,6 +551,69 @@ const getReportData = async (req, res, next) => {
 };
 
 // ─── Get Paginated Transactions ───────────────────────────────────────────────
+
+/**
+ * Build the Sequelize WHERE clause shared by getTransactions and downloadTransactions
+ * from the tab/sub/search query params.
+ * tab: matched|mismatched|unsettled|all|sales
+ * sub (mismatched only): less|more|return|notreturn
+ *   - less/more    → PENDING RECEIVABLE / OVERPAID split (by amount direction)
+ *   - return       → mismatched orders whose sale_order_number also matches a Return GST record
+ *                     (i.e. this order's row was joined to a return — return_amount > 0)
+ *   - notreturn    → mismatched orders with no matching return record
+ */
+function buildTransactionsWhere(decodedFilename, tab, sub, search) {
+    const { Op } = require('sequelize');
+    const SETTLED = ['RECONCILED', 'PENDING RECEIVABLE', 'OVERPAID / INVESTIGATE'];
+    const MISMATCHED = ['PENDING RECEIVABLE', 'OVERPAID / INVESTIGATE'];
+
+    let where;
+    if (tab === 'unsettled') {
+        where = {
+            [Op.and]: [
+                { filename: decodedFilename },
+                {
+                    [Op.or]: [
+                        { reconciliation_status: null },
+                        { reconciliation_status: { [Op.notIn]: SETTLED } },
+                    ],
+                },
+            ],
+        };
+    } else {
+        where = { filename: decodedFilename };
+        if (tab === 'matched')                     where.reconciliation_status = 'RECONCILED';
+        if (tab === 'mismatched' && sub === 'less') where.reconciliation_status = 'PENDING RECEIVABLE';
+        if (tab === 'mismatched' && sub === 'more') where.reconciliation_status = 'OVERPAID / INVESTIGATE';
+        if (tab === 'mismatched' && sub === 'return') {
+            where.reconciliation_status = { [Op.in]: MISMATCHED };
+            where.return_amount = { [Op.gt]: 0 };
+        }
+        if (tab === 'mismatched' && sub === 'notreturn') {
+            where.reconciliation_status = { [Op.in]: MISMATCHED };
+            where[Op.and] = [{
+                [Op.or]: [
+                    { return_amount: { [Op.lte]: 0 } },
+                    { return_amount: null },
+                ],
+            }];
+        }
+        // tab === 'all' | 'sales' → no status filter
+    }
+
+    if (search) {
+        const searchCond = {
+            [Op.or]: [
+                { sale_order_number: { [Op.like]: `%${search}%` } },
+                { invoice_number:    { [Op.like]: `%${search}%` } },
+            ],
+        };
+        if (where[Op.and]) where[Op.and].push(searchCond);
+        else                where[Op.and] = [searchCond];
+    }
+
+    return where;
+}
 
 const getTransactions = async (req, res, next) => {
     try {
@@ -554,44 +635,7 @@ const getTransactions = async (req, res, next) => {
         const Model = getDynamicModel(brandDb, tableName, agent.columns);
         await Model.sync();
 
-        const { Op } = require('sequelize');
-        const SETTLED = ['RECONCILED', 'PENDING RECEIVABLE', 'OVERPAID / INVESTIGATE'];
-
-        // Build WHERE clause
-        let where;
-        if (tab === 'unsettled') {
-            where = {
-                [Op.and]: [
-                    { filename: decodedFilename },
-                    {
-                        [Op.or]: [
-                            { reconciliation_status: null },
-                            { reconciliation_status: { [Op.notIn]: SETTLED } },
-                        ],
-                    },
-                ],
-            };
-        } else {
-            where = { filename: decodedFilename };
-            if (tab === 'matched')                    where.reconciliation_status = 'RECONCILED';
-            if (tab === 'mismatched' && sub === 'less') where.reconciliation_status = 'PENDING RECEIVABLE';
-            if (tab === 'mismatched' && sub === 'more') where.reconciliation_status = 'OVERPAID / INVESTIGATE';
-            // tab === 'all' | 'sales' → no status filter
-        }
-
-        if (search) {
-            const searchCond = {
-                [Op.or]: [
-                    { sale_order_number: { [Op.like]: `%${search}%` } },
-                    { invoice_number:    { [Op.like]: `%${search}%` } },
-                ],
-            };
-            if (where[Op.and]) {
-                where[Op.and].push(searchCond);
-            } else {
-                where[Op.and] = [searchCond];
-            }
-        }
+        const where = buildTransactionsWhere(decodedFilename, tab, sub, search);
 
         const { count: total, rows } = await Model.findAndCountAll({
             where,
@@ -622,6 +666,148 @@ const getTransactions = async (req, res, next) => {
     }
 };
 
+// ─── Download Transaction Sheet (current UI view, all rows) ───────────────────
+
+function statusLabelOf(row) {
+    const s  = (row.reconciliation_status || '').toUpperCase().trim();
+    const ds = (row.delivery_status || '').toUpperCase();
+    if (s === 'RECONCILED')         return 'RECONCILED';
+    if (s === 'PENDING RECEIVABLE') return 'PENDING';
+    if (s.startsWith('OVERPAID'))   return 'OVERPAID';
+    if (ds === 'RTO')               return 'RTO';
+    if (ds === 'CANCELLED')         return 'CANCELLED';
+    return 'UNSETTLED';
+}
+
+function gatewayOfRow(row) {
+    const toNum = v => { const n = Number(v); return isNaN(n) ? 0 : n; };
+    if (toNum(row.snapmint_settlement_value) > 0)  return 'Snapmint';
+    if (toNum(row.bharatx_ledger_amount) > 0)      return 'BharatX';
+    if (toNum(row.razorpay_settlement_amount) > 0) return 'Razorpay';
+    return '—';
+}
+
+function settlementDateOfRow(row) {
+    return row.snapmint_settlement_date || row.bharatx_settlement_timestamp || row.razorpay_settlement_date || null;
+}
+
+const NORMAL_COLUMNS = [
+    { header: 'Order ID',         key: 'orderId',    width: 20 },
+    { header: 'Invoice No.',      key: 'invoiceNo',  width: 20 },
+    { header: 'Order Value',      key: 'orderValue', width: 14, style: { numFmt: '#,##0.00' } },
+    { header: 'Settlement',       key: 'settlement', width: 14, style: { numFmt: '#,##0.00' } },
+    { header: 'Diff',             key: 'diff',       width: 14, style: { numFmt: '#,##0.00' } },
+    { header: 'Order Date',       key: 'orderDate',  width: 14, style: { numFmt: 'dd-mmm-yyyy' } },
+    { header: 'Settlement Date',  key: 'settleDate', width: 14, style: { numFmt: 'dd-mmm-yyyy' } },
+    { header: 'Status',           key: 'status',     width: 14 },
+    { header: 'Courier',          key: 'courier',    width: 14 },
+    { header: 'Gateway',          key: 'gateway',     width: 14 },
+];
+
+const SALES_COLUMNS = [
+    { header: 'Order ID',       key: 'orderId',     width: 20 },
+    { header: 'Invoice No.',    key: 'invoiceNo',   width: 20 },
+    { header: 'Invoice Date',   key: 'invoiceDate', width: 14, style: { numFmt: 'dd-mmm-yyyy' } },
+    { header: 'Channel',        key: 'channel',     width: 14 },
+    { header: 'GMV',            key: 'gmv',         width: 14, style: { numFmt: '#,##0.00' } },
+    { header: 'Return',         key: 'ret',         width: 14, style: { numFmt: '#,##0.00' } },
+    { header: 'Net Amount',     key: 'netAmount',   width: 14, style: { numFmt: '#,##0.00' } },
+    { header: 'Basic (÷1.12)',  key: 'basic',       width: 14, style: { numFmt: '#,##0.00' } },
+    { header: 'GST @12%',       key: 'gst',         width: 14, style: { numFmt: '#,##0.00' } },
+    { header: 'Status',         key: 'status',      width: 14 },
+];
+
+function toNumVal(v) { const n = Number(v); return isNaN(n) ? 0 : n; }
+
+function normalRowValues(row) {
+    return {
+        orderId:    row.sale_order_number || '',
+        invoiceNo:  row.invoice_number || '',
+        orderValue: toNumVal(row.total_amount),
+        settlement: toNumVal(row.total_settlement_received),
+        diff:       toNumVal(row.balance_amount_receivable),
+        orderDate:  row.dispatch_or_cancellation_date ? new Date(row.dispatch_or_cancellation_date) : null,
+        settleDate: settlementDateOfRow(row) ? new Date(settlementDateOfRow(row)) : null,
+        status:     statusLabelOf(row),
+        courier:    (row.shipping_partner || '').toLowerCase(),
+        gateway:    gatewayOfRow(row),
+    };
+}
+
+function salesRowValues(row) {
+    const netAmount = toNumVal(row.net_amount);
+    const basic = Math.round(netAmount / 1.12 * 100) / 100;
+    const gst   = Math.round((netAmount - basic) * 100) / 100;
+    return {
+        orderId:     row.sale_order_number || '',
+        invoiceNo:   row.invoice_number || '',
+        invoiceDate: row.dispatch_or_cancellation_date ? new Date(row.dispatch_or_cancellation_date) : null,
+        channel:     row.platform || '',
+        gmv:         toNumVal(row.total_amount),
+        ret:         toNumVal(row.return_amount),
+        netAmount,
+        basic,
+        gst,
+        status:      statusLabelOf(row),
+    };
+}
+
+function addSheet(workbook, name, tabColor, columns, rows, rowMapper) {
+    const sheet = workbook.addWorksheet(name, { properties: { tabColor: { argb: `FF${tabColor}` } } });
+    sheet.columns = columns;
+    const headerRow = sheet.getRow(1);
+    headerRow.font = { bold: true, color: { argb: 'FFFFFFFF' } };
+    headerRow.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF334155' } };
+    for (const row of rows) sheet.addRow(rowMapper(row));
+    return sheet;
+}
+
+const downloadTransactions = async (req, res, next) => {
+    try {
+        const { brandId, agentId, filename } = req.params;
+        const decodedFilename = decodeURIComponent(filename);
+        const search = (req.query.search || '').trim();
+
+        const brand = await Brand.findByPk(brandId);
+        const agent = await Agent.findByPk(agentId);
+        if (!brand || !agent) return res.status(404).json({ error: 'Brand or Agent not found' });
+
+        const brandDb   = getBrandConnection(brand.db_name);
+        const tableName = agent.name.replace(/[^a-zA-Z0-9]/g, '_').toLowerCase();
+        const Model     = getDynamicModel(brandDb, tableName, agent.columns);
+        await Model.sync();
+
+        const where = buildTransactionsWhere(decodedFilename, 'all', null, search);
+        const rows  = await Model.findAll({ where, raw: true, order: [['id', 'ASC']] });
+
+        const SETTLED = ['RECONCILED', 'PENDING RECEIVABLE', 'OVERPAID / INVESTIGATE'];
+        const matchedRows    = rows.filter(r => (r.reconciliation_status || '').toUpperCase().trim() === 'RECONCILED');
+        const mismatchedRows = rows.filter(r => {
+            const s = (r.reconciliation_status || '').toUpperCase().trim();
+            return s === 'PENDING RECEIVABLE' || s.startsWith('OVERPAID');
+        });
+        const unsettledRows  = rows.filter(r => !SETTLED.includes((r.reconciliation_status || '').toUpperCase().trim()));
+
+        const workbook = new ExcelJS.Workbook();
+        addSheet(workbook, 'Matched',       '10B981', NORMAL_COLUMNS, matchedRows,    normalRowValues);
+        addSheet(workbook, 'Mismatched',    'F59E0B', NORMAL_COLUMNS, mismatchedRows, normalRowValues);
+        addSheet(workbook, 'Unsettled',     '94A3B8', NORMAL_COLUMNS, unsettledRows,  normalRowValues);
+        addSheet(workbook, 'All Orders',    '3B82F6', NORMAL_COLUMNS, rows,           normalRowValues);
+        addSheet(workbook, 'Sales Report',  '7C3AED', SALES_COLUMNS,  rows,           salesRowValues);
+
+        const safeBase = path.basename(decodedFilename, path.extname(decodedFilename));
+        const outName = `${safeBase}_transaction_sheet.xlsx`;
+
+        res.setHeader('Content-Disposition', `attachment; filename="${outName}"`);
+        res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+        await workbook.xlsx.write(res);
+        res.end();
+    } catch (error) {
+        console.error('[OrderCycle] Download Transactions Error:', error);
+        next(error);
+    }
+};
+
 module.exports = {
     generatePreview,
     generateCommit,
@@ -631,4 +817,5 @@ module.exports = {
     deleteFile,
     getReportData,
     getTransactions,
+    downloadTransactions,
 };
