@@ -849,7 +849,8 @@ const AgentWorkspace = () => {
                           <TableHead>Year</TableHead>
                           {isAmazon && <TableHead>Type</TableHead>}
                           <TableHead>Inventory</TableHead>
-                          <TableHead>Created</TableHead>
+                          <TableHead>Created At</TableHead>
+                          <TableHead>Created By</TableHead>
                           <TableHead className="text-right">Actions</TableHead>
                         </TableRow>
                       </TableHeader>
@@ -861,7 +862,10 @@ const AgentWorkspace = () => {
                             {isAmazon && <TableCell><Badge variant="secondary">{file.file_type}</Badge></TableCell>}
                             <TableCell>{file.inventory_type}</TableCell>
                             <TableCell className="text-sm text-slate-600">
-                              {file.created_at ? format(new Date(file.created_at), 'dd MMM yyyy') : 'N/A'}
+                              {file.created_at ? format(new Date(file.created_at), 'dd MMM yyyy, hh:mm a') : 'N/A'}
+                            </TableCell>
+                            <TableCell className="text-sm text-slate-600">
+                              {file.created_by_name || 'N/A'}
                             </TableCell>
                             <TableCell className="text-right">
                               <div className="flex items-center justify-end gap-2">

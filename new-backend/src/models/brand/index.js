@@ -1,5 +1,6 @@
 const { DataTypes, Sequelize } = require('sequelize');
 const { UNIFIED } = require('../../config/database');
+const { getCurrentUserId } = require('../../utils/requestContext');
 
 /**
  * Factory function to create the BrandAgent model on a specific brand connection
@@ -61,7 +62,15 @@ const getDynamicModel = (sequelize, tableName, columns) => {
     created_at: {
       type: DataTypes.DATE,
       defaultValue: DataTypes.NOW
-    }
+    },
+    // Who generated this working file. Read from AsyncLocalStorage (set by
+    // authMiddleware) rather than passed in by each agent controller — same
+    // "controllers need no changes" approach as brand_id below.
+    created_by: {
+      type: DataTypes.UUID,
+      allowNull: true,
+      defaultValue: () => getCurrentUserId(),
+    },
   };
 
   // UNIFIED DB: every tenant row carries brand_id. Defined in the model (so
@@ -75,10 +84,14 @@ const getDynamicModel = (sequelize, tableName, columns) => {
     };
   }
 
-  // Add custom columns if provided
+  // Add custom columns if provided. Skip anything already in the base schema
+  // above (id, brand_id, created_at, created_by, ...) — agent.columns is a
+  // mirror of the real table's shape (including bookkeeping columns) and
+  // blindly re-adding those here drops their defaultValue (e.g. created_at
+  // silently lost DataTypes.NOW, so working files never got a timestamp).
   if (columns && Array.isArray(columns)) {
     columns.forEach(col => {
-      if (col.name === 'id' || col.name === 'brand_id') return;
+      if (schema[col.name]) return;
 
       schema[col.name] = {
         type: DataTypes[col.type?.toUpperCase()] || DataTypes.STRING
