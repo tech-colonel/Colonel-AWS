@@ -40,8 +40,8 @@ _MAX_LLM_EXTRACT_PAGES = 5
 # the production reco engine runs on a small (2 GB) shared box; an OOM there would
 # crash ALL agents. So only OCR scans within these limits; larger scans get a clear
 # "too large for the server" message instead of risking the engine.
-_MAX_OCR_BYTES = 40_000_000     # ~40 MB input (≈35 high-res scanned pages)
-_MAX_OCR_PAGES = 35
+_MAX_OCR_BYTES = 40_000_000     # ~40 MB input
+_MAX_OCR_PAGES = 50
 
 # ──────────────────────────────────────────────────────────────────
 # Column header keyword lists (lowercase substring match)
@@ -424,6 +424,105 @@ def _text_boundary(data_lines: list, lo: float, hi: float, n: int = 300) -> Opti
     return mid if gap >= 3.0 else None
 
 
+def _col_data_tokens(col: dict, data_lines: list, sample: int = 60) -> list[list[str]]:
+    """Non-empty per-line token lists that fall inside this column's X-range."""
+    out = []
+    for ln in data_lines[:400]:
+        toks = [w['text'] for w in ln['words']
+                if col['x0'] <= (w['x0'] + w['x1']) / 2 < col['x1'] and (w['text'] or '').strip()]
+        if toks:
+            out.append(toks)
+        if len(out) >= sample:
+            break
+    return out
+
+
+def _is_dateish_column(col: dict, data_lines: list) -> bool:
+    """A column whose DATA is mostly dates (a secondary 'Value Dt' column) — kept
+    OUT of the narration merge so a running value-date never pollutes the narration."""
+    rows = _col_data_tokens(col, data_lines)
+    if len(rows) < 4:
+        return False
+    hit = sum(1 for toks in rows if _leading_date(" ".join(toks))[0] or _parse_date(" ".join(toks)))
+    return hit / len(rows) > 0.5
+
+
+def _is_numberish_column(col: dict, data_lines: list) -> bool:
+    """A column whose DATA is mostly money-shaped — a defensive guard so a
+    mis-tagged amount column is never swallowed into the narration merge (which
+    would drop money and break balance verification)."""
+    rows = _col_data_tokens(col, data_lines)
+    if len(rows) < 4:
+        return False
+    hit = sum(1 for toks in rows if all(_looks_amount(t) for t in toks))
+    return hit / len(rows) > 0.5
+
+
+def _merge_text_columns(columns: list[dict], data_lines: list[dict]) -> list[dict]:
+    """Collapse each run of ≥2 consecutive DESCRIPTIVE columns into a single
+    narration column. Header-clustering often sees a wrapped narration as two
+    adjacent text columns (ICICI 'Cheque Number' + 'Transaction Remarks', Axis
+    'Chq No' + 'Particulars'); binning words by X then splits one narration into
+    both, fragmenting/scrambling it. Date and numeric columns break the run and
+    are never merged; a date-like or amount-like text column is also excluded so
+    a value-date or a mis-tagged amount can never be swallowed (amounts/balance,
+    hence verification, are untouched)."""
+    TEXT = {'narr', 'ref', 'other'}
+
+    def _mergeable(c: dict) -> bool:
+        return (c['tag'] in TEXT
+                and not c.get('is_primary_date')
+                and not _is_dateish_column(c, data_lines)
+                and not _is_numberish_column(c, data_lines))
+
+    out: list[dict] = []
+    i, n = 0, len(columns)
+    while i < n:
+        if _mergeable(columns[i]):
+            j = i + 1
+            while j < n and _mergeable(columns[j]):
+                j += 1
+            run = columns[i:j]
+            if len(run) > 1:
+                narr_member = next((m for m in run if m['tag'] == 'narr'), None)
+                out.append({
+                    'header': (narr_member or run[0])['header'],
+                    'tag': 'narr',
+                    'x0': min(m['x0'] for m in run),
+                    'x1': max(m['x1'] for m in run),
+                    'is_primary_date': False,
+                })
+            else:
+                out.append(columns[i])
+            i = j
+        else:
+            out.append(columns[i])
+            i += 1
+    for k, c in enumerate(out):
+        c['key'] = f"c{k}"
+    return out
+
+
+def _merge_symbol_columns(columns: list[dict]) -> list[dict]:
+    """Fold a trailing symbol/punctuation-only header fragment into the preceding
+    NUMERIC column. Credit-card statements print the amount header as "Amount(in ₹)";
+    the ₹ glyph renders as a stray token so header-clustering leaves a phantom ")" /
+    "` )" column that then captures the right-aligned amounts. Extending the amount
+    column over it (out to the page edge) recovers those values."""
+    out: list[dict] = []
+    for c in columns:
+        prev = out[-1] if out else None
+        label = c.get('header') or ''
+        is_symbol = not re.search(r'[A-Za-z0-9]', label)
+        if prev is not None and is_symbol and prev['tag'] in _NUMERIC_TAGS:
+            prev['x1'] = max(prev['x1'], c['x1'])
+            continue
+        out.append(c)
+    for k, c in enumerate(out):
+        c['key'] = f"c{k}"
+    return out
+
+
 def _detect_columns(page, header: dict, data_lines: list[dict]) -> Optional[list[dict]]:
     """Cluster header words into columns by X-gap (cleanly separates text
     columns from right-aligned amount columns), then split any cluster whose
@@ -501,6 +600,14 @@ def _detect_columns(page, header: dict, data_lines: list[dict]) -> Optional[list
             'x0': rc['x0'], 'x1': rc['x1'],
         })
 
+    # Recover an amount column split by a rendered currency glyph (credit cards:
+    # "Amount(in ₹)" → phantom ")" column) before anything else uses the columns.
+    columns = _merge_symbol_columns(columns)
+
+    # Collapse a narration that header-clustering split across adjacent text
+    # columns (e.g. ICICI Cheque Number + Transaction Remarks) into one column.
+    columns = _merge_text_columns(columns, data_lines)
+
     tags = {c['tag'] for c in columns}
     if 'date' not in tags or not (tags & _NUMERIC_TAGS):
         return None
@@ -516,10 +623,21 @@ def _detect_columns(page, header: dict, data_lines: list[dict]) -> Optional[list
     for c in columns:
         c['right_x'] = None
         if c['tag'] in _NUMERIC_TAGS:
-            x1s = [w['x1'] for ln in data_lines[:400] for w in ln['words']
-                   if c['x0'] <= (w['x0'] + w['x1']) / 2 < c['x1'] and _looks_amount(w['text'])]
+            x1s = sorted(w['x1'] for ln in data_lines[:400] for w in ln['words']
+                         if c['x0'] <= (w['x0'] + w['x1']) / 2 < c['x1'] and _looks_amount(w['text']))
             if len(x1s) >= 3:
-                c['right_x'] = statistics.median(x1s)
+                # Real values in an amount column share ONE right edge. A secondary
+                # left sub-column can hide inside the same detected column (e.g. the
+                # credit-card "International amount" 0.00 sitting beside the ₹ Amount);
+                # cluster the right-edges and lock onto the RIGHTMOST cluster so the
+                # true right-aligned amount wins and the 0.00 sub-column is ignored.
+                clusters = [[x1s[0]]]
+                for x in x1s[1:]:
+                    if x - clusters[-1][-1] <= 15:
+                        clusters[-1].append(x)
+                    else:
+                        clusters.append([x])
+                c['right_x'] = statistics.median(clusters[-1])   # rightmost cluster
 
     logger.info("Detected %d columns: %s", len(columns),
                 [(c['header'], c['tag']) for c in columns])
@@ -617,6 +735,17 @@ def _build_transactions(all_lines: list[dict], columns: list[dict]) -> list[dict
                     flag = 'C'
                 elif '(dr)' in low or low.rstrip().endswith('dr'):
                     flag = 'D'
+            if not flag:
+                # Still no direction — use the SIGN of the amount. Credit-card
+                # statements have one signed Amount column: positive = purchase
+                # (debit / money owed), negative = payment or reversal (credit).
+                # Only negatives change behaviour here (positives already fell to
+                # debit below), so positive-only single-amount banks are unaffected.
+                signed = _parse_amount(raw)
+                if signed < 0:
+                    flag = 'C'
+                elif signed > 0:
+                    flag = 'D'
             if flag.startswith('C'):        # CR → money in (payment/refund) = credit
                 c = amt
             else:                            # DR / blank → money out (purchase) = debit
@@ -643,8 +772,23 @@ def _build_transactions(all_lines: list[dict], columns: list[dict]) -> list[dict
         for pl in pending:
             if not anchors:
                 break
-            near = min(anchors, key=lambda a: abs(a['y'] - pl['y']))
-            if abs(near['y'] - pl['y']) > max_attach:
+            # A wrapped-narration line belongs to the transaction it sits UNDER
+            # (the anchor above). Only attach to the anchor BELOW when that one is
+            # CLEARLY closer — i.e. a transaction-type label printed just above its
+            # own amount row (ICICI "Credit trxn"/"iDirect trxn"). On a tie (a middle
+            # line of a 3+ line wrap, equidistant between two rows) the line stays
+            # with the row above. This stops continuation text leaking downward.
+            above = [a for a in anchors if a['y'] <= pl['y']]
+            below = [a for a in anchors if a['y'] > pl['y']]
+            na = max(above, key=lambda a: a['y']) if above else None
+            nb = min(below, key=lambda a: a['y']) if below else None
+            da = (pl['y'] - na['y']) if na else float('inf')
+            db = (nb['y'] - pl['y']) if nb else float('inf')
+            if nb is not None and db + 0.4 * line_h < da:
+                near = nb
+            else:
+                near = na if na is not None else nb
+            if near is None or abs(near['y'] - pl['y']) > max_attach:
                 continue
             for k in text_keys:
                 txt = pl['cells'].get(k, '').strip()
@@ -695,7 +839,6 @@ def _build_transactions(all_lines: list[dict], columns: list[dict]) -> list[dict
         dtok, drest = _leading_date(date_raw)
         if dtok:
             # New anchor
-            flush_pending()
             frag: dict = {}
             for k in text_keys:
                 t = cells.get(k, '').strip()
@@ -718,6 +861,11 @@ def _build_transactions(all_lines: list[dict], columns: list[dict]) -> list[dict
                 'raw_cells': dict(cells),
                 'frag': frag,
             })
+            # Flush AFTER appending so a pending line that sits just ABOVE this new
+            # anchor (e.g. ICICI's "Credit trxn"/"iDirect trxn" transaction-type
+            # label, printed above the amount row) attaches to the nearer/correct
+            # transaction instead of the previous one.
+            flush_pending()
         else:
             # Date-less line: either continuation text, or a stray line.
             if any(cells.get(k, '').strip() for k in text_keys):
@@ -747,7 +895,11 @@ def _build_transactions(all_lines: list[dict], columns: list[dict]) -> list[dict
                 # Preserve that text verbatim so Cr/Dr isn't lost; keep a plain amount
                 # numeric (e.g. credit-card statements) so totals/format still work.
                 raw = str(a['raw_cells'].get(k, '') or '').strip()
-                cells_out[k] = _clean_text(raw) if re.search(r'[A-Za-z]', raw) else max(0.0, _parse_amount(raw))
+                # Preserve the SIGN for a single Amount column (credit-card layouts:
+                # negative = payment/reversal). Clamping to ≥0 would blank out every
+                # credit in the rendered sheet even though debit/credit are derived
+                # correctly. Cells carrying a Dr/Cr word keep their text verbatim.
+                cells_out[k] = _clean_text(raw) if re.search(r'[A-Za-z]', raw) else _parse_amount(raw)
             elif c['tag'] in _NUMERIC_TAGS:
                 amt = _parse_amount(a['raw_cells'].get(k))
                 cells_out[k] = amt if c['tag'] == 'balance' else max(0.0, amt)
@@ -1276,7 +1428,7 @@ def _looks_like_statement(text: str) -> bool:
 def _reject_scanned(too_large: bool = False) -> dict:
     """Scanned / image-only PDF (no text layer) where OCR was unavailable, failed, or
     the scan was too large to OCR safely on the server."""
-    msg = ("This scanned PDF is too large for the server to OCR right now (limit ~12 MB / 15 pages). "
+    msg = ("This scanned PDF is too large for the server to OCR right now (limit ~40 MB / 50 pages). "
            "Please upload a smaller / lower-resolution scan, or a text-based digital statement."
            if too_large else
            "This looks like a scanned / image-only PDF (no text layer) and automatic OCR could not "
