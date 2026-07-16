@@ -632,6 +632,19 @@ const runUniversalClassifier = (ledgerPath, bankPath, outputPath, correctionsPat
     const args = ['--ledger', ledgerPath, '--bank', bankPath, '--output', outputPath];
     if (correctionsPath) args.push('--corrections', correctionsPath);
     if (brandName) args.push('--brand', brandName);
+    // Per-brand side-dependent ledger map (credit-side ledger for Receipts, debit-side for
+    // Payments; entries may pin a fixed type e.g. Contra). Resolved by brand slug — ONLY a
+    // brand that has an output/side_ledgers/<slug>.json file gets one (currently M Brands,
+    // Urban Plant). Every other brand loads nothing, so no other brand — and no shared
+    // universal-bank/DB logic — is affected. classify.py treats an absent map as empty.
+    if (brandName) {
+      const slug = brandName.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+      const sideMapPath = path.resolve(__dirname, '../../output/side_ledgers/' + slug + '.json');
+      if (slug && fs.existsSync(sideMapPath)) {
+        args.push('--side-map', sideMapPath);
+        console.log(`[RECO] Side-ledger map attached for "${brandName}" (${slug}.json).`);
+      }
+    }
     // LLM fallback: candidate-constrained pass over Low/Medium rows only.
     // Claude is preferred when its key is present; Gemini is the fallback.
     if (anthropicKey) args.push('--anthropic-key', anthropicKey, '--anthropic-model', anthropicModel);

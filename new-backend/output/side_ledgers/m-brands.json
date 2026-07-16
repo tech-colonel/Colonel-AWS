@@ -1,0 +1,16 @@
+{
+  "_comment": "M-Brands ONLY side-dependent ledger map for the Universal Bank Statement classifier. When a bank narration contains one of the counterparty tokens, the classifier uses the credit-side ledger for a Receipt (money in Credit) and the debit-side ledger for a Payment (money in Debit). Checked ABOVE the DB payee-directory. Each ledger is validated against the brand COA at runtime; if a ledger is not in the COA the entry is skipped and the row falls through to the normal directory/COA/LLM layers. Built from the accountant's reviewed previous output (credit-side/debit-side columns).",
+  "brand": "M Brands",
+  "counterparties": [
+    { "tokens": ["MYNTRA"], "credit": "Myntra Debtors Account-Receipt", "debit": "MYNTRA DESIGNS PVT LTD - Creditor" },
+    { "tokens": ["EASEBUZZ"], "credit": "EASEBUZZ PVT LTD NODAL", "debit": "EASEBUZZ PVT LTD NODAL(CR)" },
+    { "tokens": ["SHIPROCKET", "BIGFOOT RETAIL"], "credit": "SHIPROCKET COD CRF", "debit": "Bigfoot Retail Solution(Shiprocket)-HR" },
+    { "tokens": ["RELIANCE RETAIL", "AJIO", "054105001906"], "credit": "Reliance Retail Limited (AJIO)", "debit": "RELIANCE RETAIL LIMITED" },
+    { "tokens": ["AMAZON", "INTERNAL AC FOR INTERMED"], "credit": "Amazon Debtors Account-Receipt", "debit": "Amazon Sellers Services Pvt Ltd (KA)" },
+    { "tokens": ["FLIPKART"], "credit": "Flipkart Debtors Receipt", "debit": "FLIPKART INTERNET PRIVATE LIMITED (KA)" },
+    { "tokens": ["TATA UNISTORE"], "credit": "Tata UniStore Limited-Recepit", "debit": "Tata UniStore Limited- Cr" },
+    { "tokens": ["RAZORPAY"], "credit": "Razorpay Software Pvt. Ltd.", "debit": "Razorpay Software Private Limited(Creditor)" },
+    { "tokens": ["NYKAA"], "credit": "Nykaa Debtors Account-Receipt", "debit": "NYKAA Fashion Private Limited (Creditor)" },
+    { "tokens": ["MIRRAW"], "credit": "MIRRAW ONLINE SERVICES PRIVATE LIMITED", "debit": "Mirraw Online Services Pvt Ltd - Creditor" }
+  ]
+}

@@ -1,0 +1,17 @@
+{
+  "_comment": "Urban Plant ONLY side-dependent ledger map for the Universal Bank Statement classifier. Same mechanism as m-brands.json: when a bank narration contains a counterparty token, use the credit-side ledger for a Receipt and the debit-side ledger for a Payment. An entry may set a fixed \"type\" (e.g. Contra) to override the Receipt/Payment default — used for the PETTYCASH own-account transfers which were falling to Suspense. Checked ABOVE the DB directory; each ledger is validated against the brand COA at runtime (skipped + falls through if missing). Built from the accountant's reviewed previous output.",
+  "brand": "Urban Plant",
+  "counterparties": [
+    { "tokens": ["DELHIVERY"], "credit": "Receipt From Delhivery", "debit": "DELHIVERY LIMITED-Payment" },
+    { "tokens": ["RAZORPAY"], "credit": "Receipt From Razorpay", "debit": "RAZORPAY SOFTWARE PRIVATE LIMITED" },
+    { "tokens": ["BUSYBEES", "BUSY BEES"], "credit": "Receipt From Busy Bees", "debit": "BUSYBEES LOGISTICS SOLUTIONS PRIVATE -Payment" },
+    { "tokens": ["FLIPKART"], "credit": "Receipt From Flipkart", "debit": "FLIPKART INTERNET PRIVATE LIMITED" },
+    { "tokens": ["PETTYCASH", "PETTY CASH"], "credit": "Petty Cash", "debit": "Petty Cash", "type": "Contra" },
+
+    { "tokens": ["RFPACKERS", "R.F.PACKERS", "R F PACKERS"], "credit": "M/S R.F.PACKERS", "debit": "M/S R.F.PACKERS" },
+    { "tokens": ["UP POWER"], "credit": "Electricity Expense", "debit": "Electricity Expense" },
+    { "tokens": ["IMPS CHG"], "credit": "Bank Charges", "debit": "Bank Charges" },
+
+    { "tokens": ["SALARY", "STIPEND", "EMPLOYEE"], "credit": "Salary Payable", "debit": "Salary Payable", "fallback": true }
+  ]
+}

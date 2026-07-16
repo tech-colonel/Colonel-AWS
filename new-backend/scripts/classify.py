@@ -350,7 +350,7 @@ def extract_payee_keys(narration) -> dict:
 
 class BankClassifier:
     def __init__(self, master_ledgers: list, corrections: dict | None = None,
-                 brand_name: str = ""):
+                 brand_name: str = "", side_map: list | None = None):
         self.master_ledgers = [str(l).strip() for l in master_ledgers
                                if pd.notna(l) and str(l).strip()]
         # Per-brand learned payee directory. Accepts either the legacy flat
@@ -359,7 +359,42 @@ class BankClassifier:
         self.directory = self._normalize_directory(corrections or {})
         self.corrections = self.directory['exact']   # back-compat alias
         self._brand_name = brand_name
+        # Optional per-brand SIDE-DEPENDENT ledger map (currently M-Brands only): a list
+        # of {"tokens":[...], "credit": <ledger>, "debit": <ledger>}. When a narration
+        # contains a token, the credit-side ledger is used for a Receipt and the debit-side
+        # for a Payment. Checked ABOVE the payee directory. Empty for every other brand →
+        # no behaviour change. Tokens are upper-cased once here for fast matching.
+        self.side_map = []            # top-priority: checked ABOVE the directory
+        self.side_map_fallback = []   # low-priority: checked LATE, just before Suspense, so a
+                                      # broad rule (e.g. Salary→Salary Payable) never overrides a
+                                      # specific per-payee/directory/fuzzy match.
+        for e in (side_map or []):
+            toks = [str(t).upper() for t in (e.get('tokens') or []) if str(t).strip()]
+            if toks and e.get('credit') and e.get('debit'):
+                entry = {'tokens': toks,
+                         'credit': str(e['credit']).strip(),
+                         'debit': str(e['debit']).strip(),
+                         'type': (str(e['type']).strip() if e.get('type') else None)}
+                (self.side_map_fallback if e.get('fallback') else self.side_map).append(entry)
         self._build_indices()
+
+    def _side_map_lookup(self, narration_upper: str, txn_type: str):
+        """Side-dependent ledger override (per-brand, e.g. M-Brands marketplaces).
+        If the narration contains a counterparty token, return its credit-side ledger
+        for a Receipt / debit-side ledger for a Payment — but only if that ledger still
+        exists in the brand COA (else skip so the row falls through to the directory)."""
+        return self._match_side(self.side_map, narration_upper, txn_type, "Side Ledger (credit/debit)")
+
+    def _match_side(self, entries, narration_upper, txn_type, rule):
+        if not entries:
+            return None
+        for e in entries:
+            if any(tok in narration_upper for tok in e['tokens']):
+                ledger = e['credit'] if txn_type == "Receipt" else e['debit']
+                if ledger in self.master_ledgers:
+                    return {"ledger": ledger, "type": e.get('type') or txn_type, "confidence": "High",
+                            "rule": rule, "entity": e['tokens'][0]}
+        return None
 
     @staticmethod
     def _normalize_directory(corr: dict) -> dict:
@@ -698,6 +733,13 @@ class BankClassifier:
         # whose correct ledger is NOT inferable from the narration alone.
         # CoA validation: skips entries whose ledger no longer exists in master.
         # ------------------------------------------------------------------
+        # STEP 0 (pre) — per-brand SIDE-DEPENDENT ledger map (M-Brands marketplaces),
+        # checked ABOVE the directory: same counterparty → credit ledger on Receipt,
+        # debit ledger on Payment. Empty for other brands, so a no-op there.
+        sm = self._side_map_lookup(orig_upper, txn_type)
+        if sm:
+            return sm
+
         hit = self._directory_lookup(orig, txn_type)
         if hit:
             return hit
@@ -1285,6 +1327,13 @@ class BankClassifier:
                 return {"ledger": ledger, "type": txn_type, "confidence": conf,
                         "rule": "Fuzzy Generic Match"}
 
+        # Per-brand LOW-PRIORITY side-map fallback (e.g. Urban Plant Salary/Stipend →
+        # Salary Payable): only reached when nothing specific matched, so it never
+        # overrides a real per-payee/directory/fuzzy match. Empty for other brands.
+        smf = self._match_side(self.side_map_fallback, orig_upper, txn_type, "Side Ledger (fallback)")
+        if smf:
+            return smf
+
         # ------------------------------------------------------------------
         # FALLBACK — Suspense A/c (pre-computed from master during init)
         # ------------------------------------------------------------------
@@ -1460,16 +1509,28 @@ def load_bank_statement(filepath: str) -> tuple:
     ext = str(filepath).rsplit('.', 1)[-1].lower()
 
     if ext == 'csv':
-        # CSV path: try common encodings; no sheet selection needed
-        df_raw = None
-        for enc in ('utf-8', 'latin-1', 'cp1252'):
+        # CSV path: bank-statement CSVs are RAGGED — metadata rows (account/address)
+        # have a different column count than the transaction table, which crashes
+        # pandas' C parser ("Expected N fields ... saw M"). Read with the csv module
+        # (handles any per-row width + quoting), pad every row to the widest, then build
+        # the frame — reproducing pd.read_csv(header=None, dtype=str) but ragged-safe.
+        import csv as _csv
+        rows = None
+        for enc in ('utf-8-sig', 'utf-8', 'latin-1', 'cp1252'):
             try:
-                df_raw = pd.read_csv(filepath, header=None, encoding=enc, dtype=str)
+                with open(filepath, newline='', encoding=enc) as _fh:
+                    rows = list(_csv.reader(_fh))
                 break
             except UnicodeDecodeError:
                 continue
-        if df_raw is None:
+        if rows is None:
             raise ValueError(f"Cannot read CSV {filepath} — tried utf-8, latin-1, cp1252")
+        rows = [r for r in rows if any((c or '').strip() for c in r)]   # drop fully-blank rows
+        if not rows:
+            raise ValueError(f"CSV {filepath} is empty")
+        width = max(len(r) for r in rows)
+        rows = [r + [''] * (width - len(r)) for r in rows]              # pad ragged → rectangle
+        df_raw = pd.DataFrame(rows).replace('', float('nan'))           # match read_csv(dtype=str)
         target = 'CSV'
     else:
         # Excel path (unchanged)
@@ -1821,6 +1882,10 @@ def main():
                         help="Brand name for the output filename/summary (default: Brand)")
     parser.add_argument("--corrections", default=None,
                         help="Path to corrections JSON file: {NARRATION_KEY: {ledger, type}}")
+    parser.add_argument("--side-map", default=None,
+                        help="Path to a per-brand side-dependent ledger map JSON "
+                             "({counterparties:[{tokens,credit,debit}]}). Credit ledger for "
+                             "Receipts, debit ledger for Payments. Checked above the directory.")
     parser.add_argument("--gemini-key", default=None,
                         help="Gemini API key for the LLM fallback (else env GEMINI_API_KEY)")
     parser.add_argument("--gemini-model", default="gemini-2.5-flash",
@@ -1894,8 +1959,21 @@ def main():
         except Exception as _e:
             print(f"      → Warning: could not load corrections file: {_e}")
 
+    # Optional per-brand side-dependent ledger map (M-Brands marketplaces). Only passed
+    # by the backend for the specific brand; absent → empty → no behaviour change.
+    side_map = []
+    if args.side_map and os.path.exists(args.side_map):
+        try:
+            with open(args.side_map, 'r', encoding='utf-8') as _f:
+                _sm = _json.load(_f)
+            side_map = _sm.get('counterparties', []) if isinstance(_sm, dict) else (_sm or [])
+            print(f"      → Loaded side-ledger map: {len(side_map)} counterparties")
+        except Exception as _e:
+            print(f"      → Warning: could not load side-map file: {_e}")
+
     print("[3/4] Classifying transactions …")
-    classifier = BankClassifier(ledgers, corrections=corrections, brand_name=args.brand)
+    classifier = BankClassifier(ledgers, corrections=corrections, brand_name=args.brand,
+                                side_map=side_map)
     rows, summary = [], {"High": 0, "Medium": 0, "Low": 0}
 
     date_col  = col_map.get("txn_date")
