@@ -635,43 +635,43 @@ function ReconciliationView({ file, brandId, agentId, onBack, onDownload }) {
             {/* ── Reconciliation Summary ── */}
             <div className="bg-white border border-slate-200 rounded-xl p-5">
                 <h3 className="text-sm font-bold text-slate-800 mb-4">Reconciliation Summary</h3>
-                <div className="flex items-stretch gap-0 flex-wrap">
+                <div className="flex items-center gap-8 flex-wrap">
                     {/* NET SALES */}
-                    <div className="flex-1 min-w-[140px] pr-6">
+                    <div className="min-w-[130px]">
                         <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Net Sales</p>
                         <p className="text-2xl font-bold text-slate-900 mt-1 leading-none">{fmtINR(summary.netSales)}</p>
                         <p className="text-xs text-slate-400 mt-1">{reconciliation.total.toLocaleString()} orders</p>
                     </div>
 
-                    <div className="flex items-center text-slate-300 font-light text-2xl mr-6">=</div>
+                    <div className="text-slate-300 font-light text-2xl leading-none">=</div>
 
                     {/* GROSS SALES */}
-                    <div className="flex-1 min-w-[140px] pr-6">
+                    <div className="min-w-[130px]">
                         <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Gross Sales</p>
                         <p className="text-2xl font-bold text-slate-900 mt-1 leading-none">{fmtINR(summary.grossSales)}</p>
                         <p className="text-xs text-slate-400 mt-1">{reconciliation.total.toLocaleString()} orders</p>
                     </div>
 
-                    <div className="flex items-center text-slate-300 font-light text-2xl mr-6">−</div>
+                    <div className="text-slate-300 font-light text-2xl leading-none">−</div>
 
                     {/* RETURNS */}
-                    <div className="flex-1 min-w-[120px] pr-6">
+                    <div className="min-w-[110px]">
                         <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Returns</p>
                         <p className="text-2xl font-bold text-slate-900 mt-1 leading-none">{fmtINR(summary.totalReturns)}</p>
                         <p className="text-xs text-slate-400 mt-1">—</p>
                     </div>
 
-                    <div className="flex items-center text-slate-300 font-light text-2xl mr-6">−</div>
+                    <div className="text-slate-300 font-light text-2xl leading-none">−</div>
 
                     {/* CANCELLATIONS */}
-                    <div className="flex-1 min-w-[120px]">
+                    <div className="min-w-[110px]">
                         <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Cancellations</p>
                         <p className="text-2xl font-bold text-slate-900 mt-1 leading-none">{fmtINR(summary.cancelledAmount)}</p>
                         <p className="text-xs text-slate-400 mt-1">{summary.cancelledCount.toLocaleString()} orders</p>
                     </div>
 
                     {/* Reconciliation Status donut */}
-                    <div className="ml-auto flex items-center gap-6 border-l border-slate-100 pl-6">
+                    <div className="ml-auto flex items-center gap-6 border-l border-slate-100 pl-8">
                         <div className="text-right">
                             <p className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-3">Reconciliation Status</p>
                             <div className="flex items-center gap-6">

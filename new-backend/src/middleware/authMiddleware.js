@@ -1,5 +1,6 @@
 const jwt = require('jsonwebtoken');
 const { User } = require('../models/master');
+const { als } = require('../utils/requestContext');
 
 const authenticateToken = async (req, res, next) => {
   try {
@@ -18,7 +19,10 @@ const authenticateToken = async (req, res, next) => {
     }
 
     req.user = user;
-    next();
+    // Run the rest of the request inside an AsyncLocalStorage context so
+    // dynamic-table model hooks (e.g. created_by defaults) can read the
+    // acting user without every controller threading it through explicitly.
+    als.run({ userId: user.id }, next);
   } catch (error) {
     if (error.name === 'TokenExpiredError') {
       return res.status(401).json({ error: 'Token expired' });

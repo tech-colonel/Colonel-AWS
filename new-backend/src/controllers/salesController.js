@@ -1,6 +1,6 @@
 const salesService = require('../services/salesService');
 const { Brand, Agent } = require('../models/master');
-const { getBrandConnection } = require('../config/database');
+const { getBrandConnection, masterSequelize } = require('../config/database');
 const { getDynamicModel } = require('../models/brand');
 const path = require('path');
 const fs = require('fs-extra');
@@ -51,7 +51,7 @@ const getWorkingFiles = async (req, res, next) => {
     // real table instead.
     let dbCols = {};
     try { dbCols = await brandDb.getQueryInterface().describeTable(tableName); } catch (_) { dbCols = {}; }
-    const attributes = ['id', 'filename', 'month', 'year', 'created_at', 'file_type', 'inventory_type']
+    const attributes = ['id', 'filename', 'month', 'year', 'created_at', 'file_type', 'inventory_type', 'created_by']
       .filter((c) => dbCols[c]);
     if (!attributes.length) return res.json([]); // table has none of the expected columns
 
@@ -65,6 +65,22 @@ const getWorkingFiles = async (req, res, next) => {
       order: order,
       raw: true
     });
+
+    // Best-effort creator-name lookup (users live in the same master DB).
+    // Non-fatal: a lookup failure just leaves created_by_name unset.
+    if (dbCols.created_by) {
+      const creatorIds = [...new Set(rows.map((r) => r.created_by).filter(Boolean))];
+      if (creatorIds.length) {
+        try {
+          const [users] = await masterSequelize.query(
+            `SELECT id, name FROM users WHERE id = ANY($1::uuid[])`,
+            { bind: [creatorIds] }
+          );
+          const nameById = Object.fromEntries(users.map((u) => [u.id, u.name]));
+          rows.forEach((r) => { r.created_by_name = nameById[r.created_by] || null; });
+        } catch (_) { /* creator names are a display nicety, not core data */ }
+      }
+    }
 
     // =====================================================
     // ✅ GROUP BY filename (keep latest)
