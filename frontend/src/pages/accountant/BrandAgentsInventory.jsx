@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import DashboardLayout from '../../components/layout/DashboardLayout';
+import { channelLogoSrc } from '../../components/ChannelLogo';
 import { LayoutDashboard, Bot, TrendingUp, ChevronRight, ShoppingBag } from 'lucide-react';
 import { Card, CardContent } from '../../components/ui/card';
 import api from '../../lib/api';
@@ -146,7 +147,7 @@ const metaFor = (agent) => {
   return {
     displayName: agent.name, icon: channelIcon(agent.name), category: s.category,
     color: s.color, bg: s.bg, border: s.border, accuracy: null, fields: null,
-    mono: channelBrand(agent.name),
+    mono: channelBrand(agent.name), logoSrc: channelLogoSrc(agent.name),
   };
 };
 
@@ -164,7 +165,12 @@ const AgentCard = ({ agent, assigned, onClick }) => {
     >
       <div className="p-5 flex-1">
         <div className="flex items-start justify-between mb-3">
-          {meta.mono ? (
+          {meta.logoSrc ? (
+            <div className="w-11 h-11 rounded-xl flex items-center justify-center bg-white border overflow-hidden"
+              style={{ borderColor: meta.border, padding: 6 }}>
+              <img src={meta.logoSrc} alt="" style={{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain' }} />
+            </div>
+          ) : meta.mono ? (
             <div className="w-11 h-11 rounded-xl flex items-center justify-center font-extrabold text-base tracking-tight"
               style={{ background: meta.mono.bg, color: meta.mono.fg }}>
               {meta.mono.label}

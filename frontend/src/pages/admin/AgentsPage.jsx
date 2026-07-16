@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import DashboardLayout from '../../components/layout/DashboardLayout';
+import { channelLogoSrc } from '../../components/ChannelLogo';
 import { Building2, Bot, Plus, TrendingUp, ChevronRight, Activity, FileSpreadsheet, Target, Layers, PieChart as PieIcon } from 'lucide-react';
 import { Button } from '../../components/ui/button';
 import { Input } from '../../components/ui/input';
@@ -126,13 +127,19 @@ const RichAgentCard = ({ meta, description, onClick }) => (
 const SimpleAgentCard = ({ agent, onClick }) => {
   const s = SECTION_STYLE[sectionOf(agent)] || SECTION_STYLE.other;
   const mono = channelBrand(agent.name);
+  const logoSrc = channelLogoSrc(agent.name);
   return (
     <button onClick={onClick}
       className="text-left w-full rounded-2xl border bg-white transition-all duration-200 flex flex-col overflow-hidden hover:shadow-lg hover:-translate-y-0.5 group"
       style={{ borderColor: s.border }}>
       <div className="p-5 flex-1">
         <div className="flex items-start justify-between mb-3">
-          {mono ? (
+          {logoSrc ? (
+            <div className="w-11 h-11 rounded-xl flex items-center justify-center bg-white border overflow-hidden"
+              style={{ borderColor: s.border, padding: 6 }}>
+              <img src={logoSrc} alt="" style={{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain' }} />
+            </div>
+          ) : mono ? (
             <div className="w-11 h-11 rounded-xl flex items-center justify-center font-extrabold text-base tracking-tight"
               style={{ background: mono.bg, color: mono.fg }}>{mono.label}</div>
           ) : (
