@@ -19,6 +19,7 @@ export const CHANNEL_LOGO = {
   shopify:  'shopify.svg',
   firstcry: 'firstcry.svg',
   jiomart:  'jiomart.svg',
+  meesho:   'meesho.svg',
 };
 
 /** Return the /logos src for a channel name, or null if there is no bundled logo. */
