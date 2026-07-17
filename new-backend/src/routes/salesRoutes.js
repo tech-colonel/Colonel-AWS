@@ -6,6 +6,7 @@ const salesAmazonController = require('../controllers/agents/sales-amazon/salesA
 const salesMyntraController = require('../controllers/agents/sales-myntra/salesMyntraController');
 const salesShopifyController = require('../controllers/agents/sales-shopify/salesShopifyController');
 const { authenticateToken } = require('../middleware/authMiddleware');
+const { reattachUserContext } = require('../utils/requestContext');
 
 const upload = multer({ storage: multer.memoryStorage() });
 
@@ -20,14 +21,14 @@ router.delete('/brands/:brandId/agents/:agentId/master/sku/delete', authenticate
 
 // ─── Amazon Routes ─────────────────────────────────────────────────────────────
 router.get('/brands/:brandId/agents/:agentId/amazon/master', authenticateToken, salesAmazonController.getMasterData);
-router.post('/brands/:brandId/agents/:agentId/amazon/master/sku', authenticateToken, upload.single('file'), salesAmazonController.uploadSkuMaster);
-router.post('/brands/:brandId/agents/:agentId/amazon/master/ledger', authenticateToken, upload.single('file'), salesAmazonController.uploadLedgerMaster);
-router.post('/brands/:brandId/agents/:agentId/amazon/generate', authenticateToken, upload.single('file'), salesAmazonController.generate);
+router.post('/brands/:brandId/agents/:agentId/amazon/master/sku', authenticateToken, upload.single('file'), reattachUserContext, salesAmazonController.uploadSkuMaster);
+router.post('/brands/:brandId/agents/:agentId/amazon/master/ledger', authenticateToken, upload.single('file'), reattachUserContext, salesAmazonController.uploadLedgerMaster);
+router.post('/brands/:brandId/agents/:agentId/amazon/generate', authenticateToken, upload.single('file'), reattachUserContext, salesAmazonController.generate);
 
 const misController = require('../controllers/agents/common/misController');
 
 // Two-phase generation: preview → verify → commit/discard
-router.post('/brands/:brandId/agents/:agentId/amazon/generate/preview', authenticateToken, upload.single('file'), salesAmazonController.generatePreview);
+router.post('/brands/:brandId/agents/:agentId/amazon/generate/preview', authenticateToken, upload.single('file'), reattachUserContext, salesAmazonController.generatePreview);
 router.post('/brands/:brandId/agents/:agentId/amazon/generate/commit',  authenticateToken, salesAmazonController.generateCommit);
 router.post('/brands/:brandId/agents/:agentId/amazon/generate/discard', authenticateToken, salesAmazonController.generateDiscard);
 
@@ -36,12 +37,12 @@ router.post('/brands/:brandId/agents/:agentId/amazon/mis', authenticateToken, mi
 
 // ─── Flipkart Routes ───────────────────────────────────────────────────────────
 router.get('/brands/:brandId/agents/:agentId/flipkart/master', authenticateToken, flipkart.getMasterData);
-router.post('/brands/:brandId/agents/:agentId/flipkart/master/sku', authenticateToken, upload.single('file'), flipkart.uploadSkuMaster);
-router.post('/brands/:brandId/agents/:agentId/flipkart/master/ledger', authenticateToken, upload.single('file'), flipkart.uploadLedgerMaster);
-router.post('/brands/:brandId/agents/:agentId/flipkart/generate', authenticateToken, upload.single('file'), flipkart.generate);
+router.post('/brands/:brandId/agents/:agentId/flipkart/master/sku', authenticateToken, upload.single('file'), reattachUserContext, flipkart.uploadSkuMaster);
+router.post('/brands/:brandId/agents/:agentId/flipkart/master/ledger', authenticateToken, upload.single('file'), reattachUserContext, flipkart.uploadLedgerMaster);
+router.post('/brands/:brandId/agents/:agentId/flipkart/generate', authenticateToken, upload.single('file'), reattachUserContext, flipkart.generate);
 
 // Two-phase generation: preview → verify → commit/discard
-router.post('/brands/:brandId/agents/:agentId/flipkart/generate/preview', authenticateToken, upload.single('file'), flipkart.generatePreview);
+router.post('/brands/:brandId/agents/:agentId/flipkart/generate/preview', authenticateToken, upload.single('file'), reattachUserContext, flipkart.generatePreview);
 router.post('/brands/:brandId/agents/:agentId/flipkart/generate/commit',  authenticateToken, flipkart.generateCommit);
 router.post('/brands/:brandId/agents/:agentId/flipkart/generate/discard', authenticateToken, flipkart.generateDiscard);
 
@@ -49,32 +50,32 @@ const salesBlinkitController = require('../controllers/agents/sales-blinkit/sale
 
 // ─── Myntra Routes ─────────────────────────────────────────────────────────────
 router.get('/brands/:brandId/agents/:agentId/myntra/master', authenticateToken, salesMyntraController.getMasterData);
-router.post('/brands/:brandId/agents/:agentId/myntra/master/sku', authenticateToken, upload.single('file'), salesMyntraController.uploadSkuMaster);
-router.post('/brands/:brandId/agents/:agentId/myntra/master/ledger', authenticateToken, upload.single('file'), salesMyntraController.uploadLedgerMaster);
+router.post('/brands/:brandId/agents/:agentId/myntra/master/sku', authenticateToken, upload.single('file'), reattachUserContext, salesMyntraController.uploadSkuMaster);
+router.post('/brands/:brandId/agents/:agentId/myntra/master/ledger', authenticateToken, upload.single('file'), reattachUserContext, salesMyntraController.uploadLedgerMaster);
 router.post('/brands/:brandId/agents/:agentId/myntra/generate', authenticateToken, upload.fields([
     { name: 'rtoFile', maxCount: 1 },
     { name: 'packedFile', maxCount: 1 },
     { name: 'rtFile', maxCount: 1 },
     { name: 'file', maxCount: 1 }
-]), salesMyntraController.generate);
+]), reattachUserContext, salesMyntraController.generate);
 
 router.post('/brands/:brandId/agents/:agentId/myntra/generate/preview', authenticateToken, upload.fields([
     { name: 'rtoFile', maxCount: 1 },
     { name: 'packedFile', maxCount: 1 },
     { name: 'rtFile', maxCount: 1 },
     { name: 'file', maxCount: 1 }
-]), salesMyntraController.generatePreview);
+]), reattachUserContext, salesMyntraController.generatePreview);
 
 router.post('/brands/:brandId/agents/:agentId/myntra/generate/commit', authenticateToken, salesMyntraController.generateCommit);
 router.post('/brands/:brandId/agents/:agentId/myntra/generate/discard', authenticateToken, salesMyntraController.generateDiscard);
 
 // ─── Blinkit Routes ────────────────────────────────────────────────────────────
 router.get('/brands/:brandId/agents/:agentId/blinkit/master', authenticateToken, salesBlinkitController.getMasterData);
-router.post('/brands/:brandId/agents/:agentId/blinkit/master/sku', authenticateToken, upload.single('file'), salesBlinkitController.uploadSkuMaster);
-router.post('/brands/:brandId/agents/:agentId/blinkit/master/ledger', authenticateToken, upload.single('file'), salesBlinkitController.uploadLedgerMaster);
-router.post('/brands/:brandId/agents/:agentId/blinkit/generate', authenticateToken, upload.single('file'), salesBlinkitController.generate);
+router.post('/brands/:brandId/agents/:agentId/blinkit/master/sku', authenticateToken, upload.single('file'), reattachUserContext, salesBlinkitController.uploadSkuMaster);
+router.post('/brands/:brandId/agents/:agentId/blinkit/master/ledger', authenticateToken, upload.single('file'), reattachUserContext, salesBlinkitController.uploadLedgerMaster);
+router.post('/brands/:brandId/agents/:agentId/blinkit/generate', authenticateToken, upload.single('file'), reattachUserContext, salesBlinkitController.generate);
 
-router.post('/brands/:brandId/agents/:agentId/blinkit/generate/preview', authenticateToken, upload.single('file'), salesBlinkitController.generatePreview);
+router.post('/brands/:brandId/agents/:agentId/blinkit/generate/preview', authenticateToken, upload.single('file'), reattachUserContext, salesBlinkitController.generatePreview);
 router.post('/brands/:brandId/agents/:agentId/blinkit/generate/commit', authenticateToken, salesBlinkitController.generateCommit);
 router.post('/brands/:brandId/agents/:agentId/blinkit/generate/discard', authenticateToken, salesBlinkitController.generateDiscard);
 
@@ -83,31 +84,31 @@ const salesJiomartController = require('../controllers/agents/sales-jiomart/sale
 
 // ─── FirstCry Routes ───────────────────────────────────────────────────────────
 router.get('/brands/:brandId/agents/:agentId/firstcry/master', authenticateToken, salesFirstcryController.getMasterData);
-router.post('/brands/:brandId/agents/:agentId/firstcry/master/sku', authenticateToken, upload.single('file'), salesFirstcryController.uploadSkuMaster);
-router.post('/brands/:brandId/agents/:agentId/firstcry/master/ledger', authenticateToken, upload.single('file'), salesFirstcryController.uploadLedgerMaster);
-router.post('/brands/:brandId/agents/:agentId/firstcry/generate', authenticateToken, upload.single('file'), salesFirstcryController.generate);
+router.post('/brands/:brandId/agents/:agentId/firstcry/master/sku', authenticateToken, upload.single('file'), reattachUserContext, salesFirstcryController.uploadSkuMaster);
+router.post('/brands/:brandId/agents/:agentId/firstcry/master/ledger', authenticateToken, upload.single('file'), reattachUserContext, salesFirstcryController.uploadLedgerMaster);
+router.post('/brands/:brandId/agents/:agentId/firstcry/generate', authenticateToken, upload.single('file'), reattachUserContext, salesFirstcryController.generate);
 
-router.post('/brands/:brandId/agents/:agentId/firstcry/generate/preview', authenticateToken, upload.single('file'), salesFirstcryController.generatePreview);
+router.post('/brands/:brandId/agents/:agentId/firstcry/generate/preview', authenticateToken, upload.single('file'), reattachUserContext, salesFirstcryController.generatePreview);
 router.post('/brands/:brandId/agents/:agentId/firstcry/generate/commit', authenticateToken, salesFirstcryController.generateCommit);
 router.post('/brands/:brandId/agents/:agentId/firstcry/generate/discard', authenticateToken, salesFirstcryController.generateDiscard);
 
 // ─── JioMart Routes ───────────────────────────────────────────────────────────
 router.get('/brands/:brandId/agents/:agentId/jiomart/master', authenticateToken, salesJiomartController.getMasterData);
-router.post('/brands/:brandId/agents/:agentId/jiomart/master/sku', authenticateToken, upload.single('file'), salesJiomartController.uploadSkuMaster);
-router.post('/brands/:brandId/agents/:agentId/jiomart/master/ledger', authenticateToken, upload.single('file'), salesJiomartController.uploadLedgerMaster);
-router.post('/brands/:brandId/agents/:agentId/jiomart/generate', authenticateToken, upload.single('file'), salesJiomartController.generate);
+router.post('/brands/:brandId/agents/:agentId/jiomart/master/sku', authenticateToken, upload.single('file'), reattachUserContext, salesJiomartController.uploadSkuMaster);
+router.post('/brands/:brandId/agents/:agentId/jiomart/master/ledger', authenticateToken, upload.single('file'), reattachUserContext, salesJiomartController.uploadLedgerMaster);
+router.post('/brands/:brandId/agents/:agentId/jiomart/generate', authenticateToken, upload.single('file'), reattachUserContext, salesJiomartController.generate);
 
-router.post('/brands/:brandId/agents/:agentId/jiomart/generate/preview', authenticateToken, upload.single('file'), salesJiomartController.generatePreview);
+router.post('/brands/:brandId/agents/:agentId/jiomart/generate/preview', authenticateToken, upload.single('file'), reattachUserContext, salesJiomartController.generatePreview);
 router.post('/brands/:brandId/agents/:agentId/jiomart/generate/commit', authenticateToken, salesJiomartController.generateCommit);
 router.post('/brands/:brandId/agents/:agentId/jiomart/generate/discard', authenticateToken, salesJiomartController.generateDiscard);
 
 // ─── Shopify Routes ───────────────────────────────────────────────────────────
 router.get('/brands/:brandId/agents/:agentId/shopify/master', authenticateToken, salesShopifyController.getMasterData);
-router.post('/brands/:brandId/agents/:agentId/shopify/master/sku', authenticateToken, upload.single('file'), salesShopifyController.uploadSkuMaster);
-router.post('/brands/:brandId/agents/:agentId/shopify/master/ledger', authenticateToken, upload.single('file'), salesShopifyController.uploadLedgerMaster);
-router.post('/brands/:brandId/agents/:agentId/shopify/generate', authenticateToken, upload.single('file'), salesShopifyController.generate);
+router.post('/brands/:brandId/agents/:agentId/shopify/master/sku', authenticateToken, upload.single('file'), reattachUserContext, salesShopifyController.uploadSkuMaster);
+router.post('/brands/:brandId/agents/:agentId/shopify/master/ledger', authenticateToken, upload.single('file'), reattachUserContext, salesShopifyController.uploadLedgerMaster);
+router.post('/brands/:brandId/agents/:agentId/shopify/generate', authenticateToken, upload.single('file'), reattachUserContext, salesShopifyController.generate);
 
-router.post('/brands/:brandId/agents/:agentId/shopify/generate/preview', authenticateToken, upload.single('file'), salesShopifyController.generatePreview);
+router.post('/brands/:brandId/agents/:agentId/shopify/generate/preview', authenticateToken, upload.single('file'), reattachUserContext, salesShopifyController.generatePreview);
 router.post('/brands/:brandId/agents/:agentId/shopify/generate/commit', authenticateToken, salesShopifyController.generateCommit);
 router.post('/brands/:brandId/agents/:agentId/shopify/generate/discard', authenticateToken, salesShopifyController.generateDiscard);
 
@@ -115,11 +116,11 @@ const salesZeptoController = require('../controllers/agents/sales-zepto/salesZep
 
 // ─── Zepto Routes ─────────────────────────────────────────────────────────────
 router.get('/brands/:brandId/agents/:agentId/zepto/master', authenticateToken, salesZeptoController.getMasterData);
-router.post('/brands/:brandId/agents/:agentId/zepto/master/sku', authenticateToken, upload.single('file'), salesZeptoController.uploadSkuMaster);
-router.post('/brands/:brandId/agents/:agentId/zepto/master/ledger', authenticateToken, upload.single('file'), salesZeptoController.uploadLedgerMaster);
-router.post('/brands/:brandId/agents/:agentId/zepto/generate', authenticateToken, upload.single('file'), salesZeptoController.generate);
+router.post('/brands/:brandId/agents/:agentId/zepto/master/sku', authenticateToken, upload.single('file'), reattachUserContext, salesZeptoController.uploadSkuMaster);
+router.post('/brands/:brandId/agents/:agentId/zepto/master/ledger', authenticateToken, upload.single('file'), reattachUserContext, salesZeptoController.uploadLedgerMaster);
+router.post('/brands/:brandId/agents/:agentId/zepto/generate', authenticateToken, upload.single('file'), reattachUserContext, salesZeptoController.generate);
 
-router.post('/brands/:brandId/agents/:agentId/zepto/generate/preview', authenticateToken, upload.single('file'), salesZeptoController.generatePreview);
+router.post('/brands/:brandId/agents/:agentId/zepto/generate/preview', authenticateToken, upload.single('file'), reattachUserContext, salesZeptoController.generatePreview);
 router.post('/brands/:brandId/agents/:agentId/zepto/generate/commit', authenticateToken, salesZeptoController.generateCommit);
 router.post('/brands/:brandId/agents/:agentId/zepto/generate/discard', authenticateToken, salesZeptoController.generateDiscard);
 
@@ -132,7 +133,7 @@ router.get('/brands/:brandId/agents/:agentId/nykaa/master', authenticateToken, s
 router.post('/brands/:brandId/agents/:agentId/nykaa/generate/preview', authenticateToken, upload.fields([
     { name: 'cycle1File', maxCount: 1 },   // May_01_15 (1–15 cycle)
     { name: 'cycle2File', maxCount: 1 },   // May_16_30 (16–30 cycle)
-]), salesNykaaController.generatePreview);
+]), reattachUserContext, salesNykaaController.generatePreview);
 router.post('/brands/:brandId/agents/:agentId/nykaa/generate/commit',  authenticateToken, salesNykaaController.generateCommit);
 router.post('/brands/:brandId/agents/:agentId/nykaa/generate/discard', authenticateToken, salesNykaaController.generateDiscard);
 
@@ -140,11 +141,11 @@ const totalSalesController = require('../controllers/agents/total-sales/totalSal
 
 // ─── Total Sales Routes ────────────────────────────────────────────────────────
 router.get('/brands/:brandId/agents/:agentId/total-sales-analyzer/master', authenticateToken, totalSalesController.getMasterData);
-router.post('/brands/:brandId/agents/:agentId/total-sales-analyzer/master/sku', authenticateToken, upload.single('file'), totalSalesController.uploadSkuMaster);
-router.post('/brands/:brandId/agents/:agentId/total-sales-analyzer/master/ledger', authenticateToken, upload.single('file'), totalSalesController.uploadLedgerMaster);
-router.post('/brands/:brandId/agents/:agentId/total-sales-analyzer/generate', authenticateToken, upload.single('file'), totalSalesController.generatePreview); // Use generatePreview for standard generate as well
+router.post('/brands/:brandId/agents/:agentId/total-sales-analyzer/master/sku', authenticateToken, upload.single('file'), reattachUserContext, totalSalesController.uploadSkuMaster);
+router.post('/brands/:brandId/agents/:agentId/total-sales-analyzer/master/ledger', authenticateToken, upload.single('file'), reattachUserContext, totalSalesController.uploadLedgerMaster);
+router.post('/brands/:brandId/agents/:agentId/total-sales-analyzer/generate', authenticateToken, upload.single('file'), reattachUserContext, totalSalesController.generatePreview); // Use generatePreview for standard generate as well
 
-router.post('/brands/:brandId/agents/:agentId/total-sales-analyzer/generate/preview', authenticateToken, upload.single('file'), totalSalesController.generatePreview);
+router.post('/brands/:brandId/agents/:agentId/total-sales-analyzer/generate/preview', authenticateToken, upload.single('file'), reattachUserContext, totalSalesController.generatePreview);
 router.post('/brands/:brandId/agents/:agentId/total-sales-analyzer/generate/commit', authenticateToken, totalSalesController.generateCommit);
 router.post('/brands/:brandId/agents/:agentId/total-sales-analyzer/generate/discard', authenticateToken, totalSalesController.generateDiscard);
 router.post('/brands/:brandId/agents/:agentId/total-sales-analyzer/dashboard', authenticateToken, totalSalesController.getDashboardData);
@@ -155,29 +156,29 @@ const salesLimeroadController = require('../controllers/agents/sales-limeroad/sa
 
 // ─── Mirrow Routes ─────────────────────────────────────────────────────────────
 router.get('/brands/:brandId/agents/:agentId/mirrow/master', authenticateToken, salesMirrowController.getMasterData);
-router.post('/brands/:brandId/agents/:agentId/mirrow/master/sku', authenticateToken, upload.single('file'), salesMirrowController.uploadSkuMaster);
-router.post('/brands/:brandId/agents/:agentId/mirrow/master/ledger', authenticateToken, upload.single('file'), salesMirrowController.uploadLedgerMaster);
-router.post('/brands/:brandId/agents/:agentId/mirrow/generate', authenticateToken, upload.single('file'), salesMirrowController.generate);
+router.post('/brands/:brandId/agents/:agentId/mirrow/master/sku', authenticateToken, upload.single('file'), reattachUserContext, salesMirrowController.uploadSkuMaster);
+router.post('/brands/:brandId/agents/:agentId/mirrow/master/ledger', authenticateToken, upload.single('file'), reattachUserContext, salesMirrowController.uploadLedgerMaster);
+router.post('/brands/:brandId/agents/:agentId/mirrow/generate', authenticateToken, upload.single('file'), reattachUserContext, salesMirrowController.generate);
 
-router.post('/brands/:brandId/agents/:agentId/mirrow/generate/preview', authenticateToken, upload.single('file'), salesMirrowController.generatePreview);
+router.post('/brands/:brandId/agents/:agentId/mirrow/generate/preview', authenticateToken, upload.single('file'), reattachUserContext, salesMirrowController.generatePreview);
 router.post('/brands/:brandId/agents/:agentId/mirrow/generate/commit', authenticateToken, salesMirrowController.generateCommit);
 router.post('/brands/:brandId/agents/:agentId/mirrow/generate/discard', authenticateToken, salesMirrowController.generateDiscard);
 
 // ─── cread Routes ─────────────────────────────────────────────────────────────
 router.get('/brands/:brandId/agents/:agentId/cread/master', authenticateToken, salesCreadController.getMasterData);
-router.post('/brands/:brandId/agents/:agentId/cread/master/sku', authenticateToken, upload.single('file'), salesCreadController.uploadSkuMaster);
-router.post('/brands/:brandId/agents/:agentId/cread/master/ledger', authenticateToken, upload.single('file'), salesCreadController.uploadLedgerMaster);
-router.post('/brands/:brandId/agents/:agentId/cread/generate', authenticateToken, upload.single('file'), salesCreadController.generate);
+router.post('/brands/:brandId/agents/:agentId/cread/master/sku', authenticateToken, upload.single('file'), reattachUserContext, salesCreadController.uploadSkuMaster);
+router.post('/brands/:brandId/agents/:agentId/cread/master/ledger', authenticateToken, upload.single('file'), reattachUserContext, salesCreadController.uploadLedgerMaster);
+router.post('/brands/:brandId/agents/:agentId/cread/generate', authenticateToken, upload.single('file'), reattachUserContext, salesCreadController.generate);
 
-router.post('/brands/:brandId/agents/:agentId/cread/generate/preview', authenticateToken, upload.single('file'), salesCreadController.generatePreview);
+router.post('/brands/:brandId/agents/:agentId/cread/generate/preview', authenticateToken, upload.single('file'), reattachUserContext, salesCreadController.generatePreview);
 router.post('/brands/:brandId/agents/:agentId/cread/generate/commit', authenticateToken, salesCreadController.generateCommit);
 router.post('/brands/:brandId/agents/:agentId/cread/generate/discard', authenticateToken, salesCreadController.generateDiscard);
 
 // ─── LimeRoad Routes ───────────────────────────────────────────────────────────
 router.get('/brands/:brandId/agents/:agentId/limeroad/master', authenticateToken, salesLimeroadController.getMasterData);
-router.post('/brands/:brandId/agents/:agentId/limeroad/master/sku', authenticateToken, upload.single('file'), salesLimeroadController.uploadSkuMaster);
-router.post('/brands/:brandId/agents/:agentId/limeroad/master/ledger', authenticateToken, upload.single('file'), salesLimeroadController.uploadLedgerMaster);
-router.post('/brands/:brandId/agents/:agentId/limeroad/generate/preview', authenticateToken, upload.single('file'), salesLimeroadController.generatePreview);
+router.post('/brands/:brandId/agents/:agentId/limeroad/master/sku', authenticateToken, upload.single('file'), reattachUserContext, salesLimeroadController.uploadSkuMaster);
+router.post('/brands/:brandId/agents/:agentId/limeroad/master/ledger', authenticateToken, upload.single('file'), reattachUserContext, salesLimeroadController.uploadLedgerMaster);
+router.post('/brands/:brandId/agents/:agentId/limeroad/generate/preview', authenticateToken, upload.single('file'), reattachUserContext, salesLimeroadController.generatePreview);
 router.post('/brands/:brandId/agents/:agentId/limeroad/generate/commit',  authenticateToken, salesLimeroadController.generateCommit);
 router.post('/brands/:brandId/agents/:agentId/limeroad/generate/discard', authenticateToken, salesLimeroadController.generateDiscard);
 
