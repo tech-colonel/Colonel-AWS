@@ -585,6 +585,74 @@ class ReconciliationHandler(BaseHTTPRequestHandler):
                 self.write_json({k: v for k, v in payload.items() if not k.startswith("_")})
                 return
 
+            # Receivable Cycle — Combine Tally GST + Sales Order Combine + courier COD
+            # settlement (Delhivery/Ekart/Xpressbees) + combined SRN report -> Main Sheet
+            # + per-courier COD sheets. Fully self-contained engine (recon/receivable_cycle.py)
+            # — does not share code with any other reco agent.
+            if reco_type == "receivable_cycle":
+                from io import BytesIO
+                from recon.receivable_cycle import (
+                    reconcile_receivable_cycle, build_receivable_cycle_workbook, MAIN_SHEET_COLUMNS,
+                )
+
+                tally_file = files.get("tally_gst")
+                sales_order_file = files.get("sales_order")
+                if not tally_file or not sales_order_file:
+                    self.write_json(
+                        {"error": "Upload the Combine Tally GST report (field: tally_gst) and "
+                                  "the Sales Order Combine file (field: sales_order)."},
+                        400,
+                    )
+                    return
+
+                def _rc_files(name):
+                    val = files.get(name)
+                    if val is None:
+                        return []
+                    items = val if isinstance(val, list) else [val]
+                    return [item["content"] for item in items if item.get("content")]
+
+                try:
+                    result = reconcile_receivable_cycle({
+                        "tally_gst": tally_file["content"],
+                        "sales_order": sales_order_file["content"],
+                        "delhivery": _rc_files("delhivery"),
+                        "ekart": _rc_files("ekart"),
+                        "xpressbees": _rc_files("xpressbees"),
+                        "srn": _rc_files("srn"),
+                    })
+                except Exception as exc:
+                    self.write_json({"error": f"Receivable Cycle reconciliation failed: {exc}"}, 400)
+                    return
+
+                wb = build_receivable_cycle_workbook(result)
+                _buf = BytesIO(); wb.save(_buf)
+                job_id = uuid4().hex
+                payload = {
+                    "job_id": job_id,
+                    "reco_type": reco_type,
+                    "summary": result["summary"],
+                    "counts": {"result_rows": len(result["main_sheet"])},
+                    "results": result["main_sheet"],
+                    # COD sub-sheets (Delivery/Ekart/Xpressbees/DTDC/Self shipping) — already
+                    # computed for the xlsx above; exposed in the JSON too so both the
+                    # just-ran UI view and the Node DB-persistence step see the full sheet
+                    # set, not just the Main Sheet.
+                    "cod_sheets": result["cod_sheets"],
+                    # Explicit column ORDER for Main Sheet + each COD sheet, as arrays —
+                    # the frontend uses these instead of deriving column order from a
+                    # row's own object keys, because any key that looks like an array
+                    # index ("2", "3", "4") gets forced to the front of a JS object's
+                    # own-property order regardless of insertion order, no matter what
+                    # the source JSON/DB preserved.
+                    "main_sheet_columns": MAIN_SHEET_COLUMNS,
+                    "cod_sheet_columns": result["cod_columns"],
+                    "_xlsx_bytes": _buf.getvalue(),
+                }
+                JOBS[job_id] = payload
+                self.write_json({k: v for k, v in payload.items() if not k.startswith("_")})
+                return
+
             # Default two-file reconciliation (gst_2b_purchase)
             gstr2b_file = files.get("gstr2b")
             purchase_file = files.get("purchase")
@@ -671,7 +739,7 @@ class ReconciliationHandler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def write_json(self, payload: dict, status: int = 200) -> None:
-        data = json.dumps(payload, indent=2).encode("utf-8")
+        data = json.dumps(payload, indent=2, default=str).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(data)))
@@ -711,6 +779,8 @@ class ReconciliationHandler(BaseHTTPRequestHandler):
             filename_prefix = "gstr3b_tally_entry"
         elif reco_type == "einvoice_reco":
             filename_prefix = "einvoice_reco"
+        elif reco_type == "receivable_cycle":
+            filename_prefix = "receivable_cycle"
         elif reco_type == "pdf_bank_extract":
             acct = payload.get("account_no", "")
             filename_prefix = f"bank_statement_{acct}" if acct else "bank_statement_pdf"

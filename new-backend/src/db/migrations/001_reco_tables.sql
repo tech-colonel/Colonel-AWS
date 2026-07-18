@@ -40,6 +40,18 @@ CREATE INDEX IF NOT EXISTS reco_jobs_created_at_idx ON reco_jobs (created_at DES
 -- source_name = the uploaded file name ("from where"). Idempotent.
 ALTER TABLE reco_jobs ADD COLUMN IF NOT EXISTS source_name TEXT;
 
+-- period_end_month/year: lets a job represent a month RANGE (e.g. Receivable Cycle's
+-- "Generate Receivables" form) instead of only a single month. NULL for every other
+-- agent and for single-month runs — metadata only, not a data filter.
+ALTER TABLE reco_jobs ADD COLUMN IF NOT EXISTS period_end_month INTEGER;
+ALTER TABLE reco_jobs ADD COLUMN IF NOT EXISTS period_end_year  INTEGER;
+
+DROP INDEX IF EXISTS reco_jobs_idempotency_idx;
+CREATE UNIQUE INDEX reco_jobs_idempotency_idx
+    ON reco_jobs (brand_id, agent_type, month, year,
+                  COALESCE(period_end_month, -1), COALESCE(period_end_year, -1), file_hash)
+    WHERE file_hash IS NOT NULL;
+
 -- ────────────────────────────────────────────────────────────
 -- 2.  bank_reco_results  — classified bank statement rows
 -- ────────────────────────────────────────────────────────────
@@ -334,6 +346,52 @@ ALTER TABLE ledger_master FORCE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS ledger_master_brand_policy ON ledger_master;
 CREATE POLICY ledger_master_brand_policy ON ledger_master
+    USING (
+        current_setting('app.bypass_rls', true) = 'true'
+        OR brand_id::text = current_setting('app.brand_id', true)
+    );
+
+-- ────────────────────────────────────────────────────────────
+-- 10.  receivable_cycle_results — row-level storage for the Receivable Cycle
+--      agent's Main Sheet + per-courier COD sub-sheets. Unlike every other
+--      *_results table above, this agent's output has ~90 columns across 6
+--      differently-shaped sheets, so rows are stored as a JSON blob per
+--      source row (sheet_name + row_data) instead of a rigid flat schema —
+--      the frontend derives table columns dynamically from row keys.
+--      row_data is JSON, not JSONB: JSONB re-serializes object keys sorted by
+--      (length, then lexicographic) and does NOT preserve original key order,
+--      which silently scrambled the Excel's column order in the web "View"
+--      (short keys like "2"/"3"/"4"/"IRN"/"Qty" jumped to the front).
+-- ────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS receivable_cycle_results (
+    id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    job_id       UUID NOT NULL REFERENCES reco_jobs(id) ON DELETE CASCADE,
+    brand_id     UUID NOT NULL,
+    sheet_name   VARCHAR(50) NOT NULL,
+    row_index    INTEGER NOT NULL,
+    row_data     JSON NOT NULL,
+    created_at   TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Idempotent upgrade path: fix an already-created table that still has the old JSONB column.
+DO $$ BEGIN
+  IF EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema = 'public' AND table_name = 'receivable_cycle_results'
+      AND column_name = 'row_data' AND data_type = 'jsonb'
+  ) THEN
+    ALTER TABLE receivable_cycle_results ALTER COLUMN row_data TYPE json USING row_data::json;
+  END IF;
+END $$;
+
+CREATE INDEX IF NOT EXISTS receivable_cycle_results_job_id_idx ON receivable_cycle_results (job_id);
+CREATE INDEX IF NOT EXISTS receivable_cycle_results_brand_sheet_idx ON receivable_cycle_results (brand_id, sheet_name);
+
+ALTER TABLE receivable_cycle_results ENABLE ROW LEVEL SECURITY;
+ALTER TABLE receivable_cycle_results FORCE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS receivable_cycle_results_brand_policy ON receivable_cycle_results;
+CREATE POLICY receivable_cycle_results_brand_policy ON receivable_cycle_results
     USING (
         current_setting('app.bypass_rls', true) = 'true'
         OR brand_id::text = current_setting('app.brand_id', true)

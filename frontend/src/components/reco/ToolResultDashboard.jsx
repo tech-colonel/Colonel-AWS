@@ -455,6 +455,7 @@ export default function ToolResultDashboard({
   onSendFeedback,   // async ({comment, rows}) => …  (enables the feedback UI when provided)
   agentLabel,
   embedded = false, // chat/inline mode: KPIs + charts only, no row table / download
+  columns,          // optional explicit column order (generic dashboard only) — see GenericDashboard
 }) {
   const kind = classifyAgent(agentType);
   const safeRows = Array.isArray(rows) ? rows : [];
@@ -506,7 +507,7 @@ export default function ToolResultDashboard({
   else if (kind === 'bank') dash = <BankDashboard {...{ summary, counts, safeRows, displayed, capped, dist, filter, setFilter, onDownload: dld, downloading, isUniversal, editedLedgers, setEditedLedgers, embedded }} />;
   else if (kind === '3b2b') dash = <Gst3b2bDashboard {...{ safeRows, capped, displayed, onDownload: dld, downloading, embedded }} />;
   else if (kind === 'tally') dash = <TallyDashboard {...{ safeRows, capped, displayed, onDownload: dld, downloading, embedded }} />;
-  else dash = <GenericDashboard {...{ safeRows, capped, displayed, onDownload: dld, downloading, embedded }} />;
+  else dash = <GenericDashboard {...{ safeRows, capped, displayed, onDownload: dld, downloading, embedded, columns }} />;
 
   if (!onSendFeedback) return dash;
 
@@ -977,13 +978,23 @@ function TallyDashboard({ safeRows, capped, displayed, onDownload, downloading, 
 // ════════════════════════════════════════════════════════════════════════════
 const SKIP_KEYS = new Set(['raw', 'raw_books', 'raw_gstr', 'gstr2b', 'purchase']);
 
-function GenericDashboard({ safeRows, capped, displayed, onDownload, downloading, embedded }) {
+function GenericDashboard({ safeRows, capped, displayed, onDownload, downloading, embedded, columns }) {
   const cards = [{ label: 'Total Rows', value: cnt(safeRows.length), color: '#0748EE', bg: '#E8EFFE' }];
 
+  // Prefer an explicit column order when the caller has one (e.g. Receivable
+  // Cycle passes its real MAIN_SHEET_COLUMNS/cod_columns list) — deriving the
+  // order from Object.keys() is unreliable for any row whose keys include
+  // array-index-looking strings ("2", "3", "4", ...): JavaScript forces those
+  // to the front of any object's own-property order regardless of insertion
+  // order, no matter what the source JSON or database preserved.
   const keys = useMemo(() => {
+    if (Array.isArray(columns) && columns.length) {
+      const present = new Set(safeRows.length ? Object.keys(safeRows[0]) : []);
+      return columns.filter((k) => !SKIP_KEYS.has(k) && (present.size === 0 || present.has(k)));
+    }
     if (safeRows.length === 0) return [];
     return Object.keys(safeRows[0]).filter((k) => !SKIP_KEYS.has(k));
-  }, [safeRows]);
+  }, [safeRows, columns]);
 
   return (
     <div>

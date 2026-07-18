@@ -82,6 +82,14 @@ const RECO_AGENTS = [
     createdAt: new Date(),
     updatedAt: new Date(),
   },
+  {
+    id: '97702640-9642-4278-b34a-d1af684006ce',
+    name: 'receivable_cycle',
+    description: 'Receivable Cycle — Combine Tally GST + Sales Order Combine + courier COD settlement (Delhivery/Ekart/Xpressbees) + combined SRN report reconciled into a Main Sheet + per-courier COD sheets',
+    columns: JSON.stringify([]),
+    createdAt: new Date(),
+    updatedAt: new Date(),
+  },
 ];
 
 module.exports = {
@@ -89,7 +97,7 @@ module.exports = {
     // Step 1: Insert the 4 RECO agents.
     // ignoreDuplicates: true = ON CONFLICT DO NOTHING on both id and name unique constraints.
     await queryInterface.bulkInsert('agents', RECO_AGENTS, { ignoreDuplicates: true });
-    console.log('  [SEED] agents — 5 RECO agents inserted (or already present)');
+    console.log('  [SEED] agents — RECO agents inserted (or already present)');
 
     // Step 2: Assign all 4 RECO agents to every brand in the DB.
     // Uses CROSS JOIN so it works regardless of what brand UUIDs the target DB has —
@@ -113,7 +121,8 @@ module.exports = {
         'amazon_mtr_consolidator',
         'pdf_bank_extract',
         'zepto_receivables',
-        'einvoice_reco'
+        'einvoice_reco',
+        'receivable_cycle'
       )
       ON CONFLICT DO NOTHING
     `);

@@ -37,7 +37,7 @@ const getRecoHistory = async (req, res) => {
     const seq = await getBrandSeq(brandId);
     const jobs = await withBypass(seq, async (t) => {
       const [rows] = await seq.query(
-        `SELECT id, agent_type, month, year, status,
+        `SELECT id, agent_type, month, year, period_end_month, period_end_year, status,
                 total_rows, matched_rows, unmatched_rows,
                 output_file_id, created_at
          FROM reco_jobs
@@ -255,7 +255,7 @@ const getJobById = async (req, res) => {
     const seq = await getBrandSeq(brandId);
     const result = await withBypass(seq, async (t) => {
       const [[job]] = await seq.query(
-        `SELECT id, agent_type, month, year, status,
+        `SELECT id, agent_type, month, year, period_end_month, period_end_year, status,
                 total_rows, matched_rows, unmatched_rows,
                 output_file_id, created_at
          FROM reco_jobs
@@ -265,6 +265,41 @@ const getJobById = async (req, res) => {
         { bind: [jobId, brandId], transaction: t }
       );
       if (!job) return { job: null, rows: [] };
+
+      // Receivable Cycle stores rows as JSONB (sheet_name, row_data) rather than a flat
+      // schema — see receivable_cycle_results migration comment. Reconstruct the Main
+      // Sheet array + a { [sheetName]: rows } map of the COD sub-sheets.
+      if (job.agent_type === 'receivable_cycle') {
+        try {
+          const [data] = await seq.query(
+            `SELECT sheet_name, row_data FROM receivable_cycle_results
+             WHERE job_id = $1 ORDER BY sheet_name, row_index ASC LIMIT 200000`,
+            { bind: [job.id], transaction: t }
+          );
+          const codSheets = {};
+          let mainRows = [];
+          let mainColumns = null;
+          let codColumns = {};
+          for (const { sheet_name, row_data } of data) {
+            if (sheet_name === '__columns__') {
+              const { 'Main Sheet': mainCols, ...rest } = row_data || {};
+              mainColumns = mainCols || null;
+              codColumns = rest;
+            } else if (sheet_name === 'Main Sheet') {
+              mainRows.push(row_data);
+            } else {
+              (codSheets[sheet_name] ||= []).push(row_data);
+            }
+          }
+          return {
+            job, rows: mainRows, cod_sheets: codSheets,
+            main_sheet_columns: mainColumns, cod_sheet_columns: codColumns,
+          };
+        } catch (_) {
+          return { job, rows: [], cod_sheets: {} };
+        }
+      }
+
       const mapping = RESULTS_TABLE_MAP[job.agent_type];
       let rows = [];
       if (mapping) {

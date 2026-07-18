@@ -28,6 +28,11 @@ reco-engine/temp_run/
 Extra/
 *.xlsx~
 *.xls~
+*.bak-[0-9]*
+
+# ── Local test fixtures (large source Excel exports, never commit) ─────────────
+/test files receivables/
+/new one month receivable /
 
 # ── macOS ──────────────────────────────────────────────────────────────────────
 .DS_Store

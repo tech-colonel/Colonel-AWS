@@ -283,7 +283,8 @@ const hashFiles = (...buffers) => {
  * Returns the existing job row or null.
  * Must run inside a transaction so SET LOCAL actually bypasses RLS.
  */
-const findExistingJob = async (sequelize, brandId, agentType, month, year, fileHash) => {
+const findExistingJob = async (sequelize, brandId, agentType, month, year, fileHash,
+  periodEndMonth = null, periodEndYear = null) => {
   try {
     let result = null;
     await sequelize.transaction(async (t) => {
@@ -294,9 +295,12 @@ const findExistingJob = async (sequelize, brandId, agentType, month, year, fileH
          WHERE brand_id = $1 AND agent_type = $2
            AND month IS NOT DISTINCT FROM $3
            AND year  IS NOT DISTINCT FROM $4
+           AND period_end_month IS NOT DISTINCT FROM $6
+           AND period_end_year  IS NOT DISTINCT FROM $7
            AND file_hash = $5
          LIMIT 1`,
-        { bind: [brandId, agentType, month || null, year || null, fileHash], transaction: t }
+        { bind: [brandId, agentType, month || null, year || null, fileHash,
+            periodEndMonth || null, periodEndYear || null], transaction: t }
       );
       result = rows[0] || null;
     });
@@ -344,7 +348,8 @@ const deleteJob = async (sequelize, jobId) => {
  * Returns the created job id or null on failure.
  */
 const saveRecoJob = async (sequelize, { brandId, agentType, month, year, fileHash,
-  outputFileId, totalRows, matchedRows, unmatchedRows, createdBy }) => {
+  outputFileId, totalRows, matchedRows, unmatchedRows, createdBy,
+  periodEndMonth = null, periodEndYear = null }) => {
   try {
     let jobId;
     await sequelize.transaction(async (t) => {
@@ -352,11 +357,13 @@ const saveRecoJob = async (sequelize, { brandId, agentType, month, year, fileHas
       const [rows] = await sequelize.query(
         `INSERT INTO reco_jobs
            (brand_id, agent_type, month, year, file_hash, status,
-            total_rows, matched_rows, unmatched_rows, output_file_id, created_by)
-         VALUES ($1,$2,$3,$4,$5,'completed',$6,$7,$8,$9,$10)
+            total_rows, matched_rows, unmatched_rows, output_file_id, created_by,
+            period_end_month, period_end_year)
+         VALUES ($1,$2,$3,$4,$5,'completed',$6,$7,$8,$9,$10,$11,$12)
          RETURNING id`,
         { bind: [brandId, agentType, month || null, year || null, fileHash,
-            totalRows, matchedRows, unmatchedRows, outputFileId, createdBy || null],
+            totalRows, matchedRows, unmatchedRows, outputFileId, createdBy || null,
+            periodEndMonth || null, periodEndYear || null],
           transaction: t }
       );
       jobId = rows[0]?.id;
@@ -594,6 +601,65 @@ const saveGstr1B2cSummary = async (sequelize, jobId, brandId, b2cRows) => {
   }
 };
 
+/**
+ * Bulk-insert Receivable Cycle results (Main Sheet + COD sub-sheets) as JSON rows —
+ * this agent's output has ~90 columns across 6 differently-shaped sheets, so each row
+ * is stored as (sheet_name, row_index, row_data) rather than a rigid flat schema.
+ * Also persists one extra metadata row (sheet_name='__columns__') holding the explicit
+ * column ORDER per sheet, as arrays — the frontend uses this instead of deriving column
+ * order from a row's own object keys, since any key that looks like an array index
+ * ("2", "3", "4") is forced to the front of a JS object's own-property order regardless
+ * of insertion order, no matter what the source JSON/DB preserved.
+ * Batches ~500 rows per INSERT (Main Sheet alone commonly runs 20k+ rows — a per-row
+ * loop like the other save* helpers use would mean tens of thousands of awaited
+ * round-trips for a single job).
+ */
+const saveReceivableCycleResults = async (sequelize, jobId, brandId, mainRows, codSheets, mainColumns, codColumns) => {
+  const sheets = [['Main Sheet', mainRows || []]];
+  for (const [name, rows] of Object.entries(codSheets || {})) {
+    if (rows?.length) sheets.push([name, rows]);
+  }
+  const totalRows = sheets.reduce((n, [, rows]) => n + rows.length, 0);
+  if (totalRows === 0) return;
+
+  const CHUNK = 500;
+  let saved = 0;
+  try {
+    await sequelize.transaction(async (t) => {
+      await sequelize.query(`SET LOCAL app.bypass_rls = 'true'`, { transaction: t });
+      for (const [sheetName, rows] of sheets) {
+        for (let i = 0; i < rows.length; i += CHUNK) {
+          const batch = rows.slice(i, i + CHUNK);
+          const placeholders = [];
+          const bind = [];
+          batch.forEach((row, idx) => {
+            const base = bind.length;
+            placeholders.push(`($${base + 1},$${base + 2},$${base + 3},$${base + 4},$${base + 5}::json)`);
+            bind.push(jobId, brandId, sheetName, i + idx, JSON.stringify(row));
+          });
+          await sequelize.query(
+            `INSERT INTO receivable_cycle_results (job_id, brand_id, sheet_name, row_index, row_data)
+             VALUES ${placeholders.join(',')}`,
+            { bind, transaction: t }
+          );
+          saved += batch.length;
+        }
+      }
+      if (mainColumns?.length) {
+        const columnsBySheet = { 'Main Sheet': mainColumns, ...(codColumns || {}) };
+        await sequelize.query(
+          `INSERT INTO receivable_cycle_results (job_id, brand_id, sheet_name, row_index, row_data)
+           VALUES ($1,$2,'__columns__',-1,$3::json)`,
+          { bind: [jobId, brandId, JSON.stringify(columnsBySheet)], transaction: t }
+        );
+      }
+    });
+    console.log(`[RECO-DB] ✅ Saved ${saved}/${totalRows} receivable_cycle rows (${sheets.length} sheet(s)) for job ${jobId}`);
+  } catch (err) {
+    console.error('[RECO-DB] saveReceivableCycleResults error:', err.message);
+  }
+};
+
 // Frontend reco types that use the gstr_2b_books Python engine → persist to gstr_2b_results
 const GST_2B_FRONTEND_TYPES = new Set([
   'gstr_2b_books', 'gstr_2a_vs_2b_vs_books', 'gstr_2b_vs_purchase',
@@ -614,6 +680,7 @@ const RECO_TYPE_MAP = {
   'gstr_2b_books_multistate': 'gstr_2b_books_multistate', // multi-state variant
   'zepto_receivables': 'zepto_receivables',
   'einvoice_reco': 'einvoice_reco',                    // E-Invoice Register vs Books (Sales + Credit Note)
+  'receivable_cycle': 'receivable_cycle',              // Tally GST + Sales Order + courier COD settlement + SRN -> Main/COD sheets
 };
 
 /**
@@ -1230,11 +1297,17 @@ const runReco = async (req, res) => {
           const fileHash = hashFiles(...(req.files || []).map(f => f.buffer));
           const month = parseInt(req.body.month) || null;
           const year  = parseInt(req.body.year)  || null;
-          console.log(`[RECO-DB] fileHash=${fileHash.slice(0,12)} month=${month} year=${year}`);
+          // Receivable Cycle's "Generate Receivables" form can tag a job with a month
+          // RANGE instead of a single month — metadata only (see reco_jobs.period_end_*),
+          // never sent by any other agent's page.
+          const periodEndMonth = parseInt(req.body.period_end_month) || null;
+          const periodEndYear  = parseInt(req.body.period_end_year)  || null;
+          console.log(`[RECO-DB] fileHash=${fileHash.slice(0,12)} month=${month} year=${year}` +
+            (periodEndMonth || periodEndYear ? ` periodEnd=${periodEndMonth}/${periodEndYear}` : ''));
 
           const pythonJobId = response.data?.job_id || null;
 
-          const existing = await findExistingJob(seq, brandId, recoType, month, year, fileHash);
+          const existing = await findExistingJob(seq, brandId, recoType, month, year, fileHash, periodEndMonth, periodEndYear);
           console.log(`[RECO-DB] existing job:`, existing ? `id=${existing.id} total_rows=${existing.total_rows}` : 'none');
           if (existing) {
             if (existing.total_rows > 0) {
@@ -1270,6 +1343,7 @@ const runReco = async (req, res) => {
             outputFileId: pythonJobId,
             totalRows, matchedRows, unmatchedRows,
             createdBy: req.user?.id,
+            periodEndMonth, periodEndYear,
           });
           console.log(`[RECO-DB] savedJobId=${savedJobId}`);
 
@@ -1291,6 +1365,9 @@ const runReco = async (req, res) => {
               await saveGstr1Results(seq, savedJobId, brandId, g1Rows);
             }
             await saveGstr1B2cSummary(seq, savedJobId, brandId, response.data?.b2c_rows);
+          } else if (savedJobId && recoType === 'receivable_cycle') {
+            await saveReceivableCycleResults(seq, savedJobId, brandId, pyResults,
+              response.data?.cod_sheets, response.data?.main_sheet_columns, response.data?.cod_sheet_columns);
           } else {
             console.log(`[RECO-DB] Skipping GST rows: savedJobId=${savedJobId} isGST=${GST_2B_FRONTEND_TYPES.has(recoType)}`);
           }

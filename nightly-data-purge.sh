@@ -8,7 +8,8 @@
 #
 # CLEARS (heavy row-level output only — re-generatable by re-running a file):
 #   - result tables: bank_reco_results, gstr_2b_results, gstr_2a_2b_results,
-#     gstr_3b_results, gstr_1_results, gstr_3b_tally_results
+#     gstr_3b_results, gstr_1_results, gstr_3b_tally_results,
+#     receivable_cycle_results
 #   - MTR workbooks in new-backend/output/mtr/
 #
 # PRESERVES (important — never touched):
@@ -33,7 +34,7 @@ TS=$(date +%Y-%m-%d_%H:%M:%S)
 echo "[purge] ===== $TS START (dry_run=$DRY) ====="
 
 # Result tables (children of reco_jobs). Cleared explicitly + via CASCADE.
-RESULT_TABLES="bank_reco_results gstr_2b_results gstr_2a_2b_results gstr_3b_results gstr_1_results gstr_3b_tally_results"
+RESULT_TABLES="bank_reco_results gstr_2b_results gstr_2a_2b_results gstr_3b_results gstr_1_results gstr_3b_tally_results receivable_cycle_results"
 
 # Brand DBs only — never colonel-master / colonel_v2.
 DBS=$(psql -h localhost -U postgres -d postgres -Atqc \

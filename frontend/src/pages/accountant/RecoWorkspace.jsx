@@ -9,7 +9,7 @@ import {
   FileSpreadsheet, Loader2, ChevronDown, ChevronUp, Database, Info,
   BarChart3, ArrowRight, Save, Search, X, Scale, ClipboardList,
   FolderOpen, Globe, TrendingUp, Landmark, BookOpen, GitCompare, AlertCircle,
-  Zap, CreditCard,
+  Zap, CreditCard, History, Eye, Calendar, Trash2,
 } from 'lucide-react';
 import api from '../../lib/api';
 import { sidebarFor, isAdminUser } from '../../lib/adminNav';
@@ -17,6 +17,19 @@ import OtherBrandReset from '../../components/OtherBrandReset';
 import { DEMO_SAMPLES, urlToFile } from '../../lib/demoSamples';
 import { toast } from 'sonner';
 import GoogleDriveFolderInput from './GoogleDriveFolderInput';
+
+const HISTORY_MONTHS_SHORT = ['', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+// Formats a reco_jobs row's period as "Mar 2025" or, when period_end_month/year differ
+// from the start, "Mar 2025 – May 2025".
+const formatJobPeriod = (job) => {
+  if (!job.month) return '—';
+  const start = `${HISTORY_MONTHS_SHORT[job.month]} ${job.year || ''}`;
+  const hasEnd = job.period_end_month && job.period_end_year &&
+    (job.period_end_month !== job.month || job.period_end_year !== job.year);
+  if (!hasEnd) return start;
+  return `${start} – ${HISTORY_MONTHS_SHORT[job.period_end_month]} ${job.period_end_year}`;
+};
 
 const AGENT_CONFIG = {
   gstr_2b_vs_purchase: {
@@ -138,6 +151,21 @@ const AGENT_CONFIG = {
     color: '#6366F1', bg: 'rgba(99,102,241,0.08)', border: 'rgba(99,102,241,0.2)',
     driveMode: true,
     files: [],
+  },
+  receivable_cycle: {
+    name: 'Receivable Cycle',
+    slug: 'TALLY · COD · SRN',
+    icon: RotateCcw,
+    description: 'Combines the Tally GST report, Sales Order Combine, courier COD settlement exports (Delhivery/Ekart/Xpressbees), and the combined SRN report into a Main Sheet plus per-courier COD sheets.',
+    color: '#7C3AED', bg: 'rgba(124,58,237,0.08)', border: 'rgba(124,58,237,0.2)',
+    files: [
+      { key: 'tally_gst', label: 'Combine Tally GST Report', hint: '.xlsx / .xls', required: true },
+      { key: 'sales_order', label: 'Sales Order Combine', hint: '.xlsx / .xls', required: true },
+      { key: 'delhivery', label: 'Delhivery COD Settlement (Optional)', hint: '.xlsx / .xls — one or more files', required: false, multiple: true },
+      { key: 'ekart', label: 'Ekart COD Settlement (Optional)', hint: '.xlsx / .xls — one or more files', required: false, multiple: true },
+      { key: 'xpressbees', label: 'Xpressbees COD Settlement (Optional)', hint: '.xlsx / .xls — one or more files', required: false, multiple: true },
+      { key: 'srn', label: 'Combined SRN Report (Optional)', hint: '.xlsx / .xls — one or more files', required: false, multiple: true },
+    ],
   },
 };
 
@@ -453,6 +481,20 @@ const RecoWorkspace = ({ agentTypeProp } = {}) => {
   const is3b = agentType === 'gstr_3b_tally_entry';
 
   const isUniversal = agentType === 'universal_bank_statement';
+  const isReceivableCycle = agentType === 'receivable_cycle';
+  const [recoHistory, setRecoHistory] = useState([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [deletingJobId, setDeletingJobId] = useState(null);
+
+  // "Generate Receivables" form (Receivable Cycle only) — files + a manually-picked
+  // month or month-range, tagging the resulting job (metadata only, doesn't filter
+  // the uploaded rows — see reco_jobs.period_end_month/year).
+  const [generateModalOpen, setGenerateModalOpen] = useState(false);
+  const [periodMode, setPeriodMode] = useState('single'); // 'single' | 'range'
+  const [periodMonth, setPeriodMonth] = useState('');
+  const [periodYear, setPeriodYear] = useState('');
+  const [periodEndMonth, setPeriodEndMonth] = useState('');
+  const [periodEndYear, setPeriodEndYear] = useState('');
   const [brands, setBrands] = useState([]);
   const [selectedBrand, setSelectedBrand] = useState(brandId && brandId !== 'other' ? brandId : '');
   const [editedLedgers, setEditedLedgers] = useState({});
@@ -477,6 +519,25 @@ const RecoWorkspace = ({ agentTypeProp } = {}) => {
       results: (data.results || []).map(r => ({ ...r, gstr2b: stripRaw(r.gstr2b), purchase: stripRaw(r.purchase) })),
     };
   };
+
+  // Previously generated Receivable Cycle files for this brand — re-fetched after every
+  // run too, so a just-completed job appears once its fire-and-forget DB save lands.
+  useEffect(() => {
+    if (!isReceivableCycle || !effectiveBrandId || effectiveBrandId === 'other' || effectiveBrandId === 'demo') {
+      setRecoHistory([]);
+      return;
+    }
+    let cancelled = false;
+    setHistoryLoading(true);
+    api.get(`/api/dashboard/reco/history/${effectiveBrandId}`)
+      .then(res => {
+        if (cancelled) return;
+        setRecoHistory((res.data?.jobs || []).filter(j => j.agent_type === 'receivable_cycle'));
+      })
+      .catch(() => { if (!cancelled) setRecoHistory([]); })
+      .finally(() => { if (!cancelled) setHistoryLoading(false); });
+    return () => { cancelled = true; };
+  }, [isReceivableCycle, effectiveBrandId, result]);
 
   useEffect(() => {
     try {
@@ -605,6 +666,16 @@ const RecoWorkspace = ({ agentTypeProp } = {}) => {
     if (agentType === 'bank_statement' && isDemo && !uploadedFiles['ledger_master']) {
       toast.error('In demo mode, please upload the Ledger Master file'); return;
     }
+    if (isReceivableCycle) {
+      if (!periodMonth || !periodYear) { toast.error('Pick the month and year this run represents'); return; }
+      if (periodMode === 'range') {
+        if (!periodEndMonth || !periodEndYear) { toast.error('Pick the end month and year for the range'); return; }
+        if (Number(periodEndYear) < Number(periodYear) ||
+            (Number(periodEndYear) === Number(periodYear) && Number(periodEndMonth) < Number(periodMonth))) {
+          toast.error('Range end must be on or after the start month'); return;
+        }
+      }
+    }
     setRunning(true); setResult(null); setEditedLedgers({}); setUploadProgress(0);
     setPhase('uploading');
     setActive3bMonth(0); setActive3bSummaryTab('entries');
@@ -614,6 +685,14 @@ const RecoWorkspace = ({ agentTypeProp } = {}) => {
       formData.append('tolerance', tolerance);
       formData.append('brand_id', effectiveBrandId || brandId);
       formData.append('is_demo', isDemo ? 'true' : 'false');
+      if (isReceivableCycle) {
+        formData.append('month', periodMonth);
+        formData.append('year', periodYear);
+        if (periodMode === 'range') {
+          formData.append('period_end_month', periodEndMonth);
+          formData.append('period_end_year', periodEndYear);
+        }
+      }
       for (const [key, val] of Object.entries(uploadedFiles)) {
         if (!val) continue;
         if (Array.isArray(val)) {
@@ -643,6 +722,7 @@ const RecoWorkspace = ({ agentTypeProp } = {}) => {
       if (agentType === 'gstr_3b_tally_entry' && uploadedFiles['coa'] && effectiveBrandId && effectiveBrandId !== 'other') {
         checkLedgerMaster(effectiveBrandId);
       }
+      if (isReceivableCycle) setGenerateModalOpen(false);
       try { sessionStorage.setItem(cacheKey, JSON.stringify(slimResultForCache(response.data))); } catch (_) {}
       toast.success(`Reconciliation complete! ${response.data.results?.length || 0} records processed.`);
     } catch (err) {
@@ -737,6 +817,25 @@ const RecoWorkspace = ({ agentTypeProp } = {}) => {
     }
     try { sessionStorage.removeItem(cacheKey); sessionStorage.removeItem(editsKey); } catch (_) {}
     setUploadedFiles({}); setResult(null); setFilter('All'); setEditedLedgers({});
+  };
+
+  // Delete one previously-generated file from the "Previously Generated Files" list
+  // (Receivable Cycle). Reuses the same per-run purge endpoint Reset already uses —
+  // CASCADE removes the row-level receivable_cycle_results for that job too.
+  const handleDeleteHistoryJob = async (job) => {
+    if (!window.confirm('Delete this generated file? This removes it from history permanently and cannot be undone.')) return;
+    const bId = effectiveBrandId || brandId;
+    if (!bId || bId === 'other' || bId === 'demo') return;
+    setDeletingJobId(job.id);
+    try {
+      await api.delete(`/api/reco/job/${bId}/${job.output_file_id || job.id}`);
+      setRecoHistory(prev => prev.filter(j => j.id !== job.id));
+      toast.success('Deleted');
+    } catch (err) {
+      toast.error(err.response?.data?.error || 'Failed to delete');
+    } finally {
+      setDeletingJobId(null);
+    }
   };
 
   const flattenResult = (row) => {
@@ -887,9 +986,232 @@ const RecoWorkspace = ({ agentTypeProp } = {}) => {
     </div>
   ) : null;
 
+  // Extracted so it can be reused both in the standard upload grid (every agent)
+  // and inside the Receivable Cycle "Generate Receivables" modal.
+  const brandSelectorField = (
+    <div style={{ marginBottom: 4 }}>
+      <p style={{ fontSize: 11, fontWeight: 700, color: 'var(--text-muted)', marginBottom: 6, letterSpacing: '0.06em', textTransform: 'uppercase', fontFamily: 'DM Sans' }}>
+        Brand <span style={{ color: '#E11D48' }}>*</span>
+      </p>
+      {selectedBrand && selectedBrand !== 'other' ? (
+        <div style={{
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+          padding: '10px 14px', borderRadius: 10,
+          background: 'var(--page-bg)', border: '1px solid var(--card-border)',
+          borderLeft: '3px solid #0748EE',
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <div style={{
+              width: 26, height: 26, borderRadius: 6,
+              background: `hsl(${((brands.find(b => b.id === selectedBrand)?.name || '?').charCodeAt(0) * 37) % 360},60%,50%)`,
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              color: '#fff', fontSize: 10, fontWeight: 800, fontFamily: 'Barlow',
+            }}>
+              {(brands.find(b => b.id === selectedBrand)?.name || '?')[0].toUpperCase()}
+            </div>
+            <span style={{ fontSize: 13, fontWeight: 700, color: 'var(--text-heading)', fontFamily: 'Barlow' }}>
+              {brands.find(b => b.id === selectedBrand)?.name || selectedBrand}
+            </span>
+            <CheckCircle2 style={{ width: 13, height: 13, color: '#0748EE' }} />
+          </div>
+          <button onClick={() => setBrandPickerOpen(true)} style={{
+            fontSize: 11, fontWeight: 600, padding: '3px 8px', borderRadius: 6,
+            background: 'var(--surface)', border: '1px solid var(--card-border)',
+            color: 'var(--text-muted)', cursor: 'pointer',
+          }}>Change</button>
+        </div>
+      ) : selectedBrand === 'other' ? (
+        <div style={{
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+          padding: '10px 14px', borderRadius: 10,
+          background: 'var(--page-bg)', border: '1px solid var(--card-border)',
+        }}>
+          <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-muted)' }}>Other / Testing (no DB save)</span>
+          <button onClick={() => setBrandPickerOpen(true)} style={{
+            fontSize: 11, fontWeight: 600, padding: '3px 8px', borderRadius: 6,
+            background: 'var(--surface)', border: '1px solid var(--card-border)',
+            color: 'var(--text-muted)', cursor: 'pointer',
+          }}>Change</button>
+        </div>
+      ) : (
+        <button onClick={() => setBrandPickerOpen(true)} style={{
+          display: 'flex', alignItems: 'center', gap: 8, width: '100%',
+          padding: '10px 14px', borderRadius: 10, textAlign: 'left',
+          background: 'var(--page-bg)', border: '1px dashed var(--card-border)',
+          color: 'var(--text-muted)', cursor: 'pointer',
+          fontSize: 13, fontFamily: 'Barlow',
+        }}>
+          <Search style={{ width: 14, height: 14 }} />
+          Select brand…
+        </button>
+      )}
+    </div>
+  );
+
+  const periodSelectStyle = {
+    padding: '8px 10px', borderRadius: 8, fontSize: 13, outline: 'none',
+    background: 'var(--page-bg)', border: '1px solid var(--card-border)',
+    color: 'var(--text-heading)', fontFamily: 'Barlow',
+  };
+
+  const GenerateReceivablesModal = (isReceivableCycle && generateModalOpen) ? (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center p-4"
+      style={{ background: 'rgba(10,15,46,0.6)', backdropFilter: 'blur(8px)' }}
+      onClick={e => { if (e.target === e.currentTarget && !running) setGenerateModalOpen(false); }}
+    >
+      <div style={{
+        width: '100%', maxWidth: 640, maxHeight: '90vh', overflowY: 'auto',
+        background: 'var(--surface)',
+        border: '1px solid var(--card-border)',
+        borderRadius: 16, padding: 24,
+        boxShadow: '0 24px 80px rgba(0,0,0,0.25)',
+        position: 'relative',
+      }}>
+        {!running && (
+          <button
+            aria-label="Close Generate Receivables form"
+            onClick={() => setGenerateModalOpen(false)}
+            style={{
+              position: 'absolute', top: 16, right: 16,
+              width: 28, height: 28, borderRadius: 8,
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              background: 'var(--page-bg)', border: '1px solid var(--card-border)',
+              color: 'var(--text-muted)', cursor: 'pointer',
+            }}>
+            <X style={{ width: 14, height: 14 }} />
+          </button>
+        )}
+
+        {/* Modal header */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 4 }}>
+          <div style={{
+            width: 40, height: 40, borderRadius: 10, flexShrink: 0,
+            background: config.bg, border: `1.5px solid ${config.border}`,
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+          }}>
+            <Zap style={{ width: 18, height: 18, color: config.color }} />
+          </div>
+          <div>
+            <h3 style={{ fontFamily: 'Barlow', fontWeight: 800, fontSize: 16, color: 'var(--text-heading)', margin: 0 }}>
+              Generate Receivables
+            </h3>
+            <p style={{ fontSize: 11, color: 'var(--text-muted)', fontFamily: 'monospace', letterSpacing: '0.06em', marginTop: 2 }}>
+              {config.slug}
+            </p>
+          </div>
+        </div>
+        <p style={{ fontSize: 12, color: 'var(--text-muted)', margin: '10px 0 18px' }}>
+          Upload the source files and pick the month (or month range) this run represents.
+        </p>
+
+        {/* File slots */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginBottom: 22 }}>
+          {activeFiles.map((f, idx) => (
+            <React.Fragment key={f.key}>
+              {f.multiple ? (
+                <MultiFileDropzone
+                  fileConfig={f} files={uploadedFiles[f.key] || []}
+                  onChange={(arr) => handleFileChange(f.key, arr)}
+                  disabled={running} stepIndex={idx}
+                />
+              ) : (
+                <FileDropzone
+                  fileConfig={f} file={uploadedFiles[f.key]}
+                  onChange={(file) => handleFileChange(f.key, file)}
+                  disabled={running} stepIndex={idx}
+                />
+              )}
+            </React.Fragment>
+          ))}
+        </div>
+
+        {/* Period picker — single month or a month range. Metadata only: tags the
+            job for history/idempotency, does not filter the uploaded rows. */}
+        <div style={{ marginBottom: 22 }}>
+          <p style={{ fontSize: 11, fontWeight: 700, color: 'var(--text-muted)', marginBottom: 8, letterSpacing: '0.06em', textTransform: 'uppercase', fontFamily: 'DM Sans' }}>
+            <Calendar style={{ width: 12, height: 12, display: 'inline', marginRight: 5, verticalAlign: -1 }} />
+            Period <span style={{ color: '#E11D48' }}>*</span>
+          </p>
+
+          <div style={{ display: 'flex', gap: 6, marginBottom: 12 }}>
+            {[['single', 'Single Month'], ['range', 'Month Range']].map(([mode, label]) => (
+              <button key={mode}
+                onClick={() => setPeriodMode(mode)}
+                disabled={running}
+                style={{
+                  padding: '6px 14px', borderRadius: 8, fontSize: 12, fontWeight: 700,
+                  fontFamily: 'Barlow', cursor: running ? 'not-allowed' : 'pointer',
+                  background: periodMode === mode ? config.bg : 'var(--page-bg)',
+                  border: `1px solid ${periodMode === mode ? config.border : 'var(--card-border)'}`,
+                  color: periodMode === mode ? config.color : 'var(--text-muted)',
+                }}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+
+          <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap' }}>
+            <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+              {periodMode === 'range' && (
+                <span style={{ fontSize: 11, color: 'var(--text-muted)', fontWeight: 700 }}>From</span>
+              )}
+              <select value={periodMonth} onChange={e => setPeriodMonth(e.target.value)} disabled={running} style={periodSelectStyle}>
+                <option value="">Month</option>
+                {HISTORY_MONTHS_SHORT.slice(1).map((m, i) => <option key={m} value={i + 1}>{m}</option>)}
+              </select>
+              <input type="number" placeholder="Year" value={periodYear} min="2000" max="2100"
+                onChange={e => setPeriodYear(e.target.value)} disabled={running}
+                style={{ ...periodSelectStyle, width: 84 }} />
+            </div>
+
+            {periodMode === 'range' && (
+              <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                <span style={{ fontSize: 11, color: 'var(--text-muted)', fontWeight: 700 }}>To</span>
+                <select value={periodEndMonth} onChange={e => setPeriodEndMonth(e.target.value)} disabled={running} style={periodSelectStyle}>
+                  <option value="">Month</option>
+                  {HISTORY_MONTHS_SHORT.slice(1).map((m, i) => <option key={m} value={i + 1}>{m}</option>)}
+                </select>
+                <input type="number" placeholder="Year" value={periodEndYear} min="2000" max="2100"
+                  onChange={e => setPeriodEndYear(e.target.value)} disabled={running}
+                  style={{ ...periodSelectStyle, width: 84 }} />
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Actions */}
+        <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
+          <button onClick={() => setGenerateModalOpen(false)} disabled={running} style={{
+            padding: '10px 18px', borderRadius: 8, fontSize: 13, fontWeight: 700,
+            background: 'var(--page-bg)', border: '1px solid var(--card-border)',
+            color: 'var(--text-muted)', cursor: running ? 'not-allowed' : 'pointer', fontFamily: 'Barlow',
+          }}>
+            Cancel
+          </button>
+          <button onClick={handleRun} disabled={running} className="btn-glow" style={{
+            padding: '10px 20px', display: 'flex', alignItems: 'center', gap: 8,
+          }}>
+            {running
+              ? <><Loader2 style={{ width: 15, height: 15 }} className="animate-spin" /> {
+                  phase === 'uploading' ? `Uploading ${uploadProgress ?? 0}%`
+                  : phase === 'reconciling' ? 'Reconciling…'
+                  : phase === 'preparing' ? 'Preparing Excel…'
+                  : 'Processing…'
+                }</>
+              : <><Zap style={{ width: 15, height: 15 }} /> Generate</>
+            }
+          </button>
+        </div>
+      </div>
+    </div>
+  ) : null;
+
   return (
     <DashboardLayout sidebarItems={sidebarItems}>
       {BrandPickerOverlay}
+      {GenerateReceivablesModal}
       <div style={{ padding: '24px 28px', maxWidth: 1200 }}>
 
         {/* Breadcrumb */}
@@ -1028,8 +1350,130 @@ const RecoWorkspace = ({ agentTypeProp } = {}) => {
           </div>
         </div>
 
+        {/* ── Previously Generated Files (Receivable Cycle only) ───────── */}
+        {isReceivableCycle && (
+          <div className="glass-card" style={{ padding: 20, marginBottom: 28 }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 14 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <History style={{ width: 15, height: 15, color: 'var(--text-muted)' }} />
+                <p style={{ fontSize: 13, fontWeight: 700, color: 'var(--text-heading)', fontFamily: 'Barlow', margin: 0 }}>
+                  Previously Generated Files
+                </p>
+              </div>
+              {historyLoading && <Loader2 style={{ width: 14, height: 14, color: 'var(--text-muted)' }} className="animate-spin" />}
+            </div>
+
+            {!historyLoading && recoHistory.length === 0 && (
+              <p style={{ fontSize: 12, color: 'var(--text-muted)', margin: 0 }}>
+                No previous Receivable Cycle runs for this brand yet.
+              </p>
+            )}
+
+            {recoHistory.length > 0 && (
+              <div style={{ overflowX: 'auto' }}>
+                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+                  <thead>
+                    <tr style={{ textAlign: 'left', color: 'var(--text-muted)', borderBottom: '1px solid var(--card-border)' }}>
+                      <th style={{ padding: '6px 8px', fontWeight: 600 }}>Run Date</th>
+                      <th style={{ padding: '6px 8px', fontWeight: 600 }}>Period</th>
+                      <th style={{ padding: '6px 8px', fontWeight: 600 }}>Total Rows</th>
+                      <th style={{ padding: '6px 8px', fontWeight: 600 }}>Status</th>
+                      <th style={{ padding: '6px 8px' }} />
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {recoHistory.map(job => (
+                      <tr key={job.id} style={{ borderBottom: '1px solid var(--card-border)' }}>
+                        <td style={{ padding: '8px', color: 'var(--text-heading)' }}>
+                          {job.created_at ? new Date(job.created_at).toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' }) : '—'}
+                        </td>
+                        <td style={{ padding: '8px', color: 'var(--text-heading)' }}>
+                          {formatJobPeriod(job)}
+                        </td>
+                        <td style={{ padding: '8px', color: 'var(--text-heading)' }}>
+                          {(job.total_rows ?? 0).toLocaleString('en-IN')}
+                        </td>
+                        <td style={{ padding: '8px', color: 'var(--text-heading)', textTransform: 'capitalize' }}>
+                          {job.status}
+                        </td>
+                        <td style={{ padding: '8px', textAlign: 'right' }}>
+                          <div style={{ display: 'inline-flex', gap: 6 }}>
+                            <button
+                              onClick={() => navigate(`/brands/${effectiveBrandId || brandId}/reco/receivable_cycle/results/${job.output_file_id || job.id}`)}
+                              style={{
+                                display: 'inline-flex', alignItems: 'center', gap: 5,
+                                padding: '5px 10px', borderRadius: 6, fontSize: 11, fontWeight: 700,
+                                background: 'rgba(7,72,238,0.08)', border: '1px solid rgba(7,72,238,0.2)',
+                                color: '#0748EE', cursor: 'pointer', fontFamily: 'Barlow',
+                              }}
+                            >
+                              <Eye style={{ width: 12, height: 12 }} />
+                              View
+                            </button>
+                            <button
+                              onClick={() => handleDeleteHistoryJob(job)}
+                              disabled={deletingJobId === job.id}
+                              aria-label="Delete this generated file"
+                              style={{
+                                display: 'inline-flex', alignItems: 'center', gap: 5,
+                                padding: '5px 10px', borderRadius: 6, fontSize: 11, fontWeight: 700,
+                                background: 'rgba(225,29,72,0.08)', border: '1px solid rgba(225,29,72,0.2)',
+                                color: '#E11D48', cursor: deletingJobId === job.id ? 'not-allowed' : 'pointer',
+                                opacity: deletingJobId === job.id ? 0.6 : 1, fontFamily: 'Barlow',
+                              }}
+                            >
+                              {deletingJobId === job.id
+                                ? <Loader2 style={{ width: 12, height: 12 }} className="animate-spin" />
+                                : <Trash2 style={{ width: 12, height: 12 }} />}
+                              Delete
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        )}
+
         {/* ── Upload Form ─────────────────────────────────────────────── */}
-        {!result && (
+        {!result && isReceivableCycle && (
+          <div className="glass-card" style={{ padding: 24, marginBottom: 28 }}>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: 24, alignItems: 'center' }}>
+              <div>
+                <p style={{
+                  fontSize: 10, fontWeight: 700, letterSpacing: '0.1em',
+                  textTransform: 'uppercase', color: 'var(--text-muted)',
+                  fontFamily: 'DM Sans', marginBottom: 16,
+                }}>Brand</p>
+                <div style={{ maxWidth: 360 }}>{brandSelectorField}</div>
+              </div>
+              <button
+                onClick={() => setGenerateModalOpen(true)}
+                disabled={!selectedBrand}
+                className="btn-glow"
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 8,
+                  padding: '13px 22px', whiteSpace: 'nowrap',
+                  opacity: !selectedBrand ? 0.5 : 1,
+                  cursor: !selectedBrand ? 'not-allowed' : 'pointer',
+                }}
+              >
+                <Zap style={{ width: 15, height: 15 }} />
+                Generate Receivables
+              </button>
+            </div>
+            {!selectedBrand && (
+              <p style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 10, marginBottom: 0 }}>
+                Select a brand above to enable Generate Receivables.
+              </p>
+            )}
+          </div>
+        )}
+
+        {!result && !isReceivableCycle && (
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 320px', gap: 20, marginBottom: 28 }}>
 
             {/* Left: Files */}
@@ -1041,64 +1485,7 @@ const RecoWorkspace = ({ agentTypeProp } = {}) => {
               }}>Upload Files</p>
 
               <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-                {/* Brand selector */}
-                <div style={{ marginBottom: 4 }}>
-                  <p style={{ fontSize: 11, fontWeight: 700, color: 'var(--text-muted)', marginBottom: 6, letterSpacing: '0.06em', textTransform: 'uppercase', fontFamily: 'DM Sans' }}>
-                    Brand <span style={{ color: '#E11D48' }}>*</span>
-                  </p>
-                  {selectedBrand && selectedBrand !== 'other' ? (
-                    <div style={{
-                      display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-                      padding: '10px 14px', borderRadius: 10,
-                      background: 'var(--page-bg)', border: '1px solid var(--card-border)',
-                      borderLeft: '3px solid #0748EE',
-                    }}>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                        <div style={{
-                          width: 26, height: 26, borderRadius: 6,
-                          background: `hsl(${((brands.find(b => b.id === selectedBrand)?.name || '?').charCodeAt(0) * 37) % 360},60%,50%)`,
-                          display: 'flex', alignItems: 'center', justifyContent: 'center',
-                          color: '#fff', fontSize: 10, fontWeight: 800, fontFamily: 'Barlow',
-                        }}>
-                          {(brands.find(b => b.id === selectedBrand)?.name || '?')[0].toUpperCase()}
-                        </div>
-                        <span style={{ fontSize: 13, fontWeight: 700, color: 'var(--text-heading)', fontFamily: 'Barlow' }}>
-                          {brands.find(b => b.id === selectedBrand)?.name || selectedBrand}
-                        </span>
-                        <CheckCircle2 style={{ width: 13, height: 13, color: '#0748EE' }} />
-                      </div>
-                      <button onClick={() => setBrandPickerOpen(true)} style={{
-                        fontSize: 11, fontWeight: 600, padding: '3px 8px', borderRadius: 6,
-                        background: 'var(--surface)', border: '1px solid var(--card-border)',
-                        color: 'var(--text-muted)', cursor: 'pointer',
-                      }}>Change</button>
-                    </div>
-                  ) : selectedBrand === 'other' ? (
-                    <div style={{
-                      display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-                      padding: '10px 14px', borderRadius: 10,
-                      background: 'var(--page-bg)', border: '1px solid var(--card-border)',
-                    }}>
-                      <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-muted)' }}>Other / Testing (no DB save)</span>
-                      <button onClick={() => setBrandPickerOpen(true)} style={{
-                        fontSize: 11, fontWeight: 600, padding: '3px 8px', borderRadius: 6,
-                        background: 'var(--surface)', border: '1px solid var(--card-border)',
-                        color: 'var(--text-muted)', cursor: 'pointer',
-                      }}>Change</button>
-                    </div>
-                  ) : (
-                    <button onClick={() => setBrandPickerOpen(true)} style={{
-                      display: 'flex', alignItems: 'center', gap: 8, width: '100%',
-                      padding: '10px 14px', borderRadius: 10, textAlign: 'left',
-                      background: 'var(--page-bg)', border: '1px dashed var(--card-border)',
-                      color: 'var(--text-muted)', cursor: 'pointer',
-                      fontSize: 13, fontFamily: 'Barlow',
-                    }}>
-                      <Search style={{ width: 14, height: 14 }} />
-                      Select brand…
-                    </button>
-                  )}
-                </div>
+                {brandSelectorField}
 
                 {/* File slots */}
                 {isDriveMode ? (
