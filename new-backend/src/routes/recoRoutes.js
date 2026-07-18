@@ -7,7 +7,7 @@ const { runReco, exportReco, openInSheets, checkHealth, getLedgerStatus, deleteR
 // In-memory storage — files forwarded directly to Python
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 50 * 1024 * 1024 } // 50MB
+  limits: { fileSize: 150 * 1024 * 1024 } // 150MB — raised from 50MB: real Tally/marketplace exports (e.g. Receivable Cycle's Combine Tally GST / Sales Order Combine) can exceed 50MB
 });
 
 // Allow demo-mode token through without DB lookup

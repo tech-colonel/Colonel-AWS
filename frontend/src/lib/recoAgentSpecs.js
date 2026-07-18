@@ -89,6 +89,18 @@ export const RECO_AGENT_SPECS = [
       { key: 'folder_url', label: 'Google Drive Folder URL', hint: 'Paste the shared folder link', required: true },
     ],
   },
+  {
+    reco_type: 'receivable_cycle',
+    name: 'Receivable Cycle',
+    files: [
+      { key: 'tally_gst',    label: 'Combine Tally GST Report',       hint: '.xlsx / .xls', required: true },
+      { key: 'sales_order',  label: 'Sales Order Combine',            hint: '.xlsx / .xls', required: true },
+      { key: 'delhivery',    label: 'Delhivery COD Settlement (opt.)', hint: '.xlsx / .xls', required: false },
+      { key: 'ekart',        label: 'Ekart COD Settlement (opt.)',     hint: '.xlsx / .xls', required: false },
+      { key: 'xpressbees',   label: 'Xpressbees COD Settlement (opt.)', hint: '.xlsx / .xls', required: false },
+      { key: 'srn',          label: 'Combined SRN Report (opt.)',      hint: '.xlsx / .xls', required: false },
+    ],
+  },
 ];
 
 export const specByType = (t) => RECO_AGENT_SPECS.find((s) => s.reco_type === t) || null;

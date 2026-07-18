@@ -67,6 +67,11 @@ const RECO_AGENT_META = {
     color: '#0748EE', bg: '#E8EFFE', border: '#A3BFF8', accuracy: 'Auto-detect',
     fields: ['Bank Statement PDF'],
   },
+  receivable_cycle: {
+    displayName: 'Receivable Cycle', icon: '📦', category: 'Other',
+    color: '#7C3AED', bg: '#F5F3FF', border: '#C4B5FD', accuracy: null,
+    fields: ['Tally GST Report', 'Sales Order Combine', 'Courier COD Settlement', 'SRN Report'],
+  },
 };
 
 // Category sections, in display order (mirrors the admin Agents page).
@@ -130,6 +135,7 @@ const sectionOf = (agent) => {
   if (RECO_AGENT_META[agent.name]) {
     if (n === 'universal_bank_statement' || n === 'pdf_bank_extract') return 'bank';
     if (n === 'amazon_mtr_consolidator') return 'marketplace';
+    if (n === 'receivable_cycle') return 'other';
     return 'reco';
   }
   if (/invoice/.test(n)) return 'invoice';

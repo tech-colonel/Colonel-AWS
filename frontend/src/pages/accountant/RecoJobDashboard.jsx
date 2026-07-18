@@ -7,7 +7,7 @@ import {
 } from 'recharts';
 import {
   ArrowLeft, Download, CheckCircle2, AlertTriangle, HelpCircle,
-  BarChart3, Loader2, TrendingUp, LayoutDashboard, Bot, Map,
+  BarChart3, Loader2, TrendingUp, LayoutDashboard, Bot, Map, Trash2,
 } from 'lucide-react';
 import api from '../../lib/api';
 import { sidebarFor, isAdminUser } from '../../lib/adminNav';
@@ -27,7 +27,12 @@ const AGENT_META = {
   gstr_2b_books_multistate:   { label: 'GSTR-2B vs Books (Multi-State)',      color: '#7C3AED' },
   gstr_3b_tally_entry:        { label: 'GSTR-3B Tally Entry',                 color: '#0F766E' },
   einvoice_reco:              { label: 'E-Invoice Reco',                      color: '#0284C7' },
+  receivable_cycle:           { label: 'Receivable Cycle',                    color: '#4F46E5' },
 };
+
+// Fixed display order for Receivable Cycle's COD sub-sheet tabs (mirrors
+// COD_SHEET_ORDER in reco-engine/recon/receivable_cycle.py).
+const COD_SHEET_ORDER = ['COD main sheet', 'Delivery', 'Ekart', 'Xpressbees', 'DTDC', 'Self shipping'];
 
 const GST_STATE_CODES = {
   '01':'J&K','02':'H.P.','03':'Punjab','04':'Chandigarh','05':'Uttarakhand',
@@ -46,6 +51,16 @@ const stateFromGstin = (gstin) => {
 };
 
 const MONTHS = ['','Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+
+// Formats a job's period as "Mar 2025" or, when period_end_month/year differ from
+// the start (Receivable Cycle's "Generate Receivables" range option), "Mar 2025 – May 2025".
+const formatJobPeriod = (job) => {
+  if (!job?.month) return '';
+  const start = `${MONTHS[job.month]} ${job.year ?? ''}`;
+  const hasEnd = job.period_end_month && job.period_end_year &&
+    (job.period_end_month !== job.month || job.period_end_year !== job.year);
+  return hasEnd ? `${start} – ${MONTHS[job.period_end_month]} ${job.period_end_year}` : start;
+};
 
 const CONFIDENCE_COLORS = {
   High: '#059669', Medium: '#D97706', Low: '#E11D48', Unknown: '#94A3B8',
@@ -124,10 +139,14 @@ const RecoJobDashboard = () => {
 
   const [job, setJob] = useState(null);
   const [rows, setRows] = useState([]);
+  const [codSheets, setCodSheets] = useState({});
+  const [mainColumns, setMainColumns] = useState(null);
+  const [codColumns, setCodColumns] = useState({});
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(null);
   const [filter, setFilter] = useState('All');
   const [downloading, setDownloading] = useState(false);
+  const [deleting, setDeleting] = useState(false);
 
   // Prefer the DB-stored agent_type (available after load), fall back to URL param
   const resolvedType = job?.agent_type || agentType;
@@ -145,6 +164,9 @@ const RecoJobDashboard = () => {
         if (res.data.job) {
           setJob(res.data.job);
           setRows(res.data.rows ?? []);
+          setCodSheets(res.data.cod_sheets ?? {});
+          setMainColumns(res.data.main_sheet_columns ?? null);
+          setCodColumns(res.data.cod_sheet_columns ?? {});
         } else {
           setLoadError('job_not_found');
         }
@@ -177,6 +199,20 @@ const RecoJobDashboard = () => {
       toast.error('Download failed');
     } finally {
       setDownloading(false);
+    }
+  };
+
+  const handleDeleteJob = async () => {
+    if (!window.confirm('Delete this generated file? This removes it from history permanently and cannot be undone.')) return;
+    if (!brandId || brandId === 'other' || brandId === 'demo') return;
+    setDeleting(true);
+    try {
+      await api.delete(`/api/reco/job/${brandId}/${job.output_file_id || job.id}`);
+      toast.success('Deleted');
+      navigate(-1);
+    } catch (err) {
+      toast.error(err.response?.data?.error || 'Failed to delete');
+      setDeleting(false);
     }
   };
 
@@ -229,8 +265,9 @@ const RecoJobDashboard = () => {
     );
   }
 
-  const isGstr1       = job.agent_type === 'gstr_1_vs_books';
-  const isMultistate  = job?.agent_type === 'gstr_2b_books_multistate';
+  const isGstr1            = job.agent_type === 'gstr_1_vs_books';
+  const isReceivableCycle  = job.agent_type === 'receivable_cycle';
+  const isMultistate       = job?.agent_type === 'gstr_2b_books_multistate';
 
   return (
     <DashboardLayout sidebarItems={sidebarItems}>
@@ -266,7 +303,7 @@ const RecoJobDashboard = () => {
               </h1>
               <div className="flex items-center gap-3 mt-0.5">
                 <span className="text-xs" style={{ color: 'var(--text-muted)' }}>
-                  {MONTHS[job.month ?? 0]} {job.year ?? ''}
+                  {formatJobPeriod(job)}
                 </span>
                 <span
                   className="inline-flex items-center gap-1 text-xs font-semibold px-2 py-0.5 rounded-full"
@@ -279,22 +316,49 @@ const RecoJobDashboard = () => {
             </div>
           </div>
 
-          {job.output_file_id && (
-            <button
-              onClick={handleDownload}
-              disabled={downloading}
-              className="flex items-center gap-2 text-sm font-semibold px-4 py-2 rounded-xl transition-all disabled:opacity-50"
-              style={{ background: 'var(--surface)', border: '1px solid var(--card-border)', color: 'var(--text-heading)' }}
-            >
-              {downloading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
-              Download Excel
-            </button>
-          )}
+          <div className="flex items-center gap-2">
+            {job.output_file_id && (
+              <button
+                onClick={handleDownload}
+                disabled={downloading}
+                className="flex items-center gap-2 text-sm font-semibold px-4 py-2 rounded-xl transition-all disabled:opacity-50"
+                style={{ background: 'var(--surface)', border: '1px solid var(--card-border)', color: 'var(--text-heading)' }}
+              >
+                {downloading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
+                Download Excel
+              </button>
+            )}
+            {isReceivableCycle && (
+              <button
+                onClick={handleDeleteJob}
+                disabled={deleting}
+                className="flex items-center gap-2 text-sm font-semibold px-4 py-2 rounded-xl transition-all disabled:opacity-50"
+                style={{ background: 'rgba(225,29,72,0.08)', border: '1px solid rgba(225,29,72,0.2)', color: '#E11D48' }}
+              >
+                {deleting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Trash2 className="w-4 h-4" />}
+                Delete
+              </button>
+            )}
+          </div>
         </div>
 
         {/* ── GSTR-1 vs BOOKS keeps its bespoke multi-tab view ── */}
         {isGstr1 ? (
           <Gstr1View rows={rows} filter={filter} setFilter={setFilter} meta={meta} />
+        ) : isReceivableCycle ? (
+          <ReceivableCycleView
+            mainRows={rows}
+            codSheets={codSheets}
+            mainColumns={mainColumns}
+            codColumns={codColumns}
+            filter={filter}
+            setFilter={setFilter}
+            onDownload={job.output_file_id ? handleDownload : undefined}
+            downloading={downloading}
+            brandId={brandId}
+            jobId={job.output_file_id || job.id}
+            onSendFeedback={handleSendFeedback}
+          />
         ) : (
           /* Every other agent → the premium shared dashboard (KPIs, charts,
              status filters, row table). Persisted rows are read-only, so no
@@ -812,6 +876,58 @@ const Gstr1View = ({ rows, filter, setFilter, meta }) => {
           )}
         </div>
       </div>
+    </>
+  );
+};
+
+/* ── Receivable Cycle sub-view ────────────────────────────────────────────────
+   Tabbed Main Sheet + per-courier COD sub-sheets. Each tab reuses the shared,
+   already-generic ToolResultDashboard — receivable_cycle isn't in
+   classifyAgent's known buckets, so it falls into GenericDashboard. mainColumns/
+   codColumns (from reco-engine's MAIN_SHEET_COLUMNS / cod_columns) give it the
+   real column order explicitly — deriving it from a row's own object keys is
+   unreliable whenever a key looks like an array index ("2", "3", "4"), which
+   JavaScript always forces to the front regardless of insertion order. ── */
+const ReceivableCycleView = ({ mainRows, codSheets, mainColumns, codColumns, filter, setFilter, onDownload, downloading, brandId, jobId, onSendFeedback }) => {
+  const tabs = [
+    'Main Sheet',
+    ...COD_SHEET_ORDER.filter(name => codSheets?.[name]?.length),
+    ...Object.keys(codSheets || {}).filter(name => !COD_SHEET_ORDER.includes(name) && codSheets[name]?.length),
+  ];
+  const [activeTab, setActiveTab] = useState('Main Sheet');
+  const activeRows = activeTab === 'Main Sheet' ? mainRows : (codSheets?.[activeTab] || []);
+  const activeColumns = activeTab === 'Main Sheet' ? mainColumns : codColumns?.[activeTab];
+
+  return (
+    <>
+      <div className="flex flex-wrap gap-2">
+        {tabs.map(tab => (
+          <button
+            key={tab}
+            onClick={() => setActiveTab(tab)}
+            className="text-xs font-semibold px-3 py-1.5 rounded-lg transition-colors"
+            style={activeTab === tab
+              ? { background: '#4F46E515', color: '#4F46E5', border: '1px solid #4F46E540' }
+              : { background: 'var(--surface)', color: 'var(--text-muted)', border: '1px solid var(--card-border)' }}
+          >
+            {tab} <span style={{ opacity: 0.6 }}>({(tab === 'Main Sheet' ? mainRows : codSheets?.[tab] || []).length.toLocaleString('en-IN')})</span>
+          </button>
+        ))}
+      </div>
+
+      <ToolResultDashboard
+        agentType="receivable_cycle"
+        rows={activeRows}
+        columns={activeColumns}
+        filter={filter}
+        setFilter={setFilter}
+        onDownload={onDownload}
+        downloading={downloading}
+        brandId={brandId}
+        jobId={jobId}
+        agentLabel={`Receivable Cycle — ${activeTab}`}
+        onSendFeedback={onSendFeedback}
+      />
     </>
   );
 };
