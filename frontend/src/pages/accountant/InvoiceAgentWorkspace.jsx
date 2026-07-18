@@ -86,6 +86,14 @@ const FIELD_SECTIONS = [
     ],
   },
   {
+    title: 'TDS',
+    fields: [
+      { key: 'tds_section', label: 'TDS Section', type: 'text' },
+      { key: 'tds_rate', label: 'TDS Rate', type: 'number', suffix: '%' },
+      { key: 'tds_amount', label: 'TDS Amount', type: 'number', display: money },
+    ],
+  },
+  {
     title: 'Amounts',
     fields: [
       { key: 'taxable_value', label: 'Taxable Value', type: 'number', required: true, display: money },

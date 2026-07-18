@@ -189,6 +189,9 @@ const feedInvoicesFromN8n = async (req, res, next) => {
                     voucher_type: row.voucher_type || null,
                     category: row.category || null,
                     product_name: row.product_name || null,
+                    tds_section: row.tds_section || null,
+                    tds_rate: parseFloat(row.tds_rate) || 0,
+                    tds_amount: parseFloat(row.tds_amount) || 0,
                     invoice_link: row.Invoice_link || row.invoice_link || null,
                     status: 'Corrupted'
                 });
@@ -222,6 +225,9 @@ const feedInvoicesFromN8n = async (req, res, next) => {
             igst_amount: parseFloat(row.igst_amount) || 0,
             gst_amount: parseFloat(row.GST_AMOUNT || row.gst_amount) || 0,
             taxable_value: parseFloat(row['taxable value'] || row.taxable_value || row.amount) || 0,
+            tds_section: row.tds_section || null,
+            tds_rate: parseFloat(row.tds_rate) || 0,
+            tds_amount: parseFloat(row.tds_amount) || 0,
             invoice_link: row.Invoice_link || row.invoice_link || null,
             status: 'Processed'
         }));

@@ -175,7 +175,8 @@ const updateInvoice = async (req, res, next) => {
       'hsn_code', 'quantity', 'unit', 'rate',
       'cgst_rate', 'sgst_rate', 'igst_rate',
       'cgst_amount', 'sgst_amount', 'igst_amount',
-      'gst_amount', 'taxable_value', 'invoice_link', 'status'
+      'gst_amount', 'taxable_value', 'invoice_link', 'status',
+      'tds_section', 'tds_rate', 'tds_amount'
     ];
 
     const updates = {};
