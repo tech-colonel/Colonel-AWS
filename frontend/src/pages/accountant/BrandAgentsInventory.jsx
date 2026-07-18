@@ -247,12 +247,14 @@ const BrandAgentsInventory = () => {
 
   // RECO-only build shows the reco agents PLUS the sales/marketplace agents (Sales-*, Nykaa,
   // Settlement-Amazon, Total-Sales-Analyzer). Legacy Amazon/Flipkart/Myntra dupes, Meesho/AJIO
-  // (no backend), invoice and order-cycle are intentionally excluded. Full build shows everything.
+  // (no backend) and order-cycle are excluded. Invoice Process IS shown (accountants
+  // review AI-extracted invoices). Full build shows everything.
   const isSalesMarketplace = (a) =>
     /^sales-/i.test(a.name || '') ||
     ['nykaa', 'settlement-amazon', 'total-sales-analyzer'].includes((a.name || '').toLowerCase());
+  const isInvoice = (a) => (a.name || '').toLowerCase() === 'invoice process';
   const visibleAgents = RECO_ONLY
-    ? allAgents.filter(agent => (RECO_ID_TO_TYPE[agent.id] || isSalesMarketplace(agent)) && !HIDDEN_WHEN_RECO_ONLY.has(agent.id))
+    ? allAgents.filter(agent => (RECO_ID_TO_TYPE[agent.id] || isSalesMarketplace(agent) || isInvoice(agent)) && !HIDDEN_WHEN_RECO_ONLY.has(agent.id))
     : allAgents;
 
   // Group visible agents into category sections (drop empty sections).
