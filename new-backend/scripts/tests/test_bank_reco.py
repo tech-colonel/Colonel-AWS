@@ -11,6 +11,18 @@ def test_bracket_and_alias_matching():
     assert not party_matches("Bank Charges", "Worker Salary Payable")          # no over-match
     print("test_bracket_and_alias_matching PASS")
 
+def test_busybees_delhi_tag_still_matches_untagged():
+    assert party_matches("Busybees Logistics Solutions Pvt.Ltd.-Delhi", "Busybees Logistics Solutions Pvt.Ltd.")
+    print("test_busybees_delhi_tag_still_matches_untagged PASS")
+
+def test_distinguishing_branch_tags_block_full_match():
+    # Different branches of the SAME parent must NOT full-match, even though the stripped
+    # base name collapses to one string -- this is the over-merge bug being fixed.
+    assert not party_matches("Flo Sleep Solutions (Vasai)", "Flo Sleep Solutions (Hyderabad)")
+    assert not party_matches("Flo Sleep Solutions (Medchal)", "Flo Sleep Solutions (HYD)")
+    assert not party_matches("Flo Sleep Solutions (Chennai)", "Flo Sleep Solutions (BLR)")
+    print("test_distinguishing_branch_tags_block_full_match PASS")
+
 def test_partial_tier():
     tally = [{"date": dt.datetime(2024,4,2),"party":"Some Unknown Vendor","narration":"","vch_type":"","vch_no":"V9","debit":0.0,"credit":5000.0,"direction":"out","row":50}]
     bank  = [{"txn_date": dt.datetime(2024,4,2),"description":"x","chq_ref":"","debit":5000.0,"credit":0.0,"balance":0,"type":"Payment","ledger":"Totally Different Name","confidence":"High","direction":"out","row":9}]
@@ -101,5 +113,7 @@ if __name__ == "__main__":
     test_party_normalize_and_match()
     test_reconcile_buckets()
     test_bracket_and_alias_matching()
+    test_busybees_delhi_tag_still_matches_untagged()
+    test_distinguishing_branch_tags_block_full_match()
     test_partial_tier()
     print("ALL PASS")

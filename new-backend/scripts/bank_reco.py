@@ -238,8 +238,53 @@ def alias_same(a, b):
             return True
     return False
 
+# Markers that, inside a parenthetical, mean "not a distinguishing branch/location tag" --
+# just a Dr/Cr flag, a COD marker, or a pure number (voucher/cheque no. etc). Deliberately NOT
+# a fixed city list here (unlike _PURE_MARKER_RE above): any other parenthetical content is
+# treated as a distinguishing qualifier, so we don't miss unlisted city/branch names (e.g. the
+# full word "hyderabad" was never in the old location list -- only the abbreviation "hyd" was).
+_QUALIFIER_MARKER_RE = re.compile(r"^\s*(dr|cr|cod|[0-9,.\s]*)\s*$", re.I)
+
+def _qualifiers(name):
+    """
+    The set of distinguishing branch/location tags in `name`: each parenthetical's normalized
+    inner content that isn't a pure Dr/Cr/COD/numeric marker, plus any trailing location/branch
+    suffix that `normalize_party`'s `_LOC_SUFFIX` would strip (e.g. "-Delhi", "-Telangana").
+    Two names that BOTH carry qualifiers, but share none in common, are different branches/
+    ledgers of the same parent (e.g. "Flo Sleep Solutions (Vasai)" vs "...(Hyderabad)") and must
+    never be treated as an exact-string full match just because their un-tagged base collapses
+    to the same string.
+    """
+    raw = str(name or "")
+    quals = set()
+    for inner in _PAREN_RE.findall(raw):
+        inner = inner.strip()
+        if not inner or _QUALIFIER_MARKER_RE.match(inner):
+            continue
+        q = normalize_party(inner)
+        if q:
+            quals.add(q)
+    m = _LOC_SUFFIX.search(raw.lower())
+    if m:
+        quals.add(m.group(1).strip().lower())
+    return quals
+
+def _qualifiers_overlap(qa, qb, threshold=85):
+    """True if any qualifier in qa is the same branch/location as any qualifier in qb
+    (equal, alias-group same, or fuzzy match >= threshold -- e.g. "hyd" ~ "hyderabad")."""
+    for x in qa:
+        for y in qb:
+            if x == y or alias_same(x, y) or fuzz.token_sort_ratio(x, y) >= threshold:
+                return True
+    return False
+
 def party_matches(a, b, threshold=85):
     """Check if two party names match within the fuzzy threshold (default 85)."""
+    qa, qb = _qualifiers(a), _qualifiers(b)
+    if qa and qb and not _qualifiers_overlap(qa, qb, threshold):
+        # Both names carry a distinguishing branch/location tag and they don't agree --
+        # different branches of the same parent. Never full-match these.
+        return False
     na, nb = normalize_party(a), normalize_party(b)
     if not na or not nb: return False
     if na == nb: return True
