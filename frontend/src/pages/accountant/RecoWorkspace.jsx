@@ -123,11 +123,11 @@ const AGENT_CONFIG = {
     description: 'Classifies bank transactions from any bank format — auto-detects columns, applies learned corrections from prior runs.',
     color: '#059669', bg: 'rgba(5,150,105,0.08)', border: 'rgba(5,150,105,0.2)',
     files: [
-      { key: 'bank_statement', label: 'Bank Statement', hint: '.xlsx / .xls / .csv', required: true },
+      { key: 'bank_statement', label: 'Bank Statement', hint: '.xlsx / .xls / .csv / .pdf', required: true, accept: '.xlsx,.xls,.csv,.pdf' },
       { key: 'ledger_master', label: 'Ledger Master (Chart of Accounts)', hint: '.xlsx / .xls — optional, saved for future runs', required: false },
     ],
     demoFiles: [
-      { key: 'bank_statement', label: 'Bank Statement', hint: '.xlsx / .xls / .csv', required: true },
+      { key: 'bank_statement', label: 'Bank Statement', hint: '.xlsx / .xls / .csv / .pdf', required: true, accept: '.xlsx,.xls,.csv,.pdf' },
       { key: 'ledger_master', label: 'Ledger Master', hint: '.xlsx / .xls', required: false, isDemo: true },
     ],
   },

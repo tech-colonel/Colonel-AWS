@@ -886,6 +886,25 @@ const runReco = async (req, res) => {
       let bankPath = path.join(jobDir, `bank_statement_${bankFile.originalname}`);
       await fs.promises.writeFile(bankPath, bankFile.buffer);
 
+      // PDF bank statement → convert to structured xlsx via the pdf_bank_extract engine, then classify as usual.
+      if (bankFile.originalname.toLowerCase().endsWith('.pdf')) {
+        console.log('[RECO-UNIVERSAL] PDF bank statement detected — converting via pdf_bank_extract');
+        const pdfForm = new FormData();
+        pdfForm.append('reco_type', 'pdf_bank_extract');
+        pdfForm.append('bank_pdf', bankFile.buffer, { filename: bankFile.originalname, contentType: 'application/pdf' });
+        if (req.body.pdf_password) pdfForm.append('pdf_password', String(req.body.pdf_password));
+        const extractResp = await axios.post(`${PYTHON_RECO_URL}/api/reconcile`, pdfForm, {
+          headers: { ...pdfForm.getHeaders() }, timeout: 600000, maxContentLength: Infinity, maxBodyLength: Infinity,
+        });
+        if (!extractResp.data || !extractResp.data.job_id) {
+          return res.status(400).json({ error: 'Could not read the PDF bank statement.', detail: extractResp.data && extractResp.data.validation });
+        }
+        const xlsxResp = await axios.get(`${PYTHON_RECO_URL}/api/jobs/${extractResp.data.job_id}/export.xlsx`, { responseType: 'arraybuffer', timeout: 120000 });
+        bankPath = path.join(jobDir, 'converted_bank_statement.xlsx');
+        await fs.promises.writeFile(bankPath, Buffer.from(xlsxResp.data));
+        console.log(`[RECO-UNIVERSAL] PDF converted → ${extractResp.data.transaction_count || '?'} rows`);
+      }
+
       let ledgerPath = '';
 
       // Check if it is a multi-tab Excel file containing both ledger master and statement
