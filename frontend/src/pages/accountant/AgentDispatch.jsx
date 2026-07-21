@@ -32,6 +32,8 @@ export default function AgentDispatch() {
   if (recoType === 'pdf_bank_extract') return <PdfBankExtractorWorkspace />;
   if (recoType === 'myntra_ticket_finder') return <MyntraTicketFinderWorkspace />;
   if (recoType === 'gstr_3b_tally_entry') return <Gstr3bTallyWorkspace />;
-  if (recoType) return <RecoWorkspace agentTypeProp={recoType} />;
+  // key by agentId so switching between two RecoWorkspace-backed agents (e.g. Universal → Bank Reco)
+  // remounts a fresh instance — prevents stale result/upload state from bleeding across agents.
+  if (recoType) return <RecoWorkspace key={agentId} agentTypeProp={recoType} />;
   return <AgentWorkspace />;
 }
