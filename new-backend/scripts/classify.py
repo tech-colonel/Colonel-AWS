@@ -320,6 +320,38 @@ def _norm_key(s) -> str:
     return ' '.join(re.sub(r'[^a-z0-9 ]', ' ', str(s).lower()).split())
 
 
+# FLO slash-format NEFT/RTGS + IMPS-FROM payee extraction (Task 2.5a).
+# Bank code = 4 letters + optional trailing alnum, e.g. UTIB/ICIC/HDFC/BARB.
+_BANKCODE_RE = re.compile(r'^[A-Z]{4}[A-Z0-9]*$')
+
+
+def _slash_neft_payee(u: str):
+    """FLO slash format: (NEFT|RTGS)/<ref>/[<BANKCODE>/]<PAYEE>[/<BANK>/<num>].
+    Drop the ref field and any pure-numeric / bank-code tokens; the remaining
+    field with the most alphabetic characters is the payee. Never derive a
+    key from the numeric reference itself."""
+    m = re.match(r'^(?:NEFT|RTGS)/(.+)', u)
+    if not m:
+        return None
+    parts = [p.strip() for p in m.group(1).split('/') if p.strip()]
+    if not parts:
+        return None
+    parts = parts[1:]                                 # drop the ref field
+    candidates = [p for p in parts if not p.isdigit() and not _BANKCODE_RE.match(p)]
+    if not candidates:
+        return None
+    best = max(candidates, key=lambda t: sum(c.isalpha() for c in t))
+    return _norm_key(best)
+
+
+def _imps_from_payee(u: str):
+    """IMPS <ref> FROM <PAYEE>."""
+    m = re.search(r'\bIMPS\s+\d+\s+FROM\s+(.+)', u)
+    if m:
+        return _norm_key(m.group(1))
+    return None
+
+
 def extract_payee_keys(narration) -> dict:
     """Return the stable identity keys extractable from a bank narration.
     Any subset of: exact, phone, vpa, name (UPI payee), neft_name."""
@@ -343,6 +375,10 @@ def extract_payee_keys(narration) -> dict:
     mnft = re.search(r'(?:NEFT|RTGS)\s+(?:DR|CR)-[A-Z0-9]+-(.+?)-(?:NETBANK|NB[ ,]|NB$)', u)
     if mnft:                                          # NEFT/RTGS payee, between IFSC and NETBANK tail
         nm = _norm_key(mnft.group(1))
+        if nm:
+            keys['neft_name'] = nm
+    if 'neft_name' not in keys:                       # FLO slash-NEFT/RTGS + IMPS-FROM (Task 2.5a)
+        nm = _slash_neft_payee(u) or _imps_from_payee(u)
         if nm:
             keys['neft_name'] = nm
     return keys

@@ -28,6 +28,33 @@ const PHONE_RE = /(?<!\d)(\d{10})(?!\d)/;
 const VPA_RE = /([A-Za-z0-9.\-]+@[A-Za-z]+)/;
 const normKey = (s) => s.toLowerCase().replace(/[^a-z0-9 ]/g, ' ').trim().replace(/\s+/g, ' ');
 
+// FLO slash-format NEFT/RTGS + IMPS-FROM payee extraction (Task 2.5a).
+// Bank code = 4 letters + optional trailing alnum, e.g. UTIB/ICIC/HDFC/BARB.
+const BANKCODE_RE = /^[A-Z]{4}[A-Z0-9]*$/;
+
+// FLO slash format: (NEFT|RTGS)/<ref>/[<BANKCODE>/]<PAYEE>[/<BANK>/<num>].
+// Drop the ref field and any pure-numeric / bank-code tokens; the remaining
+// field with the most alphabetic characters is the payee. Never derive a
+// key from the numeric reference itself.
+const slashNeftPayee = (u) => {
+  const m = u.match(/^(?:NEFT|RTGS)\/(.+)/);
+  if (!m) return null;
+  let parts = m[1].split('/').map((p) => p.trim()).filter((p) => p);
+  if (!parts.length) return null;
+  parts = parts.slice(1); // drop the ref field
+  const candidates = parts.filter((p) => !/^\d+$/.test(p) && !BANKCODE_RE.test(p));
+  if (!candidates.length) return null;
+  const alphaCount = (t) => (t.match(/[A-Za-z]/g) || []).length;
+  const best = candidates.reduce((a, b) => (alphaCount(b) > alphaCount(a) ? b : a));
+  return normKey(best);
+};
+
+// IMPS <ref> FROM <PAYEE>.
+const impsFromPayee = (u) => {
+  const m = u.match(/\bIMPS\s+\d+\s+FROM\s+(.+)/);
+  return m ? normKey(m[1]) : null;
+};
+
 const extractPayeeKeys = (narration) => {
   if (!narration) return {};
   const raw = String(narration).trim();
@@ -47,6 +74,11 @@ const extractPayeeKeys = (narration) => {
   const mNeft = u.match(/(?:NEFT|RTGS)\s+(?:DR|CR)-[A-Z0-9]+-(.+?)-(?:NETBANK|NB[ ,]|NB$)/);
   if (mNeft) {
     const nm = normKey(mNeft[1]);
+    if (nm) keys.neft_name = nm;
+  }
+  if (!keys.neft_name) {
+    // FLO slash-NEFT/RTGS + IMPS-FROM (Task 2.5a)
+    const nm = slashNeftPayee(u) || impsFromPayee(u);
     if (nm) keys.neft_name = nm;
   }
   return keys;
