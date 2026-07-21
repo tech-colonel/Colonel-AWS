@@ -1,6 +1,7 @@
 import os, sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from bank_reco import parse_tally, parse_tally_opening, parse_bank_output, normalize_party, party_matches
+from bank_reco import parse_tally, parse_tally_opening, parse_bank_output, normalize_party, party_matches, reconcile
+import datetime as dt
 
 TALLY = "/Users/dhavalchauhan/Dhaval/Bank RECO/Bank Statement Apr 24-25 Tally.xls"
 
@@ -53,8 +54,33 @@ def test_party_normalize_and_match():
     assert not party_matches("Bank Charges", "Worker Salary Payable")
     print("test_party_normalize_and_match PASS")
 
+def test_reconcile_buckets():
+    tally = [
+        {"date": dt.datetime(2024,4,2), "party":"Busybees Logistics Solutions Pvt Ltd","narration":"","vch_type":"","vch_no":"V1","debit":0.0,"credit":518708.32,"direction":"out","row":11},
+        {"date": dt.datetime(2024,4,1), "party":"Peprfry Sales","narration":"","vch_type":"","vch_no":"V2","debit":26612.21,"credit":0.0,"direction":"in","row":12},
+        {"date": dt.datetime(2024,4,9), "party":"Ghost Vendor","narration":"","vch_type":"","vch_no":"V3","debit":0.0,"credit":999.0,"direction":"out","row":13},
+    ]
+    bank = [
+        {"txn_date": dt.datetime(2024,4,3),"description":"x","chq_ref":"","debit":518708.32,"credit":0.0,"balance":0,"type":"Payment","ledger":"Busybees Logistics Solutions Pvt.Ltd.-Delhi","confidence":"High","direction":"out","row":2},
+        {"txn_date": dt.datetime(2024,4,1),"description":"y","chq_ref":"","debit":0.0,"credit":26612.21,"balance":0,"type":"Receipt","ledger":"Peprfry Sales","confidence":"High","direction":"in","row":3},
+        {"txn_date": dt.datetime(2024,4,5),"description":"charge","chq_ref":"","debit":500.0,"credit":0.0,"balance":0,"type":"Payment","ledger":"Bank Charges","confidence":"High","direction":"out","row":4},
+    ]
+    res = reconcile(tally, bank)
+    assert res["counts"]["matched"] == 2, res["counts"]
+    assert res["counts"]["bank_only"] == 1, res["counts"]      # Bank Charges
+    assert res["counts"]["tally_only"] == 1, res["counts"]     # Ghost Vendor
+    # Busybees: dates differ (4/2 vs 4/3) -> date_changed True, new_date = bank txn date
+    busy = [m for m in res["matched"] if "usybees" in m["tally"]["party"]][0]
+    assert busy["date_changed"] and busy["new_date"].date() == dt.date(2024,4,3)
+    # Peprfry: same date -> not changed
+    pep = [m for m in res["matched"] if m["tally"]["party"] == "Peprfry Sales"][0]
+    assert not pep["date_changed"]
+    assert res["counts"]["date_updated"] == 1
+    print("test_reconcile_buckets PASS")
+
 if __name__ == "__main__":
     test_parse_tally_basic()
     test_parse_bank_output()
     test_party_normalize_and_match()
+    test_reconcile_buckets()
     print("ALL PASS")

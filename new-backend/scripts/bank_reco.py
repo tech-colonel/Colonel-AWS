@@ -184,3 +184,77 @@ def party_matches(a, b, threshold=85):
     if not na or not nb: return False
     if na == nb: return True
     return fuzz.token_sort_ratio(na, nb) >= threshold
+
+def _amt_in(trow):
+    """Tally money-in magnitude (debit)."""
+    return trow["debit"]
+
+def _amt_out(trow):
+    """Tally money-out magnitude (credit)."""
+    return trow["credit"]
+
+def _bank_amt(brow):
+    """Bank amount based on direction: credit for in, debit for out."""
+    return brow["credit"] if brow["direction"] == "in" else brow["debit"]
+
+def _d(x):
+    """Extract date-only component from datetime, returning None if conversion fails."""
+    try:
+        return x.date()
+    except Exception:
+        return None
+
+def reconcile(tally_rows, bank_rows, amt_tol=0.01):
+    """
+    Reconcile Tally and bank rows using greedy 1:1 matching.
+
+    Returns a dict with:
+    - "matched": list of matched pairs with date reconciliation
+    - "bank_only": bank rows with no Tally match
+    - "tally_only": Tally rows with no bank match
+    - "counts": {"matched", "date_updated", "bank_only", "tally_only"}
+    """
+    bank_used = [False] * len(bank_rows)
+    matched, tally_only = [], []
+
+    for t in tally_rows:
+        # Get Tally amount based on direction
+        t_amt = _amt_in(t) if t["direction"] == "in" else _amt_out(t)
+        found = None
+
+        for j, b in enumerate(bank_rows):
+            if bank_used[j]:
+                continue
+            if b["direction"] != t["direction"]:
+                continue
+            if abs(_bank_amt(b) - t_amt) > amt_tol:
+                continue
+            if not party_matches(t["party"], b["ledger"]):
+                continue
+            found = j
+            break
+
+        if found is None:
+            tally_only.append(t)
+            continue
+
+        bank_used[found] = True
+        b = bank_rows[found]
+        od, nd = t["date"], b["txn_date"]
+        changed = bool(_d(od) and _d(nd) and _d(od) != _d(nd))
+        matched.append({
+            "bank": b,
+            "tally": t,
+            "old_date": od,
+            "new_date": nd,
+            "date_changed": changed
+        })
+
+    bank_only = [b for j, b in enumerate(bank_rows) if not bank_used[j]]
+    counts = {
+        "matched": len(matched),
+        "date_updated": sum(1 for m in matched if m["date_changed"]),
+        "bank_only": len(bank_only),
+        "tally_only": len(tally_only),
+    }
+    return {"matched": matched, "bank_only": bank_only, "tally_only": tally_only, "counts": counts}
