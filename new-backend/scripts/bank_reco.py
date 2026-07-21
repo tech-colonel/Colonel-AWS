@@ -2,6 +2,11 @@ import re
 from io import BytesIO
 import pandas as pd
 
+try:
+    from thefuzz import fuzz
+except ImportError:
+    from fuzzywuzzy import fuzz
+
 _OLE2 = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
 
 def _read_any(path):
@@ -157,3 +162,25 @@ def parse_bank_output(path):
             "row": i,
         })
     return rows
+
+# Party normalization for fuzzy matching
+_SUFFIXES = [" pvt ltd", " pvt.ltd.", " private limited", " pvt. ltd.", " limited", " llp", " (dr)", " (cr)"]
+_LOC_SUFFIX = re.compile(r"[-(]\s*(delhi|telangana|bangalore|blr|hyd|gurgaon|mumbai|vasai|chennai|kolkata|pune|noida|factory)\s*\)?\s*$", re.I)
+
+def normalize_party(name):
+    """Normalize party name by removing suffixes, locations, punctuation, and collapsing whitespace."""
+    s = str(name or "").lower().strip()
+    s = s.replace("\n", " ")
+    s = _LOC_SUFFIX.sub("", s).strip()
+    for suf in _SUFFIXES:
+        if s.endswith(suf): s = s[: -len(suf)].strip()
+    s = re.sub(r"[^a-z0-9 ]", " ", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+def party_matches(a, b, threshold=85):
+    """Check if two party names match within the fuzzy threshold (default 85)."""
+    na, nb = normalize_party(a), normalize_party(b)
+    if not na or not nb: return False
+    if na == nb: return True
+    return fuzz.token_sort_ratio(na, nb) >= threshold

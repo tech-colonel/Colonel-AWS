@@ -1,6 +1,6 @@
 import os, sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from bank_reco import parse_tally, parse_tally_opening, parse_bank_output
+from bank_reco import parse_tally, parse_tally_opening, parse_bank_output, normalize_party, party_matches
 
 TALLY = "/Users/dhavalchauhan/Dhaval/Bank RECO/Bank Statement Apr 24-25 Tally.xls"
 
@@ -46,7 +46,15 @@ def test_parse_bank_output():
     assert rows[1]["ledger"] == "Peprfry Sales"
     print("test_parse_bank_output PASS")
 
+def test_party_normalize_and_match():
+    assert normalize_party("Busybees Logistics Solutions Pvt.Ltd.-Delhi") == normalize_party("Busybees Logistics Solutions Pvt Ltd")
+    assert party_matches("Peprfry Sales", "peprfry sales")
+    assert party_matches("Flo Sleep Solutions ( Gurgaon )", "Flo Sleep Solutions (Gurgaon)")
+    assert not party_matches("Bank Charges", "Worker Salary Payable")
+    print("test_party_normalize_and_match PASS")
+
 if __name__ == "__main__":
     test_parse_tally_basic()
     test_parse_bank_output()
+    test_party_normalize_and_match()
     print("ALL PASS")
