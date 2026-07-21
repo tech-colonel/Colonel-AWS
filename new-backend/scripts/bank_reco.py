@@ -41,6 +41,13 @@ def _num(x):
     try: return float(s)
     except ValueError: return 0.0
 
+def _clean_str(x):
+    """Free-text string cleaner: NaN/None/'nan'/'NaT'/'none' all render as empty string.
+    (float('nan') is truthy, so `str(x or "")` alone lets it through as the literal "nan".)"""
+    if x is None: return ""
+    s = str(x).strip()
+    return "" if s.lower() in ("nan", "nat", "none") else s
+
 def _colmap(header_cells):
     """Map logical fields to column indices by fuzzy header text."""
     m = {}
@@ -103,6 +110,26 @@ def parse_tally(path):
         })
     return rows
 
+def parse_tally_account(path):
+    """
+    Return the bank ledger name printed in the Tally daybook's own header block, e.g. the
+    daybook prints a row like "RBL Bank - 2588  Book" above the Date/Particulars/Debit/Credit
+    transaction-header row -- that IS the account this daybook is for. Scan the rows above the
+    header row for one whose text (case-insensitively) ends with "Book", strip the trailing
+    "Book" and collapse whitespace. Returns None if no such row is found.
+    """
+    df, h = _tally_frame(path)
+    for i in range(h):
+        cells = [str(x).strip() for x in df.iloc[i].tolist() if str(x).strip() not in ("", "nan")]
+        for cell in cells:
+            if cell.strip().lower().endswith("book"):
+                stripped = re.sub(r"(?i)\s*book\s*$", "", cell).strip()
+                stripped = re.sub(r"\s+", " ", stripped)
+                if stripped:
+                    return stripped
+    return None
+
+
 def parse_tally_opening(path):
     df, h = _tally_frame(path)
     cm = _colmap(df.iloc[h].tolist())
@@ -149,16 +176,17 @@ def parse_bank_output(path):
             j = cm.get(k)
             return r[j] if j is not None and j < len(r) else None
         debit, credit = _num(g("debit")), _num(g("credit"))
-        typ = str(g("type") or "").strip()
-        if debit == 0 and credit == 0 and not str(g("description") or "").strip():
+        typ = _clean_str(g("type"))
+        description = _clean_str(g("description"))
+        if debit == 0 and credit == 0 and not description:
             continue
         rows.append({
             "txn_date": pd.to_datetime(g("txn_date"), dayfirst=True, errors="coerce"),
-            "description": str(g("description") or "").strip(),
-            "chq_ref": str(g("chq_ref") or "").strip(),
+            "description": description,
+            "chq_ref": _clean_str(g("chq_ref")),
             "debit": debit, "credit": credit, "balance": _num(g("balance")),
-            "type": typ, "ledger": str(g("ledger") or "").strip(),
-            "confidence": str(g("confidence") or "").strip(),
+            "type": typ, "ledger": _clean_str(g("ledger")),
+            "confidence": _clean_str(g("confidence")),
             "direction": "in" if (credit > 0 or typ.lower() == "receipt") else "out",
             "row": i,
         })
@@ -737,14 +765,33 @@ def main():
     ap.add_argument("--coa", default=None)
     ap.add_argument("--output", required=True)
     ap.add_argument("--brand", default="Brand")
+    ap.add_argument("--bank-ledger", default=None,
+                     help="Override the bank ledger name used on 'Add to Tally' rows. "
+                          "Defaults to the ledger parsed from the Tally daybook's own title "
+                          "(the '<Ledger Name>  Book' header row).")
     a = ap.parse_args()
     tally = parse_tally(a.tally)
     bank = parse_bank_output(a.bank)
     opening = parse_tally_opening(a.tally)
     res = reconcile(tally, bank)
+    # Resolve the bank-account ledger name for "Add to Tally" rows:
+    # 1. explicit --bank-ledger CLI override
+    # 2. the ledger parsed straight from the daybook's own title row (authoritative --
+    #    the daybook literally IS that ledger's book)
+    # 3. SAFE fallback: first Tally party containing "bank" but NOT "charge(s)" -- guards
+    #    against an expense ledger like "Bank Charges" appearing before the real bank
+    #    account and silently becoming the ledger name on every ready-to-paste row.
+    # 4. last-resort generic literal
+    bank_ledger = (
+        a.bank_ledger
+        or parse_tally_account(a.tally)
+        or next((r["party"] for r in tally
+                 if "bank" in r["party"].lower() and "charge" not in r["party"].lower()), None)
+        or "Bank Account"
+    )
     ctx = {"brand": a.brand, "bank_rows": bank, "tally_rows": tally,
            "opening": opening, "bank_path": a.bank,
-           "bank_ledger": next((r["party"] for r in tally if "bank" in r["party"].lower()), "Bank Account")}
+           "bank_ledger": bank_ledger}
     write_workbook(res, ctx, a.output)
     print(json.dumps({"counts": res["counts"],
                       "summary": {"brand": a.brand, "total_bank_rows": len(bank), "total_tally_rows": len(tally)}}))

@@ -1,6 +1,6 @@
 import os, sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from bank_reco import parse_tally, parse_tally_opening, parse_bank_output, normalize_party, party_matches, reconcile
+from bank_reco import parse_tally, parse_tally_opening, parse_bank_output, parse_tally_account, normalize_party, party_matches, reconcile
 import datetime as dt
 
 def test_bracket_and_alias_matching():
@@ -36,10 +36,12 @@ TALLY = "/Users/dhavalchauhan/Dhaval/Bank RECO/Bank Statement Apr 24-25 Tally.xl
 
 def _make_universal_fixture(tmp_path="/tmp/bank_reco_fixture.xlsx"):
     import openpyxl
+    import math
     wb = openpyxl.Workbook(); ws = wb.active; ws.title = "Bank Statement"
     ws.append(["Txn Date","Description","Chq / Ref No.","Debit","Credit","Balance","Type","Ledger Name","Confidence"])
     ws.append(["02-04-2024","NEFT/000/Busybees Logistics Solution","", 518708.32, "", 100.0, "Payment", "Busybees Logistics Solutions Pvt.Ltd.", "High"])
-    ws.append(["01-04-2024","NEFT/PEPPERFRY LIMITED","", "", 26612.21, 200.0, "Receipt", "Peprfry Sales", "High"])
+    # NaN chq_ref (float('nan') cell) -- must render as "" not the literal string "nan"
+    ws.append(["01-04-2024","NEFT/PEPPERFRY LIMITED", math.nan, "", 26612.21, 200.0, "Receipt", "Peprfry Sales", "High"])
     wb.save(tmp_path); return tmp_path
 
 def test_parse_tally_basic():
@@ -74,7 +76,17 @@ def test_parse_bank_output():
     assert rows[0]["direction"] == "out" and rows[0]["debit"] == 518708.32
     assert rows[1]["direction"] == "in" and rows[1]["credit"] == 26612.21
     assert rows[1]["ledger"] == "Peprfry Sales"
+    # the NaN chq_ref cell must render as empty string, never the literal "nan"
+    assert rows[1]["chq_ref"] == "", f"expected empty chq_ref, got {rows[1]['chq_ref']!r}"
     print("test_parse_bank_output PASS")
+
+
+def test_parse_tally_account():
+    acct = parse_tally_account(TALLY)
+    assert acct is not None, "parse_tally_account returned None on real data"
+    assert "RBL Bank" in acct, acct
+    assert "book" not in acct.lower(), f"trailing 'Book' not stripped: {acct!r}"
+    print("test_parse_tally_account PASS")
 
 def test_party_normalize_and_match():
     assert normalize_party("Busybees Logistics Solutions Pvt.Ltd.-Delhi") == normalize_party("Busybees Logistics Solutions Pvt Ltd")
@@ -110,6 +122,7 @@ def test_reconcile_buckets():
 if __name__ == "__main__":
     test_parse_tally_basic()
     test_parse_bank_output()
+    test_parse_tally_account()
     test_party_normalize_and_match()
     test_reconcile_buckets()
     test_bracket_and_alias_matching()
