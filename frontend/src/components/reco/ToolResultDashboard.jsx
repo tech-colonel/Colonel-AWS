@@ -5,6 +5,7 @@ import {
   PieChart, Pie, Cell,
   BarChart, Bar,
   XAxis, YAxis, CartesianGrid, Tooltip, Legend,
+  ReferenceLine, LabelList,
 } from 'recharts';
 
 /* ──────────────────────────────────────────────────────────────────────────
@@ -41,6 +42,42 @@ function money(x) {
 
 // display a plain count
 const cnt = (n) => Number(n || 0).toLocaleString('en-IN');
+
+// ─── ₹ formatters (analytics charts) ──────────────────────────────────────────
+// Compact Indian-grouped axis ticks: ₹3.7Cr / ₹12L / ₹4.2K — trims a trailing ".0".
+function fmtCompactINR(x) {
+  const n = num(x);
+  const sign = n < 0 ? '-' : '';
+  const abs = Math.abs(n);
+  const trim = (s) => s.replace(/\.0$/, '');
+  if (abs >= 1e7) return `${sign}₹${trim((abs / 1e7).toFixed(1))}Cr`;
+  if (abs >= 1e5) return `${sign}₹${trim((abs / 1e5).toFixed(1))}L`;
+  if (abs >= 1e3) return `${sign}₹${trim((abs / 1e3).toFixed(1))}K`;
+  return `${sign}₹${abs.toLocaleString('en-IN', { maximumFractionDigits: 0 })}`;
+}
+// Full ₹ value for tooltips, en-IN grouped.
+function fmtFullINR(x) {
+  const n = num(x);
+  const sign = n < 0 ? '-' : '';
+  return `${sign}₹${Math.abs(n).toLocaleString('en-IN', { maximumFractionDigits: 2 })}`;
+}
+
+// ─── Small media-query hook (dark mode + reduced motion) ──────────────────────
+function useMediaQuery(query) {
+  const [matches, setMatches] = React.useState(() => (
+    typeof window !== 'undefined' && window.matchMedia ? window.matchMedia(query).matches : false
+  ));
+  React.useEffect(() => {
+    if (typeof window === 'undefined' || !window.matchMedia) return undefined;
+    const mql = window.matchMedia(query);
+    const handler = (e) => setMatches(e.matches);
+    if (mql.addEventListener) mql.addEventListener('change', handler); else mql.addListener(handler);
+    return () => {
+      if (mql.removeEventListener) mql.removeEventListener('change', handler); else mql.removeListener(handler);
+    };
+  }, [query]);
+  return matches;
+}
 
 // ─── Canonical field accessors (tolerant of live OR persisted names) ─────────
 const F = {
@@ -118,8 +155,9 @@ const TH = {
 };
 const THr = { ...TH, textAlign: 'right' };
 const TD = { fontSize: '12px', padding: '6px 10px', textAlign: 'left', color: '#334155', borderBottom: '1px solid #F1F5F9', whiteSpace: 'nowrap' };
-const TDn = { ...TD, textAlign: 'right', fontFamily: 'monospace' };
-const CHART_TITLE = { fontSize: '11px', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.06em', color: '#64748B', marginBottom: '8px' };
+const TDn = { ...TD, textAlign: 'right', fontFamily: 'monospace', fontVariantNumeric: 'tabular-nums' };
+const CHART_TITLE = { fontSize: '11px', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.06em', color: '#64748B', marginBottom: '2px' };
+const CHART_SUBTITLE = { fontSize: '11px', color: '#94A3B8', marginBottom: '8px' };
 const CHART_MARGIN = { top: 5, right: 10, left: -20, bottom: 0 };
 const AXIS_TICK = { fontSize: 11, fill: '#94A3B8' };
 const GRID = { strokeDasharray: '3 3', stroke: '#F1F5F9' };
@@ -128,7 +166,7 @@ const GRID = { strokeDasharray: '3 3', stroke: '#F1F5F9' };
 function StatCard({ label, value, color = '#0748EE', bg = '#E8EFFE' }) {
   return (
     <div className="stat-card" style={{ padding: '14px 16px', background: bg, border: `1px solid ${color}22` }}>
-      <div style={{ fontFamily: 'Barlow, sans-serif', fontWeight: 900, fontSize: '26px', lineHeight: 1.05, color }}>
+      <div style={{ fontFamily: 'Barlow, sans-serif', fontWeight: 900, fontSize: '26px', lineHeight: 1.05, color, fontVariantNumeric: 'tabular-nums' }}>
         {value}
       </div>
       <div style={{ fontSize: '11px', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', color, marginTop: '4px', opacity: 0.85 }}>
@@ -159,11 +197,14 @@ function ConfPill({ value }) {
   return <Pill text={value || '—'} {...cfg} />;
 }
 
-function ChartCard({ title, children, height = 210 }) {
+function ChartCard({ title, subtitle, children, height = 210 }) {
   return (
-    <div className="glass-card" style={{ padding: '14px 16px' }}>
+    <div className="glass-card" style={{ padding: '14px 16px', minWidth: 0 }}>
       <div style={CHART_TITLE}>{title}</div>
-      <ResponsiveContainer width="100%" height={height}>{children}</ResponsiveContainer>
+      {subtitle && <div style={CHART_SUBTITLE}>{subtitle}</div>}
+      <div style={{ width: '100%', overflowX: 'auto' }}>
+        <ResponsiveContainer width="100%" height={height}>{children}</ResponsiveContainer>
+      </div>
     </div>
   );
 }
@@ -445,6 +486,7 @@ export default function ToolResultDashboard({
   agentType,
   summary = {},
   counts = {},
+  analytics = null,
   rows = [],
   filter,
   setFilter,
@@ -506,7 +548,7 @@ export default function ToolResultDashboard({
   // Dispatch by agent kind ----------------------------------------------------
   let dash;
   if (kind === '2b') dash = <Gst2bDashboard {...{ agentType, summary, safeRows, displayed, capped, dist, filter, setFilter, onDownload: dld, downloading, embedded }} />;
-  else if (kind === 'bankreco') dash = <BankRecoDashboard {...{ summary, counts, safeRows, displayed, capped, filter, setFilter, onDownload: dld, downloading, embedded }} />;
+  else if (kind === 'bankreco') dash = <BankRecoDashboard {...{ summary, counts, analytics, safeRows, displayed, capped, filter, setFilter, onDownload: dld, downloading, embedded }} />;
   else if (kind === 'bank') dash = <BankDashboard {...{ summary, counts, safeRows, displayed, capped, dist, filter, setFilter, onDownload: dld, downloading, isUniversal, editedLedgers, setEditedLedgers, embedded }} />;
   else if (kind === '3b2b') dash = <Gst3b2bDashboard {...{ safeRows, capped, displayed, onDownload: dld, downloading, embedded }} />;
   else if (kind === 'tally') dash = <TallyDashboard {...{ safeRows, capped, displayed, onDownload: dld, downloading, embedded }} />;
@@ -833,7 +875,108 @@ function RecoStatusPill({ status }) {
   return <Pill text={status || '—'} color={c} bg={`${c}14`} border={`${c}55`} />;
 }
 
-function BankRecoDashboard({ summary, counts, safeRows, displayed, capped, filter, setFilter, onDownload, downloading, embedded }) {
+// TRUE bucket total (from `counts` — the whole reconciliation, not the ≤1500-row preview
+// the backend actually returns) for a given reco-status filter value. "Already in Tally"
+// excludes date-updated rows (date_updated is a SUBSET of counts.matched, not additive).
+function bankRecoTrueTotal(filterValue, counts) {
+  const matched = num(counts.matched), dateUpdated = num(counts.date_updated);
+  const partial = num(counts.partial), bankOnly = num(counts.bank_only), tallyOnly = num(counts.tally_only);
+  switch (filterValue) {
+    case 'Already in Tally': return matched - dateUpdated;
+    case 'Date updated': return dateUpdated;
+    case 'Partially matched': return partial;
+    case 'Bank-only — add': return bankOnly;
+    case 'Tally-only — check': return tallyOnly;
+    default: return matched + partial + bankOnly + tallyOnly; // 'All'
+  }
+}
+
+// Muted note shown under the table whenever what's on-screen is fewer rows than the
+// TRUE total for the active filter — replaces the old "first 200 of N" banner, which
+// only ever compared against the already-truncated ≤1500-row preview.
+function TrueTotalNote({ visible, total }) {
+  if (visible >= total) return null;
+  return (
+    <div style={{ fontSize: '12px', color: '#64748B', marginBottom: '8px', padding: '6px 12px', background: '#F8FAFC', border: '1px solid #E2E8F0', borderRadius: '8px', display: 'inline-block' }}>
+      Showing {cnt(visible)} of {cnt(total)} rows — download the Excel for all.
+    </div>
+  );
+}
+
+// ─── Analytics charts (Closing balance, Monthly gap, Top ledgers) ─────────────
+function BankRecoAnalytics({ analytics }) {
+  const isDark = useMediaQuery('(prefers-color-scheme: dark)');
+  const reduceMotion = useMediaQuery('(prefers-reduced-motion: reduce)');
+  const animate = !reduceMotion;
+
+  const tallyColor = isDark ? '#5B9BFF' : '#2563EB';
+  const bankColor = isDark ? '#34C088' : '#12855A';
+  const gapPos = isDark ? '#34C088' : '#12855A';
+  const gapNeg = '#C0392B';
+
+  const monthly = analytics?.monthly || [];
+  const topLedgers = analytics?.top_ledgers || [];
+  if (monthly.length === 0 && topLedgers.length === 0) return null;
+
+  const closingData = monthly.map((m) => ({ month: m.month, Tally: m.tally_closing, Bank: m.bank_closing }));
+  const gapData = monthly.map((m) => ({ month: m.month, diff: m.diff }));
+  const ledgerData = topLedgers.map((t) => ({
+    ledger: t.ledger && t.ledger.length > 24 ? `${t.ledger.slice(0, 23)}…` : t.ledger,
+    fullLedger: t.ledger,
+    amount: t.amount,
+  }));
+
+  return (
+    <div style={{ marginBottom: '20px', fontVariantNumeric: 'tabular-nums' }}>
+      <h3 style={{ fontSize: '13px', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.08em', color: '#64748B', margin: '0 0 12px' }}>
+        Analytics
+      </h3>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: '16px' }}>
+        {closingData.length > 0 && (
+          <ChartCard title="Closing balance — Books vs Bank" subtitle="Month-end Tally closing vs bank statement closing balance" height={240}>
+            <BarChart data={closingData} margin={CHART_MARGIN}>
+              <CartesianGrid {...GRID} vertical={false} />
+              <XAxis dataKey="month" tick={AXIS_TICK} />
+              <YAxis tick={AXIS_TICK} tickFormatter={fmtCompactINR} width={64} />
+              <Tooltip formatter={(v, n) => [fmtFullINR(v), n]} />
+              <Legend wrapperStyle={{ fontSize: 11 }} />
+              <Bar dataKey="Tally" name="Tally" fill={tallyColor} radius={[3, 3, 0, 0]} isAnimationActive={animate} />
+              <Bar dataKey="Bank" name="Bank" fill={bankColor} radius={[3, 3, 0, 0]} isAnimationActive={animate} />
+            </BarChart>
+          </ChartCard>
+        )}
+        {gapData.length > 0 && (
+          <ChartCard title="Monthly gap (Tally − Bank)" subtitle="Where books and bank diverge, by month" height={240}>
+            <BarChart data={gapData} margin={CHART_MARGIN}>
+              <CartesianGrid {...GRID} vertical={false} />
+              <XAxis dataKey="month" tick={AXIS_TICK} />
+              <YAxis tick={AXIS_TICK} tickFormatter={fmtCompactINR} width={64} />
+              <Tooltip formatter={(v) => fmtFullINR(v)} labelFormatter={(l) => `Gap — ${l}`} />
+              <ReferenceLine y={0} stroke="#CBD5E1" />
+              <Bar dataKey="diff" radius={[3, 3, 3, 3]} isAnimationActive={animate}>
+                {gapData.map((d, i) => <Cell key={i} fill={num(d.diff) >= 0 ? gapPos : gapNeg} />)}
+                <LabelList dataKey="diff" position="top" formatter={fmtCompactINR} style={{ fontSize: 10, fill: '#94A3B8' }} />
+              </Bar>
+            </BarChart>
+          </ChartCard>
+        )}
+        {ledgerData.length > 0 && (
+          <ChartCard title="Top ledgers by value" subtitle="Highest bank-side transaction volume by ledger" height={Math.max(220, ledgerData.length * 28)}>
+            <BarChart data={ledgerData} layout="vertical" margin={{ top: 5, right: 28, left: 8, bottom: 0 }}>
+              <CartesianGrid {...GRID} horizontal={false} />
+              <XAxis type="number" tick={AXIS_TICK} tickFormatter={fmtCompactINR} />
+              <YAxis dataKey="ledger" type="category" tick={AXIS_TICK} width={148} />
+              <Tooltip formatter={(v, n, p) => [fmtFullINR(v), p?.payload?.fullLedger || n]} />
+              <Bar dataKey="amount" fill="#0748EE" radius={[0, 3, 3, 0]} isAnimationActive={animate} />
+            </BarChart>
+          </ChartCard>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function BankRecoDashboard({ summary, counts, analytics, safeRows, displayed, capped, filter, setFilter, onDownload, downloading, embedded }) {
   const cards = [
     { label: 'Matched', value: cnt(counts.matched), color: '#059669', bg: '#ECFDF5' },
     { label: 'Date-updated', value: cnt(counts.date_updated), color: '#D97706', bg: '#FFFBEB' },
@@ -842,27 +985,33 @@ function BankRecoDashboard({ summary, counts, safeRows, displayed, capped, filte
     { label: 'Tally-only → check', value: cnt(counts.tally_only), color: '#64748B', bg: '#F1F5F9' },
   ];
 
+  // Chip counts are the TRUE totals from `counts` (the whole reconciliation), NOT the
+  // count of preview rows that happen to be present in `safeRows` — the backend caps
+  // the preview at 1500 rows fairly split across buckets, so e.g. "Date updated" could
+  // show 4 rows in the preview while the true total is 1,062. See bankRecoTrueTotal().
   const chips = useMemo(() => {
     const order = ['Already in Tally', 'Date updated', 'Partially matched', 'Bank-only — add', 'Tally-only — check'];
-    const m = new Map();
-    for (const r of safeRows) {
-      const k = r.reco_status || '—';
-      m.set(k, (m.get(k) || 0) + 1);
-    }
-    const arr = [{ value: 'All', label: 'All', count: safeRows.length, color: '#0748EE' }];
+    const arr = [{ value: 'All', label: 'All', count: bankRecoTrueTotal('All', counts), color: '#0748EE' }];
     for (const name of order) {
-      if (m.has(name)) arr.push({ value: name, label: name, count: m.get(name), color: recoStatusColor(name) });
+      const count = bankRecoTrueTotal(name, counts);
+      if (count > 0) arr.push({ value: name, label: name, count, color: recoStatusColor(name) });
     }
     return arr;
-  }, [safeRows]);
+  }, [counts]);
+
+  const activeFilter = filter || 'All';
+  const trueTotal = bankRecoTrueTotal(activeFilter, counts);
+  const visibleRows = capped.length; // rows actually rendered in the table right now
 
   return (
     <div>
       <KpiHeader cards={cards} onDownload={onDownload} downloading={downloading} />
 
+      <BankRecoAnalytics analytics={analytics} />
+
       {!embedded && <>
       <FilterChips chips={chips} filter={filter} setFilter={setFilter} />
-      <MoreBanner shown={ROW_CAP} total={displayed.length} />
+      <TrueTotalNote visible={visibleRows} total={trueTotal} />
 
       {displayed.length === 0 ? <Empty /> : (
         <TableWrap minWidth="980px">

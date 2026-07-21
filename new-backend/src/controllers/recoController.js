@@ -732,7 +732,8 @@ const runUniversalClassifier = (ledgerPath, bankPath, outputPath, correctionsPat
  * Execute the standalone Bank-vs-Tally Reco python CLI (scripts/bank_reco.py).
  * Mirrors runUniversalClassifier's execFile conventions: python3, no shell, generous
  * timeout/buffer for larger daybooks. The script prints one JSON line to stdout —
- * { counts: {...}, summary: {...}, results: [...] } — after writing the output workbook.
+ * { counts: {...}, summary: {...}, results: [...], analytics: {...} } — after writing
+ * the output workbook.
  */
 const runBankReco = (tallyPath, bankPath, outputPath, brandName) =>
   new Promise((resolve, reject) => {
@@ -1409,6 +1410,7 @@ const runReco = async (req, res) => {
           summary: meta.summary || {},
           counts,
           results: meta.results || [],   // reco-bucket rows for the dashboard table (workbook remains the full deliverable)
+          analytics: meta.analytics || null,  // monthly closing / top ledgers / buckets for the Analytics charts
         });
       } finally {
         // Guaranteed cleanup of sandboxed job folder — runs even if the response threw

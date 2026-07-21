@@ -646,10 +646,12 @@ def _write_query(wb, ctx):
     _autowidth(ws)
 
 
-def _write_closing(wb, ctx):
-    """Sheet 8: Bank vs Tally (Closing) — Tally closing = opening + cumulative(debit-credit)
-    by month; Bank closing = last balance seen in that month; DIFF = Tally - Bank."""
-    ws = _sheet(wb, "Bank vs Tally", ["Month", "As per Tally", "As per Bank", "DIFF"])
+def _closing_series(ctx):
+    """Shared aggregation behind BOTH the 'Bank vs Tally' sheet AND analytics.monthly:
+    Tally closing = opening + cumulative(debit-credit) by month; Bank closing = last
+    balance seen in that month (chronological within the month, not file order).
+    Returns a chronological list of (month_key, tally_closing, bank_closing_or_None).
+    """
     tally_rows = ctx["tally_rows"]
     bank_rows = ctx["bank_rows"]
     opening = ctx.get("opening") or 0.0
@@ -674,19 +676,79 @@ def _write_closing(wb, ctx):
         b_by_month_last[_month_key(b["txn_date"])] = b["balance"]
 
     months = sorted(set(t_by_month.keys()) | set(b_by_month_last.keys()))
+    out = []
     cum = opening
     for mk in months:
         a = t_by_month.get(mk, {"debit": 0.0, "credit": 0.0})
         cum += (a["debit"] - a["credit"])
-        bank_closing = b_by_month_last.get(mk, "")
+        bank_closing = b_by_month_last.get(mk)  # None if no bank txns that month
+        out.append((mk, cum, bank_closing))
+    return out
+
+
+def _write_closing(wb, ctx):
+    """Sheet 8: Bank vs Tally (Closing) — DIFF = Tally - Bank. Values come from
+    `_closing_series`, shared with analytics.monthly so the sheet and the dashboard
+    chart can never disagree."""
+    ws = _sheet(wb, "Bank vs Tally", ["Month", "As per Tally", "As per Bank", "DIFF"])
+    for mk, cum, bank_closing in _closing_series(ctx):
+        bank_val = bank_closing if isinstance(bank_closing, (int, float)) else ""
         diff = (cum - bank_closing) if isinstance(bank_closing, (int, float)) else ""
-        ws.append([mk, cum, bank_closing, diff])
+        ws.append([mk, cum, bank_val, diff])
         rr = ws.max_row
         for c in (2, 3, 4):
             ws.cell(row=rr, column=c).number_format = MONEY
         for c in range(1, 5):
             ws.cell(row=rr, column=c).border = THIN
     _autowidth(ws)
+
+
+def _top_ledgers(ctx, n=10):
+    """Top `n` bank-side ledgers by absolute total amount (sum of debit+credit per
+    `ledger_name`) — same `ctx["bank_rows"]` source the Query/Pivot sheets aggregate,
+    just grouped by ledger alone instead of (ledger, month)."""
+    agg = {}
+    for b in ctx["bank_rows"]:
+        name = (b.get("ledger") or "").strip()
+        if not name:
+            continue
+        agg[name] = agg.get(name, 0.0) + (b["debit"] or 0) + (b["credit"] or 0)
+    top = sorted(agg.items(), key=lambda kv: abs(kv[1]), reverse=True)[:n]
+    return [{"ledger": name, "amount": amount} for name, amount in top]
+
+
+def _build_analytics(result, ctx):
+    """Analytics for the dashboard's charts. Reuses `result["counts"]` (already computed
+    by `reconcile`) and the closing-balance / ledger aggregations shared with the
+    workbook's 'Bank vs Tally (Closing)' sheet — never re-runs the reconciliation itself.
+    """
+    counts = result["counts"]
+    monthly = []
+    for mk, tally_closing, bank_closing in _closing_series(ctx):
+        if isinstance(bank_closing, (int, float)):
+            bc = float(bank_closing)
+            diff = float(tally_closing) - bc
+        else:
+            bc = None
+            diff = None
+        monthly.append({
+            "month": mk,
+            "tally_closing": float(tally_closing),
+            "bank_closing": bc,
+            "diff": diff,
+        })
+    buckets = [
+        {"key": "matched", "label": "Matched", "count": counts["matched"]},
+        {"key": "date_updated", "label": "Date-updated", "count": counts["date_updated"]},
+        {"key": "partial", "label": "Partially matched", "count": counts["partial"]},
+        {"key": "bank_only", "label": "Bank-only", "count": counts["bank_only"]},
+        {"key": "tally_only", "label": "Tally-only", "count": counts["tally_only"]},
+    ]
+    return {
+        "monthly": monthly,
+        "top_ledgers": _top_ledgers(ctx),
+        "buckets": buckets,
+    }
 
 
 def _write_universal(wb, ctx):
@@ -911,9 +973,11 @@ def main():
            "bank_ledger": bank_ledger}
     write_workbook(res, ctx, a.output)
     results = _build_results(res)
+    analytics = _build_analytics(res, ctx)
     print(json.dumps({"counts": res["counts"],
                       "summary": {"brand": a.brand, "total_bank_rows": len(bank), "total_tally_rows": len(tally)},
-                      "results": results}))
+                      "results": results,
+                      "analytics": analytics}))
 
 if __name__ == "__main__":
     main()

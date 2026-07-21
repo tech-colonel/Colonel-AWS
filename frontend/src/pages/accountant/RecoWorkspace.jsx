@@ -2120,6 +2120,7 @@ const RecoWorkspace = ({ agentTypeProp } = {}) => {
                 agentType={agentType}
                 summary={result.summary}
                 counts={result.counts}
+                analytics={result.analytics}
                 rows={dashboardRows}
                 filter={filter}
                 setFilter={setFilter}
