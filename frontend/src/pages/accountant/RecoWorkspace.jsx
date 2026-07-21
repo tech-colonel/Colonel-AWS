@@ -167,6 +167,17 @@ const AGENT_CONFIG = {
       { key: 'srn', label: 'Combined SRN Report (Optional)', hint: '.xlsx / .xls — one or more files', required: false, multiple: true },
     ],
   },
+  bank_tally_reco: {
+    name: 'Bank Reco',
+    slug: 'TALLY ↔ BANK · RECONCILE',
+    icon: Globe,
+    description: 'Reconciles your Tally bank-ledger daybook against the Universal Bank Statement output — matches on amount + party, updates clearing dates, and lists bank-only entries ready to paste.',
+    color: '#0748EE', bg: 'rgba(7,72,238,0.08)', border: 'rgba(7,72,238,0.2)',
+    files: [
+      { key: 'tally_daybook', label: 'Tally Bank Daybook', hint: '.xls / .xlsx — books side', accept: '.xls,.xlsx', required: true },
+      { key: 'bank_output', label: 'Universal Bank Statement Output', hint: '.xlsx — from the Universal Bank tool (auto-loaded via handoff)', accept: '.xlsx', required: false },
+    ],
+  },
 };
 
 const STATUS_CFG = {
@@ -447,6 +458,7 @@ const RecoWorkspace = ({ agentTypeProp } = {}) => {
   const agentType = agentTypeProp || agentTypeParam;
   const navigate = useNavigate();
   const location = useLocation();
+  const sourceJobId = new URLSearchParams(location.search).get('source_job_id');
 
   // Switch the active brand AND keep the URL in sync (URL = source of truth).
   // The 'other' sentinel is a local testing mode (not a real brand route) → no nav.
@@ -685,6 +697,8 @@ const RecoWorkspace = ({ agentTypeProp } = {}) => {
       formData.append('tolerance', tolerance);
       formData.append('brand_id', effectiveBrandId || brandId);
       formData.append('is_demo', isDemo ? 'true' : 'false');
+      if (sourceJobId) formData.append('source_job_id', sourceJobId);
+      if (effectiveBrandName) formData.append('brand_name', effectiveBrandName);
       if (isReceivableCycle) {
         formData.append('month', periodMonth);
         formData.append('year', periodYear);

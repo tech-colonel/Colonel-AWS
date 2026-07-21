@@ -20,6 +20,7 @@ export const RECO_ID_TO_TYPE = {
   '6fcb5c0e-7397-495c-af1e-9b1fe5faa2ad': 'myntra_ticket_finder',
   'ebcc3f8c-3e05-4132-860c-70e63b2380f1': 'zepto_receivables',
   '97702640-9642-4278-b34a-d1af684006ce': 'receivable_cycle',
+  '290c797b-ec07-4caa-984f-45935e5c6b2a': 'bank_tally_reco',
 };
 
 export default function AgentDispatch() {

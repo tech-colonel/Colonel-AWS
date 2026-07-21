@@ -72,6 +72,11 @@ const RECO_AGENT_META = {
     color: '#7C3AED', bg: '#F5F3FF', border: '#C4B5FD', accuracy: null,
     fields: ['Tally GST Report', 'Sales Order Combine', 'Courier COD Settlement', 'SRN Report'],
   },
+  bank_tally_reco: {
+    displayName: 'Bank Reco', icon: '🏦', category: 'Bank & Finance',
+    color: '#0748EE', bg: '#EFF4FF', border: '#A3BFF8', accuracy: null,
+    fields: ['Tally Daybook', 'Universal Bank Output'],
+  },
 };
 
 // Category sections, in display order (mirrors the admin Agents page).
@@ -133,7 +138,7 @@ const channelBrand = (name) => {
 const sectionOf = (agent) => {
   const n = (agent.name || '').toLowerCase();
   if (RECO_AGENT_META[agent.name]) {
-    if (n === 'universal_bank_statement' || n === 'pdf_bank_extract') return 'bank';
+    if (n === 'universal_bank_statement' || n === 'pdf_bank_extract' || n === 'bank_tally_reco') return 'bank';
     if (n === 'amazon_mtr_consolidator') return 'marketplace';
     if (n === 'receivable_cycle') return 'other';
     return 'reco';
