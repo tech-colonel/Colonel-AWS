@@ -19,5 +19,34 @@ def test_neft_slash_payee():
     # NEFT numeric ref must NOT become a key
     assert not any(v == "000368456767" for v in extract_payee_keys(CASES[0][0]).values())
     print("test_neft_slash_payee PASS")
+
+
+def test_imps_from_junk_token_filtering():
+    # IMPS-FROM trailing text that is purely numeric must NOT become neft_name
+    # (it's an account number, not a payee) -- but the phone key must still
+    # be extracted from that same 10-digit number.
+    keys = extract_payee_keys("IMPS 409317366881 FROM 9998887771")
+    assert not keys.get("neft_name"), f"expected no neft_name, got {keys.get('neft_name')!r}"
+    assert keys.get("phone") == "9998887771"
+
+    # IMPS-FROM trailing text with an embedded bank-code+account-number token
+    # (e.g. "UTIB0001234") must have that token dropped, keeping only the name.
+    keys2 = extract_payee_keys("IMPS 409 FROM UTIB0001234 RAJESH KUMAR")
+    assert keys2.get("neft_name") == "rajesh kumar", keys2.get("neft_name")
+
+    print("test_imps_from_junk_token_filtering PASS")
+
+
+def test_slash_neft_single_word_payee_not_dropped():
+    # A legitimate longer single-word payee must NOT be misclassified as a
+    # bank code (old regex ^[A-Z]{4}[A-Z0-9]*$ would have wrongly dropped it).
+    keys = extract_payee_keys("NEFT/000/RAZORPAY")
+    assert keys.get("neft_name") == "razorpay", keys.get("neft_name")
+    print("test_slash_neft_single_word_payee_not_dropped PASS")
+
+
 if __name__ == "__main__":
-    test_neft_slash_payee(); print("ALL PASS")
+    test_neft_slash_payee()
+    test_imps_from_junk_token_filtering()
+    test_slash_neft_single_word_payee_not_dropped()
+    print("ALL PASS")

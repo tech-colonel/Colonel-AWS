@@ -29,11 +29,19 @@ const VPA_RE = /([A-Za-z0-9.\-]+@[A-Za-z]+)/;
 const normKey = (s) => s.toLowerCase().replace(/[^a-z0-9 ]/g, ' ').trim().replace(/\s+/g, ' ');
 
 // FLO slash-format NEFT/RTGS + IMPS-FROM payee extraction (Task 2.5a).
-// Bank code = 4 letters + optional trailing alnum, e.g. UTIB/ICIC/HDFC/BARB.
-const BANKCODE_RE = /^[A-Z]{4}[A-Z0-9]*$/;
+// A "junk token" is dropped from payee candidates: it is pure-numeric or
+// contains any digit (an account number, or a bank-code+digits blob like
+// "UTIB0001234"), or is an exact 4-letter bank/IFSC code (e.g. UTIB, HDFC).
+// Shared by the IMPS-FROM tokenizer and the slash-NEFT/RTGS field filter below.
+// Mirrors _is_junk_token() in classify.py — must stay in sync.
+const BANKCODE_RE = /^[A-Z]{4}$/;
+const isJunkToken = (t) => /\d/.test(t) || BANKCODE_RE.test(t);
 
 // FLO slash format: (NEFT|RTGS)/<ref>/[<BANKCODE>/]<PAYEE>[/<BANK>/<num>].
-// Drop the ref field and any pure-numeric / bank-code tokens; the remaining
+// Drop the ref field, then drop any remaining field that is itself a single
+// junk token (numeric / bank-code) -- multi-word fields are never dropped
+// wholesale, so an alphanumeric abbreviation inside a real payee name (e.g.
+// "P2P" in "NDX P2P PRIVATE LIMITED LENDER") is preserved. The remaining
 // field with the most alphabetic characters is the payee. Never derive a
 // key from the numeric reference itself.
 const slashNeftPayee = (u) => {
@@ -42,17 +50,25 @@ const slashNeftPayee = (u) => {
   let parts = m[1].split('/').map((p) => p.trim()).filter((p) => p);
   if (!parts.length) return null;
   parts = parts.slice(1); // drop the ref field
-  const candidates = parts.filter((p) => !/^\d+$/.test(p) && !BANKCODE_RE.test(p));
+  const candidates = parts.filter((p) => p.includes(' ') || !isJunkToken(p));
   if (!candidates.length) return null;
   const alphaCount = (t) => (t.match(/[A-Za-z]/g) || []).length;
   const best = candidates.reduce((a, b) => (alphaCount(b) > alphaCount(a) ? b : a));
   return normKey(best);
 };
 
-// IMPS <ref> FROM <PAYEE>.
+// IMPS <ref> FROM <PAYEE>: tokenize the trailing text on whitespace, drop
+// junk tokens (numeric / bank-code), and only report a payee if something
+// with an actual letter survives (never an all-numeric key, which would
+// otherwise leak the account number into neft_name).
 const impsFromPayee = (u) => {
   const m = u.match(/\bIMPS\s+\d+\s+FROM\s+(.+)/);
-  return m ? normKey(m[1]) : null;
+  if (!m) return null;
+  const survivors = m[1].split(/\s+/).filter((t) => t && !isJunkToken(t));
+  if (!survivors.length) return null;
+  const joined = survivors.join(' ');
+  if (!/[A-Za-z]/.test(joined)) return null;
+  return normKey(joined);
 };
 
 const extractPayeeKeys = (narration) => {

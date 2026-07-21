@@ -321,13 +321,24 @@ def _norm_key(s) -> str:
 
 
 # FLO slash-format NEFT/RTGS + IMPS-FROM payee extraction (Task 2.5a).
-# Bank code = 4 letters + optional trailing alnum, e.g. UTIB/ICIC/HDFC/BARB.
-_BANKCODE_RE = re.compile(r'^[A-Z]{4}[A-Z0-9]*$')
+# A "junk token" is dropped from payee candidates: it is pure-numeric or
+# contains any digit (an account number, or a bank-code+digits blob like
+# "UTIB0001234"), or is an exact 4-letter bank/IFSC code (e.g. UTIB, HDFC).
+# Shared by the IMPS-FROM tokenizer and the slash-NEFT/RTGS field filter below.
+_BANKCODE_RE = re.compile(r'^[A-Z]{4}$')
+
+
+def _is_junk_token(t: str) -> bool:
+    """Pure-numeric, contains any digit, or an exact 4-letter bank/IFSC code."""
+    return any(c.isdigit() for c in t) or bool(_BANKCODE_RE.match(t))
 
 
 def _slash_neft_payee(u: str):
     """FLO slash format: (NEFT|RTGS)/<ref>/[<BANKCODE>/]<PAYEE>[/<BANK>/<num>].
-    Drop the ref field and any pure-numeric / bank-code tokens; the remaining
+    Drop the ref field, then drop any remaining field that is itself a single
+    junk token (numeric / bank-code) -- multi-word fields are never dropped
+    wholesale, so an alphanumeric abbreviation inside a real payee name (e.g.
+    "P2P" in "NDX P2P PRIVATE LIMITED LENDER") is preserved. The remaining
     field with the most alphabetic characters is the payee. Never derive a
     key from the numeric reference itself."""
     m = re.match(r'^(?:NEFT|RTGS)/(.+)', u)
@@ -337,7 +348,7 @@ def _slash_neft_payee(u: str):
     if not parts:
         return None
     parts = parts[1:]                                 # drop the ref field
-    candidates = [p for p in parts if not p.isdigit() and not _BANKCODE_RE.match(p)]
+    candidates = [p for p in parts if ' ' in p or not _is_junk_token(p)]
     if not candidates:
         return None
     best = max(candidates, key=lambda t: sum(c.isalpha() for c in t))
@@ -345,11 +356,20 @@ def _slash_neft_payee(u: str):
 
 
 def _imps_from_payee(u: str):
-    """IMPS <ref> FROM <PAYEE>."""
+    """IMPS <ref> FROM <PAYEE>: tokenize the trailing text on whitespace,
+    drop junk tokens (numeric / bank-code), and only report a payee if
+    something with an actual letter survives (never an all-numeric key,
+    which would otherwise leak the account number into neft_name)."""
     m = re.search(r'\bIMPS\s+\d+\s+FROM\s+(.+)', u)
-    if m:
-        return _norm_key(m.group(1))
-    return None
+    if not m:
+        return None
+    survivors = [t for t in m.group(1).split() if not _is_junk_token(t)]
+    if not survivors:
+        return None
+    joined = ' '.join(survivors)
+    if not any(c.isalpha() for c in joined):
+        return None
+    return _norm_key(joined)
 
 
 def extract_payee_keys(narration) -> dict:
