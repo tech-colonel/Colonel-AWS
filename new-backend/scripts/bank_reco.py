@@ -79,8 +79,12 @@ def parse_tally(path):
         if "opening balance" in party.lower(): continue
         if debit == 0 and credit == 0: continue
         if not party: continue
+        # Skip footer/totals rows: date is NaT/unparseable AND party has no alphabetic chars
+        parsed_date = pd.to_datetime(date, errors="coerce") if date is not None else None
+        if pd.isna(parsed_date) and not any(c.isalpha() for c in party):
+            continue
         rows.append({
-            "date": pd.to_datetime(date, errors="coerce") if date is not None else None,
+            "date": parsed_date,
             "party": party,
             "narration": narr if narr != "nan" else "",
             "vch_type": (str(r[cm["vch_type"]]).strip() if cm.get("vch_type") is not None and cm["vch_type"] < len(r) else ""),
@@ -102,3 +106,52 @@ def parse_tally_opening(path):
                 v = _num(x)
                 if v > 0: return v
     return None
+
+def _bank_colmap(header_cells):
+    """Map logical fields to column indices by fuzzy header text (Universal Bank output)."""
+    m = {}
+    for idx, c in enumerate(header_cells):
+        cl = str(c).strip().lower().replace(" ", "")
+        if "txndate" in cl or cl == "date": m.setdefault("txn_date", idx)
+        elif "description" in cl or "narration" in cl: m["description"] = idx
+        elif "chq" in cl or "ref" in cl: m["chq_ref"] = idx
+        elif cl == "debit": m["debit"] = idx
+        elif cl == "credit": m["credit"] = idx
+        elif "balance" in cl: m["balance"] = idx
+        elif cl == "type": m["type"] = idx
+        elif "ledgername" in cl or (cl == "ledger"): m["ledger"] = idx
+        elif "confidence" in cl: m["confidence"] = idx
+    return m
+
+def parse_bank_output(path):
+    """Parse Universal Bank output format: sheet 'Bank Statement', headers include 'Description' and 'Ledger'."""
+    sheets = _read_any(path)
+    df = None
+    for name, d in sheets.items():
+        if name.strip().lower() in ("bank statement", "sheet1") or _find_header_row(d, ["description", "ledger"]) is not None:
+            df = d; break
+    if df is None:
+        df = next(iter(sheets.values()))
+    h = _find_header_row(df, ["description"]) or 0
+    cm = _bank_colmap(df.iloc[h].tolist())
+    rows = []
+    for i in range(h + 1, len(df)):
+        r = df.iloc[i].tolist()
+        def g(k):
+            j = cm.get(k)
+            return r[j] if j is not None and j < len(r) else None
+        debit, credit = _num(g("debit")), _num(g("credit"))
+        typ = str(g("type") or "").strip()
+        if debit == 0 and credit == 0 and not str(g("description") or "").strip():
+            continue
+        rows.append({
+            "txn_date": pd.to_datetime(g("txn_date"), dayfirst=True, errors="coerce"),
+            "description": str(g("description") or "").strip(),
+            "chq_ref": str(g("chq_ref") or "").strip(),
+            "debit": debit, "credit": credit, "balance": _num(g("balance")),
+            "type": typ, "ledger": str(g("ledger") or "").strip(),
+            "confidence": str(g("confidence") or "").strip(),
+            "direction": "in" if (credit > 0 or typ.lower() == "receipt") else "out",
+            "row": i,
+        })
+    return rows
