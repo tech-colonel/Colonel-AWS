@@ -61,8 +61,6 @@ def _tally_frame(path):
 def parse_tally(path):
     df, h = _tally_frame(path)
     cm = _colmap(df.iloc[h].tolist())
-    # party lives in the column just right of 'Particulars' label OR the Particulars column itself
-    party_col = cm.get("particulars")
     rows = []
     for i in range(h + 1, len(df)):
         r = df.iloc[i].tolist()
@@ -76,7 +74,11 @@ def parse_tally(path):
         debit = _num(r[cm["debit"]]) if cm.get("debit") is not None else 0.0
         credit = _num(r[cm["credit"]]) if cm.get("credit") is not None else 0.0
         narr = str(r[cm["narration"]]).strip() if cm.get("narration") is not None and cm["narration"] < len(r) else ""
-        if "opening balance" in party.lower(): continue
+        party_l = party.lower()
+        # Skip labeled summary/footer rows (opening/closing balance, grand total) — these are
+        # daybook bookkeeping rows, not transactions, even though they contain alphabetic text.
+        if "opening balance" in party_l or "closing balance" in party_l or "grand total" in party_l:
+            continue
         if debit == 0 and credit == 0: continue
         if not party: continue
         # Skip footer/totals rows: date is NaT/unparseable AND party has no alphabetic chars

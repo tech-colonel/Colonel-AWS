@@ -26,6 +26,15 @@ def test_parse_tally_basic():
     # verify that all parties contain at least one alphabetic character (footer rows excluded)
     for r in rows:
         assert any(c.isalpha() for c in r["party"]), f"party has no alphabetic chars: {r['party']}"
+    # verify no summary/footer label leaked into parsed rows as a fabricated transaction
+    for r in rows:
+        p = r["party"].lower()
+        assert "closing balance" not in p, f"Closing Balance row leaked into parsed output: {r}"
+        assert "opening balance" not in p, f"Opening Balance row leaked into parsed output: {r}"
+        assert "grand total" not in p, f"Grand Total row leaked into parsed output: {r}"
+    # the specific phantom transaction must be gone
+    assert not any(r["party"].strip().lower() == "closing balance" for r in rows), \
+        "phantom 'Closing Balance' transaction present in parsed output"
     print("test_parse_tally_basic PASS")
 
 def test_parse_bank_output():
