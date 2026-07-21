@@ -756,6 +756,123 @@ def write_workbook(result, ctx, output_path):
     wb.save(output_path)
 
 
+def _fair_caps(sizes, total):
+    """Water-filling allocation: split `total` slots across buckets in `sizes`
+    (name -> count) so every non-empty bucket gets a share, redistributing any
+    leftover from buckets smaller than their share to the buckets that still
+    want more. Returns {name: cap}, summing to min(total, sum(sizes.values())).
+    """
+    remaining = dict(sizes)
+    caps = {k: 0 for k in sizes}
+    budget = total
+    active = [k for k, v in sizes.items() if v > 0]
+    while budget > 0 and active:
+        share = max(1, budget // len(active))
+        progressed = False
+        for k in list(active):
+            take = min(share, remaining[k], budget)
+            if take <= 0:
+                continue
+            caps[k] += take
+            remaining[k] -= take
+            budget -= take
+            progressed = True
+            if remaining[k] <= 0:
+                active.remove(k)
+            if budget <= 0:
+                break
+        if not progressed:
+            break
+    return caps
+
+
+def _build_results(result, max_rows=1500):
+    """Flatten all reco buckets into a list of flat row dicts for the UI results table.
+    Capped at `max_rows` total (the UI only shows the first ~200 anyway), fairly
+    split across buckets via `_fair_caps` so a huge "matched" bucket never crowds
+    out partial/bank_only/tally_only rows entirely. Keys: txn_date, description,
+    chq_ref, debit, credit, balance, type, ledger_name, reco_status, tally_party,
+    date_flag -- dates dd-mm-yyyy, money as numbers ("" if blank).
+    """
+    rows = []
+
+    def _money(v):
+        return v if v else ""
+
+    partial = result.get("partial", [])
+    caps = _fair_caps({
+        "matched": len(result["matched"]),
+        "partial": len(partial),
+        "bank_only": len(result["bank_only"]),
+        "tally_only": len(result["tally_only"]),
+    }, max_rows)
+
+    for m in result["matched"][:caps["matched"]]:
+        b = m["bank"]
+        date_changed = m["date_changed"]
+        rows.append({
+            "txn_date": _fmt_date(b["txn_date"]),
+            "description": b["description"],
+            "chq_ref": b["chq_ref"],
+            "debit": _money(b["debit"]),
+            "credit": _money(b["credit"]),
+            "balance": _money(b["balance"]),
+            "type": b["type"],
+            "ledger_name": b["ledger"],
+            "reco_status": "Date updated" if date_changed else "Already in Tally",
+            "tally_party": m["tally"]["party"],
+            "date_flag": ("Date updated → %s" % _fmt_date(m["new_date"])) if date_changed else "OK",
+        })
+
+    for p in partial[:caps["partial"]]:
+        b = p["bank"]
+        rows.append({
+            "txn_date": _fmt_date(b["txn_date"]),
+            "description": b["description"],
+            "chq_ref": b["chq_ref"],
+            "debit": _money(b["debit"]),
+            "credit": _money(b["credit"]),
+            "balance": _money(b["balance"]),
+            "type": b["type"],
+            "ledger_name": b["ledger"],
+            "reco_status": "Partially matched",
+            "tally_party": p["tally"]["party"],
+            "date_flag": "amount+date agree, name differs",
+        })
+
+    for b in result["bank_only"][:caps["bank_only"]]:
+        rows.append({
+            "txn_date": _fmt_date(b["txn_date"]),
+            "description": b["description"],
+            "chq_ref": b["chq_ref"],
+            "debit": _money(b["debit"]),
+            "credit": _money(b["credit"]),
+            "balance": _money(b["balance"]),
+            "type": b["type"],
+            "ledger_name": b["ledger"],
+            "reco_status": "Bank-only — add",
+            "tally_party": "",
+            "date_flag": "",
+        })
+
+    for t in result["tally_only"][:caps["tally_only"]]:
+        rows.append({
+            "txn_date": _fmt_date(t["date"]),
+            "description": t["party"],
+            "chq_ref": "",
+            "debit": _money(t["debit"]),
+            "credit": _money(t["credit"]),
+            "balance": "",
+            "type": "",
+            "ledger_name": t["party"],
+            "reco_status": "Tally-only — check",
+            "tally_party": t["party"],
+            "date_flag": "",
+        })
+
+    return rows
+
+
 import argparse, json, sys
 
 def main():
@@ -793,8 +910,10 @@ def main():
            "opening": opening, "bank_path": a.bank,
            "bank_ledger": bank_ledger}
     write_workbook(res, ctx, a.output)
+    results = _build_results(res)
     print(json.dumps({"counts": res["counts"],
-                      "summary": {"brand": a.brand, "total_bank_rows": len(bank), "total_tally_rows": len(tally)}}))
+                      "summary": {"brand": a.brand, "total_bank_rows": len(bank), "total_tally_rows": len(tally)},
+                      "results": results}))
 
 if __name__ == "__main__":
     main()

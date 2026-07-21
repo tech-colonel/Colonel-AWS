@@ -82,10 +82,11 @@ const GST_2B_AGENTS = new Set([
   'gstr_2b_books', 'gstr_2b_books_multistate', 'gstr_2a_vs_2b_vs_books',
   'gstr_2b_vs_purchase', 'gstr_2a_2b_books', 'einvoice_reco',
 ]);
-const BANK_AGENTS = new Set(['universal_bank_statement', 'bank_reco', 'bank_statement', 'bank_tally_reco']);
+const BANK_AGENTS = new Set(['universal_bank_statement', 'bank_reco', 'bank_statement']);
 
 function classifyAgent(t) {
   if (GST_2B_AGENTS.has(t)) return '2b';
+  if (t === 'bank_tally_reco') return 'bankreco';
   if (BANK_AGENTS.has(t)) return 'bank';
   if (t === 'gstr_3b_vs_2b') return '3b2b';
   if (t === 'gstr_3b_tally_entry') return 'tally';
@@ -492,6 +493,7 @@ export default function ToolResultDashboard({
     if (!filter || filter === 'All') return indexed;
     if (kind === '2b') return indexed.filter((p) => (F.remark1(p.row) || '—') === filter);
     if (kind === 'bank') return indexed.filter((p) => (F.confidence(p.row) || 'Unknown') === filter);
+    if (kind === 'bankreco') return indexed.filter((p) => (p.row.reco_status || '—') === filter);
     return indexed;
   }, [indexed, filter, kind]);
 
@@ -504,6 +506,7 @@ export default function ToolResultDashboard({
   // Dispatch by agent kind ----------------------------------------------------
   let dash;
   if (kind === '2b') dash = <Gst2bDashboard {...{ agentType, summary, safeRows, displayed, capped, dist, filter, setFilter, onDownload: dld, downloading, embedded }} />;
+  else if (kind === 'bankreco') dash = <BankRecoDashboard {...{ summary, counts, safeRows, displayed, capped, filter, setFilter, onDownload: dld, downloading, embedded }} />;
   else if (kind === 'bank') dash = <BankDashboard {...{ summary, counts, safeRows, displayed, capped, dist, filter, setFilter, onDownload: dld, downloading, isUniversal, editedLedgers, setEditedLedgers, embedded }} />;
   else if (kind === '3b2b') dash = <Gst3b2bDashboard {...{ safeRows, capped, displayed, onDownload: dld, downloading, embedded }} />;
   else if (kind === 'tally') dash = <TallyDashboard {...{ safeRows, capped, displayed, onDownload: dld, downloading, embedded }} />;
@@ -805,6 +808,87 @@ function BankDashboard({ summary, counts, safeRows, displayed, capped, dist, fil
                 </tr>
               );
             })}
+          </tbody>
+        </TableWrap>
+      )}
+      </>}
+    </div>
+  );
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+//  BANK-VS-TALLY RECO (dedicated dashboard — real reco buckets, not confidence)
+// ════════════════════════════════════════════════════════════════════════════
+const RECO_STATUS_COLORS = {
+  'Already in Tally': '#059669',
+  'Date updated': '#D97706',
+  'Partially matched': '#EA580C',
+  'Bank-only — add': '#E11D48',
+  'Tally-only — check': '#64748B',
+};
+const recoStatusColor = (name) => RECO_STATUS_COLORS[name] || '#64748B';
+
+function RecoStatusPill({ status }) {
+  const c = recoStatusColor(status);
+  return <Pill text={status || '—'} color={c} bg={`${c}14`} border={`${c}55`} />;
+}
+
+function BankRecoDashboard({ summary, counts, safeRows, displayed, capped, filter, setFilter, onDownload, downloading, embedded }) {
+  const cards = [
+    { label: 'Matched', value: cnt(counts.matched), color: '#059669', bg: '#ECFDF5' },
+    { label: 'Date-updated', value: cnt(counts.date_updated), color: '#D97706', bg: '#FFFBEB' },
+    { label: 'Partially matched', value: cnt(counts.partial), color: '#EA580C', bg: '#FFF1E9' },
+    { label: 'Bank-only → paste', value: cnt(counts.bank_only), color: '#E11D48', bg: '#FEF2F2' },
+    { label: 'Tally-only → check', value: cnt(counts.tally_only), color: '#64748B', bg: '#F1F5F9' },
+  ];
+
+  const chips = useMemo(() => {
+    const order = ['Already in Tally', 'Date updated', 'Partially matched', 'Bank-only — add', 'Tally-only — check'];
+    const m = new Map();
+    for (const r of safeRows) {
+      const k = r.reco_status || '—';
+      m.set(k, (m.get(k) || 0) + 1);
+    }
+    const arr = [{ value: 'All', label: 'All', count: safeRows.length, color: '#0748EE' }];
+    for (const name of order) {
+      if (m.has(name)) arr.push({ value: name, label: name, count: m.get(name), color: recoStatusColor(name) });
+    }
+    return arr;
+  }, [safeRows]);
+
+  return (
+    <div>
+      <KpiHeader cards={cards} onDownload={onDownload} downloading={downloading} />
+
+      {!embedded && <>
+      <FilterChips chips={chips} filter={filter} setFilter={setFilter} />
+      <MoreBanner shown={ROW_CAP} total={displayed.length} />
+
+      {displayed.length === 0 ? <Empty /> : (
+        <TableWrap minWidth="980px">
+          <thead>
+            <tr>
+              <th style={TH}>Txn Date</th>
+              <th style={TH}>Description</th>
+              <th style={THr}>Debit</th>
+              <th style={THr}>Credit</th>
+              <th style={TH}>Ledger Name</th>
+              <th style={TH}>Reco Status</th>
+              <th style={TH}>Tally Party</th>
+            </tr>
+          </thead>
+          <tbody>
+            {capped.map(({ row: r, idx }, i) => (
+              <tr key={idx} style={{ background: altBg(i) }}>
+                <td style={TD}>{r.txn_date || '—'}</td>
+                <td style={{ ...TD, maxWidth: '320px', whiteSpace: 'normal' }}>{r.description || '—'}</td>
+                <td style={TDn}>{money(r.debit)}</td>
+                <td style={TDn}>{money(r.credit)}</td>
+                <td style={TD}>{r.ledger_name || '—'}</td>
+                <td style={TD}><RecoStatusPill status={r.reco_status} /></td>
+                <td style={TD}>{r.tally_party || '—'}</td>
+              </tr>
+            ))}
           </tbody>
         </TableWrap>
       )}
