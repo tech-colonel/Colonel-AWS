@@ -178,12 +178,82 @@ def normalize_party(name):
     s = re.sub(r"\s+", " ", s).strip()
     return s
 
+_PAREN_RE = re.compile(r"\(([^()]*)\)")
+# Markers that, if that's ALL a parenthetical contains, mean it's not a second-company alias —
+# it's a Dr/Cr flag, a location tag, or a pure number (voucher/cheque no. etc). Skip those.
+_PURE_MARKER_RE = re.compile(r"^\s*(dr|cr|cod|delhi|telangana|bangalore|blr|hyd|gurgaon|mumbai|vasai|chennai|kolkata|pune|noida|factory|[0-9,.\s]*)\s*$", re.I)
+
+def _match_keys(name):
+    """
+    Derive the set of normalized keys under which `name` should be found for matching.
+    A bracketed ledger name like "Aurorax Private Limited (BharatX)" is ONE ledger identity —
+    we never split it into two parties. We just derive EXTRA keys (full name, name without the
+    parenthetical, each parenthetical's inner content) so any of those spellings match.
+    """
+    keys = set()
+    full = normalize_party(name)
+    if full:
+        keys.add(full)
+
+    raw = str(name or "")
+    # name with all parentheticals stripped out
+    stripped = normalize_party(_PAREN_RE.sub(" ", raw))
+    if stripped:
+        keys.add(stripped)
+
+    # each parenthetical's inner content, unless it's a pure Dr/Cr/COD/location/numeric marker
+    for inner in _PAREN_RE.findall(raw):
+        if _PURE_MARKER_RE.match(inner.strip()):
+            continue
+        inner_norm = normalize_party(inner)
+        if inner_norm:
+            keys.add(inner_norm)
+
+    # de-spaced variant of every key so far (so "BharatX" and "Bharat X" both -> "bharatx")
+    for k in list(keys):
+        despaced = k.replace(" ", "")
+        if despaced:
+            keys.add(despaced)
+
+    return keys
+
+# Editable alias groups: sets of normalized substrings that denote the SAME ledger identity
+# even though the literal names differ (e.g. a courier/marketplace known by multiple trade names
+# across Tally vs bank narration). Extend this list as new aliases are discovered on real data.
+ALIAS_GROUPS = [
+    {"amazon"},
+    {"e kart", "ekart", "instakart"},
+    {"delhivery"},
+    {"flipkart"},
+    {"snapmint"},
+]
+
+def alias_same(a, b):
+    """True if `a` and `b` both contain a substring from the SAME alias group."""
+    na, nb = normalize_party(a), normalize_party(b)
+    if not na or not nb:
+        return False
+    for group in ALIAS_GROUPS:
+        if any(sub in na for sub in group) and any(sub in nb for sub in group):
+            return True
+    return False
+
 def party_matches(a, b, threshold=85):
     """Check if two party names match within the fuzzy threshold (default 85)."""
     na, nb = normalize_party(a), normalize_party(b)
     if not na or not nb: return False
     if na == nb: return True
-    return fuzz.token_sort_ratio(na, nb) >= threshold
+    if fuzz.token_sort_ratio(na, nb) >= threshold:
+        return True
+    if alias_same(a, b):
+        return True
+    # bracket / de-space match keys: any key of a equals or fuzz-matches any key of b
+    keys_a, keys_b = _match_keys(a), _match_keys(b)
+    for ka in keys_a:
+        for kb in keys_b:
+            if ka == kb or fuzz.token_sort_ratio(ka, kb) >= threshold:
+                return True
+    return False
 
 def _amt_in(trow):
     """Tally money-in magnitude (debit)."""
@@ -208,11 +278,19 @@ def reconcile(tally_rows, bank_rows, amt_tol=0.01):
     """
     Reconcile Tally and bank rows using greedy 1:1 matching.
 
+    Two passes:
+    1. Full match — same direction + amount within amt_tol + party_matches True.
+    2. Partial match (soft "review" tier) — over rows still unmatched after pass 1,
+       greedily pair same direction + amount within amt_tol + same date (date-only)
+       where party_matches is False. These are flagged for human review, not auto-merged.
+       Any rows still unmatched after both passes fall to bank_only/tally_only.
+
     Returns a dict with:
-    - "matched": list of matched pairs with date reconciliation
-    - "bank_only": bank rows with no Tally match
-    - "tally_only": Tally rows with no bank match
-    - "counts": {"matched", "date_updated", "bank_only", "tally_only"}
+    - "matched": list of full-match pairs with date reconciliation
+    - "partial": list of {"bank","tally","reason"} soft-matched pairs (name differs)
+    - "bank_only": bank rows with no match at all
+    - "tally_only": Tally rows with no match at all
+    - "counts": {"matched", "date_updated", "partial", "bank_only", "tally_only"}
     """
     bank_used = [False] * len(bank_rows)
     matched, tally_only = [], []
@@ -250,11 +328,42 @@ def reconcile(tally_rows, bank_rows, amt_tol=0.01):
             "date_changed": changed
         })
 
+    # Partial tier: over the still-unmatched rows, greedily pair same direction + amount +
+    # same date-only where names differ (party_matches False -- if it matched, pass 1 would
+    # have already claimed it). This is a soft "please review" flag, not an auto-merge.
+    partial = []
+    still_unmatched_tally = []
+    for t in tally_only:
+        t_amt = _amt_in(t) if t["direction"] == "in" else _amt_out(t)
+        t_date = _d(t["date"])
+        found = None
+        for j, b in enumerate(bank_rows):
+            if bank_used[j]:
+                continue
+            if b["direction"] != t["direction"]:
+                continue
+            if abs(_bank_amt(b) - t_amt) > amt_tol:
+                continue
+            if t_date is None or _d(b["txn_date"]) != t_date:
+                continue
+            found = j
+            break
+
+        if found is None:
+            still_unmatched_tally.append(t)
+            continue
+
+        bank_used[found] = True
+        b = bank_rows[found]
+        partial.append({"bank": b, "tally": t, "reason": "amount+date agree, name differs"})
+
+    tally_only = still_unmatched_tally
     bank_only = [b for j, b in enumerate(bank_rows) if not bank_used[j]]
     counts = {
         "matched": len(matched),
         "date_updated": sum(1 for m in matched if m["date_changed"]),
+        "partial": len(partial),
         "bank_only": len(bank_only),
         "tally_only": len(tally_only),
     }
-    return {"matched": matched, "bank_only": bank_only, "tally_only": tally_only, "counts": counts}
+    return {"matched": matched, "partial": partial, "bank_only": bank_only, "tally_only": tally_only, "counts": counts}

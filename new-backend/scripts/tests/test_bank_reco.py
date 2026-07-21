@@ -3,6 +3,23 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from bank_reco import parse_tally, parse_tally_opening, parse_bank_output, normalize_party, party_matches, reconcile
 import datetime as dt
 
+def test_bracket_and_alias_matching():
+    assert party_matches("Aurorax Private Limited (BharatX)", "Bharat X")      # bracket + de-space
+    assert party_matches("Aurorax Private Limited (BharatX)", "Aurorax Private Limited")  # one company, name w/o bracket
+    assert party_matches("Instakart Services Pvt. Ltd. - COD", "E Kart COD")   # alias group
+    assert party_matches("Amazon Seller Receipt", "AMAZON_IN")                 # alias group
+    assert not party_matches("Bank Charges", "Worker Salary Payable")          # no over-match
+    print("test_bracket_and_alias_matching PASS")
+
+def test_partial_tier():
+    tally = [{"date": dt.datetime(2024,4,2),"party":"Some Unknown Vendor","narration":"","vch_type":"","vch_no":"V9","debit":0.0,"credit":5000.0,"direction":"out","row":50}]
+    bank  = [{"txn_date": dt.datetime(2024,4,2),"description":"x","chq_ref":"","debit":5000.0,"credit":0.0,"balance":0,"type":"Payment","ledger":"Totally Different Name","confidence":"High","direction":"out","row":9}]
+    r = reconcile(tally, bank)
+    assert r["counts"]["matched"] == 0
+    assert r["counts"]["partial"] == 1, r["counts"]
+    assert r["counts"]["bank_only"] == 0 and r["counts"]["tally_only"] == 0
+    print("test_partial_tier PASS")
+
 TALLY = "/Users/dhavalchauhan/Dhaval/Bank RECO/Bank Statement Apr 24-25 Tally.xls"
 
 def _make_universal_fixture(tmp_path="/tmp/bank_reco_fixture.xlsx"):
@@ -83,4 +100,6 @@ if __name__ == "__main__":
     test_parse_bank_output()
     test_party_normalize_and_match()
     test_reconcile_buckets()
+    test_bracket_and_alias_matching()
+    test_partial_tier()
     print("ALL PASS")
