@@ -311,7 +311,7 @@ def _parse_indusind_bill(text: str) -> str:
 # NEFT-name 100% purity (40/41 agree across months).
 # ---------------------------------------------------------------------------
 DIRECTORY_SECTIONS = ('exact', 'phone', 'vpa', 'neft_name', 'name')
-_PHONE_RE = re.compile(r'(?<!\d)(\d{10})(?!\d)')   # standalone 10-digit (won't slice a 12-digit ref)
+_PHONE_RE = re.compile(r'(?<!\d)([6-9]\d{9})(?!\d)')   # Indian mobile [6-9] prefix (not NEFT refs starting w/ digits)
 _VPA_RE = re.compile(r'([A-Za-z0-9.\-]+@[A-Za-z]+)')
 
 

@@ -24,7 +24,7 @@ const normalizeNarration = (desc) =>
 
 // Extract stable payee identity keys from a bank narration.
 // Mirrors extract_payee_keys() in classify.py — must stay in sync.
-const PHONE_RE = /(?<!\d)(\d{10})(?!\d)/;
+const PHONE_RE = /(?<!\d)([6-9]\d{9})(?!\d)/;
 const VPA_RE = /([A-Za-z0-9.\-]+@[A-Za-z]+)/;
 const normKey = (s) => s.toLowerCase().replace(/[^a-z0-9 ]/g, ' ').trim().replace(/\s+/g, ' ');
 

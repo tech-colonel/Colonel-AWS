@@ -45,8 +45,29 @@ def test_slash_neft_single_word_payee_not_dropped():
     print("test_slash_neft_single_word_payee_not_dropped PASS")
 
 
+def test_neft_ref_not_phone_key():
+    # NEFT reference like 'CMS4059809711' must NOT become a phone key.
+    # The 10-digit tail "4059809711" does not start with [6-9] so it fails the constraint.
+    # Existing tests ensure neft_name is still extracted correctly.
+    keys = extract_payee_keys('NEFT/CMS4059809711/NDX P2P PRIVATE LIMITED  LENDER')
+    assert 'phone' not in keys or keys.get('phone') != '4059809711', \
+        f"NEFT ref should NOT leak as phone key, got {keys.get('phone')!r}"
+    assert keys.get('neft_name') == 'ndx p2p private limited lender', \
+        f"neft_name extraction broken, got {keys.get('neft_name')!r}"
+
+    # But real Indian mobiles starting with [6-9] MUST still work
+    keys2 = extract_payee_keys('IMPS 999 FROM 9876543210 ABC')
+    assert keys2.get('phone') == '9876543210', f"Expected phone 9876543210, got {keys2.get('phone')!r}"
+
+    keys3 = extract_payee_keys('UPI/409/FLOPES/7989617179@YBL')
+    assert keys3.get('phone') == '7989617179', f"Expected phone 7989617179, got {keys3.get('phone')!r}"
+
+    print("test_neft_ref_not_phone_key PASS")
+
+
 if __name__ == "__main__":
     test_neft_slash_payee()
     test_imps_from_junk_token_filtering()
     test_slash_neft_single_word_payee_not_dropped()
+    test_neft_ref_not_phone_key()
     print("ALL PASS")
