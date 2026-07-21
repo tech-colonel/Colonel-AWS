@@ -198,7 +198,12 @@ const getStatusCfg = (status = '') => {
 };
 
 // ── File Dropzone ─────────────────────────────────────────────────────────────
-const FileDropzone = ({ fileConfig, file, onChange, disabled, stepIndex }) => {
+// In-memory result cache — survives the per-agent remount (AgentDispatch keys RecoWorkspace by
+// agentId) within an SPA session, so navigating away and back restores a completed run until
+// Reset. sessionStorage alone is unreliable for large (14k-row) results (~5MB quota). Cleared on Reset.
+const RESULT_MEMO = new Map();
+
+const FileDropzone = ({ fileConfig, file, onChange, disabled, stepIndex, prefilled = false }) => {
   const inputRef = useRef(null);
   const [dragging, setDragging] = useState(false);
   const [hovered, setHovered] = useState(false);
@@ -232,20 +237,20 @@ const FileDropzone = ({ fileConfig, file, onChange, disabled, stepIndex }) => {
         borderRadius: '10px',
         cursor: disabled ? 'not-allowed' : 'pointer',
         opacity: disabled ? 0.5 : 1,
-        background: file
+        background: (file || prefilled)
           ? 'rgba(5,150,105,0.06)'
           : active
           ? 'rgba(7,72,238,0.05)'
           : 'var(--surface)',
         border: `1px solid ${
-          file
+          (file || prefilled)
             ? 'rgba(5,150,105,0.25)'
             : active
             ? 'rgba(7,72,238,0.35)'
             : 'var(--card-border)'
         }`,
         borderLeft: `3px solid ${
-          file ? '#059669' : active ? '#0748EE' : 'transparent'
+          (file || prefilled) ? '#059669' : active ? '#0748EE' : 'transparent'
         }`,
         transition: 'all 0.18s ease',
         overflow: 'hidden',
@@ -255,7 +260,7 @@ const FileDropzone = ({ fileConfig, file, onChange, disabled, stepIndex }) => {
       <span style={{
         position: 'absolute', right: 12, top: '50%', transform: 'translateY(-50%)',
         fontFamily: 'Barlow', fontWeight: 700, fontSize: 40, lineHeight: 1,
-        color: file ? 'rgba(5,150,105,0.1)' : 'rgba(0,0,0,0.04)',
+        color: (file || prefilled) ? 'rgba(5,150,105,0.1)' : 'rgba(0,0,0,0.04)',
         pointerEvents: 'none', userSelect: 'none',
       }}>{stepNum}</span>
 
@@ -281,6 +286,25 @@ const FileDropzone = ({ fileConfig, file, onChange, disabled, stepIndex }) => {
             </p>
             <p className="text-xs font-mono mt-0.5" style={{ color: 'rgba(5,150,105,0.55)' }}>
               {(file.size / 1024).toFixed(1)} KB · READY
+            </p>
+          </div>
+          <CheckCircle2 style={{ width: 16, height: 16, flexShrink: 0, color: '#059669' }} />
+        </div>
+      ) : prefilled ? (
+        <div className="flex items-center gap-3">
+          <div style={{
+            width: 34, height: 34, borderRadius: 8, flexShrink: 0,
+            background: 'rgba(5,150,105,0.12)', display: 'flex',
+            alignItems: 'center', justifyContent: 'center',
+          }}>
+            <CheckCircle2 style={{ width: 16, height: 16, color: '#059669' }} />
+          </div>
+          <div className="flex-1 min-w-0">
+            <p className="text-sm font-semibold truncate" style={{ color: '#059669', fontFamily: 'Barlow' }}>
+              {fileConfig.label}
+            </p>
+            <p className="text-xs font-mono mt-0.5" style={{ color: 'rgba(5,150,105,0.6)' }}>
+              LOADED FROM UNIVERSAL RUN · click to replace
             </p>
           </div>
           <CheckCircle2 style={{ width: 16, height: 16, flexShrink: 0, color: '#059669' }} />
@@ -522,6 +546,8 @@ const RecoWorkspace = ({ agentTypeProp } = {}) => {
   const FLO_BRAND_ID = '099c8de8-5ff8-49eb-81a9-1f89658a6bb8';
   const BANK_RECO_AGENT_ID = '290c797b-ec07-4caa-984f-45935e5c6b2a';
   const isFloBrand = (effectiveBrandId || brandId) === FLO_BRAND_ID;
+  // A handoff (?source_job_id=…) pre-loads the Universal output server-side; show slot 02 as loaded.
+  const handoffLoaded = (key) => key === 'bank_output' && !!sourceJobId && !uploadedFiles[key];
 
   // Cache a slim copy (raw source dicts stripped) so large results stay under
   // sessionStorage's ~5MB quota — otherwise the save throws and Back loses the
@@ -581,10 +607,15 @@ const RecoWorkspace = ({ agentTypeProp } = {}) => {
       if (!urlBrandValid && list.length > 0) setBrandPickerOpen(true);
     }).catch(() => {});
     if (!result) {
-      try {
-        const cached = sessionStorage.getItem(cacheKey);
-        if (cached) setResult(JSON.parse(cached));
-      } catch (_) {}
+      const memo = RESULT_MEMO.get(cacheKey);
+      if (memo) {
+        setResult(memo);
+      } else {
+        try {
+          const cached = sessionStorage.getItem(cacheKey);
+          if (cached) setResult(JSON.parse(cached));
+        } catch (_) {}
+      }
     }
   }, [agentType, brandId, isDemo]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -664,6 +695,7 @@ const RecoWorkspace = ({ agentTypeProp } = {}) => {
         });
         setPhase('done');
         setResult(data);
+        RESULT_MEMO.set(cacheKey, data);
         try { sessionStorage.setItem(cacheKey, JSON.stringify(slimResultForCache(data))); } catch (_) {}
         toast.success(`Reconciliation complete! ${data.results?.length || 0} records processed.`);
       } catch (err) {
@@ -736,6 +768,7 @@ const RecoWorkspace = ({ agentTypeProp } = {}) => {
       setUploadProgress(null);
       setPhase('done');
       setResult(response.data);
+      RESULT_MEMO.set(cacheKey, response.data);
       if (agentType === 'gstr_3b_tally_entry' && uploadedFiles['coa'] && effectiveBrandId && effectiveBrandId !== 'other') {
         checkLedgerMaster(effectiveBrandId);
       }
@@ -832,6 +865,7 @@ const RecoWorkspace = ({ agentTypeProp } = {}) => {
     if (result?.job_id && bId && bId !== 'other' && bId !== 'demo') {
       try { await api.delete(`/api/reco/job/${bId}/${result.job_id}`); } catch (_) {}
     }
+    RESULT_MEMO.delete(cacheKey);
     try { sessionStorage.removeItem(cacheKey); sessionStorage.removeItem(editsKey); } catch (_) {}
     setUploadedFiles({}); setResult(null); setFilter('All'); setEditedLedgers({});
   };
@@ -1521,6 +1555,7 @@ const RecoWorkspace = ({ agentTypeProp } = {}) => {
                         fileConfig={f} file={uploadedFiles[f.key]}
                         onChange={(file) => handleFileChange(f.key, file)}
                         disabled={running} stepIndex={idx}
+                        prefilled={handoffLoaded(f.key)}
                       />
                     )}
                     {f.isDemo && (
@@ -1697,6 +1732,7 @@ const RecoWorkspace = ({ agentTypeProp } = {}) => {
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                   {activeFiles.map(f => {
                     const uploaded = !!uploadedFiles[f.key];
+                    const handoff = handoffLoaded(f.key);
                     return (
                       <div key={f.key} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
                         <span style={{ fontSize: 12, color: 'var(--text-body)', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
@@ -1704,9 +1740,9 @@ const RecoWorkspace = ({ agentTypeProp } = {}) => {
                         </span>
                         <span style={{
                           fontSize: 11, fontWeight: 700, marginLeft: 8, flexShrink: 0, fontFamily: 'monospace',
-                          color: uploaded ? '#059669' : f.required ? '#E11D48' : 'var(--text-muted)',
+                          color: (uploaded || handoff) ? '#059669' : f.required ? '#E11D48' : 'var(--text-muted)',
                         }}>
-                          {uploaded ? '✓ READY' : f.required ? 'REQUIRED' : 'OPTIONAL'}
+                          {uploaded ? '✓ READY' : handoff ? '✓ LOADED' : f.required ? 'REQUIRED' : 'OPTIONAL'}
                         </span>
                       </div>
                     );
