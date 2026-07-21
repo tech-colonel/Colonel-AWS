@@ -519,6 +519,9 @@ const RecoWorkspace = ({ agentTypeProp } = {}) => {
   const effectiveBrandName = brands.find(b => b.id === effectiveBrandId)?.name || null;
   const cacheKey = `reco_result_${agentType}_${effectiveBrandId || brandId}`;
   const editsKey = `reco_edits_${agentType}_${effectiveBrandId || brandId}`;
+  const FLO_BRAND_ID = '099c8de8-5ff8-49eb-81a9-1f89658a6bb8';
+  const BANK_RECO_AGENT_ID = '290c797b-ec07-4caa-984f-45935e5c6b2a';
+  const isFloBrand = (effectiveBrandId || brandId) === FLO_BRAND_ID;
 
   // Cache a slim copy (raw source dicts stripped) so large results stay under
   // sessionStorage's ~5MB quota — otherwise the save throws and Back loses the
@@ -2048,6 +2051,20 @@ const RecoWorkspace = ({ agentTypeProp } = {}) => {
                   View Analytics
                   <ArrowRight style={{ width: 12, height: 12 }} />
                 </button>
+                {agentType === 'universal_bank_statement' && isFloBrand && (
+                  <button
+                    onClick={() => navigate(`/brands/${effectiveBrandId || brandId}/agents/${BANK_RECO_AGENT_ID}?source_job_id=${result?.job_id}`)}
+                    style={{
+                      display: 'flex', alignItems: 'center', gap: 6, padding: '8px 14px',
+                      borderRadius: 8, fontSize: 12, fontWeight: 700,
+                      background: '#0F9D58', color: '#fff', border: 'none', cursor: 'pointer',
+                      fontFamily: 'Barlow',
+                    }}
+                  >
+                    Reconcile with Tally
+                    <ArrowRight style={{ width: 12, height: 12 }} />
+                  </button>
+                )}
               </div>
             </div>
 
