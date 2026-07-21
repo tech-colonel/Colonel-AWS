@@ -1,3 +1,4 @@
+import os
 import re
 from io import BytesIO
 import pandas as pd
@@ -412,3 +413,341 @@ def reconcile(tally_rows, bank_rows, amt_tol=0.01):
         "tally_only": len(tally_only),
     }
     return {"matched": matched, "partial": partial, "bank_only": bank_only, "tally_only": tally_only, "counts": counts}
+
+
+# ---------------------------------------------------------------------------
+# Styled 9-sheet workbook writer + CLI
+# ---------------------------------------------------------------------------
+
+from openpyxl import Workbook, load_workbook
+from openpyxl.styles import PatternFill, Font, Border, Side, Alignment
+from openpyxl.utils import get_column_letter
+
+GREEN  = PatternFill(start_color="C8E6C9", end_color="C8E6C9", fill_type="solid")
+YELLOW = PatternFill(start_color="FFF9C4", end_color="FFF9C4", fill_type="solid")
+ORANGE = PatternFill(start_color="FFE0B2", end_color="FFE0B2", fill_type="solid")   # partial match
+RED    = PatternFill(start_color="FFCDD2", end_color="FFCDD2", fill_type="solid")
+GREY   = PatternFill(start_color="ECEFF1", end_color="ECEFF1", fill_type="solid")
+HEADER = PatternFill(start_color="263238", end_color="263238", fill_type="solid")
+WHITE_BOLD = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
+THIN = Border(*(Side(style='thin', color='CCCCCC'),)*4)
+MONEY = '#,##0.00'
+
+
+def _sheet(wb, title, headers):
+    ws = wb.create_sheet(title)
+    for c, h in enumerate(headers, 1):
+        cell = ws.cell(row=1, column=c, value=h)
+        cell.fill = HEADER; cell.font = WHITE_BOLD; cell.border = THIN
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+    ws.freeze_panes = "A2"
+    return ws
+
+
+def _autowidth(ws):
+    for col in ws.columns:
+        width = max((len(str(c.value)) for c in col if c.value is not None), default=10)
+        ws.column_dimensions[get_column_letter(col[0].column)].width = min(max(width + 2, 10), 48)
+
+
+def _fmt_date(x):
+    """NaT/None-safe dd-mm-yyyy formatter shared by every sheet."""
+    if x is None:
+        return ""
+    try:
+        if pd.isna(x):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    try:
+        return x.strftime("%d-%m-%Y")
+    except Exception:
+        return ""
+
+
+def _month_key(x):
+    """NaT/None-safe YYYY-MM month bucket key."""
+    if x is None:
+        return None
+    try:
+        if pd.isna(x):
+            return None
+    except (TypeError, ValueError):
+        pass
+    try:
+        return x.strftime("%Y-%m")
+    except Exception:
+        return None
+
+
+def _fill_row(ws, row, ncols, fill):
+    for c in range(1, ncols + 1):
+        cell = ws.cell(row=row, column=c)
+        cell.fill = fill
+        cell.border = THIN
+
+
+def _write_summary(wb, result, ctx):
+    """Sheet 1: Summary — two-column key/value."""
+    ws = _sheet(wb, "Summary", ["Field", "Value"])
+    bank_rows = ctx["bank_rows"]
+    dates = [b["txn_date"] for b in bank_rows if _month_key(b["txn_date"]) is not None]
+    period = ("%s to %s" % (_fmt_date(min(dates)), _fmt_date(max(dates)))) if dates else ""
+    total_in = sum(b["credit"] or 0 for b in bank_rows)
+    total_out = sum(b["debit"] or 0 for b in bank_rows)
+    c = result["counts"]
+    reconciled = c["bank_only"] == 0 and c["tally_only"] == 0
+
+    money_fields = {"Total money-in", "Total money-out"}
+    rows = [
+        ("Brand", ctx.get("brand", "")),
+        ("Bank", os.path.basename(ctx.get("bank_path") or "")),
+        ("Period", period),
+        ("Matched", c["matched"]),
+        ("Date-updated", c["date_updated"]),
+        ("Partially matched", c["partial"]),
+        ("Bank-only", c["bank_only"]),
+        ("Tally-only", c["tally_only"]),
+        ("Total money-in", total_in),
+        ("Total money-out", total_out),
+        ("Reconciled?", "Yes" if reconciled else "No"),
+    ]
+    for field, value in rows:
+        ws.append([field, value])
+        rr = ws.max_row
+        if field in money_fields:
+            ws.cell(row=rr, column=2).number_format = MONEY
+        if field == "Reconciled?":
+            _fill_row(ws, rr, 2, GREEN if reconciled else RED)
+        else:
+            ws.cell(row=rr, column=1).border = THIN
+            ws.cell(row=rr, column=2).border = THIN
+    _autowidth(ws)
+
+
+def _write_date_updates(wb, result):
+    """Sheet 3: Date Updates (old -> new) — matched rows where date_changed."""
+    ws = _sheet(wb, "Date Updates", ["Party", "Amount", "Vch No.", "Old Date", "New Date"])
+    for m in result["matched"]:
+        if not m["date_changed"]:
+            continue
+        t = m["tally"]
+        amt = t["debit"] if t["direction"] == "in" else t["credit"]
+        vals = [t["party"], amt, t["vch_no"], _fmt_date(m["old_date"]), _fmt_date(m["new_date"])]
+        ws.append(vals)
+        rr = ws.max_row
+        ws.cell(row=rr, column=2).number_format = MONEY
+        _fill_row(ws, rr, len(vals), YELLOW)
+    _autowidth(ws)
+
+
+def _write_ready_to_paste(wb, result, ctx):
+    """Sheet 4: Add to Tally (Ready-to-Paste) — one row per bank-only row."""
+    ws = _sheet(wb, "Add to Tally", ["Date", "Dr Ledger", "Cr Ledger", "Amount", "Narration"])
+    bank_ledger = ctx.get("bank_ledger") or "Bank Account"
+    for b in result["bank_only"]:
+        amt = b["debit"] if b["direction"] == "out" else b["credit"]
+        ledger = b["ledger"] or "Suspense"
+        if b["direction"] == "out":
+            dr, cr = ledger, bank_ledger
+        else:
+            dr, cr = bank_ledger, ledger
+        vals = [_fmt_date(b["txn_date"]), dr, cr, amt, b["description"]]
+        ws.append(vals)
+        rr = ws.max_row
+        ws.cell(row=rr, column=4).number_format = MONEY
+        _fill_row(ws, rr, len(vals), RED)
+    _autowidth(ws)
+
+
+def _write_tally_only(wb, result):
+    """Sheet 5: Tally-only (Check) — tally rows with no bank match at all."""
+    ws = _sheet(wb, "Tally-only", ["Date", "Party", "Debit", "Credit", "Vch No.", "Remark"])
+    remark = "In Tally, not in bank — check duplicate / wrong-brand entry"
+    for t in result["tally_only"]:
+        vals = [_fmt_date(t["date"]), t["party"], t["debit"] or "", t["credit"] or "", t["vch_no"], remark]
+        ws.append(vals)
+        rr = ws.max_row
+        for c in (3, 4):
+            ws.cell(row=rr, column=c).number_format = MONEY
+        _fill_row(ws, rr, len(vals), GREY)
+    _autowidth(ws)
+
+
+def _write_pivot(wb, ctx):
+    """Sheet 6: Pivot — bank rows grouped by month, summed debit/credit."""
+    ws = _sheet(wb, "Pivot", ["Month", "Withdrawal", "Deposit"])
+    agg = {}
+    for b in ctx["bank_rows"]:
+        mk = _month_key(b["txn_date"])
+        if mk is None:
+            continue
+        a = agg.setdefault(mk, {"debit": 0.0, "credit": 0.0})
+        a["debit"] += b["debit"] or 0
+        a["credit"] += b["credit"] or 0
+    for mk in sorted(agg.keys()):
+        a = agg[mk]
+        ws.append([mk, a["debit"], a["credit"]])
+        rr = ws.max_row
+        ws.cell(row=rr, column=2).number_format = MONEY
+        ws.cell(row=rr, column=3).number_format = MONEY
+        for c in range(1, 4):
+            ws.cell(row=rr, column=c).border = THIN
+    _autowidth(ws)
+
+
+def _write_query(wb, ctx):
+    """Sheet 7: Query — bank rows grouped by (ledger, month), dynamic, no hardcoded vendors."""
+    ws = _sheet(wb, "Query", ["Ledger", "Month", "Debit", "Credit"])
+    agg = {}
+    for b in ctx["bank_rows"]:
+        mk = _month_key(b["txn_date"]) or ""
+        key = (b["ledger"] or "", mk)
+        a = agg.setdefault(key, {"debit": 0.0, "credit": 0.0})
+        a["debit"] += b["debit"] or 0
+        a["credit"] += b["credit"] or 0
+    for key in sorted(agg.keys()):
+        ledger, mk = key
+        a = agg[key]
+        ws.append([ledger, mk, a["debit"], a["credit"]])
+        rr = ws.max_row
+        ws.cell(row=rr, column=3).number_format = MONEY
+        ws.cell(row=rr, column=4).number_format = MONEY
+        for c in range(1, 5):
+            ws.cell(row=rr, column=c).border = THIN
+    _autowidth(ws)
+
+
+def _write_closing(wb, ctx):
+    """Sheet 8: Bank vs Tally (Closing) — Tally closing = opening + cumulative(debit-credit)
+    by month; Bank closing = last balance seen in that month; DIFF = Tally - Bank."""
+    ws = _sheet(wb, "Bank vs Tally", ["Month", "As per Tally", "As per Bank", "DIFF"])
+    tally_rows = ctx["tally_rows"]
+    bank_rows = ctx["bank_rows"]
+    opening = ctx.get("opening") or 0.0
+
+    t_by_month = {}
+    for t in tally_rows:
+        mk = _month_key(t["date"])
+        if mk is None:
+            continue
+        a = t_by_month.setdefault(mk, {"debit": 0.0, "credit": 0.0})
+        a["debit"] += t["debit"] or 0
+        a["credit"] += t["credit"] or 0
+
+    # Last balance seen per month, walking bank rows in chronological (date, row) order so
+    # "last" means last-by-date-in-month, not last-in-file-order.
+    b_by_month_last = {}
+    bank_sorted = sorted(
+        (b for b in bank_rows if _month_key(b["txn_date"]) is not None),
+        key=lambda b: (b["txn_date"], b["row"]),
+    )
+    for b in bank_sorted:
+        b_by_month_last[_month_key(b["txn_date"])] = b["balance"]
+
+    months = sorted(set(t_by_month.keys()) | set(b_by_month_last.keys()))
+    cum = opening
+    for mk in months:
+        a = t_by_month.get(mk, {"debit": 0.0, "credit": 0.0})
+        cum += (a["debit"] - a["credit"])
+        bank_closing = b_by_month_last.get(mk, "")
+        diff = (cum - bank_closing) if isinstance(bank_closing, (int, float)) else ""
+        ws.append([mk, cum, bank_closing, diff])
+        rr = ws.max_row
+        for c in (2, 3, 4):
+            ws.cell(row=rr, column=c).number_format = MONEY
+        for c in range(1, 5):
+            ws.cell(row=rr, column=c).border = THIN
+    _autowidth(ws)
+
+
+def _write_universal(wb, ctx):
+    """Sheet 9: Universal Output — verbatim copy of the raw Universal 'Bank Statement' sheet."""
+    ws = wb.create_sheet("Universal Output")
+    src_wb = load_workbook(ctx["bank_path"], data_only=True)
+    src_ws = None
+    for name in src_wb.sheetnames:
+        if name.strip().lower() == "bank statement":
+            src_ws = src_wb[name]
+            break
+    if src_ws is None:
+        src_ws = src_wb[src_wb.sheetnames[0]]
+    for row in src_ws.iter_rows():
+        ws.append([c.value for c in row])
+    if ws.max_row >= 1:
+        ws.freeze_panes = "A2"
+    _autowidth(ws)
+
+
+def write_workbook(result, ctx, output_path):
+    wb = Workbook(); wb.remove(wb.active)
+    # --- Sheet 2: Reconciliation (main) ---
+    ws = _sheet(wb, "Reconciliation", ["Txn Date","Description","Chq / Ref No.","Debit","Credit",
+        "Balance","Type","Ledger Name","Reco Status","Matched Tally Party","Tally Date","Date Flag"])
+    matched_by_bankrow = {id(m["bank"]): m for m in result["matched"]}
+    partial_by_bankrow = {id(p["bank"]): p for p in result.get("partial", [])}
+    for b in ctx["bank_rows"]:
+        m = matched_by_bankrow.get(id(b))
+        p = partial_by_bankrow.get(id(b))
+        if m:
+            status = "Already in Tally"
+            party = m["tally"]["party"]
+            tdate = _fmt_date(m["old_date"])
+            flag = ("Date updated → %s" % _fmt_date(m["new_date"])) if m["date_changed"] else "OK"
+            fill = YELLOW if m["date_changed"] else GREEN
+        elif p:
+            status = "Partially matched — verify name"
+            party = p["tally"]["party"]
+            tdate = _fmt_date(p["tally"]["date"])
+            flag = "Amount+date agree, name differs"
+            fill = ORANGE
+        else:
+            status, party, tdate, flag, fill = "In bank, not in Tally — add", "", "", "", RED
+        vals = [_fmt_date(b["txn_date"]),
+                b["description"], b["chq_ref"], b["debit"] or "", b["credit"] or "",
+                b["balance"] or "", b["type"], b["ledger"], status, party, tdate, flag]
+        ws.append(vals)
+        rr = ws.max_row
+        for c in (4,5,6):
+            ws.cell(row=rr, column=c).number_format = MONEY
+        for c in range(1, len(vals)+1):
+            ws.cell(row=rr, column=c).fill = fill; ws.cell(row=rr, column=c).border = THIN
+    _autowidth(ws)
+    # --- Sheets 1,3,4,5,6,7,8,9 ---
+    _write_summary(wb, result, ctx)          # sheet 1
+    _write_date_updates(wb, result)          # sheet 3
+    _write_ready_to_paste(wb, result, ctx)   # sheet 4
+    _write_tally_only(wb, result)            # sheet 5
+    _write_pivot(wb, ctx)                    # sheet 6
+    _write_query(wb, ctx)                    # sheet 7
+    _write_closing(wb, ctx)                  # sheet 8
+    _write_universal(wb, ctx)                # sheet 9
+    # reorder tabs to spec order
+    order = ["Summary","Reconciliation","Date Updates","Add to Tally","Tally-only","Pivot","Query","Bank vs Tally","Universal Output"]
+    wb._sheets.sort(key=lambda s: order.index(s.title) if s.title in order else 99)
+    wb.save(output_path)
+
+
+import argparse, json, sys
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--tally", required=True)
+    ap.add_argument("--bank", required=True)
+    ap.add_argument("--coa", default=None)
+    ap.add_argument("--output", required=True)
+    ap.add_argument("--brand", default="Brand")
+    a = ap.parse_args()
+    tally = parse_tally(a.tally)
+    bank = parse_bank_output(a.bank)
+    opening = parse_tally_opening(a.tally)
+    res = reconcile(tally, bank)
+    ctx = {"brand": a.brand, "bank_rows": bank, "tally_rows": tally,
+           "opening": opening, "bank_path": a.bank,
+           "bank_ledger": next((r["party"] for r in tally if "bank" in r["party"].lower()), "Bank Account")}
+    write_workbook(res, ctx, a.output)
+    print(json.dumps({"counts": res["counts"],
+                      "summary": {"brand": a.brand, "total_bank_rows": len(bank), "total_tally_rows": len(tally)}}))
+
+if __name__ == "__main__":
+    main()
