@@ -90,6 +90,14 @@ const RECO_AGENTS = [
     createdAt: new Date(),
     updatedAt: new Date(),
   },
+  {
+    id: '290c797b-ec07-4caa-984f-45935e5c6b2a',
+    name: 'bank_tally_reco',
+    description: 'Bank Reco — reconcile Tally bank-ledger daybook vs Universal Bank Statement output (match, clearing-date update, ready-to-paste)',
+    columns: JSON.stringify([]),
+    createdAt: new Date(),
+    updatedAt: new Date(),
+  },
 ];
 
 module.exports = {
@@ -122,7 +130,8 @@ module.exports = {
         'pdf_bank_extract',
         'zepto_receivables',
         'einvoice_reco',
-        'receivable_cycle'
+        'receivable_cycle',
+        'bank_tally_reco'
       )
       ON CONFLICT DO NOTHING
     `);
