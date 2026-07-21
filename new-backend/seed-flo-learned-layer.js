@@ -19,7 +19,6 @@
 // via masterSequelize (postgres superuser, bypasses RLS), same pattern Task 1's
 // seed-flo-brand.js used for ledger_master.
 
-const path = require('path');
 const XLSX = require('xlsx');
 const { masterSequelize } = require('./src/config/database');
 const { normalizeNarration, extractPayeeKeys } = require('./src/controllers/bankCorrectionsController');
