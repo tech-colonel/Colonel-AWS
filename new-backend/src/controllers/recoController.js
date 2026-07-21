@@ -1285,6 +1285,9 @@ const runReco = async (req, res) => {
         // 2. Bank side: chained from a prior Universal Bank Statement run (source_job_id)
         //    OR a directly uploaded classified bank_output workbook.
         const sourceJobId = req.body.source_job_id;
+        if (sourceJobId && !/^[0-9a-fA-F-]{36}$/.test(sourceJobId)) {
+          return res.status(400).json({ error: 'Invalid source_job_id' });
+        }
         let bankPath;
         if (sourceJobId) {
           const savedOutput = path.join(RECO_OUTPUT_DIR, `${sourceJobId}.xlsx`);
@@ -1301,6 +1304,14 @@ const runReco = async (req, res) => {
           bankPath = path.join(jobDir, `bank_output_${bankFile.originalname}`);
           await fs.promises.writeFile(bankPath, bankFile.buffer);
         }
+
+        // Read the bank bytes into memory NOW (synchronously, inside the try) — the
+        // per-job temp dir (and this file with it) gets deleted by the `finally` block
+        // below as soon as the response is sent. The deferred setImmediate DB-save must
+        // hash these in-memory bytes, never re-read bankPath, or it races the cleanup
+        // and silently fails with ENOENT (mirrors how the universal branch always hashes
+        // in-memory buffers, never a soon-to-be-deleted path).
+        const bankBuf = fs.readFileSync(bankPath);
 
         // 3. Resolve brand name for the workbook header — same DB lookup the universal
         //    branch uses for its brandName (falls back to the raw body field, then generic).
@@ -1346,7 +1357,7 @@ const runReco = async (req, res) => {
               const brand = await Brand.findByPk(brandId);
               if (!brand) return;
               const seq = getBrandConnection(brand.db_name);
-              const fileHash = hashFiles(tallyFile.buffer, await fs.promises.readFile(bankPath));
+              const fileHash = hashFiles(tallyFile.buffer, bankBuf);
               const month = parseInt(req.body.month) || null;
               const year = parseInt(req.body.year) || null;
 
