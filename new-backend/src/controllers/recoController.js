@@ -729,6 +729,30 @@ const runUniversalClassifier = (ledgerPath, bankPath, outputPath, correctionsPat
 };
 
 /**
+ * Execute the standalone Bank-vs-Tally Reco python CLI (scripts/bank_reco.py).
+ * Mirrors runUniversalClassifier's execFile conventions: python3, no shell, generous
+ * timeout/buffer for larger daybooks. The script prints one JSON line to stdout —
+ * { counts: {...}, summary: {...} } — after writing the output workbook.
+ */
+const runBankReco = (tallyPath, bankPath, outputPath, brandName) =>
+  new Promise((resolve, reject) => {
+    const script = path.join(__dirname, '../../scripts/bank_reco.py');
+    const args = ['--tally', tallyPath, '--bank', bankPath, '--output', outputPath, '--brand', brandName || 'Brand'];
+    console.log(`[RECO-BANK-TALLY] Executing standalone bank_reco CLI (brand=${brandName || 'none'}): ${script}`);
+    execFile('python3', [script, ...args], { timeout: 600000, maxBuffer: 64 * 1024 * 1024 },
+      (error, stdout, stderr) => {
+        if (error) {
+          console.error(`[RECO-BANK-TALLY] CLI execution error:`, stderr || error.message);
+          return reject(new Error(`bank_reco.py failed: ${stderr || error.message}`));
+        }
+        let meta = {};
+        try { meta = JSON.parse((stdout || '').trim().split('\n').pop()); } catch (_) { /* leave meta = {} */ }
+        resolve(meta);
+      }
+    );
+  });
+
+/**
  * Build the brand's FULL Chart of Accounts as an Excel buffer for classify.py.
  * Source of truth = the DB-backed `ledger_master` table (populated when an accountant
  * uploads a COA), unioned with accountant-verified `bank_reco_corrections` ledgers.
@@ -1241,6 +1265,128 @@ const runReco = async (req, res) => {
         },
         results: results
       });
+    }
+
+    // --- Bank-vs-Tally Reco: standalone bank_reco.py, chained off a saved Universal output ---
+    if (recoType === 'bank_tally_reco') {
+      const jobId = crypto.randomUUID();
+      const jobDir = path.join(RECO_TEMP_DIR, `job_${jobId}`);
+      await fs.promises.mkdir(jobDir, { recursive: true });
+
+      try {
+        // 1. Tally daybook — required upload
+        const tallyFile = (req.files || []).find(f => f.fieldname === 'tally_daybook');
+        if (!tallyFile) {
+          return res.status(400).json({ error: 'Tally daybook file (tally_daybook) is required' });
+        }
+        const tallyPath = path.join(jobDir, `tally_daybook_${tallyFile.originalname}`);
+        await fs.promises.writeFile(tallyPath, tallyFile.buffer);
+
+        // 2. Bank side: chained from a prior Universal Bank Statement run (source_job_id)
+        //    OR a directly uploaded classified bank_output workbook.
+        const sourceJobId = req.body.source_job_id;
+        let bankPath;
+        if (sourceJobId) {
+          const savedOutput = path.join(RECO_OUTPUT_DIR, `${sourceJobId}.xlsx`);
+          if (!fs.existsSync(savedOutput)) {
+            return res.status(400).json({ error: 'Source Universal Bank Statement output not found for source_job_id' });
+          }
+          bankPath = path.join(jobDir, 'bank_output.xlsx');
+          await fs.promises.copyFile(savedOutput, bankPath);
+        } else {
+          const bankFile = (req.files || []).find(f => f.fieldname === 'bank_output');
+          if (!bankFile) {
+            return res.status(400).json({ error: 'Bank output file (bank_output) or source_job_id is required' });
+          }
+          bankPath = path.join(jobDir, `bank_output_${bankFile.originalname}`);
+          await fs.promises.writeFile(bankPath, bankFile.buffer);
+        }
+
+        // 3. Resolve brand name for the workbook header — same DB lookup the universal
+        //    branch uses for its brandName (falls back to the raw body field, then generic).
+        let brandName = (req.body.brand_name || '').trim();
+        if (!brandName && brandId && brandId !== 'demo' && !isDemo) {
+          try {
+            const { Brand } = require('../models/master');
+            const brand = await Brand.findByPk(brandId);
+            if (brand) brandName = brand.name || '';
+          } catch (brandErr) {
+            console.warn('[RECO-BANK-TALLY] Brand lookup failed (non-fatal):', brandErr.message);
+          }
+        }
+        brandName = brandName || 'Brand';
+
+        // 4. Execute Standalone Bank-vs-Tally Reco Script
+        const outputPath = path.join(jobDir, 'output.xlsx');
+        const meta = await runBankReco(tallyPath, bankPath, outputPath, brandName);
+
+        if (!fs.existsSync(outputPath)) {
+          throw new Error('bank_reco.py failed to generate output spreadsheet.');
+        }
+
+        // 5. Persist Excel File for Direct Download (GET /api/reco/export/:jobId)
+        fs.mkdirSync(RECO_OUTPUT_DIR, { recursive: true });
+        const persistentPath = path.join(RECO_OUTPUT_DIR, `${jobId}.xlsx`);
+        fs.copyFileSync(outputPath, persistentPath);
+
+        const counts = meta.counts || {};
+        const totalRows = ['matched', 'date_updated', 'partial', 'bank_only', 'tally_only']
+          .reduce((sum, k) => sum + (parseInt(counts[k], 10) || 0), 0);
+        const matchedRows = (parseInt(counts.matched, 10) || 0) + (parseInt(counts.date_updated, 10) || 0);
+        const unmatchedRows = totalRows - matchedRows;
+
+        // 6. Persist to Hero DB (fire-and-forget, never blocks download) — mirrors the
+        //    universal branch's saveRecoJob call. No per-row results table exists for this
+        //    agent (the workbook is the deliverable), so only the job summary is saved.
+        if (!isDemo && brandId && brandId !== 'demo') {
+          setImmediate(async () => {
+            try {
+              const { Brand } = require('../models/master');
+              const { getBrandConnection } = require('../config/database');
+              const brand = await Brand.findByPk(brandId);
+              if (!brand) return;
+              const seq = getBrandConnection(brand.db_name);
+              const fileHash = hashFiles(tallyFile.buffer, await fs.promises.readFile(bankPath));
+              const month = parseInt(req.body.month) || null;
+              const year = parseInt(req.body.year) || null;
+
+              const existing = await findExistingJob(seq, brandId, 'bank_tally_reco', month, year, fileHash);
+              if (existing) {
+                if (existing.total_rows > 0) {
+                  await updateOutputFileId(seq, existing.id, jobId);
+                  console.log(`[RECO-DB] Same file re-run — bank_tally_reco output updated`);
+                  return;
+                }
+                await deleteJob(seq, existing.id);
+                console.log(`[RECO-DB] Removed 0-row bank_tally_reco job ${existing.id}, re-saving`);
+              }
+
+              await saveRecoJob(seq, {
+                brandId, agentType: 'bank_tally_reco', month, year, fileHash,
+                outputFileId: jobId,
+                totalRows, matchedRows, unmatchedRows,
+                createdBy: req.user?.id,
+              });
+            } catch (e) {
+              console.error('[RECO-DB] Background save error (bank_tally_reco):', e.message);
+            }
+          });
+        }
+
+        // 7. Return standard format payload to Frontend
+        return res.json({
+          job_id: jobId,
+          summary: meta.summary || {},
+          counts,
+          results: [],   // main deliverable is the workbook; dashboard shows counts + download
+        });
+      } finally {
+        // Guaranteed cleanup of sandboxed job folder — runs even if the response threw
+        fs.rm(jobDir, { recursive: true, force: true }, (err) => {
+          if (err) console.error('[RECO-BANK-TALLY] Cleanup error:', err.message);
+          else console.log(`[RECO-BANK-TALLY] Sandboxed job folder cleaned up: job_${jobId}`);
+        });
+      }
     }
 
     // Map frontend reco_type → Python reco_type
