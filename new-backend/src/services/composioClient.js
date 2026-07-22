@@ -272,6 +272,16 @@ async function getGoogleEmail(userId, force = false) {
 /** Forget a cached email (call after connect/disconnect so labels refresh). */
 function clearGoogleEmail(userId) { _emailCache.delete(userId); }
 
+/** The (Composio-hosted) logo URL for a toolkit slug, from the cached catalog.
+    Lets the UI show the real provider logo instead of a hardcoded icon. */
+async function getToolkitLogo(slug) {
+  try {
+    const list = await listToolkits();
+    const t = list.find((x) => String(x.slug).toLowerCase() === String(slug).toLowerCase());
+    return (t && t.logo) || null;
+  } catch (_) { return null; }
+}
+
 module.exports = {
   isConfigured,
   listToolkits,
@@ -285,4 +295,5 @@ module.exports = {
   hasConnection,
   getGoogleEmail,
   clearGoogleEmail,
+  getToolkitLogo,
 };

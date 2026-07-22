@@ -62,7 +62,8 @@ const listAccounts = async (req, res, next) => {
       }
     } catch (_) { /* none */ }
 
-    res.json({ configured: true, central, personal });
+    const logo = await composio.getToolkitLogo(LOGIN_SLUG);
+    res.json({ configured: true, central, personal, logo });
   } catch (e) { next(e); }
 };
 
