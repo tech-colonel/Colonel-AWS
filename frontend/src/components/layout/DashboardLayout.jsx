@@ -3,6 +3,7 @@ import { useAuth } from '../../context/AuthContext';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { LogOut, Menu, X, ChevronsUpDown, Building2, Check, UserCog } from 'lucide-react';
 import api from '../../lib/api';
+import GoogleAccountMenu from '../GoogleAccountMenu';
 
 const initialsOf = (name = '') =>
   name.trim().split(/\s+/).slice(0, 2).map((p) => p[0]).join('').toUpperCase() || 'U';
@@ -54,6 +55,21 @@ const Sidebar = ({ items, isOpen, setIsOpen }) => {
   // connected Google profile picture.
   const avatarUser = { ...(user || {}), picture: user?.picture || googlePic };
 
+  // After a Google OAuth round-trip the backend redirects back with
+  // ?google_connected=… — surface it briefly, then strip the param so a
+  // refresh doesn't re-trigger it. Non-breaking; no-op when absent.
+  React.useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const params = new URLSearchParams(window.location.search);
+    if (params.has('google_connected')) {
+      try { console.info('Google account connected'); } catch { /* noop */ }
+      params.delete('google_connected');
+      const qs = params.toString();
+      const newUrl = window.location.pathname + (qs ? `?${qs}` : '') + window.location.hash;
+      window.history.replaceState({}, '', newUrl);
+    }
+  }, []);
+
   // Close the popover on outside click.
   React.useEffect(() => {
     const fn = (e) => { if (menuRef.current && !menuRef.current.contains(e.target)) setMenuOpen(false); };
@@ -99,6 +115,9 @@ const Sidebar = ({ items, isOpen, setIsOpen }) => {
               <div style={{ minWidth: 0, textAlign: 'left', flex: 1 }}>
                 <div style={{ fontSize: 14, fontWeight: 700, color: 'var(--text-heading)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{user?.name || 'User'}</div>
                 <div style={{ fontSize: 12, color: 'var(--text-muted)', textTransform: 'capitalize' }}>{user?.role?.replace('_', ' ') || ''}</div>
+                {user?.email && (
+                  <div style={{ fontSize: 11, color: 'var(--text-muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{user.email}</div>
+                )}
               </div>
               <ChevronsUpDown style={{ width: 15, height: 15, color: '#94A3B8', flexShrink: 0 }} />
             </button>
@@ -112,6 +131,8 @@ const Sidebar = ({ items, isOpen, setIsOpen }) => {
                   <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>{user?.email || ''}</div>
                   <div style={{ fontSize: 11, fontWeight: 700, color: '#0748EE', background: '#EFF6FF', display: 'inline-block', padding: '2px 10px', borderRadius: 9999, marginTop: 6, textTransform: 'capitalize' }}>{user?.role?.replace('_', ' ') || 'member'}</div>
                 </div>
+
+                <GoogleAccountMenu user={user} />
 
                 {brands.length > 0 && (
                   <div style={{ padding: '8px 8px', borderBottom: '1px solid var(--card-border)', maxHeight: 200, overflowY: 'auto' }}>
