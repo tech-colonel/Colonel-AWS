@@ -614,13 +614,13 @@ const saveGstr1B2cSummary = async (sequelize, jobId, brandId, b2cRows) => {
  * loop like the other save* helpers use would mean tens of thousands of awaited
  * round-trips for a single job).
  */
-const saveReceivableCycleResults = async (sequelize, jobId, brandId, mainRows, codSheets, mainColumns, codColumns) => {
+const saveReceivableCycleResults = async (sequelize, jobId, brandId, mainRows, codSheets, mainColumns, codColumns, receivableSummary) => {
   const sheets = [['Main Sheet', mainRows || []]];
   for (const [name, rows] of Object.entries(codSheets || {})) {
     if (rows?.length) sheets.push([name, rows]);
   }
   const totalRows = sheets.reduce((n, [, rows]) => n + rows.length, 0);
-  if (totalRows === 0) return;
+  if (totalRows === 0 && !receivableSummary) return;
 
   const CHUNK = 500;
   let saved = 0;
@@ -651,6 +651,15 @@ const saveReceivableCycleResults = async (sequelize, jobId, brandId, mainRows, c
           `INSERT INTO receivable_cycle_results (job_id, brand_id, sheet_name, row_index, row_data)
            VALUES ($1,$2,'__columns__',-1,$3::json)`,
           { bind: [jobId, brandId, JSON.stringify(columnsBySheet)], transaction: t }
+        );
+      }
+      // Receivable Amount card (Delivery/Ekart/Xpressbees/DTDC pending-minus-SRN
+      // breakdown) — stored the same way as the column-order metadata row above.
+      if (receivableSummary) {
+        await sequelize.query(
+          `INSERT INTO receivable_cycle_results (job_id, brand_id, sheet_name, row_index, row_data)
+           VALUES ($1,$2,'__receivable_summary__',-1,$3::json)`,
+          { bind: [jobId, brandId, JSON.stringify(receivableSummary)], transaction: t }
         );
       }
     });
@@ -1252,6 +1261,15 @@ const runReco = async (req, res) => {
     // PDF → Bank Statement: optional password for locked/encrypted PDFs (from the UI field).
     if (req.body.pdf_password) form.append('pdf_password', String(req.body.pdf_password));
 
+    // Receivable Cycle: forward the selected period so the engine's Receivable
+    // Amount calc knows which SRN/return rows fall inside this run's month(s).
+    if (recoType === 'receivable_cycle') {
+      if (req.body.month) form.append('month', String(req.body.month));
+      if (req.body.year) form.append('year', String(req.body.year));
+      if (req.body.period_end_month) form.append('period_end_month', String(req.body.period_end_month));
+      if (req.body.period_end_year) form.append('period_end_year', String(req.body.period_end_year));
+    }
+
     if (!req.files || req.files.length === 0) {
       return res.status(400).json({ error: 'No files uploaded' });
     }
@@ -1380,7 +1398,8 @@ const runReco = async (req, res) => {
             await saveGstr1B2cSummary(seq, savedJobId, brandId, response.data?.b2c_rows);
           } else if (savedJobId && recoType === 'receivable_cycle') {
             await saveReceivableCycleResults(seq, savedJobId, brandId, pyResults,
-              response.data?.cod_sheets, response.data?.main_sheet_columns, response.data?.cod_sheet_columns);
+              response.data?.cod_sheets, response.data?.main_sheet_columns, response.data?.cod_sheet_columns,
+              response.data?.receivable_summary);
           } else {
             console.log(`[RECO-DB] Skipping GST rows: savedJobId=${savedJobId} isGST=${GST_2B_FRONTEND_TYPES.has(recoType)}`);
           }

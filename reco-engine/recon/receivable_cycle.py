@@ -263,28 +263,41 @@ DELIVERY_COLUMNS = (
     + ["Order ID of 24-25 from delhivary setlment report", "Delivery Status from sales order report",
        "Delivery Time from Sales order report", "AWB no in Settlmnt report of Fy 24-25",
        "AWB no in Settlmnt report of Fy 25-26"]
-    + TAIL_COLUMNS + ["Payment Method"]
+    + TAIL_COLUMNS + ["Payment Method", "SRN Status"]
 )
 EKART_COLUMNS = (
     FRONT_COD
     + ["Delivery Status from sales order report", "Delivery Time from Sales order report",
        "Tracking ID from Sales Order report", "Tracking ID in Ekart Sttlmt reports Fy 24-25",
        "Tracking ID in Ekart Sttlmt reports Fy 25-26"]
-    + TAIL_COLUMNS + ["Payment Method"]
+    + TAIL_COLUMNS + ["Payment Method", "SRN Status"]
 )
 XPRESSBEES_COLUMNS = (
     FRONT_COD
     + ["Delivery Status from sales order report", "Delivery Time from Sales order report",
        "Shipping Id ( AWB) in Xpressbees Sttlmt reports of Fy 24-25",
        "Order ID in Xpressbees Sttlmt reports after Mar 25"]
-    + TAIL_COLUMNS + ["Payment Method"]
+    + TAIL_COLUMNS + ["Payment Method", "SRN Status"]
 )
 DTDC_COLUMNS = (
     FRONT_COD
     + ["Delivery Status from sales order report", "Delivery Time from Sales order report"]
-    + TAIL_COLUMNS + ["Payment Method"]
+    + TAIL_COLUMNS + ["Payment Method", "SRN Status"]
 )
 SELF_SHIP_COLUMNS = FRONT_COD + TAIL_COLUMNS + ["Payment Method"]
+
+# Couriers the Receivable Amount calculation covers, and — per courier — the
+# settlement-match columns that mean "not yet settled" when ALL of them are
+# blank on a row. DTDC has no settlement export at all (see module docstring),
+# so every DTDC COD row is unconditionally pending.
+RECEIVABLE_COURIERS = ["Delivery", "Ekart", "Xpressbees", "DTDC"]
+_PENDING_MATCH_COLUMNS = {
+    "Delivery": ["AWB no in Settlmnt report of Fy 24-25", "AWB no in Settlmnt report of Fy 25-26"],
+    "Ekart": ["Tracking ID in Ekart Sttlmt reports Fy 24-25", "Tracking ID in Ekart Sttlmt reports Fy 25-26"],
+    "Xpressbees": ["Shipping Id ( AWB) in Xpressbees Sttlmt reports of Fy 24-25",
+                   "Order ID in Xpressbees Sttlmt reports after Mar 25"],
+    "DTDC": [],
+}
 
 COD_SHEET_ORDER = ["COD main sheet", "Delivery", "Ekart", "Xpressbees", "DTDC", "Self shipping"]
 _SHEET_COLUMNS = {
@@ -413,7 +426,12 @@ _SRN_FY_RE = re.compile(r"(\d{2}-\d{2})")
 
 def parse_srn(datas: list[bytes]) -> dict[tuple[str, str], dict]:
     """Keyed by ("invoice", <original invoice#>) and ("awb", <awb>) so the
-    Main Sheet lookup can try invoice-number first, AWB as a fallback."""
+    Main Sheet lookup can try invoice-number first, AWB as a fallback.
+    Also carries the return's own date + amount (Receivable Amount calc —
+    the SRN/credit-note's own value, not the original order's) — the date
+    aliases mirror the Combined SRN report being itself a Tally-style
+    credit-note register, so "Date" is expected; the others are a defensive
+    fallback in case the export names it differently."""
     out: dict[tuple[str, str], dict] = {}
     for data in datas:
         for row in _rows(_read_table(data)):
@@ -421,7 +439,12 @@ def parse_srn(datas: list[bytes]) -> dict[tuple[str, str], dict]:
             if not srn_number:
                 continue
             fy_match = _SRN_FY_RE.search(srn_number)
-            record = {"srn_number": srn_number, "fy": fy_match.group(1) if fy_match else ""}
+            record = {
+                "srn_number": srn_number,
+                "fy": fy_match.group(1) if fy_match else "",
+                "date": _parse_date(_get(row, "Date", "Return Date", "Credit Note Date", "Invoice Date")),
+                "amount": _to_float(_get(row, "Total")),
+            }
             orig_invoice = _norm_code(_get(row, "Original Invoice No", "Original Invoice No.1"))
             awb = _norm_code(_get(row, "AWB num"))
             if orig_invoice:
@@ -429,6 +452,17 @@ def parse_srn(datas: list[bytes]) -> dict[tuple[str, str], dict]:
             if awb:
                 out.setdefault(("awb", awb), record)
     return out
+
+
+def _in_period(d: _dt.date | None, period: dict | None) -> bool:
+    """True if `d` falls within `period`'s [start_month/year, end_month/year]
+    (inclusive, Receivable Cycle's own selected run period)."""
+    if d is None or not period:
+        return False
+    start = period["start_year"] * 12 + (period["start_month"] - 1)
+    end = period["end_year"] * 12 + (period["end_month"] - 1)
+    v = d.year * 12 + (d.month - 1)
+    return start <= v <= end
 
 
 # --------------------------------------------------------------------------
@@ -510,9 +544,15 @@ def _courier_bucket(shipping_provider_upper: str) -> str:
 
 
 def build_cod_sheets(tally_rows: list[dict], sales_order_idx: dict, delhivery_idx: dict,
-                      ekart_idx: dict, xpressbees_idx: dict) -> tuple[dict[str, list[dict]], dict[str, list[str]]]:
+                      ekart_idx: dict, xpressbees_idx: dict, srn_idx: dict,
+                      period: dict | None = None
+                      ) -> tuple[dict[str, list[dict]], dict[str, list[str]], dict]:
     buckets: dict[str, list[dict]] = {name: [] for name in COD_SHEET_ORDER}
     columns: dict[str, list[str]] = dict(_SHEET_COLUMNS)
+    receivable: dict[str, dict] = {
+        name: {"pending_rows": 0, "pending_amount": 0.0, "srn_rows": 0, "srn_deduction": 0.0}
+        for name in RECEIVABLE_COURIERS
+    }
 
     for row in tally_rows:
         if row["_payment_method"] != "COD":
@@ -534,8 +574,15 @@ def build_cod_sheets(tally_rows: list[dict], sales_order_idx: dict, delhivery_id
         # the workbook's actual column order.
         buckets["COD main sheet"].append({col: base.get(col, "") for col in COD_MAIN_COLUMNS})
 
+        # Same SRN match used by the Main Sheet's "Srn" column (invoice# first,
+        # AWB fallback) — surfaced here as "SRN Status" on the courier sheets.
+        srn_rec = srn_idx.get(("invoice", row["_invoice_key"])) if row["_invoice_key"] else None
+        if srn_rec is None and awb:
+            srn_rec = srn_idx.get(("awb", awb))
+
         bucket = _courier_bucket(row["_shipping_provider"])
         entry = dict(base)
+        entry["SRN Status"] = srn_rec["srn_number"] if srn_rec else ""
         if bucket == "Delivery":
             match = delhivery_idx.get(awb) if awb else None
             entry["Delivery Status from sales order report"] = order_entry.get("status", "")
@@ -574,7 +621,37 @@ def build_cod_sheets(tally_rows: list[dict], sales_order_idx: dict, delhivery_id
         bucket_columns = columns.get(bucket, COD_MAIN_COLUMNS)
         buckets.setdefault(bucket, []).append({col: entry.get(col, "") for col in bucket_columns})
 
-    return buckets, columns
+        # Receivable Amount: for the 4 covered couriers, sum the Total of rows
+        # not yet settled (their FY settlement-match columns are all blank);
+        # if that same still-pending row was ALSO returned (SRN-matched) within
+        # the run's selected period, its SRN amount is deducted — it was never
+        # actually receivable. A row already settled by the courier doesn't
+        # affect this even if later SRN-matched (its remittance is a separate
+        # concern from this pending pool).
+        if bucket in RECEIVABLE_COURIERS:
+            pending_cols = _PENDING_MATCH_COLUMNS[bucket]
+            is_pending = all(not entry.get(c) for c in pending_cols) if pending_cols else True
+            if is_pending:
+                receivable[bucket]["pending_rows"] += 1
+                receivable[bucket]["pending_amount"] += _to_float(entry.get("Total"))
+                if srn_rec and _in_period(srn_rec.get("date"), period):
+                    receivable[bucket]["srn_rows"] += 1
+                    receivable[bucket]["srn_deduction"] += srn_rec.get("amount", 0.0)
+
+    for r in receivable.values():
+        r["receivable_amount"] = round(r["pending_amount"] - r["srn_deduction"], 2)
+        r["pending_amount"] = round(r["pending_amount"], 2)
+        r["srn_deduction"] = round(r["srn_deduction"], 2)
+
+    receivable_summary = {
+        "period": period,
+        "couriers": receivable,
+        "total_pending_amount": round(sum(r["pending_amount"] for r in receivable.values()), 2),
+        "total_srn_deduction": round(sum(r["srn_deduction"] for r in receivable.values()), 2),
+        "total_receivable_amount": round(sum(r["receivable_amount"] for r in receivable.values()), 2),
+    }
+
+    return buckets, columns, receivable_summary
 
 
 # --------------------------------------------------------------------------
@@ -582,9 +659,13 @@ def build_cod_sheets(tally_rows: list[dict], sales_order_idx: dict, delhivery_id
 # --------------------------------------------------------------------------
 
 
-def reconcile_receivable_cycle(files: dict) -> dict:
+def reconcile_receivable_cycle(files: dict, period: dict | None = None) -> dict:
     """`files` keys: tally_gst (bytes, required), sales_order (bytes,
-    required), delhivery/ekart/xpressbees/srn (list[bytes], optional)."""
+    required), delhivery/ekart/xpressbees/srn (list[bytes], optional).
+    `period`: {"start_month","start_year","end_month","end_year"} (all ints)
+    — the run's selected period, used only to decide which SRN/return rows
+    count against the Receivable Amount deduction. None disables the
+    deduction (every courier's receivable_amount == its pending_amount)."""
     tally_rows = parse_tally_gst(files.get("tally_gst") or b"")
     if not tally_rows:
         raise ValueError("Combine Tally GST report has no usable rows (check the file has a "
@@ -598,7 +679,8 @@ def reconcile_receivable_cycle(files: dict) -> dict:
     srn_idx = parse_srn(files.get("srn") or [])
 
     main_sheet = build_main_sheet(tally_rows, sales_order_idx, delhivery_idx, ekart_idx, xpressbees_idx, srn_idx)
-    cod_sheets, cod_columns = build_cod_sheets(tally_rows, sales_order_idx, delhivery_idx, ekart_idx, xpressbees_idx)
+    cod_sheets, cod_columns, receivable_summary = build_cod_sheets(
+        tally_rows, sales_order_idx, delhivery_idx, ekart_idx, xpressbees_idx, srn_idx, period)
 
     summary = {
         "tally_rows": len(tally_rows),
@@ -616,6 +698,7 @@ def reconcile_receivable_cycle(files: dict) -> dict:
         "cod_sheets": cod_sheets,
         "cod_columns": cod_columns,
         "summary": summary,
+        "receivable_summary": receivable_summary,
     }
 
 

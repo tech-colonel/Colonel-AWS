@@ -38,6 +38,7 @@ import RecoWorkspace         from './pages/accountant/RecoWorkspace';
 import RecoMultiStateWorkspace from './pages/accountant/RecoMultiStateWorkspace';
 import PdfBankExtractorWorkspace from './pages/accountant/PdfBankExtractorWorkspace';
 import RecoJobDashboard      from './pages/accountant/RecoJobDashboard';
+import ReceivableDashboard   from './pages/accountant/ReceivableDashboard';
 import ComplianceTracker     from './pages/accountant/ComplianceTracker';
 import StatutoryTracker      from './pages/accountant/StatutoryTracker';
 import StatutoryRedirect     from './pages/accountant/StatutoryRedirect';
@@ -286,6 +287,14 @@ function App() {
             element={
               <ProtectedRoute allowedRoles={['accountant', 'admin']}>
                 <RecoJobDashboard />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/brands/:brandId/receivables"
+            element={
+              <ProtectedRoute allowedRoles={['accountant', 'admin']}>
+                <ReceivableDashboard />
               </ProtectedRoute>
             }
           />
