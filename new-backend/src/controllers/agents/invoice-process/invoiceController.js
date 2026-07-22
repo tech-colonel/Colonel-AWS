@@ -1,7 +1,7 @@
 const { Brand, Agent } = require('../../../models/master');
 const { getBrandConnection } = require('../../../config/database');
 const { getDynamicModel } = require('../../../models/brand');
-const { markProcessing, markDone } = require('../../../utils/invoiceEvents');
+const { markProcessing, markDone, resetRun, getState } = require('../../../utils/invoiceEvents');
 const { setExecution, getExecution, clearExecution } = require('../../../utils/executionStore');
 
 // ─── Helper: parse dates in DD/MM/YYYY or DD-MM-YYYY format ─────────────────
@@ -39,6 +39,18 @@ const processInvoice = async (req, res, next) => {
       return res.status(400).json({
         error: `Webhook URL not configured in .env for brand "${brand.name}". Expected key: ${brand.name.toLowerCase()}_invoice_url`
       });
+    }
+
+    // ─── Concurrency guard ──────────────────────────────────────────────────
+    // Refuse to fire the n8n webhook again while a run is already in flight, so
+    // repeated Process clicks can't spawn multiple overlapping executions. A run
+    // older than 3 min is treated as stale (self-heal) and allowed to re-trigger.
+    const state = getState(brandId, agentId);
+    if (state && state.status === 'processing') {
+      const age = Date.now() - new Date(state.timestamp || 0).getTime();
+      if (age < 3 * 60 * 1000) {
+        return res.status(409).json({ error: 'A run is already in progress. Please wait for it to finish.', busy: true });
+      }
     }
 
     // Signal to SSE clients that processing has started
@@ -207,21 +219,38 @@ const cancelInvoice = async (req, res, next) => {
     const agentId = req.params.agentId;
 
     const execution = getExecution(brandId, agentId);
-    if (!execution) return res.status(404).json({ error: 'No active processing found' });
 
-    // Step 1 — Stop n8n execution
-    try {
-      await fetch(`https://colonel1234.app.n8n.cloud/api/v1/executions/${execution.executionId}/stop`, {
-        method: 'POST',
-        headers: { 'X-N8N-API-KEY': process.env.n8n_api_key }
-      });
-    } catch (err) {
-      console.error('[Cancel] Could not stop n8n execution:', err.message);
-      // Continue to rollback regardless
+    // Step 1 — Find the n8n execution to stop. Prefer the one captured at start;
+    // otherwise look up whatever is running right now.
+    let execId = execution && execution.executionId ? execution.executionId : null;
+    if (!execId) {
+      try {
+        const r = await fetch('https://colonel1234.app.n8n.cloud/api/v1/executions?status=running&limit=1', {
+          headers: { 'X-N8N-API-KEY': process.env.n8n_api_key }
+        });
+        const j = await r.json();
+        execId = (j && j.data && j.data[0] && j.data[0].id) || null;
+      } catch (err) {
+        console.error('[Cancel] Could not look up running execution:', err.message);
+      }
     }
 
-    // Step 2 — Rollback: delete invoice rows saved in this run
-    if (execution.invoiceIds.length > 0) {
+    // Step 2 — Really stop the n8n workflow (best effort)
+    let stopped = false;
+    if (execId) {
+      try {
+        const stopRes = await fetch(`https://colonel1234.app.n8n.cloud/api/v1/executions/${execId}/stop`, {
+          method: 'POST',
+          headers: { 'X-N8N-API-KEY': process.env.n8n_api_key }
+        });
+        stopped = stopRes.ok;
+      } catch (err) {
+        console.error('[Cancel] Could not stop n8n execution:', err.message);
+      }
+    }
+
+    // Step 3 — Rollback: delete invoice rows saved in this run
+    if (execution && execution.invoiceIds && execution.invoiceIds.length > 0) {
       try {
         const brand = await Brand.findByPk(brandId);
         const agent = await Agent.findByPk(agentId);
@@ -234,14 +263,15 @@ const cancelInvoice = async (req, res, next) => {
       }
     }
 
-    // Step 3 — Clear memory + notify SSE
+    // Step 4 — Reset state + notify clients (always, even if nothing was tracked)
     clearExecution(brandId, agentId);
-    markDone(brandId, agentId, 0, 0);
+    resetRun(brandId, agentId);
 
     res.json({
       success: true,
-      message: 'Processing cancelled and invoices rolled back',
-      rolledBack: execution.invoiceIds.length
+      message: 'Processing cancelled',
+      stopped,
+      rolledBack: (execution && execution.invoiceIds) ? execution.invoiceIds.length : 0
     });
 
   } catch (error) {

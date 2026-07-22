@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useParams } from 'react-router-dom';
 import {
-  AlertTriangle, CheckCircle2, ChevronLeft, ChevronRight, Database,
+  AlertTriangle, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, Database,
   ExternalLink, FileText, Loader2, Maximize2, Pencil, Play, RefreshCw,
   Save, Search, Sheet, Sparkles, ThumbsDown, ThumbsUp, Trash2, X, Zap
 } from 'lucide-react';
@@ -44,6 +44,9 @@ const money = (value) => {
 
 const blank = (value) => value === null || value === undefined || String(value).trim() === '';
 const num = (value) => Number(value || 0);
+// Placeholder tokens the extractor writes when a field is empty — treat as missing.
+const NA_TOKENS = new Set(['n/a', 'na', 'n.a.', 'missing', 'none', 'nil', '-', '—', 'null', 'undefined']);
+const missingVal = (value) => blank(value) || NA_TOKENS.has(String(value).trim().toLowerCase());
 
 const FIELD_SECTIONS = [
   {
@@ -123,7 +126,7 @@ const getReviewIssues = (invoice) => {
 
 const getInvoiceStatus = (invoice) => {
   const status = String(invoice?.status || 'Processed').trim();
-  if (getReviewIssues(invoice).length > 0 && !['Approved', 'Disapproved', 'Corrupted'].includes(status)) return 'Needs Review';
+  if (getReviewIssues(invoice).length > 0 && !['Approved', 'Disapproved', 'Corrupted', 'Invalid'].includes(status)) return 'Needs Review';
   return status || 'Processed';
 };
 
@@ -131,8 +134,37 @@ const statusStyle = (status) => {
   if (status === 'Approved') return { background: '#ECFDF5', border: `1px solid #D1FAE5`, color: '#065F46' };
   if (status === 'Disapproved') return { background: '#FEF2F2', border: `1px solid #FEE2E2`, color: '#991B1B' };
   if (status === 'Needs Review') return { background: '#FFFBEB', border: `1px solid #FEF3C7`, color: '#92400E' };
-  if (status === 'Corrupted') return { background: '#FEF2F2', border: `1px solid #FEE2E2`, color: '#991B1B' };
+  if (status === 'Corrupted' || status === 'Invalid') return { background: '#FEF2F2', border: `1px solid #FEE2E2`, color: '#991B1B' };
   return { background: T_BLUE_BG, border: `1px solid #DBEAFE`, color: T_BLUE };
+};
+
+// ─── Invoice row classification (drives card color + filters) ─────────────────
+// invalid → scanned/image PDF that n8n could not process (status "Invalid"/"Corrupted") → RED
+// review  → accountant hasn't set the Tally vendor name + category in the vendor master → YELLOW
+// done    → fully processed, nothing outstanding
+const isInvalidInvoice = (invoice) => {
+  const status = String(invoice?.status || '').trim().toLowerCase();
+  return status === 'invalid' || status === 'corrupted';
+};
+
+const needsAccountantReview = (invoice) => {
+  if (!invoice || isInvalidInvoice(invoice)) return false;
+  // vendor_name_tally isn't stored yet, so this reduces to "category missing" today,
+  // and stays correct if a Tally-vendor column is added later. "N/A"/"Missing"
+  // placeholders count as missing.
+  return missingVal(invoice.vendor_name_tally) && missingVal(invoice.category);
+};
+
+const getRowKind = (invoice) => {
+  if (isInvalidInvoice(invoice)) return 'invalid';
+  if (needsAccountantReview(invoice)) return 'review';
+  return 'done';
+};
+
+const KIND_META = {
+  invalid: { dot: T_DANGER, bg: '#FEF2F2', accent: T_DANGER, label: 'Manual entries required', textColor: '#991B1B' },
+  review: { dot: T_WARNING, bg: '#FFFBEB', accent: T_WARNING, label: 'Needs accountant review', textColor: '#92400E' },
+  done: { dot: T_SUCCESS, bg: '#FFFFFF', accent: 'transparent', label: null, textColor: '#065F46' },
 };
 
 const buildForm = (invoice) => {
@@ -182,20 +214,31 @@ const FieldValue = ({ invoice, field, editing, editForm, onChange }) => {
 };
 
 // ─── Processing Status Banner ─────────────────────────────────────────────────
-const ProcessingBanner = ({ status, count, onDismiss }) => {
+const ProcessingBanner = ({ status, count, done = 0, total = 0, review = 0, invalid = 0, onDismiss }) => {
   if (status === 'idle') return null;
 
   if (status === 'processing') {
+    const hasProgress = total > 0;
+    const pct = hasProgress ? Math.min(100, Math.round((done / total) * 100)) : 0;
     return (
       <div className="invoice-processing-banner invoice-processing-banner--active">
         <div className="invoice-processing-banner__icon-wrap invoice-processing-banner__icon-wrap--spin">
           <Loader2 className="invoice-processing-banner__icon" />
         </div>
-        <div className="invoice-processing-banner__body">
-          <p className="invoice-processing-banner__title">Invoices are being processed</p>
-          <p className="invoice-processing-banner__sub">
-            n8n is extracting and parsing your invoices. This may take a minute for large batches — we'll notify you when done.
+        <div className="invoice-processing-banner__body" style={{ flex: 1 }}>
+          <p className="invoice-processing-banner__title">
+            {hasProgress ? `Saving invoices — ${done} of ${total} done` : 'Invoices are being processed'}
           </p>
+          <p className="invoice-processing-banner__sub">
+            {hasProgress
+              ? `${total} invoice${total !== 1 ? 's' : ''} found. Adding them to your invoice sheet…`
+              : "n8n is extracting and parsing your invoices. This may take a minute for large batches — we'll notify you when done."}
+          </p>
+          {hasProgress && (
+            <div style={{ marginTop: 8, height: 6, borderRadius: 999, background: 'rgba(255,255,255,0.35)', overflow: 'hidden', maxWidth: 420 }}>
+              <div style={{ height: '100%', width: `${pct}%`, borderRadius: 999, background: '#FFFFFF', transition: 'width 0.25s ease' }} />
+            </div>
+          )}
         </div>
         <div className="invoice-processing-banner__pulse" />
       </div>
@@ -208,12 +251,26 @@ const ProcessingBanner = ({ status, count, onDismiss }) => {
         <div className="invoice-processing-banner__icon-wrap invoice-processing-banner__icon-wrap--done">
           <CheckCircle2 className="invoice-processing-banner__icon" />
         </div>
-        <div className="invoice-processing-banner__body">
+        <div className="invoice-processing-banner__body" style={{ flex: 1 }}>
           <p className="invoice-processing-banner__title">
-            Invoices processed successfully!
+            {count === 0
+              ? 'No new invoices to process'
+              : review + invalid > 0
+                ? `Completed — ${count} processed, ${review + invalid} need attention`
+                : `Completed — all ${count} invoice${count !== 1 ? 's' : ''} approved!`}
           </p>
           <p className="invoice-processing-banner__sub">
-            <strong>{count}</strong> invoice{count !== 1 ? 's' : ''} have been saved to the database and the list below has been updated.
+            {count === 0 ? (
+              <>All files in the folder were already processed. Add new invoices to the folder and run again.</>
+            ) : review + invalid > 0 ? (
+              <>
+                ✓ {count - review - invalid} approved
+                {review > 0 ? ` · ⚠ ${review} need review (vendor / category missing)` : ''}
+                {invalid > 0 ? ` · ✕ ${invalid} invalid (manual entry needed)` : ''}. Please review the flagged invoices below.
+              </>
+            ) : (
+              <><strong>{count}</strong> invoice{count !== 1 ? 's' : ''} processed successfully and added to your invoice sheet.</>
+            )}
           </p>
         </div>
         <button className="invoice-processing-banner__close" onClick={onDismiss} aria-label="Dismiss">
@@ -235,8 +292,9 @@ const InvoiceAgentWorkspace = ({ agent }) => {
   const [selectedInvoiceId, setSelectedInvoiceId] = useState(null);
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState('All');
+  const [filterMenuOpen, setFilterMenuOpen] = useState(false);
   const [showSheet, setShowSheet] = useState(false);
-  const [summaryModal, setSummaryModal] = useState({ open: false, total: 0, valid: 0, corrupt: 0 });
+  const [summaryModal, setSummaryModal] = useState({ open: false, total: 0, approved: 0, review: 0, invalid: 0 });
   const [isEditing, setIsEditing] = useState(false);
   const [editForm, setEditForm] = useState({});
   const [isSaving, setIsSaving] = useState(false);
@@ -245,6 +303,7 @@ const InvoiceAgentWorkspace = ({ agent }) => {
   // Live processing status
   const [processingStatus, setProcessingStatus] = useState('idle'); // 'idle' | 'processing' | 'done'
   const [processedCount, setProcessedCount] = useState(0);
+  const [totalToProcess, setTotalToProcess] = useState(0); // N invoices in the current batch (X of N)
 
   const [isProcessing, setIsProcessing] = useState(false);
   const [executionId, setExecutionId] = useState(null);
@@ -252,6 +311,9 @@ const InvoiceAgentWorkspace = ({ agent }) => {
 
   // SSE abort controller ref so we can cancel the stream
   const sseAbortRef = useRef(null);
+  // True only after THIS session clicked Process — lets us ignore a stale
+  // terminal state replayed when the SSE connects on mount.
+  const startedRef = useRef(false);
 
   const fetchInvoices = useCallback(async () => {
     setInvoicesLoading(true);
@@ -308,6 +370,7 @@ const InvoiceAgentWorkspace = ({ agent }) => {
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
         let buffer = '';
+        let firstMsg = true;
 
         while (true) {
           const { done, value } = await reader.read();
@@ -326,39 +389,66 @@ const InvoiceAgentWorkspace = ({ agent }) => {
                   setProcessingStatus('processing');
                   setIsTriggering(true);
                   setIsProcessing(true);
+                  if (payload.total) setTotalToProcess(payload.total);
+                  if (payload.done !== undefined) setProcessedCount(payload.done);
+                } else if (payload.status === 'progress') {
+                  setProcessingStatus('processing');
+                  setIsTriggering(true);
+                  setIsProcessing(true);
+                  setTotalToProcess(payload.total || 0);
+                  setProcessedCount(payload.done || 0);
+                } else if (payload.status === 'cancelled') {
+                  setProcessingStatus('idle');
+                  setIsProcessing(false);
+                  setIsTriggering(false);
+                  setProcessedCount(0);
+                  setTotalToProcess(0);
+                  setProcessingSummary(null);
+                  startedRef.current = false;
                 } else if (payload.status === 'done') {
+                  // Stale terminal state replayed on a fresh (mount) connection with
+                  // nothing in flight for us → stay idle and keep listening.
+                  if (firstMsg && !startedRef.current) {
+                    firstMsg = false;
+                    continue;
+                  }
                   setProcessingStatus('done');
-                  const countVal = payload.processed !== undefined ? payload.processed : (payload.count || 0);
-                  const corruptVal = payload.corrupted || 0;
-                  setProcessedCount(countVal);
+                  const approvedVal = payload.processed || 0;   // fully approved
+                  const reviewVal = payload.review || 0;        // flagged Needs Review
+                  const invalidVal = payload.corrupted || 0;    // invalid / scanned
+                  const totalVal = approvedVal + reviewVal + invalidVal;
+                  const flagged = reviewVal + invalidVal;
+                  setProcessedCount(totalVal);
+                  setTotalToProcess(totalVal);
                   setIsTriggering(false);
 
                   setIsProcessing(false);
                   setExecutionId(null);
-                  setProcessingSummary({
-                    processed: countVal,
-                    corrupted: corruptVal
-                  });
+                  startedRef.current = false;
+                  setProcessingSummary({ approved: approvedVal, review: reviewVal, invalid: invalidVal, total: totalVal });
 
-                  // Show a popup notification
-                  toast.success(`Invoices are processed successfully! (${countVal} processed, ${corruptVal} corrupted)`);
+                  // Notify — warn if anything needs attention
+                  if (totalVal === 0) {
+                    toast.info('No new invoices to process — all files in the folder were already processed.');
+                  } else if (flagged > 0) {
+                    toast.warning(
+                      `Processed ${totalVal} — ${approvedVal} approved` +
+                      `${reviewVal ? `, ${reviewVal} need review` : ''}` +
+                      `${invalidVal ? `, ${invalidVal} invalid` : ''}. Please review the flagged invoices.`
+                    );
+                  } else {
+                    toast.success(`Completed! All ${approvedVal} invoice${approvedVal !== 1 ? 's' : ''} approved.`);
+                  }
 
-                  // Refresh invoice list
-                  const updatedInvoices = await fetchInvoices();
-
-                  // Open summary modal
-                  const corruptCount = updatedInvoices.filter((inv) => getReviewIssues(inv).length > 0 || inv.status === 'Corrupted').length;
-                  setSummaryModal({
-                    open: true,
-                    total: countVal + corruptVal || updatedInvoices.length,
-                    valid: countVal || (updatedInvoices.length - corruptCount),
-                    corrupt: corruptVal || corruptCount,
-                  });
+                  // Refresh invoice list (the summary modal is opened by an effect
+                  // watching processingStatus/processingSummary — robust to StrictMode).
+                  await fetchInvoices();
 
                   // Close SSE — we got what we needed
                   abortController.abort();
                   break;
                 }
+                firstMsg = false;
               } catch (_) { /* ignore parse errors */ }
             }
           }
@@ -371,12 +461,26 @@ const InvoiceAgentWorkspace = ({ agent }) => {
     })();
   }, [brandId, agentId, fetchInvoices]);
 
-  // Cleanup SSE on unmount
+  // Connect the live-status stream on mount so progress is visible even if the
+  // page is opened/refreshed while a run is in flight; clean up on unmount.
   useEffect(() => {
+    startSseConnection();
     return () => {
       if (sseAbortRef.current) sseAbortRef.current.abort();
     };
-  }, []);
+  }, [startSseConnection]);
+
+  // NOTE: we intentionally do NOT auto-open the summary modal — the top completion
+  // banner already shows the full breakdown ("Completed — X processed · …"), which
+  // is the non-intrusive "summary at the end" the workflow calls for.
+
+  // Auto-dismiss the completion banner so a finished run's summary doesn't linger as
+  // stale "previous output" on the next visit/run.
+  useEffect(() => {
+    if (processingStatus !== 'done') return;
+    const t = setTimeout(() => setProcessingStatus('idle'), 15000);
+    return () => clearTimeout(t);
+  }, [processingStatus]);
 
   const selectedInvoice = useMemo(
     () => invoices.find((invoice) => invoice.id === selectedInvoiceId) || null,
@@ -399,13 +503,14 @@ const InvoiceAgentWorkspace = ({ agent }) => {
   }, [selectedInvoiceId, selectedInvoice]);
 
   const metrics = useMemo(() => {
-    const totals = { total: invoices.length, pending: 0, approved: 0, disapproved: 0, needsReview: 0 };
+    // Disjoint 3-bucket model (+ rejected): approved + review + invalid + rejected = total.
+    const totals = { total: invoices.length, approved: 0, review: 0, invalid: 0, rejected: 0 };
     invoices.forEach((invoice) => {
-      const status = getInvoiceStatus(invoice);
-      if (status === 'Approved') totals.approved += 1;
-      else if (status === 'Disapproved') totals.disapproved += 1;
-      else totals.pending += 1;
-      if (getReviewIssues(invoice).length > 0) totals.needsReview += 1;
+      const kind = getRowKind(invoice);
+      if (kind === 'invalid') totals.invalid += 1;
+      else if (kind === 'review') totals.review += 1;
+      else if (getInvoiceStatus(invoice) === 'Disapproved') totals.rejected += 1;
+      else totals.approved += 1; // fully done / approved (excludes rejected)
     });
     return totals;
   }, [invoices]);
@@ -413,12 +518,12 @@ const InvoiceAgentWorkspace = ({ agent }) => {
   const filteredInvoices = useMemo(() => {
     const needle = search.trim().toLowerCase();
     return invoices.filter((invoice) => {
-      const status = getInvoiceStatus(invoice);
+      const kind = getRowKind(invoice);
       const matchesStatus =
         statusFilter === 'All' ||
-        (statusFilter === 'Needs Review' && getReviewIssues(invoice).length > 0) ||
-        (statusFilter === 'Pending' && !['Approved', 'Disapproved'].includes(status)) ||
-        status === statusFilter;
+        (statusFilter === 'Done' && kind === 'done' && getInvoiceStatus(invoice) !== 'Disapproved') ||
+        (statusFilter === 'Needs Review' && kind === 'review') ||
+        (statusFilter === 'Invalid' && kind === 'invalid');
       const haystack = [
         invoice.company,
         invoice.invoice_number,
@@ -435,11 +540,13 @@ const InvoiceAgentWorkspace = ({ agent }) => {
   const reviewIssues = getReviewIssues(selectedInvoice);
 
   const handleProcessInvoices = async () => {
+    startedRef.current = true;
     setIsTriggering(true);
     setIsProcessing(true);
     setProcessingSummary(null);
     setProcessingStatus('processing');
     setProcessedCount(0);
+    setTotalToProcess(0);
 
     // Start listening for SSE updates first
     startSseConnection();
@@ -454,6 +561,11 @@ const InvoiceAgentWorkspace = ({ agent }) => {
         setExecutionId(res.data.executionId);
       }
     } catch (error) {
+      // A run is already in progress — don't spawn another; keep watching the live one.
+      if (error.response?.status === 409) {
+        toast.warning(error.response.data?.error || 'A run is already in progress. Please wait for it to finish.');
+        return;
+      }
       setIsTriggering(false);
       setIsProcessing(false);
       setProcessingStatus('idle');
@@ -543,15 +655,14 @@ const InvoiceAgentWorkspace = ({ agent }) => {
 
   const statusTabs = [
     { label: 'All', count: metrics.total },
-    { label: 'Pending', count: metrics.pending },
-    { label: 'Needs Review', count: metrics.needsReview },
-    { label: 'Approved', count: metrics.approved },
-    { label: 'Disapproved', count: metrics.disapproved },
+    { label: 'Done', count: metrics.approved },
+    { label: 'Needs Review', count: metrics.review },
+    { label: 'Invalid', count: metrics.invalid },
   ];
 
   return (
     <div className="max-w-[1600px] space-y-6 animate-in fade-in duration-500">
-      <ProcessingBanner status={processingStatus} count={processedCount} onDismiss={dismissBanner} />
+      <ProcessingBanner status={processingStatus} count={processedCount} done={processedCount} total={totalToProcess} review={processingSummary?.review || 0} invalid={processingSummary?.invalid || 0} onDismiss={dismissBanner} />
 
       <div className="rounded-xl border bg-white shadow-[0_1px_3px_0_rgba(0,0,0,0.05)] overflow-hidden" style={{ borderColor: T_BORDER }}>
         <div className="px-6 py-5 flex flex-col xl:flex-row xl:items-center xl:justify-between gap-4">
@@ -594,12 +705,12 @@ const InvoiceAgentWorkspace = ({ agent }) => {
               </button>
               <button
                 onClick={handleProcessInvoices}
-                disabled={isProcessing}
+                disabled={isProcessing || processingStatus === 'processing'}
                 className="process-btn inline-flex items-center gap-2 rounded-lg px-5 py-2 text-sm font-bold text-white transition-all disabled:opacity-60 hover:brightness-110 active:scale-95"
                 style={{ background: T_BLUE, boxShadow: '0 4px 12px rgba(37,99,235,0.2)' }}
                 data-testid="process-invoices-button"
               >
-                {isProcessing ? (
+                {(isProcessing || processingStatus === 'processing') ? (
                   <>
                     <span className="spinner" /> Processing...
                   </>
@@ -608,31 +719,25 @@ const InvoiceAgentWorkspace = ({ agent }) => {
                 )}
               </button>
               {isProcessing && (
-                <button onClick={handleCancel} className="cancel-btn inline-flex items-center gap-2 font-bold transition-all hover:brightness-110 active:scale-95">
+                <button
+                  onClick={handleCancel}
+                  className="inline-flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-bold text-white transition-all hover:brightness-110 active:scale-95"
+                  style={{ background: T_DANGER, boxShadow: '0 4px 12px rgba(239,68,68,0.25)' }}
+                >
                   ✕ Cancel
                 </button>
               )}
             </div>
-            {processingSummary && (
-              <div className="summary-banner">
-                ✅ {processingSummary.processed} invoices processed
-                {processingSummary.corrupted > 0 && (
-                  <span className="corrupted-count">
-                    &nbsp;· ⚠️ {processingSummary.corrupted} corrupted
-                  </span>
-                )}
-              </div>
-            )}
           </div>
         </div>
 
         <div className="grid grid-cols-2 md:grid-cols-5 border-t" style={{ borderColor: T_BORDER }}>
           {[
             { label: 'Total Records', value: metrics.total, color: T_TEXT_PRIMARY },
-            { label: 'Pending', value: metrics.pending, color: T_BLUE },
-            { label: 'Verified', value: metrics.approved, color: T_SUCCESS },
-            { label: 'Rejected', value: metrics.disapproved, color: T_DANGER },
-            { label: 'Issues Found', value: metrics.needsReview, color: T_WARNING },
+            { label: 'Approved', value: metrics.approved, color: T_SUCCESS },
+            { label: 'Needs Review', value: metrics.review, color: T_WARNING },
+            { label: 'Invalid', value: metrics.invalid, color: T_DANGER },
+            { label: 'Rejected', value: metrics.rejected, color: T_TEXT_SECONDARY },
           ].map((item) => (
             <div key={item.label} className="px-6 py-4 border-r last:border-r-0" style={{ borderColor: T_BORDER }}>
               <div className="text-xl font-bold" style={{ color: item.color, fontFamily: 'Space Grotesk' }}>{item.value}</div>
@@ -658,16 +763,18 @@ const InvoiceAgentWorkspace = ({ agent }) => {
           <div className="flex flex-wrap gap-1.5">
             {statusTabs.map((tab) => {
               const active = statusFilter === tab.label;
+              const dot = tab.label === 'Needs Review' ? T_WARNING : tab.label === 'Invalid' ? T_DANGER : tab.label === 'Done' ? T_SUCCESS : null;
               return (
                 <button
                   key={tab.label}
                   onClick={() => setStatusFilter(tab.label)}
-                  className="rounded-lg px-3 py-1.5 text-xs font-semibold transition-all"
+                  className="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold transition-all"
                   style={{
                     background: active ? T_BLUE : 'transparent',
                     color: active ? '#FFFFFF' : T_TEXT_SECONDARY,
                   }}
                 >
+                  {dot && <span className="w-2 h-2 rounded-full shrink-0" style={{ background: active ? '#FFFFFF' : dot }} />}
                   {tab.label} <span className="opacity-60 ml-0.5">{tab.count}</span>
                 </button>
               );
@@ -679,9 +786,40 @@ const InvoiceAgentWorkspace = ({ agent }) => {
       <div className="grid grid-cols-1 xl:grid-cols-[340px_minmax(0,1fr)] gap-6 items-start">
         <div className="rounded-xl border bg-white shadow-sm overflow-hidden" style={{ borderColor: T_BORDER }}>
           <div className="px-4 py-3 border-b flex items-center justify-between bg-slate-50/50" style={{ borderColor: T_BORDER }}>
-            <div className="flex items-center gap-2">
-              <Database className="w-3.5 h-3.5" style={{ color: T_BLUE }} />
-              <span className="text-xs font-bold uppercase tracking-wider" style={{ color: T_TEXT_PRIMARY }}>Queue</span>
+            <div className="relative">
+              <button
+                onClick={() => setFilterMenuOpen((o) => !o)}
+                className="flex items-center gap-1.5 rounded-md px-1.5 py-0.5 -ml-1 hover:bg-slate-100 transition-colors"
+              >
+                <Database className="w-3.5 h-3.5" style={{ color: T_BLUE }} />
+                <span className="text-xs font-bold uppercase tracking-wider" style={{ color: T_TEXT_PRIMARY }}>{statusFilter}</span>
+                <ChevronDown className="w-3.5 h-3.5" style={{ color: T_TEXT_SECONDARY, transform: filterMenuOpen ? 'rotate(180deg)' : 'none', transition: 'transform 0.15s' }} />
+              </button>
+              {filterMenuOpen && (
+                <>
+                  <div className="fixed inset-0 z-10" onClick={() => setFilterMenuOpen(false)} />
+                  <div className="absolute z-20 mt-1 left-0 w-56 rounded-lg border bg-white shadow-lg py-1" style={{ borderColor: T_BORDER }}>
+                    {statusTabs.map((tab) => {
+                      const dot = tab.label === 'Needs Review' ? T_WARNING : tab.label === 'Invalid' ? T_DANGER : tab.label === 'Done' ? T_SUCCESS : T_BLUE;
+                      const active = statusFilter === tab.label;
+                      return (
+                        <button
+                          key={tab.label}
+                          onClick={() => { setStatusFilter(tab.label); setFilterMenuOpen(false); }}
+                          className="w-full flex items-center justify-between px-3 py-2 text-xs font-semibold hover:bg-slate-50 transition-colors"
+                          style={{ background: active ? T_BLUE_BG : 'transparent', color: active ? T_BLUE : T_TEXT_PRIMARY }}
+                        >
+                          <span className="flex items-center gap-2">
+                            <span className="w-2 h-2 rounded-full" style={{ background: dot }} />
+                            {tab.label === 'Done' ? 'Done / Approved' : tab.label === 'Needs Review' ? 'Needs Review (yellow)' : tab.label === 'Invalid' ? 'Invalid (red)' : 'All'}
+                          </span>
+                          <span style={{ color: T_TEXT_SECONDARY }}>{tab.count}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </>
+              )}
             </div>
             <span className="text-[10px] font-bold px-2 py-0.5 rounded-full" style={{ background: T_BLUE_BG, color: T_BLUE }}>
               {filteredInvoices.length} Records
@@ -703,18 +841,24 @@ const InvoiceAgentWorkspace = ({ agent }) => {
               {filteredInvoices.map((invoice) => {
                 const status = getInvoiceStatus(invoice);
                 const style = statusStyle(status);
+                const kind = getRowKind(invoice);
+                const meta = KIND_META[kind];
                 const active = invoice.id === selectedInvoiceId;
                 return (
                   <button
                     key={invoice.id}
                     onClick={() => setSelectedInvoiceId(invoice.id)}
-                    className={`w-full text-left p-4 transition-all hover:bg-slate-50/50 relative ${invoice.status === 'Corrupted' ? 'row-corrupted' : ''
-                      }`}
+                    className="w-full text-left p-4 transition-all hover:bg-slate-50/50 relative"
                     style={{
-                      background: active ? '#F0F7FF' : undefined,
+                      // Selected cards keep their status color (yellow/red) instead of turning blue;
+                      // selection is shown by a stronger tint + a full outline in that same color.
+                      background: active
+                        ? (kind === 'invalid' ? '#FEE2E2' : kind === 'review' ? '#FEF3C7' : '#F0F7FF')
+                        : meta.bg,
+                      borderLeft: `3px solid ${kind === 'done' ? (active ? T_BLUE : 'transparent') : meta.accent}`,
+                      boxShadow: active ? `inset 0 0 0 1.5px ${kind === 'done' ? T_BLUE : meta.accent}` : 'none',
                     }}
                   >
-                    {active && <div className="absolute left-0 top-0 bottom-0 w-1 bg-blue-600" />}
                     <div className="flex items-start justify-between gap-3">
                       <div className="min-w-0">
                         <p className="font-bold text-sm truncate" style={{ color: T_TEXT_PRIMARY }}>
@@ -728,6 +872,12 @@ const InvoiceAgentWorkspace = ({ agent }) => {
                         {status}
                       </span>
                     </div>
+                    {kind !== 'done' && (
+                      <div className="flex items-center gap-1.5 mt-2">
+                        <span className="w-2 h-2 rounded-full shrink-0" style={{ background: meta.dot }} />
+                        <span className="text-[10px] font-bold" style={{ color: meta.textColor }}>{meta.label}</span>
+                      </div>
+                    )}
                     <div className="flex items-center justify-between mt-3">
                       <span className="text-[10px] font-medium" style={{ color: T_TEXT_SECONDARY }}>{formatDate(invoice.invoice_date)}</span>
                       <span className="text-xs font-bold" style={{ color: T_TEXT_PRIMARY }}>{money(invoice.taxable_value)}</span>
@@ -985,16 +1135,17 @@ const InvoiceAgentWorkspace = ({ agent }) => {
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/40 backdrop-blur-sm animate-in fade-in duration-200">
           <div className="bg-white rounded-xl p-8 w-full max-w-sm shadow-2xl border" style={{ borderColor: T_BORDER }}>
             <div className="flex items-center justify-between mb-6">
-              <h3 className="font-bold text-xl tracking-tight" style={{ color: T_TEXT_PRIMARY, fontFamily: 'Space Grotesk' }}>Sync Complete</h3>
+              <h3 className="font-bold text-xl tracking-tight" style={{ color: T_TEXT_PRIMARY, fontFamily: 'Space Grotesk' }}>Processing Complete</h3>
               <button onClick={() => setSummaryModal((prev) => ({ ...prev, open: false }))} className="p-1 hover:bg-slate-100 rounded-md transition-colors">
                 <X className="w-5 h-5 text-slate-400" />
               </button>
             </div>
             <div className="space-y-3">
               {[
-                { label: 'Total Sync', value: summaryModal.total, color: T_BLUE, bg: T_BLUE_BG, border: '#DBEAFE' },
-                { label: 'Verified', value: summaryModal.valid, color: T_SUCCESS, bg: '#ECFDF5', border: '#D1FAE5' },
-                { label: 'Needs Review', value: summaryModal.corrupt, color: T_WARNING, bg: '#FFFBEB', border: '#FEF3C7' },
+                { label: 'Total Processed', value: summaryModal.total, color: T_BLUE, bg: T_BLUE_BG, border: '#DBEAFE' },
+                { label: 'Approved', value: summaryModal.approved, color: T_SUCCESS, bg: '#ECFDF5', border: '#D1FAE5' },
+                { label: 'Needs Review', value: summaryModal.review, color: T_WARNING, bg: '#FFFBEB', border: '#FEF3C7' },
+                { label: 'Invalid', value: summaryModal.invalid, color: T_DANGER, bg: '#FEF2F2', border: '#FEE2E2' },
               ].map((item) => (
                 <div key={item.label} className="flex items-center justify-between px-5 py-4 rounded-lg border shadow-sm" style={{ background: item.bg, borderColor: item.border }}>
                   <span className="text-xs font-bold uppercase tracking-wider" style={{ color: item.color }}>{item.label}</span>
@@ -1002,6 +1153,18 @@ const InvoiceAgentWorkspace = ({ agent }) => {
                 </div>
               ))}
             </div>
+            {(summaryModal.review > 0 || summaryModal.invalid > 0) && (
+              <div className="mt-5 flex items-start gap-2 rounded-lg border px-4 py-3" style={{ background: '#FFFBEB', borderColor: '#FEF3C7' }}>
+                <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" style={{ color: T_WARNING }} />
+                <p className="text-xs font-semibold leading-relaxed" style={{ color: '#92400E' }}>
+                  Out of {summaryModal.total} invoice{summaryModal.total !== 1 ? 's' : ''},{' '}
+                  {summaryModal.review > 0 && <>{summaryModal.review} {summaryModal.review !== 1 ? 'are' : 'is'} missing the vendor Tally name / category</>}
+                  {summaryModal.review > 0 && summaryModal.invalid > 0 && ' and '}
+                  {summaryModal.invalid > 0 && <>{summaryModal.invalid} could not be read (scanned/invalid)</>}
+                  . Please review the flagged invoices and complete the entries manually.
+                </p>
+              </div>
+            )}
             <button onClick={() => setSummaryModal((prev) => ({ ...prev, open: false }))} className="w-full mt-8 rounded-lg py-3 text-sm font-bold text-white shadow-lg shadow-blue-500/20 transition-all hover:brightness-110 active:scale-[0.98]" style={{ background: T_BLUE }}>
               Continue Review
             </button>

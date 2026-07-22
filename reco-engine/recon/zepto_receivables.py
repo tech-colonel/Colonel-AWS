@@ -171,6 +171,21 @@ def grn_gate(payments: list[dict], grn: dict[str, dict]) -> list[dict]:
     return kept
 
 
+def _pan_from_gstin(gstin: Any) -> str:
+    """PAN (entity id) = chars 3-12 of a 15-char GSTIN (first 2 chars are the
+    state code). All of a company's state GSTINs share one PAN, so PAN cleanly
+    identifies the vendor regardless of ship-to state."""
+    s = str(gstin or "").strip().upper()
+    return s[2:12] if len(s) >= 12 else ""
+
+
+def _name_is_zepto(name: Any) -> bool:
+    """Zepto's legal name is Kiranakart Technologies — older Tally rows carry
+    'Kiranakart'/'kiranakat' instead of 'Zepto'."""
+    n = str(name or "").lower()
+    return "zepto" in n or "kiranak" in n
+
+
 def parse_invoice_details(data: bytes) -> dict[str, dict]:
     """Build the invoice universe, keyed by the ORIGINAL invoice number
     (trailing slash preserved) so genuinely distinct invoices that merely
@@ -181,10 +196,17 @@ def parse_invoice_details(data: bytes) -> dict[str, dict]:
     matched on (base invoice number with trailing slash stripped, amount,
     date) — this collapses exact re-exports like `INV26-27/000069` /
     `INV26-27/000069/` (identical amount + date) into one row.
+
+    Feedback #00005: this is a ZEPTO receivables tracker, so only Zepto
+    (a.k.a. Kiranakart) invoices are kept. The Tally export also contains other
+    vendors (Blinkit / Flipkart / BigBasket / …) which, if left in, corrupt the
+    totals and the Summary tab. A row is Zepto if its customer name matches
+    zepto/kiranak, OR its GSTIN-PAN belongs to the set of PANs seen on
+    name-matched Zepto rows (catches a mis-named row that still has a Zepto GSTIN).
     """
     grid = _read_sheet(data, "Invoice Details") if _has_sheet(data, "Invoice Details") else _read_sheet(data, 0)
     h = _find_header(grid, ["invoice_number", "customer_name", "bcy_total"])
-    out: dict[str, dict] = {}
+    records: list[tuple[str, dict]] = []
     seen: set[tuple[str, float, str]] = set()
     for r in _rows_as_dicts(grid, h):
         inv = norm_inv(_get(r, ["invoice_number"]))
@@ -196,7 +218,7 @@ def parse_invoice_details(data: bytes) -> dict[str, dict]:
         if dedup_key in seen:
             continue   # exact duplicate (same base#, amount, date) — skip
         seen.add(dedup_key)
-        out[inv] = {
+        records.append((inv, {
             "date": date,
             "sales_order_no": _get(r, ["reference_number"]),
             "name": _get(r, ["customer_name"]),
@@ -207,7 +229,17 @@ def parse_invoice_details(data: bytes) -> dict[str, dict]:
             "gstin": _get(r, ["gst_no", "gstin"]),
             "billing_state": _get(r, ["billing_state"]),
             "shipping_state": _get(r, ["shipping_state"]),
-        }
+        }))
+    # Zepto-only filter (#00005): PAN set from clearly Zepto-named rows, then keep
+    # any row that is name-matched OR shares a Zepto PAN.
+    zepto_pans = {
+        _pan_from_gstin(f["gstin"]) for _, f in records
+        if _name_is_zepto(f["name"]) and _pan_from_gstin(f["gstin"])
+    }
+    out: dict[str, dict] = {}
+    for inv, f in records:
+        if _name_is_zepto(f["name"]) or _pan_from_gstin(f["gstin"]) in zepto_pans:
+            out[inv] = f
     return out
 
 
@@ -219,6 +251,41 @@ def _to_float(v: Any) -> float:
         return float(s)
     except ValueError:
         return 0.0
+
+
+def _parse_date(v: Any):
+    """Parse an invoice date cell into a datetime.date, or None. Handles ISO
+    (`2026-04-08`, with or without a trailing ` 00:00:00` time) and the common
+    DD-MM-YYYY / DD-MM-YYYY-with-slash / MM-DD-YYYY exports."""
+    import datetime as _dt
+    s = str(v or "").strip()
+    if not s or s.lower() in ("nan", "nat", "none"):
+        return None
+    s = s.split(" ")[0].split("T")[0]   # drop any time component
+    for fmt in ("%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y", "%m/%d/%Y", "%Y/%m/%d"):
+        try:
+            return _dt.datetime.strptime(s, fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
+def _due_date(inv_date):
+    """#00001: Due Date = invoice date + 30 calendar days."""
+    import datetime as _dt
+    return inv_date + _dt.timedelta(days=30) if inv_date else None
+
+
+def _due_status(due, is_paid: bool, today) -> str:
+    """#00002: Not Due (due in future) / Due (due today) / Overdue (due passed),
+    for UNPAID invoices only. Paid rows and rows with no due date -> blank."""
+    if is_paid or due is None:
+        return ""
+    if due > today:
+        return "Not Due"
+    if due == today:
+        return "Due"
+    return "Overdue"
 
 
 def parse_payment_advice(datas: list[bytes]) -> tuple[dict, dict]:
@@ -288,7 +355,7 @@ _INVOICE_PATTERN_RE = re.compile(r"\d{2}-\d{2}/\d+")
 
 
 def _apply_line_item(payments: dict, debit_notes: dict, pmdn_box: list, typ: str, ref_doc: str,
-                      amount: float, tds: float, payment_amt: float) -> None:
+                      amount: float, tds: float, payment_amt: float, details: dict | None = None) -> None:
     typ_l = typ.strip().lower()
     if typ_l.startswith("invoice"):
         inv = norm_inv(ref_doc)
@@ -298,6 +365,9 @@ def _apply_line_item(payments: dict, debit_notes: dict, pmdn_box: list, typ: str
         acc["incl"] += payment_amt
         acc["excl"] += amount
         acc["tds"] += tds
+        if details is not None:
+            details["payments"].append({"invoice": inv, "ref": ref_doc, "incl": payment_amt,
+                                        "excl": amount, "tds": tds})
     elif typ_l.startswith("debit note") or typ_l.startswith("credit memo"):
         # Zepto's real PDFs label debit notes "Credit Memo" (there are no
         # literal "Debit Note" rows in the data); route both the same way.
@@ -315,10 +385,16 @@ def _apply_line_item(payments: dict, debit_notes: dict, pmdn_box: list, typ: str
             if not inv:
                 return
             debit_notes[inv] = debit_notes.get(inv, 0.0) + amount
+            if details is not None:
+                details["debit_notes"].append({"invoice": inv, "ref": ref_doc, "amount": amount})
         else:
             pmdn_box[0] += amount
+            if details is not None:
+                details["pmdd"].append({"ref": ref_doc, "amount": amount})
     elif typ_l.startswith("ap-ar"):
         pmdn_box[0] += amount
+        if details is not None:
+            details["ap_ar"].append({"ref": ref_doc, "amount": amount})
 
 
 def _is_data_row_type(typ: str) -> bool:
@@ -330,7 +406,7 @@ def _is_data_row_type(typ: str) -> bool:
 
 
 def _extract_line_items_from_table(table: list[list], payments: dict, debit_notes: dict,
-                                    pmdn_box: list) -> bool:
+                                    pmdn_box: list, details: dict | None = None) -> bool:
     """Shape-based row extraction — does NOT require a header row on the page.
 
     A row is a DATA row iff it has >= 8 cells and col[1] (Type of Document) is
@@ -354,13 +430,13 @@ def _extract_line_items_from_table(table: list[list], payments: dict, debit_note
         amount = _to_float(row[4])
         tds = _to_float(row[6])
         payment_amt = _to_float(row[7])
-        _apply_line_item(payments, debit_notes, pmdn_box, typ, ref_doc, amount, tds, payment_amt)
+        _apply_line_item(payments, debit_notes, pmdn_box, typ, ref_doc, amount, tds, payment_amt, details)
         found_any = True
     return found_any
 
 
 def _extract_line_items_from_text(text: str, payments: dict, debit_notes: dict, pmdn_box: list,
-                                   filename: str = None) -> bool:
+                                   filename: str = None, details: dict | None = None) -> bool:
     # Last-resort fallback only: the shape-based table extraction in
     # `_extract_line_items_from_table` handles both header and header-less
     # (multi-page continuation) pages on its own. This text-regex path is not
@@ -377,12 +453,12 @@ def _extract_line_items_from_text(text: str, payments: dict, debit_notes: dict, 
             continue
         ref_doc = _clean_ref_doc(ref_doc_raw)
         _apply_line_item(payments, debit_notes, pmdn_box, typ, ref_doc,
-                          _to_float(amount_s), _to_float(tds_s), _to_float(payment_amt_s))
+                          _to_float(amount_s), _to_float(tds_s), _to_float(payment_amt_s), details)
         found_any = True
     return found_any
 
 
-def parse_payment_advice_pdf(pdf_bytes_list: list[bytes]) -> tuple[dict, dict, float]:
+def parse_payment_advice_pdf(pdf_bytes_list: list[bytes], details: dict | None = None) -> tuple[dict, dict, float]:
     """Parse Zepto PDF payment-advice files with PDF-level header dedup.
 
     Returns (payments, debit_notes, pmdn_total). `pmdn_total` accumulates
@@ -392,6 +468,11 @@ def parse_payment_advice_pdf(pdf_bytes_list: list[bytes]) -> tuple[dict, dict, f
 
     A whole PDF is skipped if its header triple (Payment Ref No., Payment Doc,
     Amount) was already seen — this prevents double-counting duplicate uploads.
+
+    #00007: if `details` is provided (a dict with lists `payments`,
+    `debit_notes`, `pmdd`, `ap_ar`), each recognized line item is ALSO appended
+    to it (for the split detail tabs) — purely additive; the returned sums are
+    unchanged and dedup still applies (skipped PDFs contribute no detail rows).
     """
     import pdfplumber
 
@@ -419,11 +500,11 @@ def parse_payment_advice_pdf(pdf_bytes_list: list[bytes]) -> tuple[dict, dict, f
             pdf_found_any = False
             for page in pdf.pages:
                 for table in page.extract_tables():
-                    if _extract_line_items_from_table(table, payments, debit_notes, pmdn_box):
+                    if _extract_line_items_from_table(table, payments, debit_notes, pmdn_box, details):
                         pdf_found_any = True
                 if not pdf_found_any:
                     text = page.extract_text() or ""
-                    if _extract_line_items_from_text(text, payments, debit_notes, pmdn_box):
+                    if _extract_line_items_from_text(text, payments, debit_notes, pmdn_box, None, details):
                         pdf_found_any = True
 
             if not pdf_found_any:
@@ -438,9 +519,14 @@ def parse_payment_advice_pdf(pdf_bytes_list: list[bytes]) -> tuple[dict, dict, f
 _CN_NUMBER_ALIASES = ["creditnote_number", "credit_note_number", "creditnote number", "Credit Note#", "credit note#"]
 
 
-def parse_credit_notes(data: bytes) -> dict[str, dict]:
+def parse_credit_notes(data: bytes, details: dict | None = None) -> dict[str, dict]:
     """Per invoice: sum of `bcy_total` across all its credit notes, plus the
-    list of (deduped, non-empty) credit-note numbers that made up that sum."""
+    list of (deduped, non-empty) credit-note numbers that made up that sum.
+
+    #00007: if `details` is provided, each individual credit-note row is also
+    appended to `details["credit_notes"]` (invoice, number, amount) for the
+    Credit Notes detail tab — additive; the returned aggregation is unchanged.
+    """
     grid = _read_sheet(data, "Credit Note Details") if _has_sheet(data, "Credit Note Details") else _read_sheet(data, 0)
     h = _find_header(grid, ["invoice_number", "bcy_total"])
     out: dict[str, dict] = {}
@@ -448,11 +534,14 @@ def parse_credit_notes(data: bytes) -> dict[str, dict]:
         inv = norm_inv(_get(r, ["invoice_number"]))
         if not inv:
             continue
-        acc = out.setdefault(inv, {"amount": 0.0, "numbers": []})
-        acc["amount"] += _to_float(_get(r, ["bcy_total"]))
+        amount = _to_float(_get(r, ["bcy_total"]))
         number = _get(r, _CN_NUMBER_ALIASES)
+        acc = out.setdefault(inv, {"amount": 0.0, "numbers": []})
+        acc["amount"] += amount
         if number and number not in acc["numbers"]:
             acc["numbers"].append(number)
+        if details is not None:
+            details["credit_notes"].append({"invoice": inv, "number": number, "amount": amount})
     return out
 
 
@@ -534,7 +623,7 @@ COLUMN_KEYS = [
     "invoice_amt_excl_tax","place_of_supply","gstin","billing_state","shipping_state",
     "pending_amount","payment_received_incl_tds","payment_received_excl_tds","tds",
     "debit_note_issued","dn_accepted","dn_not_accepted","credit_note_issued","credit_note_no",
-    "gross_outstanding","net_outstanding","status","grn_no","grn_date",
+    "gross_outstanding","net_outstanding","status","due_date","due_status","grn_no","grn_date",
     "invoice_not_in_ledger","pod_no","pod_date","payment_date",
 ]
 
@@ -606,20 +695,30 @@ def _dn_fallback_remap(debit_notes: dict[str, float], invoice_universe: set[str]
     return out
 
 
-def reconcile_zepto(files: dict) -> list[dict]:
+def reconcile_zepto(files: dict, today=None) -> list[dict]:
+    import datetime as _dt
+    if today is None:
+        today = _dt.date.today()
+    # #00007: collect line-item detail for the split tabs (Payments / Debit
+    # Notes / Credit Notes / PMDD / AP-AR). Additive — sums below are unchanged.
+    details = {"payments": [], "debit_notes": [], "pmdd": [], "ap_ar": [], "credit_notes": []}
     invoice_details = parse_invoice_details(_one(files, "invoice_details") or b"")
     payments_raw = parse_zepto_payment(_one(files, "zepto_payment") or b"")
     grn = parse_grn(_many(files, "grn_list"))
-    pay_map, dn_map, pmdn_total = parse_payment_advice_pdf(_many(files, "payment_advice"))
-    cn_map = parse_credit_notes(_one(files, "credit_note") or b"")
+    pay_map, dn_map, pmdn_total = parse_payment_advice_pdf(_many(files, "payment_advice"), details)
+    cn_map = parse_credit_notes(_one(files, "credit_note") or b"", details)
     lrn_map = parse_lrn(_many(files, "lrn"))
 
     dn_map = _dn_fallback_remap(dn_map, set(invoice_details.keys()))
 
-    # invoice -> PO map from the Zepto Payment track (first PO wins per invoice)
+    # invoice -> PO map from the Zepto Payment track (first PO wins per invoice).
+    # Feedback #00006: match on the invoice number with any trailing slash
+    # stripped, because the Payment track carries `INV26-27/000192` while the
+    # Tally universe may carry `INV26-27/000192/` — the same invoice must still
+    # find its PO despite that stray slash.
     inv_to_po: dict[str, str] = {}
     for p in payments_raw:
-        inv = p.get("invoice_number", "")
+        inv = p.get("invoice_number", "").rstrip("/")
         po = p.get("po", "")
         if inv and po and inv not in inv_to_po:
             inv_to_po[inv] = po
@@ -629,13 +728,14 @@ def reconcile_zepto(files: dict) -> list[dict]:
         row = {key: "" for key in COLUMN_KEYS}
         row["invoice_number"] = inv
 
-        po = inv_to_po.get(inv, "")
+        # #00006: show the PO whenever the Payment track has one for this
+        # invoice — do NOT suppress it just because the PO is absent from the
+        # GRN list. The GRN No./Date columns stay gated on the GRN list.
+        po = inv_to_po.get(inv.rstrip("/"), "")
+        row["po"] = po
         if po and po in grn:
-            row["po"] = po
             row["grn_no"] = grn[po]["grn_id"]
             row["grn_date"] = grn[po]["created_on"]
-        else:
-            row["po"] = ""
 
         for f in ("date","sales_order_no","name","place_of_supply","gstin","billing_state","shipping_state"):
             row[f] = det[f]
@@ -659,18 +759,29 @@ def reconcile_zepto(files: dict) -> list[dict]:
 
         pending = _to_float(row["total_invoice_amt"])
         row["pending_amount"] = round(pending, 2)
-        gross = pending - row["payment_received_incl_tds"]
-        net = gross + row["debit_note_issued"]
+        # Feedback #00004 (corrected formulas):
+        #   Gross Receivable = Pending - Payment Received (excl. TDS)
+        #   Net Receivable   = Pending - Payment Received (excl. TDS) - Credit Note - Debit Note
+        gross = pending - row["payment_received_excl_tds"]
+        net = gross - row["credit_note_issued"] - row["debit_note_issued"]
         row["gross_outstanding"] = round(gross, 2)
         row["net_outstanding"] = round(net, 2)
         # Signed threshold (NOT abs()): a negative Gross/Net Outstanding means
         # the vendor owes Zepto less than paid (e.g. a debit note), which the
         # accountant's reference sheet treats as settled/"Paid" too.
         row["status"] = "Paid" if (gross <= 100 and net <= 100) else "Not Paid"
+
+        # #00001/#00002: Due Date = invoice date + 30 days; Due status (Not Due /
+        # Due / Overdue) vs `today`, for UNPAID rows only (Paid -> blank).
+        inv_dt = _parse_date(det.get("date"))
+        due = _due_date(inv_dt)
+        row["due_date"] = due.isoformat() if due else ""
+        row["due_status"] = _due_status(due, row["status"] == "Paid", today)
         results.append(row)
 
     out = _RecoRows(results)
     out.pmdn_adjustment = round(pmdn_total, 2)
+    out.details = details   # #00007: line-item detail for the split tabs
     return out
 
 
@@ -691,12 +802,12 @@ def summarize_zepto(results: list[dict]) -> dict:
 # these shifted columns in Task 3. "Credit Note No" was inserted after
 # "Credit Note Issued" in the 5-column task, shifting everything after it
 # one letter to the right (U..AC -> V..AD).
-_LETTERS = ["A","B","C","D","E","F","G","H","I","J","K","L","M","N","O","P","Q","R","S","T","U","V","W","X","Y","Z","AA","AB","AC","AD"]
+_LETTERS = ["A","B","C","D","E","F","G","H","I","J","K","L","M","N","O","P","Q","R","S","T","U","V","W","X","Y","Z","AA","AB","AC","AD","AE","AF"]
 _HEADERS = ["PO","Date","Invoice_number","Sales Order No.","Name","Total Invoice Amt","Tax",
     "Invoice Amt (Excl. Tax)","Place of Supply","GSTIN","Billing State","shipping_state",
     "Pending Amount","Payment Received (Including TDS)","Payment Received (Excluding TDS)","TDS",
     "Debit Note Issued","DN Accepted","DN Not Accepted","Credit Note Issued","Credit Note No",
-    "Gross Outstanding Amt","Net Outstanding Amt","Status","GRN No.","GRN Date",
+    "Gross Outstanding Amt","Net Outstanding Amt","Status","Due Date","Due Status","GRN No.","GRN Date",
     "Invoice Not Available in Zepto Ledger","POD No","POD Date","Payment Date"]
 _FORMULA_COLS = {"pending_amount","gross_outstanding","net_outstanding","status"}
 _MONEY_KEYS = {"total_invoice_amt","tax","invoice_amt_excl_tax","pending_amount",
@@ -715,7 +826,7 @@ _COLUMN_WIDTHS = {
     "pending_amount": 14, "payment_received_incl_tds": 16, "payment_received_excl_tds": 16,
     "tds": 11, "debit_note_issued": 14, "dn_accepted": 12, "dn_not_accepted": 12,
     "credit_note_issued": 14, "credit_note_no": 16, "gross_outstanding": 15, "net_outstanding": 15,
-    "status": 12, "grn_no": 14, "grn_date": 12, "invoice_not_in_ledger": 16,
+    "status": 12, "due_date": 12, "due_status": 12, "grn_no": 14, "grn_date": 12, "invoice_not_in_ledger": 16,
     "pod_no": 12, "pod_date": 12, "payment_date": 12,
 }
 
@@ -828,6 +939,131 @@ def build_summary_sheet(wb, results: list[dict]):
     return ws
 
 
+_DETAIL_LINK_FONT_HEX = "0563C1"
+
+
+def _canon_inv(k: str) -> str:
+    """Normalize an invoice-ish key for hyperlink matching: upper/trim, and add
+    the `INV` prefix if it's missing but the year/number pattern is present
+    (the DN fallback remap can leave detail keys like `26-27/000039/` while the
+    main sheet carries `INV26-27/000039/`)."""
+    k = norm_inv(k)
+    if k and not k.startswith("INV") and re.match(r"\d{2}-\d{2}/", k):
+        k = "INV" + k
+    return k
+
+
+def _resolve_to_universe(inv: str, universe: set) -> str | None:
+    """Map a (possibly malformed) debit-note ref key onto the matching invoice
+    in the universe, mirroring `_dn_fallback_remap`'s candidate order. Returns
+    the universe key or None. Used to filter the Debit Notes detail tab to the
+    same rows the main sheet counted."""
+    inv = norm_inv(inv)
+    if inv in universe:
+        return inv
+    core = inv
+    if core[:3] == "INV":
+        core = core[3:]
+    elif core[:1] == "V":
+        core = core[1:]
+    for cand in ("INV" + core, "INV" + core.rstrip("/") + "/",
+                 "INV" + core.rstrip("/"), "INV" + core + "/"):
+        if cand in universe:
+            return cand
+    return None
+
+
+def _build_detail_sheets(wb, results):
+    """#00007: create the 5 split detail tabs (Payments / Debit Notes / Credit
+    Notes / PMDD / AP-AR & Manual Adj) from the line-item detail collected in
+    `reconcile_zepto`. Returns row-index maps for the invoice-linked tabs
+    ({inv: first_row}) so the main sheet can hyperlink into them."""
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    from openpyxl.utils import get_column_letter
+
+    details = getattr(results, "details", None) or {}
+    thin = Side(style="thin", color="D9D9D9")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+    title_font = Font(bold=True, size=13, color="123C69")
+    hdr_font = Font(bold=True, size=10, color="FFFFFF")
+    hdr_fill = PatternFill("solid", fgColor="1F3864")
+    total_font = Font(bold=True, size=10, color="123C69")
+    money_fmt = "#,##0.00"
+
+    def make_sheet(title, headers, rows, money_cols, key_col, widths):
+        ws = wb.create_sheet(title=title)
+        ncol = len(headers)
+        c = ws.cell(row=1, column=1, value=title)
+        c.font = title_font; c.alignment = Alignment(horizontal="left", vertical="center")
+        ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=ncol)
+        ws.row_dimensions[1].height = 20
+        for j, htext in enumerate(headers, start=1):
+            hc = ws.cell(row=2, column=j, value=htext)
+            hc.font = hdr_font; hc.fill = hdr_fill; hc.border = border
+            hc.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        ws.row_dimensions[2].height = 20
+        rowmap, totals, r = {}, {mc: 0.0 for mc in money_cols}, 3
+        for item in rows:
+            for j in range(1, ncol + 1):
+                val = item[j - 1]
+                cell = ws.cell(row=r, column=j, value=val)
+                cell.border = border
+                if j in money_cols:
+                    cell.number_format = money_fmt
+                    cell.alignment = Alignment(horizontal="right")
+                    totals[j] += _to_float(val)
+            if key_col is not None:
+                k = _canon_inv(item[key_col - 1])
+                if k and k not in rowmap:
+                    rowmap[k] = r
+            r += 1
+        if rows:
+            tc = ws.cell(row=r, column=1, value="TOTAL"); tc.font = total_font; tc.border = border
+            for mc in money_cols:
+                cell = ws.cell(row=r, column=mc, value=round(totals[mc], 2))
+                cell.number_format = money_fmt; cell.font = total_font
+                cell.border = border; cell.alignment = Alignment(horizontal="right")
+        else:
+            ws.cell(row=3, column=1, value="(no records)").font = Font(italic=True, color="808080")
+        for j, w in enumerate(widths, start=1):
+            ws.column_dimensions[get_column_letter(j)].width = w
+        ws.freeze_panes = "A3"
+        return rowmap
+
+    # Filter the invoice-linked tabs to the tracker's universe so their totals
+    # reconcile with the main sheet (the source files also carry prior-year /
+    # out-of-range line items that never appear as a main-sheet row).
+    universe = {r.get("invoice_number", "") for r in results}
+
+    pay = sorted((p for p in details.get("payments", []) if p["invoice"] in universe),
+                 key=lambda x: x["invoice"])
+    pay_rows = [[p["invoice"], p["ref"], round(p["excl"], 2), round(p["tds"], 2), round(p["incl"], 2)] for p in pay]
+
+    # Debit notes: resolve each (possibly malformed) ref key onto its universe
+    # invoice exactly as the main-sheet remap did; drop those that don't resolve.
+    dn = []
+    for d in details.get("debit_notes", []):
+        u = _resolve_to_universe(d["invoice"], universe)
+        if u:
+            dn.append((u, d["ref"], d["amount"]))
+    dn.sort(key=lambda x: x[0])
+    dn_rows = [[u, ref, round(amt, 2)] for (u, ref, amt) in dn]
+
+    cn = sorted((c for c in details.get("credit_notes", []) if c["invoice"] in universe),
+                key=lambda x: x["invoice"])
+    cn_rows = [[c["invoice"], c.get("number", ""), round(c["amount"], 2)] for c in cn]
+    pmdd_rows = [[p["ref"], round(p["amount"], 2)] for p in details.get("pmdd", [])]
+    apar_rows = [[a["ref"], round(a["amount"], 2)] for a in details.get("ap_ar", [])]
+
+    pay_map = make_sheet("Payments", ["Invoice", "Ref / Payment Doc", "Amount (Excl. TDS)", "TDS", "Amount (Incl. TDS)"],
+                         pay_rows, {3, 4, 5}, key_col=1, widths=[22, 22, 18, 12, 18])
+    dn_map = make_sheet("Debit Notes", ["Invoice", "Ref", "Amount"], dn_rows, {3}, key_col=1, widths=[22, 26, 16])
+    cn_map = make_sheet("Credit Notes", ["Invoice", "Credit Note No", "Amount"], cn_rows, {3}, key_col=1, widths=[22, 22, 16])
+    make_sheet("PMDD", ["Ref / Description", "Amount"], pmdd_rows, {2}, key_col=None, widths=[42, 18])
+    make_sheet("AP-AR & Manual Adj", ["Ref / Description", "Amount"], apar_rows, {2}, key_col=None, widths=[42, 18])
+    return {"payments": pay_map, "debit_notes": dn_map, "credit_notes": cn_map}
+
+
 def build_zepto_workbook(results: list[dict], payload: dict | None = None):
     from openpyxl import Workbook
     from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
@@ -850,9 +1086,12 @@ def build_zepto_workbook(results: list[dict], payload: dict | None = None):
     # From Courier(AB-AD). Shifted one letter right of the old layout
     # (U..AC) by the "Credit Note No" column insertion in the 5-col task.
     ws.append([""] * len(_HEADERS))
+    # #00001/#00002: "Aging" group (Due Date + Due Status) inserted right after
+    # the Computed block (Status = X); everything after it shifts +2 letters.
     groups = [("From Tally","B","L"),("Payment Advice (Zepto Portal)","N","P"),
               ("From Zepto Ledger / Payment Advice","Q","U"),("Computed","V","X"),
-              ("From Zepto Dashboard","Y","AA"),("From Courier (Delhivery)","AB","AD")]
+              ("Aging (Invoice Date + 30d)","Y","Z"),
+              ("From Zepto Dashboard","AA","AC"),("From Courier (Delhivery)","AD","AF")]
     for label, c1, c2 in groups:
         ws.merge_cells(f"{c1}1:{c2}1")
         cell = ws[f"{c1}1"]; cell.value = label
@@ -878,9 +1117,11 @@ def build_zepto_workbook(results: list[dict], payload: dict | None = None):
             if key == "pending_amount":
                 val = f"=F{r}"
             elif key == "gross_outstanding":
-                val = f"=M{r}-N{r}"
+                # #00004: Pending - Payment Received (excl. TDS)
+                val = f"=M{r}-O{r}"
             elif key == "net_outstanding":
-                val = f"=M{r}-N{r}+Q{r}"
+                # #00004: Gross - Credit Note - Debit Note
+                val = f"=M{r}-O{r}-T{r}-Q{r}"
             elif key == "status":
                 if row.get("invoice_not_in_ledger"):
                     val = row.get("status", "")
@@ -928,4 +1169,28 @@ def build_zepto_workbook(results: list[dict], payload: dict | None = None):
     ws.freeze_panes = "E3"
 
     build_summary_sheet(wb, results)
+
+    # #00007: split detail tabs + click-to-jump hyperlinks from the main sheet.
+    maps = _build_detail_sheets(wb, results)
+    from openpyxl.worksheet.hyperlink import Hyperlink
+    link_font = Font(color=_DETAIL_LINK_FONT_HEX, underline="single")
+
+    def _link(row_i, col_i, sheet_title, target_row):
+        cell = ws.cell(row=row_i, column=col_i)
+        cell.hyperlink = Hyperlink(ref=cell.coordinate, location=f"'{sheet_title}'!A{target_row}")
+        cell.font = link_font   # tint to signal it's clickable (number format/alignment kept)
+
+    for idx, row in enumerate(results):
+        r = idx + 3
+        inv = _canon_inv(row.get("invoice_number", ""))
+        if inv in maps["payments"]:
+            tr = maps["payments"][inv]
+            _link(r, 14, "Payments", tr)      # N  Payment Received (Incl TDS)
+            _link(r, 15, "Payments", tr)      # O  Payment Received (Excl TDS)
+        if inv in maps["debit_notes"]:
+            _link(r, 17, "Debit Notes", maps["debit_notes"][inv])   # Q  Debit Note Issued
+        if inv in maps["credit_notes"]:
+            tr = maps["credit_notes"][inv]
+            _link(r, 20, "Credit Notes", tr)  # T  Credit Note Issued
+            _link(r, 21, "Credit Notes", tr)  # U  Credit Note No
     return wb

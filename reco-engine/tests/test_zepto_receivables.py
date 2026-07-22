@@ -134,11 +134,13 @@ def test_parse_invoice_details_real_fixture_dedup_by_num_amount_date():
     # "INV26-27/000069/" -- IDENTICAL amount+date -> a true duplicate; only
     # ONE survives (the slash variant is dropped as a re-export of the same
     # row). Verified directly against the fixture: 6 such identical pairs
-    # exist, so 589 raw rows -> 583 universe rows (589 - 6 collapsed dupes).
+    # exist, so 589 raw rows -> 583 rows (589 - 6 collapsed dupes). Feedback
+    # #00005 then keeps ONLY Zepto/Kiranakart invoices (single PAN AAICK4821A),
+    # dropping ~200 other-vendor rows (Blinkit/Flipkart/BigBasket/…) -> 383.
     with open(_REAL_INVOICE_DETAILS, "rb") as f:
         data = f.read()
     universe = parse_invoice_details(data)
-    assert len(universe) == 583
+    assert len(universe) == 383
 
     # Different-amount pair: BOTH keys present, distinct amounts preserved.
     assert "INV26-27/000039" in universe
@@ -229,8 +231,10 @@ def test_parse_lrn_sheet_without_invoice_column_is_skipped():
 def _file(b): return {"filename": "f", "content": b}
 
 def test_reconcile_end_to_end():
-    # Universe = Invoice Details (every invoice becomes a row, PO comes from
-    # Zepto Payment track only if that PO is confirmed in the GRN pool).
+    # Universe = Invoice Details (every Zepto invoice becomes a row). Feedback
+    # #00006: the PO comes from the Zepto Payment track whenever present; it is
+    # NO LONGER suppressed when its PO is absent from the GRN pool (only the
+    # GRN No./Date columns stay gated on the GRN pool).
     invd = _xlsx({"Invoice Details": [
         ["title"],
         ["invoice_number","reference_number","customer_name","date","bcy_total","tax_amount",
@@ -240,8 +244,8 @@ def test_reconcile_end_to_end():
     ]})
     pay = _xlsx({"Zepto Payment track": [
         ["Zepto Payment track PO Number","Invoice Number","Cities"],
-        ["P100","INV26-27/000007","Pune"],          # PO in GRN -> po filled
-        ["P900","INV26-27/000101","Delhi"],         # PO NOT in GRN -> po blank
+        ["P100","INV26-27/000007","Pune"],          # PO in GRN  -> po + grn cols filled
+        ["P900","INV26-27/000101","Delhi"],         # PO NOT in GRN -> po filled, grn cols blank (#00006)
     ]})
     grn = b"GRN ID,PO ID,Created On,Status\r\nGrnCode99,P100,4/2/2026,CONFIRMED\r\n"   # only P100 confirmed
     cn = _xlsx({"Credit Note Details": [["t"],
@@ -266,8 +270,8 @@ def test_reconcile_end_to_end():
 
     b = by_inv["INV26-27/000101"]
     assert b["name"] == "ZEPTO JAIPUR"
-    assert b["po"] == ""                                  # PO not in GRN pool -> blank
-    assert b["grn_no"] == "" and b["grn_date"] == ""       # no GRN match -> blank
+    assert b["po"] == "P900"                              # #00006: PO shown even though not in GRN pool
+    assert b["grn_no"] == "" and b["grn_date"] == ""       # ... but GRN cols stay gated on the GRN pool
     assert round(b["total_invoice_amt"], 2) == 21369.43
     assert round(b["credit_note_issued"], 2) == 100.0
     assert b["credit_note_no"] == "CN/26-27/0099"          # new column filled from CN map
@@ -295,8 +299,8 @@ def test_workbook_has_live_formulas():
     assert ws["F3"].value == 56685.0                    # total_invoice_amt (col F)
     assert ws["U2"].value == "Credit Note No"                                          # new header
     assert ws["M3"].value == "=F3"                                                     # pending_amount
-    assert ws["V3"].value == "=M3-N3"                                                  # gross_outstanding
-    assert ws["W3"].value == "=M3-N3+Q3"                                               # net_outstanding
+    assert ws["V3"].value == "=M3-O3"                                                  # gross = Pending - Pay(excl TDS)  (#00004)
+    assert ws["W3"].value == "=M3-O3-T3-Q3"                                            # net = Gross - CreditNote - DebitNote (#00004)
     assert ws["X3"].value == '=IF(AND(V3<=100,W3<=100),"Paid","Not Paid")'             # status (signed)
     # No #REF!/formula-error leakage -- the 4 live formula strings above are
     # the exact, complete set and none of them reference a shifted-away cell.
@@ -313,8 +317,8 @@ def test_status_signed_threshold_negative_net_is_paid():
         ["title"],
         ["invoice_number","reference_number","customer_name","date","bcy_total","tax_amount",
          "amount_without_tax","place_of_supply","gst_no","billing_state","shipping_state"],
-        ["INV1","SO-1","CO A","2026-04-06",50000.0,0,50000.0,"MH","27AAA","Maharashtra","Maharashtra"],
-        ["INV2","SO-2","CO B","2026-04-06",28000.0,0,28000.0,"MH","27AAA","Maharashtra","Maharashtra"],
+        ["INV1","SO-1","ZEPTO A","2026-04-06",50000.0,0,50000.0,"MH","27AAA","Maharashtra","Maharashtra"],
+        ["INV2","SO-2","ZEPTO B","2026-04-06",28000.0,0,28000.0,"MH","27AAA","Maharashtra","Maharashtra"],
     ]})
     pay = _xlsx({"Zepto Payment track": [["Zepto Payment track PO Number","Invoice Number","Cities"]]})
     grn = b"GRN ID,PO ID,Created On,Status\r\n"
@@ -377,7 +381,7 @@ def test_universe_includes_invoice_with_no_po_mapping_at_all():
         ["title"],
         ["invoice_number","reference_number","customer_name","date","bcy_total","tax_amount",
          "amount_without_tax","place_of_supply","gst_no","billing_state","shipping_state"],
-        ["INV26-27/000500","SO-9","OTHER CO","2026-04-06",1000.0,0,1000.0,"MH","27AAA","Maharashtra","Maharashtra"],
+        ["INV26-27/000500","SO-9","ZEPTO NOPO","2026-04-06",1000.0,0,1000.0,"MH","27AAA","Maharashtra","Maharashtra"],
     ]})
     pay = _xlsx({"Zepto Payment track": [
         ["Zepto Payment track PO Number","Invoice Number","Cities"],
@@ -583,7 +587,7 @@ def test_reconcile_zepto_returns_list_subclass_with_pmdn_adjustment():
         ["title"],
         ["invoice_number","reference_number","customer_name","date","bcy_total","tax_amount",
          "amount_without_tax","place_of_supply","gst_no","billing_state","shipping_state"],
-        ["INV1","SO-1","CO A","2026-04-06",1000.0,0,1000.0,"MH","27AAA","Maharashtra","Maharashtra"],
+        ["INV1","SO-1","ZEPTO A","2026-04-06",1000.0,0,1000.0,"MH","27AAA","Maharashtra","Maharashtra"],
     ]})
     pay = _xlsx({"Zepto Payment track": [["Zepto Payment track PO Number","Invoice Number","Cities"]]})
     grn = b"GRN ID,PO ID,Created On,Status\r\n"
@@ -659,8 +663,9 @@ def test_build_zepto_workbook_has_summary_tab():
     ]
     wb = build_zepto_workbook(results)
 
-    # Exactly 2 tabs, in order, no stray default "Sheet".
-    assert wb.sheetnames == ["1. Invoice Tracker", "Summary"]
+    # Tabs in order: main + Summary + the 5 split detail tabs (#00007), no stray "Sheet".
+    assert wb.sheetnames == ["1. Invoice Tracker", "Summary", "Payments",
+                             "Debit Notes", "Credit Notes", "PMDD", "AP-AR & Manual Adj"]
 
     ws = wb["Summary"]
     total_sales = sum(r["total_invoice_amt"] for r in results)
@@ -669,6 +674,132 @@ def test_build_zepto_workbook_has_summary_tab():
     # Blank-for-manual line: label present, amount cell empty.
     assert _find_summary_amount(ws, "Amount Received in Bank") in (None, "")
     print("test_build_zepto_workbook_has_summary_tab OK")
+
+
+def test_vendor_filter_keeps_only_zepto():
+    # #00005: this is a ZEPTO tracker, so other vendors in the Tally export
+    # (Blinkit / Flipkart / …) must be dropped. A Zepto row with a garbled
+    # customer name but a Zepto GSTIN (same PAN) is still kept via the PAN set.
+    invd = _xlsx({"Invoice Details": [
+        ["title"],
+        ["invoice_number","reference_number","customer_name","date","bcy_total","tax_amount",
+         "amount_without_tax","place_of_supply","gst_no","billing_state","shipping_state"],
+        ["INV-Z1","SO1","ZEPTO PRIVATE LIMITED MUMBAI","2026-04-06",1000,0,1000,"MH","27AAICK4821A1Z5","MH","MH"],
+        ["INV-K1","SO2","Kiranakart Technologies Pvt Ltd","2026-04-06",1000,0,1000,"KA","29AAICK4821A1Z0","KA","KA"],
+        ["INV-Zpan","SO3","STORE 42","2026-04-06",1000,0,1000,"RJ","08AAICK4821A1Z9","RJ","RJ"],   # garbled name, Zepto PAN
+        ["INV-B1","SO4","BLINK COMMERCE PRIVATE LIMITED","2026-04-06",1000,0,1000,"HR","06AAFCG9846N1Z2","HR","HR"],
+        ["INV-F1","SO5","FLIPKART INDIA PRIVATE LIMITED","2026-04-06",1000,0,1000,"KA","29AABCF8078M1Z8","KA","KA"],
+    ]})
+    uni = parse_invoice_details(invd)
+    assert set(uni.keys()) == {"INV-Z1", "INV-K1", "INV-ZPAN"}   # norm_inv upper-cases the key
+    print("test_vendor_filter_keeps_only_zepto OK")
+
+
+def test_po_matches_despite_trailing_slash_and_ignores_grn_gate():
+    # #00006: the universe carries `INV26-27/000192/` (trailing slash from
+    # Tally) while the Payment track carries `INV26-27/000192` (no slash) — the
+    # PO must still match. And PO `P4254950` need NOT be in the GRN pool to show.
+    invd = _xlsx({"Invoice Details": [
+        ["title"],
+        ["invoice_number","reference_number","customer_name","date","bcy_total","tax_amount",
+         "amount_without_tax","place_of_supply","gst_no","billing_state","shipping_state"],
+        ["INV26-27/000192/","SO1","ZEPTO MUMBAI","2026-04-06",42438.23,2020.87,40417.36,"MH","27AAICK4821A1Z5","MH","MH"],
+    ]})
+    pay = _xlsx({"Zepto Payment track": [
+        ["Zepto Payment track PO Number","Invoice Number","Cities"],
+        ["P4254950","INV26-27/000192","Mumbai"],   # payment track has NO trailing slash
+    ]})
+    grn = b"GRN ID,PO ID,Created On,Status\r\n"     # empty GRN pool
+    cn = _xlsx({"Credit Note Details": [["t"], ["invoice_number","bcy_total"]]})
+    files = {"zepto_payment": _file(pay), "grn_list": [_file(grn)],
+             "invoice_details": _file(invd), "payment_advice": [], "credit_note": _file(cn)}
+    res = reconcile_zepto(files)
+    row = res[0]
+    assert row["invoice_number"] == "INV26-27/000192/"   # universe key keeps the slash
+    assert row["po"] == "P4254950"                        # matched despite slash + empty GRN pool
+    assert row["grn_no"] == "" and row["grn_date"] == ""  # GRN cols blank (PO not in GRN pool)
+    print("test_po_matches_despite_trailing_slash_and_ignores_grn_gate OK")
+
+
+def test_due_date_and_status():
+    # #00001: Due Date = invoice date + 30 calendar days.
+    # #00002: Not Due (future) / Due (today) / Overdue (past), UNPAID rows only;
+    #         Paid rows -> blank Due status (but Due Date still computed).
+    import datetime
+    invd = _xlsx({"Invoice Details": [
+        ["t"],
+        ["invoice_number","reference_number","customer_name","date","bcy_total","tax_amount",
+         "amount_without_tax","place_of_supply","gst_no","billing_state","shipping_state"],
+        ["INV-A","SO1","ZEPTO A","2026-07-01",50000,0,50000,"MH","27AAICK4821A1Z5","MH","MH"],  # due 07-31 -> Not Due
+        ["INV-B","SO2","ZEPTO B","2026-06-15",40000,0,40000,"MH","27AAICK4821A1Z5","MH","MH"],  # due 07-15 -> Due (today)
+        ["INV-C","SO3","ZEPTO C","2026-04-14",30000,0,30000,"MH","27AAICK4821A1Z5","MH","MH"],  # due 05-14 -> Overdue
+        ["INV-D","SO4","ZEPTO D","2026-04-14",50,0,50,"MH","27AAICK4821A1Z5","MH","MH"],        # <=100 -> Paid -> blank
+    ]})
+    pay = _xlsx({"Zepto Payment track": [["Zepto Payment track PO Number","Invoice Number","Cities"]]})
+    grn = b"GRN ID,PO ID,Created On,Status\r\n"
+    cn = _xlsx({"Credit Note Details": [["t"], ["invoice_number","bcy_total"]]})
+    files = {"zepto_payment": _file(pay), "grn_list": [_file(grn)],
+             "invoice_details": _file(invd), "payment_advice": [], "credit_note": _file(cn)}
+    res = reconcile_zepto(files, today=datetime.date(2026, 7, 15))
+    by = {r["invoice_number"]: r for r in res}
+    assert by["INV-A"]["due_date"] == "2026-07-31" and by["INV-A"]["due_status"] == "Not Due"
+    assert by["INV-B"]["due_date"] == "2026-07-15" and by["INV-B"]["due_status"] == "Due"
+    assert by["INV-C"]["due_date"] == "2026-05-14" and by["INV-C"]["due_status"] == "Overdue"
+    assert by["INV-D"]["status"] == "Paid"
+    assert by["INV-D"]["due_date"] == "2026-05-14" and by["INV-D"]["due_status"] == ""   # Paid -> blank status, date still shown
+
+    # Column placement: Due Date / Due Status sit right after Status (X), GRN shifts to AA.
+    from recon.zepto_receivables import build_zepto_workbook
+    ws = build_zepto_workbook(res)["1. Invoice Tracker"]
+    assert ws["X2"].value == "Status"
+    assert ws["Y2"].value == "Due Date"
+    assert ws["Z2"].value == "Due Status"
+    assert ws["AA2"].value == "GRN No."
+    assert ws["AF2"].value == "Payment Date"
+    assert ws["X3"].value == '=IF(AND(V3<=100,W3<=100),"Paid","Not Paid")'   # status formula unchanged
+    print("test_due_date_and_status OK")
+
+
+def test_detail_tabs_and_hyperlinks():
+    # #00007: 5 split detail tabs + click-to-jump hyperlinks from the main sheet.
+    from recon.zepto_receivables import build_zepto_workbook, COLUMN_KEYS, _RecoRows
+    def mk(inv, pay_excl, dn, cn, cnno):
+        r = {k: "" for k in COLUMN_KEYS}
+        r.update({"invoice_number": inv, "total_invoice_amt": 1000.0, "pending_amount": 1000.0,
+                  "payment_received_incl_tds": pay_excl + 1, "payment_received_excl_tds": pay_excl, "tds": 1.0,
+                  "debit_note_issued": dn, "credit_note_issued": cn, "credit_note_no": cnno,
+                  "gross_outstanding": 0.0, "net_outstanding": 0.0, "status": "Not Paid"})
+        return r
+    results = _RecoRows([mk("INV26-27/000039/", 900.0, -50.0, 0.0, ""),
+                         mk("INV26-27/000200", 0.0, 0.0, 100.0, "CN/26-27/0099")])
+    results.pmdn_adjustment = -123.45
+    results.details = {
+        "payments": [{"invoice": "INV26-27/000039/", "ref": "20000288", "incl": 901.0, "excl": 900.0, "tds": 1.0}],
+        "debit_notes": [{"invoice": "26-27/000039/", "ref": "26-27/000039/_QD", "amount": -50.0}],  # pre-remap key (no INV)
+        "credit_notes": [{"invoice": "INV26-27/000200", "number": "CN/26-27/0099", "amount": 100.0}],
+        "pmdd": [{"ref": "PMDDN-1", "amount": -100.0}],
+        "ap_ar": [{"ref": "APAR-1", "amount": -23.45}],
+    }
+    wb = build_zepto_workbook(results)
+    assert wb.sheetnames == ["1. Invoice Tracker", "Summary", "Payments",
+                             "Debit Notes", "Credit Notes", "PMDD", "AP-AR & Manual Adj"]
+    # detail rows landed on each tab; the DN's malformed ref key ("26-27/000039/")
+    # is resolved to its universe invoice so the tab reconciles with the main sheet.
+    assert wb["Payments"]["A3"].value == "INV26-27/000039/"
+    assert wb["Debit Notes"]["A3"].value == "INV26-27/000039/"   # resolved from "26-27/000039/"
+    assert wb["Debit Notes"]["B3"].value == "26-27/000039/_QD"    # original ref preserved
+    assert wb["Credit Notes"]["A3"].value == "INV26-27/000200"
+    assert wb["PMDD"]["A3"].value == "PMDDN-1"
+    assert wb["AP-AR & Manual Adj"]["A3"].value == "APAR-1"
+    # hyperlinks from the main sheet point into the right tabs (row-level).
+    ws = wb["1. Invoice Tracker"]
+    assert ws["O3"].hyperlink and ws["O3"].hyperlink.location == "'Payments'!A3"
+    assert ws["Q3"].hyperlink and ws["Q3"].hyperlink.location == "'Debit Notes'!A3"   # canon match despite missing INV
+    assert ws["T4"].hyperlink and ws["T4"].hyperlink.location == "'Credit Notes'!A3"
+    assert ws["U4"].hyperlink and ws["U4"].hyperlink.location == "'Credit Notes'!A3"
+    # a cell with no matching detail has no link
+    assert ws["Q4"].hyperlink is None
+    print("test_detail_tabs_and_hyperlinks OK")
 
 
 if __name__ == "__main__":
@@ -702,4 +833,8 @@ if __name__ == "__main__":
     test_reconcile_zepto_returns_list_subclass_with_pmdn_adjustment()
     test_build_zepto_workbook_fills_pmddn_summary_line()
     test_build_zepto_workbook_has_summary_tab()
+    test_vendor_filter_keeps_only_zepto()
+    test_po_matches_despite_trailing_slash_and_ignores_grn_gate()
+    test_due_date_and_status()
+    test_detail_tabs_and_hyperlinks()
     print("ALL TESTS PASSED")

@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const invoiceController = require('../controllers/agents/invoice-process/invoiceController');
-const { feedInvoicesFromN8n } = require('../controllers/agents/invoice-process/n8n-invoice-feed-db');
+const { feedInvoicesFromN8n, progressFromN8n } = require('../controllers/agents/invoice-process/n8n-invoice-feed-db');
 const { authenticateToken } = require('../middleware/authMiddleware');
 const { addSseClient, removeSseClient, getState } = require('../utils/invoiceEvents');
 
@@ -46,6 +46,9 @@ router.get('/brands/:brandId/agents/:agentId/invoice/status', authenticateToken,
 
 // n8n webhook db feed (no auth — called by n8n directly)
 router.post('/n8n/feed', feedInvoicesFromN8n);
+
+// n8n live per-invoice progress ping (no auth — called by n8n during the run)
+router.post('/n8n/progress', progressFromN8n);
 
 module.exports = router;
 

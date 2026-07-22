@@ -2,8 +2,12 @@ const { Op } = require('sequelize');
 const { Brand, Agent } = require('../../../models/master');
 const { getBrandConnection } = require('../../../config/database');
 const { getDynamicModel } = require('../../../models/brand');
-const { markDone } = require('../../../utils/invoiceEvents');
+const { markDone, markProgress, startRun, feedTick, completeRun, getState } = require('../../../utils/invoiceEvents');
 const { addInvoiceId, clearExecution } = require('../../../utils/executionStore');
+
+// Placeholder tokens the extractor writes when a field is empty — treat as missing.
+const NA_TOKENS = ['n/a', 'na', 'n.a.', 'missing', 'none', 'nil', '-', '—', 'null', 'undefined'];
+const isMissingField = (v) => !v || !String(v).trim() || NA_TOKENS.includes(String(v).trim().toLowerCase());
 
 // ─── Helper: Parse Date ───────────────────────
 const MONTH_MAP = {
@@ -193,7 +197,8 @@ const feedInvoicesFromN8n = async (req, res, next) => {
                     tds_rate: parseFloat(row.tds_rate) || 0,
                     tds_amount: parseFloat(row.tds_amount) || 0,
                     invoice_link: row.Invoice_link || row.invoice_link || null,
-                    status: 'Corrupted'
+                    // Scanned / image-based PDF that n8n could not extract → needs manual entry
+                    status: 'Invalid'
                 });
             } else {
                 validRows.push(row);
@@ -229,21 +234,34 @@ const feedInvoicesFromN8n = async (req, res, next) => {
             tds_rate: parseFloat(row.tds_rate) || 0,
             tds_amount: parseFloat(row.tds_amount) || 0,
             invoice_link: row.Invoice_link || row.invoice_link || null,
-            status: 'Processed'
+            // Auto-approve fully-done invoices; only those still missing the Tally vendor
+            // name + category (accountant hasn't updated the vendor master) need review.
+            // "N/A"/"Missing" placeholders count as missing.
+            status: (isMissingField(row.vendor_name_tally) && isMissingField(row.category)) ? 'Needs Review' : 'Approved'
         }));
 
         // ─── Insert Data ───────────────────────────────────────────────
         const validResult = await InvoiceModel.bulkCreate(finalData, { returning: true });
         const corruptedResult = await InvoiceModel.bulkCreate(corruptedRows, { returning: true });
-        const allResults = [...validResult, ...corruptedResult];
+        [...validResult, ...corruptedResult].forEach((row) => addInvoiceId(resolvedBrandId, resolvedAgentId, row.id));
 
-        allResults.forEach(row => addInvoiceId(resolvedBrandId, resolvedAgentId, row.id));
-
-        // ─── Notify SSE clients ────────────────────────────────────────
-        markDone(resolvedBrandId, resolvedAgentId, validResult.length, corruptedResult.length);
+        // ─── Accumulate live progress across per-invoice feed calls ─────
+        // (This workflow calls the feed once per invoice inside a loop, so we
+        //  tally cumulatively; completion fires on the n8n 'done' ping or the
+        //  debounce fallback — NOT on every single call.)
+        const reviewCount = finalData.filter((r) => r.status === 'Needs Review').length;
+        const approvedCount = validResult.length - reviewCount;
+        // n8n sends batch_total (total invoices in this run) on every feed call, so the
+        // first feed already gives the correct "of N" denominator.
+        const batchTotal = Number(
+            req.query.batch_total || req.body.batch_total ||
+            (Array.isArray(req.body) ? (req.body[0] && req.body[0].batch_total)
+                : (req.body.processed_invoices && req.body.processed_invoices[0] && req.body.processed_invoices[0].batch_total))
+        ) || 0;
+        feedTick(resolvedBrandId, resolvedAgentId, { approved: approvedCount, review: reviewCount, invalid: corruptedResult.length, total: batchTotal });
         clearExecution(resolvedBrandId, resolvedAgentId);
 
-        console.log(`[n8n feed] ✅ Done. Processed: ${validResult.length}, Corrupted: ${corruptedResult.length}`);
+        console.log(`[n8n feed] ✅ Fed. +Approved: ${approvedCount}, +Needs Review: ${reviewCount}, +Invalid: ${corruptedResult.length}`);
 
         // ─── Response ──────────────────────────────────────────────────
         res.json({
@@ -251,7 +269,7 @@ const feedInvoicesFromN8n = async (req, res, next) => {
             message: 'Invoices stored successfully via n8n feed',
             count: validResult.length,
             corrupted: corruptedResult.length,
-            data: allResults
+            data: [...validResult, ...corruptedResult]
         });
 
     } catch (error) {
@@ -260,6 +278,62 @@ const feedInvoicesFromN8n = async (req, res, next) => {
     }
 };
 
+// ─── Live per-invoice progress ping (called by n8n as each invoice lands) ──────
+// n8n should POST this once per invoice it finishes writing to the sheet:
+//   POST /api/n8n/progress  { brandName|brandId, agentName|agentId, done, total }
+// (or send { increment: true, total } to bump the running counter by one).
+// This drives the genuine "X of N done" counter — the numbers are always the
+// real values n8n sends, never fabricated.
+const progressFromN8n = async (req, res, next) => {
+    try {
+        const src = Array.isArray(req.body) ? (req.body[0] || {}) : (req.body || {});
+        const q = req.query || {};
+
+        const brandId = q.brandId || q.brand_id || src.brandId || src.brandid || src.brand_id;
+        const agentId = q.agentId || q.agent_id || src.agentId || src.agentid || src.agent_id;
+        const brandName = q.brandName || q.brand_name || src.brandName || src.brand_name;
+        const agentName = q.agentName || q.agent_name || src.agentName || src.agent_name;
+
+        let brand = brandId ? await Brand.findByPk(brandId) : null;
+        if (!brand && brandName) brand = await Brand.findOne({ where: { name: { [Op.iLike]: brandName } } });
+        let agent = agentId ? await Agent.findByPk(agentId) : null;
+        if (!agent && agentName) agent = await Agent.findOne({ where: { name: { [Op.iLike]: agentName } } });
+
+        if (!brand || !agent) {
+            return res.status(404).json({ error: 'Brand or Agent not found', detail: { brandId, brandName, agentId, agentName } });
+        }
+
+        const phase = String(q.phase || src.phase || '').toLowerCase();
+        const total = Number(q.total || src.total || 0) || 0;
+
+        // phase=start → reset the run and set the known total (so the UI shows "of N")
+        if (phase === 'start') {
+            startRun(brand.id, agent.id, total);
+            return res.json({ success: true, phase: 'start', total });
+        }
+        // phase=done/complete → finish the run and emit the cumulative summary
+        if (phase === 'done' || phase === 'complete') {
+            completeRun(brand.id, agent.id);
+            return res.json({ success: true, phase: 'done' });
+        }
+
+        // manual/testing tick — absolute done/total if provided, else +1 increment
+        let done;
+        if (q.done !== undefined || src.done !== undefined) {
+            done = Number(q.done !== undefined ? q.done : src.done) || 0;
+            markProgress(brand.id, agent.id, done, total);
+        } else {
+            feedTick(brand.id, agent.id, { approved: 1 });
+            done = (getState(brand.id, agent.id).done) || 0;
+        }
+        return res.json({ success: true, done, total });
+    } catch (error) {
+        console.error('❌ Invoice Progress Error:', error);
+        next(error);
+    }
+};
+
 module.exports = {
-    feedInvoicesFromN8n
+    feedInvoicesFromN8n,
+    progressFromN8n
 };
