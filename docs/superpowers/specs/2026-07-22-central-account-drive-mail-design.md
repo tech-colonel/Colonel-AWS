@@ -120,6 +120,13 @@ New/edited files (all additive; back up before editing shared ones):
   brand's pre-mapped folder) beside it, on **every** file-upload agent. **Extend** agents that already
   have Drive (Zepto Receivables, Amazon MTR, reco suite `GoogleDriveFolderInput`) — do not duplicate.
   Agent **auto-detects which files to process** (file-type routing, like MTR).
+  - **Accountant access model (decided 2026-07-22):** an authorized brand accountant (normal Colonel
+    login, assigned to the brand — **no Google login required**) opens the agent and it **auto-loads
+    that brand's admin-saved folder** (`brand_drive_config`, read server-side via the service account);
+    the accountant may **also paste an ad-hoc link** to override for a one-off run. Reads never use the
+    accountant's or team@'s OAuth token — only the service account. `brand_drive_config` GET stays
+    admin-managed, but agents resolve the folder for the brand internally, so accountants consume it
+    without seeing/editing the raw config. RLS + brand-assignment gate which brand a user can reach.
 - **D — Colonel AI chat.** Paste a Drive link in chat → route to the right agent → email the result.
   Largest / most experimental; built last.
 
