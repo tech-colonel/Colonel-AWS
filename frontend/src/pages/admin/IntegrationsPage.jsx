@@ -8,6 +8,7 @@ import { toast } from 'sonner';
 import { sidebarFor } from '../../lib/adminNav';
 import BrandLogo from '../../components/BrandLogos';
 import ComposioMarketplace from './ComposioMarketplace';
+import CentralAccountPanel from '../../components/CentralAccountPanel';
 
 /* ── Status pill (matches ToolResultDashboard pill atoms) ───────────────────── */
 function StatusPill({ connected }) {
@@ -436,6 +437,9 @@ const IntegrationsPage = () => {
             ))}
           </div>
         )}
+
+        {/* Central Google account — team@ health + per-brand Drive folder mapping */}
+        <CentralAccountPanel />
 
         {/* Composio marketplace — 1000+ connectable apps (additive, self-contained) */}
         <ComposioMarketplace />
