@@ -552,12 +552,20 @@ const RecoWorkspace = ({ agentTypeProp } = {}) => {
   // Cache a slim copy (raw source dicts stripped) so large results stay under
   // sessionStorage's ~5MB quota — otherwise the save throws and Back loses the
   // result. The results table never reads `.raw`.
+  // Cap the sessionStorage copy so a huge result (e.g. 14k-row Universal) stays under
+  // the ~5MB quota — otherwise setItem throws (silently) and the result is lost on reload.
+  // counts/summary are kept whole (tiles stay accurate); only the row table is a sample,
+  // consistent with the "showing N of M — download Excel for all" note. Full result lives
+  // in RESULT_MEMO (in-memory, uncapped) for same-session navigation.
+  const CACHE_ROW_CAP = 1000;
   const slimResultForCache = (data) => {
     if (!data) return data;
     const stripRaw = (o) => { if (!o || typeof o !== 'object') return o; const { raw, ...rest } = o; return rest; };
+    const rows = data.results || [];
     return {
       ...data,
-      results: (data.results || []).map(r => ({ ...r, gstr2b: stripRaw(r.gstr2b), purchase: stripRaw(r.purchase) })),
+      _cachedRowsCapped: rows.length > CACHE_ROW_CAP ? rows.length : undefined,
+      results: rows.slice(0, CACHE_ROW_CAP).map(r => ({ ...r, gstr2b: stripRaw(r.gstr2b), purchase: stripRaw(r.purchase) })),
     };
   };
 
