@@ -920,8 +920,10 @@ function BankRecoAnalytics({ analytics }) {
 
   const closingData = monthly.map((m) => ({ month: m.month, Tally: m.tally_closing, Bank: m.bank_closing }));
   const gapData = monthly.map((m) => ({ month: m.month, diff: m.diff }));
+  // Label only the largest-magnitude gaps (selective labels, not one-per-bar) — tooltip covers the rest.
+  const gapLabelFloor = [...gapData].map((d) => Math.abs(num(d.diff))).sort((a, b) => b - a)[3] || 0;
   const ledgerData = topLedgers.map((t) => ({
-    ledger: t.ledger && t.ledger.length > 24 ? `${t.ledger.slice(0, 23)}…` : t.ledger,
+    ledger: t.ledger && t.ledger.length > 28 ? `${t.ledger.slice(0, 27)}…` : t.ledger,
     fullLedger: t.ledger,
     amount: t.amount,
   }));
@@ -955,7 +957,7 @@ function BankRecoAnalytics({ analytics }) {
               <ReferenceLine y={0} stroke="#CBD5E1" />
               <Bar dataKey="diff" radius={[3, 3, 3, 3]} isAnimationActive={animate}>
                 {gapData.map((d, i) => <Cell key={i} fill={num(d.diff) >= 0 ? gapPos : gapNeg} />)}
-                <LabelList dataKey="diff" position="top" formatter={fmtCompactINR} style={{ fontSize: 10, fill: '#94A3B8' }} />
+                <LabelList dataKey="diff" position="top" formatter={(v) => (Math.abs(num(v)) >= gapLabelFloor ? fmtCompactINR(v) : '')} style={{ fontSize: 10, fill: '#94A3B8' }} />
               </Bar>
             </BarChart>
           </ChartCard>
@@ -965,7 +967,7 @@ function BankRecoAnalytics({ analytics }) {
             <BarChart data={ledgerData} layout="vertical" margin={{ top: 5, right: 28, left: 8, bottom: 0 }}>
               <CartesianGrid {...GRID} horizontal={false} />
               <XAxis type="number" tick={AXIS_TICK} tickFormatter={fmtCompactINR} />
-              <YAxis dataKey="ledger" type="category" tick={AXIS_TICK} width={148} />
+              <YAxis dataKey="ledger" type="category" tick={AXIS_TICK} width={168} />
               <Tooltip formatter={(v, n, p) => [fmtFullINR(v), p?.payload?.fullLedger || n]} />
               <Bar dataKey="amount" fill="#0748EE" radius={[0, 3, 3, 0]} isAnimationActive={animate} />
             </BarChart>
