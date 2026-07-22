@@ -396,3 +396,117 @@ CREATE POLICY receivable_cycle_results_brand_policy ON receivable_cycle_results
         current_setting('app.bypass_rls', true) = 'true'
         OR brand_id::text = current_setting('app.brand_id', true)
     );
+
+-- ────────────────────────────────────────────────────────────
+-- 11.  receivable_cycle_imports — raw storage for historical Receivable Cycle
+--      source files (e.g. a prior year's already-built Main Sheet/COD sheets
+--      workbook, or a raw Combined SRN register) that predate the reco_jobs
+--      upload pipeline and so have no job_id to hang off of. Same
+--      row-per-sheet-row JSON-blob shape as receivable_cycle_results above,
+--      for the same reason (many differently-named columns across sheets;
+--      JSON, not JSONB, preserves original column order).
+-- ────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS receivable_cycle_imports (
+    id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    brand_id     UUID NOT NULL DEFAULT NULLIF(current_setting('app.brand_id', true), '')::uuid,
+    source_file  VARCHAR(255) NOT NULL,
+    sheet_name   VARCHAR(64) NOT NULL,
+    row_index    INTEGER NOT NULL,
+    row_data     JSON NOT NULL,
+    created_at   TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS receivable_cycle_imports_brand_source_idx ON receivable_cycle_imports (brand_id, source_file, sheet_name);
+
+ALTER TABLE receivable_cycle_imports ENABLE ROW LEVEL SECURITY;
+ALTER TABLE receivable_cycle_imports FORCE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS receivable_cycle_imports_brand_policy ON receivable_cycle_imports;
+CREATE POLICY receivable_cycle_imports_brand_policy ON receivable_cycle_imports
+    USING (
+        current_setting('app.bypass_rls', true) = 'true'
+        OR brand_id::text = current_setting('app.brand_id', true)
+    );
+
+-- ────────────────────────────────────────────────────────────
+-- 12.  receivable_ledger — persistent, order-level, cross-year/cross-source
+--      reconciliation state powering the Receivable Cycle global dashboard.
+--      One row per sale order (keyed by AWB, or invoice number when no AWB),
+--      kept across every file/run ever loaded for a brand, so a courier
+--      settlement or SRN return arriving months later than the sale can
+--      still be matched back to the right original order. settled_flag and
+--      returned_flag are independent facts (not one enum) since an order can
+--      be settled in month X and still returned in month Y afterwards.
+-- ────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS receivable_ledger (
+    id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    brand_id          UUID NOT NULL DEFAULT NULLIF(current_setting('app.brand_id', true), '')::uuid,
+    awb               VARCHAR(64) NOT NULL DEFAULT '',
+    invoice_key       VARCHAR(64) NOT NULL DEFAULT '',
+    invoice_number    VARCHAR(64),
+    sale_order_number VARCHAR(64),
+    order_date        DATE,
+    order_month       INTEGER NOT NULL,
+    order_year        INTEGER NOT NULL,
+    payment_method    VARCHAR(16) NOT NULL,
+    courier           VARCHAR(32) NOT NULL DEFAULT '',
+    total_amount      NUMERIC(14,2) NOT NULL DEFAULT 0,
+    settled_flag      BOOLEAN NOT NULL DEFAULT FALSE,
+    settled_amount    NUMERIC(14,2),
+    settled_month     INTEGER,
+    settled_year      INTEGER,
+    settled_source    VARCHAR(32),
+    returned_flag     BOOLEAN NOT NULL DEFAULT FALSE,
+    returned_amount   NUMERIC(14,2),
+    returned_month    INTEGER,
+    returned_year     INTEGER,
+    source_file       VARCHAR(255),
+    created_at        TIMESTAMPTZ DEFAULT NOW(),
+    updated_at        TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS receivable_ledger_awb_uidx ON receivable_ledger (brand_id, awb) WHERE awb <> '';
+CREATE UNIQUE INDEX IF NOT EXISTS receivable_ledger_invoice_uidx ON receivable_ledger (brand_id, invoice_key) WHERE awb = '' AND invoice_key <> '';
+CREATE INDEX IF NOT EXISTS receivable_ledger_order_month_idx ON receivable_ledger (brand_id, order_year, order_month);
+CREATE INDEX IF NOT EXISTS receivable_ledger_settled_month_idx ON receivable_ledger (brand_id, settled_year, settled_month);
+CREATE INDEX IF NOT EXISTS receivable_ledger_returned_month_idx ON receivable_ledger (brand_id, returned_year, returned_month);
+
+ALTER TABLE receivable_ledger ENABLE ROW LEVEL SECURITY;
+ALTER TABLE receivable_ledger FORCE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS receivable_ledger_brand_policy ON receivable_ledger;
+CREATE POLICY receivable_ledger_brand_policy ON receivable_ledger
+    USING (
+        current_setting('app.bypass_rls', true) = 'true'
+        OR brand_id::text = current_setting('app.brand_id', true)
+    );
+
+-- receivable_ledger_unmatched — settlement/SRN rows whose AWB/invoice doesn't
+-- match any known ledger order, logged instead of silently dropped.
+CREATE TABLE IF NOT EXISTS receivable_ledger_unmatched (
+    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    brand_id    UUID NOT NULL DEFAULT NULLIF(current_setting('app.brand_id', true), '')::uuid,
+    match_key   VARCHAR(64) NOT NULL,
+    source      VARCHAR(32) NOT NULL,
+    amount      NUMERIC(14,2),
+    source_file VARCHAR(255),
+    created_at  TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS receivable_ledger_unmatched_brand_idx ON receivable_ledger_unmatched (brand_id, source);
+
+ALTER TABLE receivable_ledger_unmatched ENABLE ROW LEVEL SECURITY;
+ALTER TABLE receivable_ledger_unmatched FORCE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS receivable_ledger_unmatched_brand_policy ON receivable_ledger_unmatched;
+CREATE POLICY receivable_ledger_unmatched_brand_policy ON receivable_ledger_unmatched
+    USING (
+        current_setting('app.bypass_rls', true) = 'true'
+        OR brand_id::text = current_setting('app.brand_id', true)
+    );
+
+-- receivable_ledger.channel — which sales portal/channel an order came from
+-- (Shopify, Amazon, Flipkart, etc.), bucketed from the Tally row's raw
+-- "Channel Ledger" value. Powers the "Total sales" KPI's by-portal drill-down.
+ALTER TABLE receivable_ledger ADD COLUMN IF NOT EXISTS channel VARCHAR(64) NOT NULL DEFAULT '';
+CREATE INDEX IF NOT EXISTS receivable_ledger_channel_idx ON receivable_ledger (brand_id, channel);

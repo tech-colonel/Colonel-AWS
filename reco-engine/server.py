@@ -612,6 +612,26 @@ class ReconciliationHandler(BaseHTTPRequestHandler):
                     items = val if isinstance(val, list) else [val]
                     return [item["content"] for item in items if item.get("content")]
 
+                def _int_or_none(v):
+                    try:
+                        return int(v) if v not in (None, "") else None
+                    except (TypeError, ValueError):
+                        return None
+
+                # Receivable Amount calc needs the run's selected period (the "Generate
+                # Receivables" month/year, optionally a range via period_end_month/year)
+                # to know which SRN/return rows to deduct. Absent month/year -> no deduction.
+                _start_month = _int_or_none(fields.get("month"))
+                _start_year = _int_or_none(fields.get("year"))
+                period = None
+                if _start_month and _start_year:
+                    period = {
+                        "start_month": _start_month,
+                        "start_year": _start_year,
+                        "end_month": _int_or_none(fields.get("period_end_month")) or _start_month,
+                        "end_year": _int_or_none(fields.get("period_end_year")) or _start_year,
+                    }
+
                 try:
                     result = reconcile_receivable_cycle({
                         "tally_gst": tally_file["content"],
@@ -620,7 +640,7 @@ class ReconciliationHandler(BaseHTTPRequestHandler):
                         "ekart": _rc_files("ekart"),
                         "xpressbees": _rc_files("xpressbees"),
                         "srn": _rc_files("srn"),
-                    })
+                    }, period=period)
                 except Exception as exc:
                     self.write_json({"error": f"Receivable Cycle reconciliation failed: {exc}"}, 400)
                     return
@@ -647,6 +667,9 @@ class ReconciliationHandler(BaseHTTPRequestHandler):
                     # the source JSON/DB preserved.
                     "main_sheet_columns": MAIN_SHEET_COLUMNS,
                     "cod_sheet_columns": result["cod_columns"],
+                    # Receivable Amount: pending (unsettled) Total per courier, minus SRN
+                    # returns within the run's period — see receivable_cycle.build_cod_sheets.
+                    "receivable_summary": result["receivable_summary"],
                     "_xlsx_bytes": _buf.getvalue(),
                 }
                 JOBS[job_id] = payload

@@ -9,7 +9,7 @@ import {
   FileSpreadsheet, Loader2, ChevronDown, ChevronUp, Database, Info,
   BarChart3, ArrowRight, Save, Search, X, Scale, ClipboardList,
   FolderOpen, Globe, TrendingUp, Landmark, BookOpen, GitCompare, AlertCircle,
-  Zap, CreditCard, History, Eye, Calendar, Trash2,
+  Zap, CreditCard, History, Eye, Calendar, Trash2, Wallet,
 } from 'lucide-react';
 import api from '../../lib/api';
 import { sidebarFor, isAdminUser } from '../../lib/adminNav';
@@ -1411,7 +1411,20 @@ const RecoWorkspace = ({ agentTypeProp } = {}) => {
                   Previously Generated Files
                 </p>
               </div>
-              {historyLoading && <Loader2 style={{ width: 14, height: 14, color: 'var(--text-muted)' }} className="animate-spin" />}
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                {historyLoading && <Loader2 style={{ width: 14, height: 14, color: 'var(--text-muted)' }} className="animate-spin" />}
+                <button
+                  onClick={() => navigate(`/brands/${effectiveBrandId || brandId}/receivables`)}
+                  style={{
+                    display: 'flex', alignItems: 'center', gap: 6,
+                    padding: '7px 12px', borderRadius: 8, fontSize: 12, fontWeight: 700,
+                    background: '#4F46E518', border: '1px solid #4F46E540',
+                    color: '#4F46E5', cursor: 'pointer',
+                  }}
+                >
+                  <Wallet style={{ width: 13, height: 13 }} /> Receivable Dashboard
+                </button>
+              </div>
             </div>
 
             {!historyLoading && recoHistory.length === 0 && (

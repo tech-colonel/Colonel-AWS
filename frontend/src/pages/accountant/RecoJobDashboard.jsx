@@ -8,6 +8,7 @@ import {
 import {
   ArrowLeft, Download, CheckCircle2, AlertTriangle, HelpCircle,
   BarChart3, Loader2, TrendingUp, LayoutDashboard, Bot, Map, Trash2,
+  Wallet, X,
 } from 'lucide-react';
 import api from '../../lib/api';
 import { sidebarFor, isAdminUser } from '../../lib/adminNav';
@@ -142,6 +143,7 @@ const RecoJobDashboard = () => {
   const [codSheets, setCodSheets] = useState({});
   const [mainColumns, setMainColumns] = useState(null);
   const [codColumns, setCodColumns] = useState({});
+  const [receivableSummary, setReceivableSummary] = useState(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(null);
   const [filter, setFilter] = useState('All');
@@ -167,6 +169,7 @@ const RecoJobDashboard = () => {
           setCodSheets(res.data.cod_sheets ?? {});
           setMainColumns(res.data.main_sheet_columns ?? null);
           setCodColumns(res.data.cod_sheet_columns ?? {});
+          setReceivableSummary(res.data.receivable_summary ?? null);
         } else {
           setLoadError('job_not_found');
         }
@@ -351,6 +354,7 @@ const RecoJobDashboard = () => {
             codSheets={codSheets}
             mainColumns={mainColumns}
             codColumns={codColumns}
+            receivableSummary={receivableSummary}
             filter={filter}
             setFilter={setFilter}
             onDownload={job.output_file_id ? handleDownload : undefined}
@@ -888,7 +892,7 @@ const Gstr1View = ({ rows, filter, setFilter, meta }) => {
    real column order explicitly — deriving it from a row's own object keys is
    unreliable whenever a key looks like an array index ("2", "3", "4"), which
    JavaScript always forces to the front regardless of insertion order. ── */
-const ReceivableCycleView = ({ mainRows, codSheets, mainColumns, codColumns, filter, setFilter, onDownload, downloading, brandId, jobId, onSendFeedback }) => {
+const ReceivableCycleView = ({ mainRows, codSheets, mainColumns, codColumns, receivableSummary, filter, setFilter, onDownload, downloading, brandId, jobId, onSendFeedback }) => {
   const tabs = [
     'Main Sheet',
     ...COD_SHEET_ORDER.filter(name => codSheets?.[name]?.length),
@@ -900,6 +904,8 @@ const ReceivableCycleView = ({ mainRows, codSheets, mainColumns, codColumns, fil
 
   return (
     <>
+      {receivableSummary && <ReceivableAmountCard summary={receivableSummary} />}
+
       <div className="flex flex-wrap gap-2">
         {tabs.map(tab => (
           <button
@@ -929,6 +935,137 @@ const ReceivableCycleView = ({ mainRows, codSheets, mainColumns, codColumns, fil
         onSendFeedback={onSendFeedback}
       />
     </>
+  );
+};
+
+/* ── Receivable Amount card ────────────────────────────────────────────────
+   Delivery/Ekart/Xpressbees/DTDC: sum of Total for rows not yet settled by
+   that courier, minus SRN/return rows matched within the run's period —
+   see reco-engine/recon/receivable_cycle.py build_cod_sheets(). Click opens
+   the per-courier calculation. ── */
+const RECEIVABLE_COURIER_ORDER = ['Delivery', 'Ekart', 'Xpressbees', 'DTDC'];
+
+const money = (n) => `₹${fmt(n ?? 0)}`;
+
+const ReceivableAmountCard = ({ summary }) => {
+  const [open, setOpen] = useState(false);
+  const total = summary?.total_receivable_amount ?? 0;
+
+  return (
+    <>
+      <button
+        onClick={() => setOpen(true)}
+        className="w-full text-left p-5 transition-all hover:-translate-y-0.5"
+        style={{ ...cardStyle, cursor: 'pointer' }}
+      >
+        <div className="flex items-center justify-between flex-wrap gap-3">
+          <div className="flex items-center gap-3">
+            <div
+              className="w-9 h-9 rounded-xl flex items-center justify-center flex-shrink-0"
+              style={{ background: '#4F46E518', border: '1px solid #4F46E530' }}
+            >
+              <Wallet className="w-4 h-4" style={{ color: '#4F46E5' }} />
+            </div>
+            <div>
+              <p className="text-xs font-semibold" style={{ color: 'var(--text-muted)' }}>RECEIVABLE AMOUNT</p>
+              <p className="text-2xl font-black" style={{ color: 'var(--text-heading)', fontFamily: 'Barlow' }}>
+                {money(total)}
+              </p>
+            </div>
+          </div>
+          <span className="text-xs font-semibold" style={{ color: '#4F46E5' }}>View calculation →</span>
+        </div>
+      </button>
+
+      {open && <ReceivableAmountModal summary={summary} onClose={() => setOpen(false)} />}
+    </>
+  );
+};
+
+const ReceivableAmountModal = ({ summary, onClose }) => {
+  const couriers = summary?.couriers || {};
+  const period = summary?.period;
+  const periodLabel = period
+    ? (period.start_month === period.end_month && period.start_year === period.end_year
+        ? `${MONTHS[period.start_month]} ${period.start_year}`
+        : `${MONTHS[period.start_month]} ${period.start_year} – ${MONTHS[period.end_month]} ${period.end_year}`)
+    : 'No period set — SRN deduction disabled';
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center p-4"
+      style={{ background: 'rgba(15,23,42,0.45)' }}
+      onClick={onClose}
+    >
+      <div
+        className="w-full max-w-2xl rounded-2xl overflow-hidden"
+        style={{ background: 'var(--surface)', border: '1px solid var(--card-border)' }}
+        onClick={e => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between px-6 py-4" style={{ borderBottom: '1px solid var(--card-border)' }}>
+          <div>
+            <h3 className="text-base font-black" style={{ color: 'var(--text-heading)', fontFamily: 'Barlow' }}>
+              Receivable Amount — calculation
+            </h3>
+            <p className="text-xs mt-0.5" style={{ color: 'var(--text-muted)' }}>{periodLabel}</p>
+          </div>
+          <button onClick={onClose} aria-label="Close" className="p-1.5 rounded-lg" style={{ color: 'var(--text-muted)' }}>
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+
+        <div className="px-6 py-4 overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr style={{ borderBottom: '1.5px solid var(--card-border)' }}>
+                {['Courier', 'Pending rows', 'Pending amount', 'SRN returns', 'SRN deduction', 'Receivable'].map(h => (
+                  <th key={h} className="px-2 py-2 text-left text-xs font-bold uppercase tracking-wide whitespace-nowrap"
+                    style={{ color: 'var(--text-muted)' }}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {RECEIVABLE_COURIER_ORDER.filter(name => couriers[name]).map(name => {
+                const c = couriers[name];
+                return (
+                  <tr key={name} style={{ borderBottom: '1px solid var(--card-border)' }}>
+                    <td className="px-2 py-2.5 font-semibold whitespace-nowrap" style={{ color: 'var(--text-heading)' }}>{name}</td>
+                    <td className="px-2 py-2.5" style={{ color: 'var(--text-body)' }}>{c.pending_rows?.toLocaleString('en-IN')}</td>
+                    <td className="px-2 py-2.5 whitespace-nowrap" style={{ color: 'var(--text-body)' }}>{money(c.pending_amount)}</td>
+                    <td className="px-2 py-2.5" style={{ color: 'var(--text-body)' }}>{c.srn_rows?.toLocaleString('en-IN')}</td>
+                    <td className="px-2 py-2.5 whitespace-nowrap" style={{ color: '#E11D48' }}>
+                      {c.srn_deduction ? `− ${money(c.srn_deduction)}` : money(0)}
+                    </td>
+                    <td className="px-2 py-2.5 font-semibold whitespace-nowrap" style={{ color: '#059669' }}>{money(c.receivable_amount)}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+            <tfoot>
+              <tr>
+                <td className="px-2 py-3 font-black" style={{ color: 'var(--text-heading)' }}>Total</td>
+                <td />
+                <td className="px-2 py-3 font-semibold whitespace-nowrap" style={{ color: 'var(--text-heading)' }}>
+                  {money(summary?.total_pending_amount)}
+                </td>
+                <td />
+                <td className="px-2 py-3 font-semibold whitespace-nowrap" style={{ color: '#E11D48' }}>
+                  {summary?.total_srn_deduction ? `− ${money(summary.total_srn_deduction)}` : money(0)}
+                </td>
+                <td className="px-2 py-3 font-black whitespace-nowrap" style={{ color: '#059669' }}>
+                  {money(summary?.total_receivable_amount)}
+                </td>
+              </tr>
+            </tfoot>
+          </table>
+          <p className="text-xs mt-4" style={{ color: 'var(--text-muted)' }}>
+            Pending amount = sum of "Total" for COD rows not yet matched to that courier's settlement export.
+            SRN deduction = credit-note amount for pending rows returned within the period above.
+            Receivable = pending amount − SRN deduction, per courier.
+          </p>
+        </div>
+      </div>
+    </div>
   );
 };
 

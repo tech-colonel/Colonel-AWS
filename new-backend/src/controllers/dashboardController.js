@@ -211,6 +211,24 @@ const emptyDashboard = () => ({
   confidence_dist: [], recent_jobs: [],
 });
 
+const emptyReceivableDashboard = () => ({
+  period: null,
+  kpis: null,
+  receivedBySource: [],
+  receivedByChannel: [],
+  settledOfThisMonthsSalesBySource: [],
+  carriedForwardCollections: [],
+  salesByChannel: [],
+  courierAging: [],
+  thisMonthPendingByCourier: [],
+  receivableByCourierAsOfDate: [],
+  returnsBySource: [],
+  returnsByMonth: [],
+  monthlyTrend: [],
+  receivableByMonth: [],
+  dataQuality: { unmatched_count: 0, unmatched_amount: 0, bySource: [] },
+});
+
 const GST_2B_COLUMNS = 'supplier_name, supplier_gstin, invoice_number, invoice_date, taxable_value, igst, cgst, sgst, remark_1, remark_2';
 
 const RESULTS_TABLE_MAP = {
@@ -280,11 +298,14 @@ const getJobById = async (req, res) => {
           let mainRows = [];
           let mainColumns = null;
           let codColumns = {};
+          let receivableSummary = null;
           for (const { sheet_name, row_data } of data) {
             if (sheet_name === '__columns__') {
               const { 'Main Sheet': mainCols, ...rest } = row_data || {};
               mainColumns = mainCols || null;
               codColumns = rest;
+            } else if (sheet_name === '__receivable_summary__') {
+              receivableSummary = row_data || null;
             } else if (sheet_name === 'Main Sheet') {
               mainRows.push(row_data);
             } else {
@@ -294,6 +315,7 @@ const getJobById = async (req, res) => {
           return {
             job, rows: mainRows, cod_sheets: codSheets,
             main_sheet_columns: mainColumns, cod_sheet_columns: codColumns,
+            receivable_summary: receivableSummary,
           };
         } catch (_) {
           return { job, rows: [], cod_sheets: {} };
@@ -771,4 +793,418 @@ const getBrandAgentDetail = async (req, res) => {
   }
 };
 
-module.exports = { getRecoHistory, getJobResults, getDashboardSummary, getJobById, getAdminToolAnalytics, getUserActivity, getToolDetails, getUsersOverview, getBrandActivity, getBrandAgentDetail };
+/**
+ * GET /api/dashboard/receivables/:brandId?month=&year=
+ * Global Receivable Cycle dashboard — reads the cross-year receivable_ledger
+ * (built by new-backend/scripts/buildReceivableLedger.js from every Tally/
+ * courier-settlement/SRN file loaded for the brand) and answers, for a
+ * selected month: total sales, total receivable, how much of that receivable
+ * was carried forward from earlier months, how much was actually collected
+ * this month (and from whom), and how many returns landed this month.
+ *
+ * "Still pending" figures are always current-state (today's ledger), not a
+ * historical point-in-time reconstruction — the ledger keeps each order's
+ * FINAL settled/returned fact, not a snapshot per day. monthlyTrend therefore
+ * reads as "of orders sold in month X, how much is still stuck as of today",
+ * which is the aging view CFOs actually want, not a fabricated balance sheet.
+ */
+const getReceivableDashboard = async (req, res) => {
+  const { brandId } = req.params;
+  let month = parseInt(req.query.month, 10);
+  let year = parseInt(req.query.year, 10);
+  // Optional "cycle start" — everything sold before this month is treated as if it
+  // never existed for every figure on this dashboard (sales, receivable, settlements,
+  // returns, all of it), not just excluded from carried-forward. Lets a CFO say "our
+  // data before April is unreliable/irrelevant, start the whole cycle from there."
+  const startMonth = parseInt(req.query.startMonth, 10) || null;
+  const startYear = parseInt(req.query.startYear, 10) || null;
+  const startIndex = (startMonth && startYear) ? (startYear * 12 + startMonth) : 0; // 0 = no lower bound, any real order index is far greater
+  if (!brandId || brandId === 'demo') return res.status(400).json({ error: 'brandId required' });
+
+  try {
+    const seq = await getBrandSeq(brandId);
+
+    // No month/year given → default to the latest month with any ledger data,
+    // so the dashboard has something sensible to show on first load for any brand.
+    if (!month || !year) {
+      const [[latest]] = await seq.query(
+        `SELECT order_month, order_year FROM receivable_ledger WHERE brand_id = $1
+         ORDER BY order_year DESC, order_month DESC LIMIT 1`,
+        { bind: [brandId] }
+      );
+      if (!latest) return res.json(emptyReceivableDashboard());
+      month = latest.order_month;
+      year = latest.order_year;
+    }
+
+    // Selected period is before the cycle's own start — nothing to show; the start
+    // month itself is the earliest month this dashboard will ever report on.
+    if (startIndex > 0 && (year * 12 + month) < startIndex) {
+      return res.json({
+        ...emptyReceivableDashboard(),
+        period: { month, year },
+        cycleStart: { month: startMonth, year: startYear },
+        beforeCycleStart: true,
+      });
+    }
+
+    const data = await withBypass(seq, async (t) => {
+      const bind = [brandId, month, year, startIndex];
+
+      const [[kpis]] = await seq.query(
+        `SELECT
+           COALESCE(SUM(total_amount) FILTER (WHERE order_month = $2 AND order_year = $3), 0) AS sales_this_month,
+           -- "Still receivable" = not yet settled AND not returned. A returned COD order
+           -- (RTO, or a post-delivery return) never generates real cash, so once
+           -- returned_flag flips it must stop counting as outstanding, regardless of
+           -- which month the return itself landed in. Same population as sales_this_month
+           -- (COD+Prepaid, no payment_method filter) — Prepaid rows are always settled
+           -- the same month they're sold (see buildReceivableLedger.js), so they always
+           -- fall out of this filter on their own and contribute exactly ₹0; the number
+           -- is unaffected, but the population now matches every other KPI on this card
+           -- exactly, so Sales − Returned − Settled always reconciles to this to the rupee.
+           COALESCE(SUM(total_amount) FILTER (
+             WHERE NOT settled_flag AND NOT returned_flag
+               AND (order_year * 12 + order_month) <= ($3 * 12 + $2) AND (order_year * 12 + order_month) >= $4
+           ), 0) AS total_receivable_as_of_date,
+           COALESCE(SUM(total_amount) FILTER (
+             WHERE NOT settled_flag AND NOT returned_flag
+               AND order_month = $2 AND order_year = $3
+           ), 0) AS this_month_own_receivable,
+           COALESCE(SUM(total_amount) FILTER (
+             WHERE NOT settled_flag AND NOT returned_flag
+               AND (order_year * 12 + order_month) < ($3 * 12 + $2) AND (order_year * 12 + order_month) >= $4
+           ), 0) AS carried_forward_receivable,
+           -- Settled-to-date of THIS MONTH'S OWN sales, regardless of which calendar month
+           -- the settlement itself landed in (same total_amount partition as the receivable
+           -- figures above, so it is the exact complement: sales_this_month −
+           -- returned_of_this_months_sales − settled_of_this_months_sales =
+           -- this_month_own_receivable, always, to the rupee). This is an ACCRUAL figure
+           -- (status of this month's orders as of today) — do not confuse with
+           -- received_this_month below, which is a CASH figure (money that physically
+           -- arrived in this calendar month, from orders sold in any month).
+           COALESCE(SUM(total_amount) FILTER (
+             WHERE settled_flag AND NOT returned_flag AND order_month = $2 AND order_year = $3
+           ), 0) AS settled_of_this_months_sales,
+           COALESCE(SUM(settled_amount) FILTER (WHERE settled_month = $2 AND settled_year = $3 AND (order_year * 12 + order_month) >= $4), 0) AS received_this_month,
+           COALESCE(SUM(settled_amount) FILTER (
+             WHERE settled_month = $2 AND settled_year = $3 AND order_month = $2 AND order_year = $3
+           ), 0) AS received_from_this_months_sales,
+           COALESCE(SUM(settled_amount) FILTER (
+             WHERE settled_month = $2 AND settled_year = $3
+               AND (order_year * 12 + order_month) < ($3 * 12 + $2) AND (order_year * 12 + order_month) >= $4
+           ), 0) AS received_from_carried_forward,
+           COALESCE(SUM(returned_amount) FILTER (WHERE returned_month = $2 AND returned_year = $3 AND (order_year * 12 + order_month) >= $4), 0) AS returns_this_month_amount,
+           COUNT(*) FILTER (WHERE returned_month = $2 AND returned_year = $3 AND (order_year * 12 + order_month) >= $4) AS returns_this_month_count,
+           -- Behind "Total sales" card's net-of-returns view — returns of an order SOLD
+           -- this month, regardless of which month the return itself was processed in
+           -- (same month or a later one). Different from returns_this_month_amount above,
+           -- which is returns PROCESSED this month regardless of the sale's own month.
+           COALESCE(SUM(total_amount) FILTER (WHERE order_month = $2 AND order_year = $3 AND returned_flag), 0) AS returned_of_this_months_sales
+         FROM receivable_ledger WHERE brand_id = $1`,
+        { bind, transaction: t }
+      );
+
+      // Behind the "Received" KPI card's by-source table — for each courier/prepaid
+      // source, how much of what it paid out THIS calendar month was for an order
+      // sold this same month vs an order sold in an earlier month (i.e. it was
+      // finally collecting old carried-forward debt).
+      const [receivedBySource] = await seq.query(
+        `SELECT COALESCE(settled_source, 'unknown') AS source, COUNT(*) AS count, SUM(settled_amount) AS amount,
+                COALESCE(SUM(settled_amount) FILTER (WHERE order_month = $2 AND order_year = $3), 0) AS from_this_month,
+                COALESCE(SUM(settled_amount) FILTER (WHERE NOT (order_month = $2 AND order_year = $3)), 0) AS from_earlier_months
+         FROM receivable_ledger
+         WHERE brand_id = $1 AND settled_month = $2 AND settled_year = $3 AND (order_year * 12 + order_month) >= $4
+         GROUP BY 1 ORDER BY amount DESC`,
+        { bind, transaction: t }
+      );
+
+      // Same split as receivedBySource above, but by sales portal/channel instead of
+      // by courier — "from what portal" was this month's cash actually collected.
+      const [receivedByChannel] = await seq.query(
+        `SELECT COALESCE(NULLIF(channel, ''), 'Unknown') AS channel, COUNT(*) AS count, SUM(settled_amount) AS amount,
+                COALESCE(SUM(settled_amount) FILTER (WHERE order_month = $2 AND order_year = $3), 0) AS from_this_month,
+                COALESCE(SUM(settled_amount) FILTER (WHERE NOT (order_month = $2 AND order_year = $3)), 0) AS from_earlier_months
+         FROM receivable_ledger
+         WHERE brand_id = $1 AND settled_month = $2 AND settled_year = $3 AND (order_year * 12 + order_month) >= $4
+         GROUP BY 1 ORDER BY amount DESC`,
+        { bind, transaction: t }
+      );
+
+      // Behind the reconciliation strip's "Settled to date" figure
+      // (kpis.settled_of_this_months_sales) — same mutually-exclusive total_amount
+      // partition, grouped by settled_source, so "how much of THIS MONTH'S OWN sales
+      // is settled, and from where" is a literal breakdown instead of one lump sum.
+      // Unlike receivedBySource above, this is NOT filtered by settled_month/year —
+      // an order sold this month but settled next month via Ekart still counts here,
+      // under 'ekart'. Rows are ranked by amount so the biggest channel leads.
+      const [settledOfThisMonthsSalesBySource] = await seq.query(
+        `SELECT COALESCE(settled_source, 'unknown') AS source, COUNT(*) AS count,
+                SUM(total_amount) AS amount
+         FROM receivable_ledger
+         WHERE brand_id = $1 AND order_month = $2 AND order_year = $3
+           AND settled_flag AND NOT returned_flag AND (order_year * 12 + order_month) >= $4
+         GROUP BY 1 ORDER BY amount DESC`,
+        { bind, transaction: t }
+      );
+
+      // Drills into the "Previous months' sale" slice of the Received card — exactly
+      // which origin month's backlog got cleared this calendar month, and via which
+      // courier/prepaid source, so "we collected a Jan sale via Ekart in March" is a
+      // literal row instead of one lump carried-forward number.
+      const [carriedForwardCollections] = await seq.query(
+        `SELECT order_month, order_year, COALESCE(settled_source, 'unknown') AS source,
+                COUNT(*) AS count, SUM(settled_amount) AS amount
+         FROM receivable_ledger
+         WHERE brand_id = $1 AND settled_month = $2 AND settled_year = $3
+           AND NOT (order_month = $2 AND order_year = $3) AND (order_year * 12 + order_month) >= $4
+         GROUP BY order_month, order_year, settled_source
+         ORDER BY order_year DESC, order_month DESC, amount DESC`,
+        { bind, transaction: t }
+      );
+
+      // Behind the "Total sales" KPI card — which portal/channel this month's sales
+      // actually came from (Shopify, Amazon, Flipkart, etc.), COD + Prepaid combined.
+      const [salesByChannel] = await seq.query(
+        `SELECT COALESCE(NULLIF(channel, ''), 'Unknown') AS channel, COUNT(*) AS count, SUM(total_amount) AS amount
+         FROM receivable_ledger
+         WHERE brand_id = $1 AND order_month = $2 AND order_year = $3 AND (order_year * 12 + order_month) >= $4
+         GROUP BY 1 ORDER BY amount DESC`,
+        { bind, transaction: t }
+      );
+
+      // All-time (not month-filtered) per-courier picture — this is what surfaces data
+      // gaps like "Delhivery FY24-25 settlement file not loaded yet" as a near-100%
+      // pending rate, instead of that silently masquerading as a real business problem.
+      //
+      // settled_amount/returned_amount/pending_amount here are a MUTUALLY EXCLUSIVE
+      // partition of total_amount (settled-and-not-returned / returned-regardless-of-
+      // settled / neither) — NOT a straight sum of the settled_amount/returned_amount
+      // ledger columns, which can double-count an order that was briefly settled and
+      // then later refunded. This partition is what makes
+      // total_amount = settled_amount + returned_amount + pending_amount hold exactly.
+      const [courierAging] = await seq.query(
+        `SELECT courier, COUNT(*) AS total_orders, SUM(total_amount) AS total_amount,
+                COUNT(*) FILTER (WHERE settled_flag AND NOT returned_flag) AS settled_orders,
+                COALESCE(SUM(total_amount) FILTER (WHERE settled_flag AND NOT returned_flag), 0) AS settled_amount,
+                COUNT(*) FILTER (WHERE returned_flag) AS returned_orders,
+                COALESCE(SUM(total_amount) FILTER (WHERE returned_flag), 0) AS returned_amount,
+                COALESCE(SUM(total_amount) FILTER (WHERE NOT settled_flag AND NOT returned_flag), 0) AS pending_amount
+         FROM receivable_ledger
+         WHERE brand_id = $1 AND payment_method = 'COD' AND (order_year * 12 + order_month) >= $2
+         GROUP BY courier ORDER BY total_amount DESC`,
+        { bind: [brandId, startIndex], transaction: t }
+      );
+
+      // Behind the "This month's own receivable" KPI card — where THIS month's still-
+      // pending COD amount actually sits, broken down by courier/partner. Unlike
+      // courierAging above (all-time), this is scoped to this month's own sales only.
+      // Same mutually-exclusive partition as courierAging above.
+      const [thisMonthPendingByCourier] = await seq.query(
+        `SELECT courier, COUNT(*) AS total_orders, SUM(total_amount) AS total_amount,
+                COUNT(*) FILTER (WHERE settled_flag AND NOT returned_flag) AS settled_orders,
+                COALESCE(SUM(total_amount) FILTER (WHERE settled_flag AND NOT returned_flag), 0) AS settled_amount,
+                COUNT(*) FILTER (WHERE returned_flag) AS returned_orders,
+                COALESCE(SUM(total_amount) FILTER (WHERE returned_flag), 0) AS returned_amount,
+                COUNT(*) FILTER (WHERE NOT settled_flag AND NOT returned_flag) AS pending_orders,
+                COALESCE(SUM(total_amount) FILTER (WHERE NOT settled_flag AND NOT returned_flag), 0) AS pending_amount
+         FROM receivable_ledger
+         WHERE brand_id = $1 AND payment_method = 'COD' AND order_month = $2 AND order_year = $3
+           AND (order_year * 12 + order_month) >= $4
+         GROUP BY courier ORDER BY pending_amount DESC`,
+        { bind, transaction: t }
+      );
+
+      // Also behind "Total receivable" — same pending-as-of-date universe as
+      // total_receivable_as_of_date, but grouped by courier/partner instead of by
+      // month, so the card can answer "from where is it receivable" as well as
+      // "from which month".
+      const [receivableByCourierAsOfDate] = await seq.query(
+        `SELECT courier, COUNT(*) AS pending_orders, SUM(total_amount) AS pending_amount
+         FROM receivable_ledger
+         WHERE brand_id = $1 AND payment_method = 'COD' AND NOT settled_flag AND NOT returned_flag
+           AND (order_year * 12 + order_month) <= ($3 * 12 + $2) AND (order_year * 12 + order_month) >= $4
+         GROUP BY courier ORDER BY pending_amount DESC`,
+        { bind, transaction: t }
+      );
+
+      // Behind the "Returns (SRN)" KPI card — this month's returns broken down by
+      // where the order shipped from (courier, or "Prepaid" for prepaid orders,
+      // which get returned too — not just COD).
+      const [returnsBySource] = await seq.query(
+        `SELECT CASE WHEN payment_method = 'PREPAID' THEN 'Prepaid'
+                     ELSE COALESCE(NULLIF(courier, ''), 'Other COD') END AS source,
+                COUNT(*) AS count, SUM(returned_amount) AS amount
+         FROM receivable_ledger
+         WHERE brand_id = $1 AND returned_month = $2 AND returned_year = $3 AND (order_year * 12 + order_month) >= $4
+         GROUP BY 1 ORDER BY amount DESC`,
+        { bind, transaction: t }
+      );
+
+      // Also behind "Returns (SRN)" — this month's returns broken down by which
+      // ORIGIN month the underlying sale happened in. A return processed this month
+      // is very often for a sale from a previous month, not this month's own — this
+      // is what makes that visible instead of one lump total.
+      const [returnsByMonth] = await seq.query(
+        `SELECT order_month AS month, order_year AS year, COUNT(*) AS count, SUM(returned_amount) AS amount
+         FROM receivable_ledger
+         WHERE brand_id = $1 AND returned_month = $2 AND returned_year = $3 AND (order_year * 12 + order_month) >= $4
+         GROUP BY order_month, order_year ORDER BY order_year DESC, order_month DESC`,
+        { bind, transaction: t }
+      );
+
+      // Full aging breakdown behind the "Total receivable" KPI card — every origin
+      // month with COD sales up to the selected month (not windowed to 12, unlike
+      // monthlyTrend below, since the total-receivable figure can include older
+      // pending than that window covers), newest first.
+      // Same mutually-exclusive total_amount partition as courierAging/thisMonthPendingByCourier —
+      // cod_sales = settled_amount + returned_amount + pending, exactly, every row.
+      const [receivableByMonth] = await seq.query(
+        `SELECT order_month AS month, order_year AS year,
+                SUM(total_amount) AS cod_sales,
+                COALESCE(SUM(total_amount) FILTER (WHERE settled_flag AND NOT returned_flag), 0) AS settled_amount,
+                COALESCE(SUM(total_amount) FILTER (WHERE returned_flag), 0) AS returned_amount,
+                SUM(total_amount) FILTER (WHERE NOT settled_flag AND NOT returned_flag) AS pending
+         FROM receivable_ledger
+         WHERE brand_id = $1 AND payment_method = 'COD' AND (order_year * 12 + order_month) <= ($3 * 12 + $2)
+           AND (order_year * 12 + order_month) >= $4
+         GROUP BY order_month, order_year
+         ORDER BY order_year DESC, order_month DESC`,
+        { bind, transaction: t }
+      );
+
+      const [monthlyTrend] = await seq.query(
+        `SELECT order_month AS month, order_year AS year,
+                SUM(total_amount) AS sales,
+                SUM(settled_amount) FILTER (WHERE settled_month = order_month AND settled_year = order_year) AS received_same_month,
+                SUM(returned_amount) AS returned_amount,
+                SUM(total_amount) FILTER (WHERE payment_method = 'COD' AND NOT settled_flag AND NOT returned_flag) AS still_pending
+         FROM receivable_ledger
+         WHERE brand_id = $1 AND (order_year * 12 + order_month) <= ($3 * 12 + $2)
+           AND (order_year * 12 + order_month) > ($3 * 12 + $2) - 12
+           AND (order_year * 12 + order_month) >= $4
+         GROUP BY order_month, order_year
+         ORDER BY order_year, order_month`,
+        { bind, transaction: t }
+      );
+
+      const [[dataQualityTotals]] = await seq.query(
+        `SELECT COUNT(*) AS unmatched_count, COALESCE(SUM(amount), 0) AS unmatched_amount
+         FROM receivable_ledger_unmatched WHERE brand_id = $1`,
+        { bind: [brandId], transaction: t }
+      );
+      const [dataQualityBySource] = await seq.query(
+        `SELECT source, COUNT(*) AS count, COALESCE(SUM(amount), 0) AS amount
+         FROM receivable_ledger_unmatched WHERE brand_id = $1
+         GROUP BY source ORDER BY amount DESC`,
+        { bind: [brandId], transaction: t }
+      );
+
+      return { kpis, receivedBySource, receivedByChannel, settledOfThisMonthsSalesBySource, carriedForwardCollections, salesByChannel, courierAging, thisMonthPendingByCourier, receivableByCourierAsOfDate, returnsBySource, returnsByMonth, monthlyTrend, receivableByMonth, dataQualityTotals, dataQualityBySource };
+    });
+
+    res.json({
+      period: { month, year },
+      cycleStart: startIndex > 0 ? { month: startMonth, year: startYear } : null,
+      kpis: data.kpis,
+      receivedBySource: data.receivedBySource,
+      receivedByChannel: data.receivedByChannel,
+      settledOfThisMonthsSalesBySource: data.settledOfThisMonthsSalesBySource,
+      carriedForwardCollections: data.carriedForwardCollections,
+      salesByChannel: data.salesByChannel,
+      courierAging: data.courierAging,
+      thisMonthPendingByCourier: data.thisMonthPendingByCourier,
+      receivableByCourierAsOfDate: data.receivableByCourierAsOfDate,
+      returnsBySource: data.returnsBySource,
+      returnsByMonth: data.returnsByMonth,
+      monthlyTrend: data.monthlyTrend,
+      receivableByMonth: data.receivableByMonth,
+      dataQuality: { ...data.dataQualityTotals, bySource: data.dataQualityBySource },
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+};
+
+// Fixed whitelist — mirrors COD_SHEET_ORDER in reco-engine/recon/receivable_cycle.py
+// (plus "Main Sheet" and the real "Other COD" bucket the engine's own courierBucket()
+// falls back to). Never interpolate the requested sheet key directly into SQL —
+// this map is the only thing that ever reaches the query.
+const RECEIVABLE_SHEET_FILTERS = {
+  'Main Sheet': '',
+  'COD main sheet': `AND payment_method = 'COD'`,
+  'Delivery': `AND payment_method = 'COD' AND courier = 'Delivery'`,
+  'Ekart': `AND payment_method = 'COD' AND courier = 'Ekart'`,
+  'Xpressbees': `AND payment_method = 'COD' AND courier = 'Xpressbees'`,
+  'DTDC': `AND payment_method = 'COD' AND courier = 'DTDC'`,
+  'Self shipping': `AND payment_method = 'COD' AND courier = 'Self shipping'`,
+  'Other COD': `AND payment_method = 'COD' AND courier = 'Other COD'`,
+};
+const RECEIVABLE_SHEET_ORDER = Object.keys(RECEIVABLE_SHEET_FILTERS);
+
+/**
+ * GET /api/dashboard/receivables/:brandId/sheet?month=&year=&sheet=&status=&search=&page=&pageSize=
+ * Row-level "sheet" browser behind the Receivable Dashboard's "View" button —
+ * same tab set as the per-run Receivable Cycle workbook (Main Sheet, COD main
+ * sheet, one tab per courier), but reading the cross-year receivable_ledger for
+ * whichever month is selected on the dashboard, instead of a single upload's rows.
+ */
+const getReceivableSheetRows = async (req, res) => {
+  const { brandId } = req.params;
+  const month = parseInt(req.query.month, 10);
+  const year = parseInt(req.query.year, 10);
+  const sheet = req.query.sheet || 'Main Sheet';
+  const status = req.query.status || 'all'; // all | pending | settled | returned
+  const search = (req.query.search || '').trim();
+  const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+  const pageSize = Math.min(200, Math.max(10, parseInt(req.query.pageSize, 10) || 50));
+
+  if (!brandId || brandId === 'demo') return res.status(400).json({ error: 'brandId required' });
+  if (!month || !year) return res.status(400).json({ error: 'month and year query params required' });
+  if (!(sheet in RECEIVABLE_SHEET_FILTERS)) return res.status(400).json({ error: `Unknown sheet "${sheet}"` });
+
+  const statusClause = status === 'pending' ? 'AND NOT settled_flag'
+    : status === 'settled' ? 'AND settled_flag'
+    : status === 'returned' ? 'AND returned_flag'
+    : '';
+
+  try {
+    const seq = await getBrandSeq(brandId);
+    const data = await withBypass(seq, async (t) => {
+      const bind = [brandId, month, year];
+      let searchClause = '';
+      if (search) {
+        bind.push(`%${search}%`);
+        searchClause = `AND (invoice_number ILIKE $${bind.length} OR awb ILIKE $${bind.length} OR sale_order_number ILIKE $${bind.length})`;
+      }
+      const whereSql = `WHERE brand_id = $1 AND order_month = $2 AND order_year = $3
+        ${RECEIVABLE_SHEET_FILTERS[sheet]} ${statusClause} ${searchClause}`;
+
+      const [[{ count }]] = await seq.query(
+        `SELECT COUNT(*) AS count FROM receivable_ledger ${whereSql}`,
+        { bind, transaction: t }
+      );
+
+      bind.push(pageSize, (page - 1) * pageSize);
+      const [rows] = await seq.query(
+        `SELECT order_date, invoice_number, sale_order_number, awb, channel, payment_method, courier,
+                total_amount, settled_flag, settled_amount, settled_month, settled_year, settled_source,
+                returned_flag, returned_amount, returned_month, returned_year
+         FROM receivable_ledger ${whereSql}
+         ORDER BY order_date DESC, invoice_number
+         LIMIT $${bind.length - 1} OFFSET $${bind.length}`,
+        { bind, transaction: t }
+      );
+      return { rows, total: Number(count) };
+    });
+
+    res.json({
+      sheet, page, pageSize, total: data.total, rows: data.rows,
+      sheets: RECEIVABLE_SHEET_ORDER,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+};
+
+module.exports = { getRecoHistory, getJobResults, getDashboardSummary, getJobById, getAdminToolAnalytics, getUserActivity, getToolDetails, getUsersOverview, getBrandActivity, getBrandAgentDetail, getReceivableDashboard, getReceivableSheetRows };
