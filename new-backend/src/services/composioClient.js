@@ -246,6 +246,32 @@ async function hasConnection(userId, toolkitSlug) {
   return conns.some((c) => String(c.slug || '').toLowerCase() === want);
 }
 
+/* ── Google account identity ─────────────────────────────────────────────────
+   Composio stores OAuth tokens but not the account email on the connection
+   record, so we resolve it once via the Gmail profile tool and cache it
+   (short TTL) per userId. Returns null if it can't be resolved (e.g. no gmail
+   connection or the tool errors) — callers fall back to a generic label. */
+const _emailCache = new Map(); // userId -> { email, at }
+const EMAIL_TTL_MS = 10 * 60 * 1000; // 10 min
+
+async function getGoogleEmail(userId, force = false) {
+  const now = Date.now();
+  const hit = _emailCache.get(userId);
+  if (!force && hit && now - hit.at < EMAIL_TTL_MS) return hit.email;
+  let email = null;
+  try {
+    // GMAIL_GET_PROFILE returns { emailAddress, ... } for the connected account.
+    const res = await executeTool(userId, 'GMAIL_GET_PROFILE', {});
+    const data = (res && (res.data || res)) || {};
+    email = data.emailAddress || data.email || (data.response_data && data.response_data.emailAddress) || null;
+  } catch (_) { /* leave null — caller uses a fallback label */ }
+  _emailCache.set(userId, { email, at: now });
+  return email;
+}
+
+/** Forget a cached email (call after connect/disconnect so labels refresh). */
+function clearGoogleEmail(userId) { _emailCache.delete(userId); }
+
 module.exports = {
   isConfigured,
   listToolkits,
@@ -257,4 +283,6 @@ module.exports = {
   disconnect,
   executeTool,
   hasConnection,
+  getGoogleEmail,
+  clearGoogleEmail,
 };
