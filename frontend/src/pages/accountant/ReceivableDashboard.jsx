@@ -192,7 +192,8 @@ const ReceivedBreakdownModal = ({ data, period, onClose }) => {
             </h3>
             <p className="text-xs mt-0.5" style={{ color: 'var(--text-muted)' }}>
               Cash actually collected this month, not sales — includes prepaid (Razorpay-equivalent, always
-              same-month) and courier COD settlements
+              same-month) and courier COD settlements, net of any of those orders later returned by this
+              month's own close
             </p>
           </div>
           <button onClick={onClose} aria-label="Close" className="p-1.5 rounded-lg" style={{ color: 'var(--text-muted)' }}>
@@ -254,11 +255,12 @@ const SettledToDateModal = ({ rows, period, total, onClose }) => (
       <div className="flex items-center justify-between px-6 py-4" style={{ borderBottom: '1px solid var(--card-border)' }}>
         <div>
           <h3 className="text-base font-black" style={{ color: 'var(--text-heading)', fontFamily: 'Barlow' }}>
-            Settled to date — {MONTHS[period.month]} {period.year}'s own sales
+            Settled as of {MONTHS[period.month]} {period.year}'s close — {MONTHS[period.month]} {period.year}'s own sales
           </h3>
           <p className="text-xs mt-0.5" style={{ color: 'var(--text-muted)' }}>
-            COD + Prepaid combined. Counts a settlement no matter which calendar month it landed in — an order sold
-            this month but settled next month still counts here, under its actual source.
+            COD + Prepaid combined. Counts a settlement as long as it landed on or before this month's own close —
+            an order sold this month but settled later in this same month still counts here, under its actual
+            source; one settled after this month's close doesn't count until that later month is selected.
           </p>
         </div>
         <button onClick={onClose} aria-label="Close" className="p-1.5 rounded-lg" style={{ color: 'var(--text-muted)' }}>
@@ -402,11 +404,12 @@ const ReceivableByMonthModal = ({ title, subtitle, rows, total, summary, showMon
               </table>
             </div>
             <FormulaNote>
-              <strong>Formula:</strong> COD sales = Settled + Returned + Still pending, exactly, for every month.
-              An order counts as <strong>Settled</strong> only if it was paid out AND never returned; as{' '}
-              <strong>Returned</strong> if it was ever returned (even if a courier had briefly remitted it first —
-              that cash is not real revenue once the item comes back); and <strong>Still pending</strong> only if
-              it's neither. A returned order never counts as receivable, no matter which month the return itself lands in.
+              <strong>Formula:</strong> COD sales = Settled + Returned + Still pending, exactly, for every month, all
+              measured as of the selected month's own close. An order counts as <strong>Settled</strong> only if it
+              was paid out on or before that close AND never returned by then; as <strong>Returned</strong> if it was
+              returned by then (even if a courier had briefly remitted it first — that cash is not real revenue once
+              the item comes back); and <strong>Still pending</strong> only if it's neither yet. A settlement or
+              return that happens after the selected month's close doesn't count until that later month is selected.
             </FormulaNote>
           </>
         )}
@@ -532,10 +535,12 @@ const ThisMonthByCourierModal = ({ rows, period, total, onClose }) => {
           remitted before the return) never counts as receivable.
           <br /><br />
           <strong>"Returned (COD)" here is not the same number as elsewhere on this dashboard</strong> — it's COD
-          orders only (receivable is a COD-only concept), and it counts a return whenever it was recorded, even if
-          that return is dated in a later month than this one. The <strong>Total Sales</strong> card's returns figure
-          adds Prepaid on top of this; the <strong>Returns (SRN)</strong> card shows a different slice again — only
-          returns dated in this specific calendar month, regardless of which month the sale itself was in.
+          orders only (receivable is a COD-only concept), and it counts a return as long as it was recorded on or
+          before this month's own close, even if that return is dated in a later-but-still-closed month than this
+          one; a return recorded after this month's close doesn't count until that later month is selected. The{' '}
+          <strong>Total Sales</strong> card's returns figure adds Prepaid on top of this; the <strong>Returns
+          (SRN)</strong> card shows a different slice again — only returns dated in this specific calendar month,
+          regardless of which month the sale itself was in.
         </FormulaNote>
       </div>
     </div>
@@ -623,14 +628,16 @@ const SalesByChannelModal = ({ rows, period, total, returnedOfThisMonth, onClose
           <strong>Formula:</strong> Total sales = SUM(Total) from every order (COD + Prepaid) whose own sale date
           falls in {MONTHS[period.month]} {period.year} — the portal table above is gross, un-netted. Net sales
           (top of this modal) = Total sales − Returns of this month's own sales, where the return can itself be
-          processed in this month or a later one (an order sold in March that's returned in April still reduces
-          March's net figure once the return is recorded).
+          processed in this same month or an earlier-closing one, as long as it landed on or before this month's
+          own close (an order sold in March that's returned later in March still reduces March's net figure once
+          the return is recorded; one only returned in April doesn't count until April is selected).
           <br /><br />
           <strong>Three different "returns" figures live on this dashboard — they're not meant to match:</strong> this
-          one is COD + Prepaid combined, counting a return whenever it happens (any month). The <strong>This month's
-          own receivable</strong> card's "Returned" column is the COD-only subset of this same figure. The{' '}
-          <strong>Returns (SRN)</strong> card is different again — it shows only returns <em>dated</em> in this
-          specific calendar month, regardless of which month the original sale was in.
+          one is COD + Prepaid combined, counting a return as of this month's own close (any same-or-earlier-closing
+          month it was actually recorded in). The <strong>This month's own receivable</strong> card's "Returned"
+          column is the COD-only subset of this same figure. The <strong>Returns (SRN)</strong> card is different
+          again — it shows only returns <em>dated</em> in this specific calendar month, regardless of which month
+          the original sale was in.
         </FormulaNote>
       </div>
     </div>
@@ -1026,9 +1033,12 @@ const ReceivableDashboard = () => {
                 This is the number a CFO actually wants: Net Sales − Received =
                 Receivable, literally, as three cards read left to right. "Received"
                 here means settled_of_this_months_sales — how much of THIS month's
-                own sale has actually been collected, to date, no matter which later
-                calendar month the collection itself landed in — which is what makes
-                the subtraction land exactly on Receivable, every month, to the rupee. */}
+                own sale has been collected AS OF THIS MONTH'S OWN CLOSE, no matter
+                which same-or-earlier-closing calendar month the collection itself
+                landed in (a collection that only lands after this month doesn't
+                count until that later month is selected) — which is what makes the
+                subtraction land exactly on Receivable, every month, to the rupee,
+                without an already-viewed month's numbers drifting later. */}
             <div>
               <p className="text-xs font-bold uppercase tracking-wide mb-3" style={{ color: 'var(--text-muted)' }}>
                 {MONTHS[month]} {year} — Net sales − Received = Receivable
@@ -1048,7 +1058,7 @@ const ReceivableDashboard = () => {
                   <KpiCard
                     label={`Received — ${MONTHS[month]} ${year}`}
                     value={money(k.settled_of_this_months_sales)}
-                    sub="Collected against this month's own sale, as of today. Click for breakdown by source"
+                    sub={`Collected against this month's own sale, as of ${MONTHS[month]}'s close. Click for breakdown by source`}
                     icon={TrendingUp} color={COLOR_RECEIVED}
                     onClick={() => setShowSettledToDateModal(true)}
                   />
@@ -1080,7 +1090,7 @@ const ReceivableDashboard = () => {
                 <KpiCard
                   label={`Total receivable as of ${MONTHS[month]} ${year}`}
                   value={money(k.total_receivable_as_of_date)}
-                  sub="Every month's sale combined, still uncollected today. Click for the month-by-month breakdown"
+                  sub={`Every month's sale combined, still uncollected as of ${MONTHS[month]}'s close. Click for the month-by-month breakdown`}
                   icon={Wallet} color={COLOR_PRIMARY}
                   onClick={() => setShowReceivableByMonthModal(true)}
                 />
@@ -1094,7 +1104,7 @@ const ReceivableDashboard = () => {
                 <KpiCard
                   label={`Cash collected — ${MONTHS[month]} ${year}`}
                   value={money(k.received_this_month)}
-                  sub="Actual cash that arrived THIS calendar month (old dues + new) — a treasury figure, not part of the equation above"
+                  sub="Actual cash that arrived THIS calendar month (old dues + new), net of orders later returned — a treasury figure, not part of the equation above"
                   icon={TrendingUp} color={COLOR_RECEIVED}
                   onClick={() => setShowReceivedModal(true)}
                 />
@@ -1127,8 +1137,9 @@ const ReceivableDashboard = () => {
                 </ResponsiveContainer>
               </div>
               <p className="text-[11px] mt-2" style={{ color: 'var(--text-muted)' }}>
-                "Still pending" reflects today's ledger state for orders sold in that month — not a historical
-                point-in-time balance. It answers "of what we sold in month X, how much is still stuck today."
+                "Still pending" is a historical point-in-time balance, as of {MONTHS[month]} {year}'s own close, for
+                orders sold in that chart month — not today's live ledger state. It answers "of what we sold in
+                month X, how much was still stuck as of {MONTHS[month]} {year}."
               </p>
             </SectionCard>
 
@@ -1216,7 +1227,7 @@ const ReceivableDashboard = () => {
       {showReceivableByMonthModal && (
         <ReceivableByMonthModal
           title={`Total receivable as of ${MONTHS[month]} ${year} — how it's made up`}
-          subtitle="Carried forward from earlier months + this month's own sales, still uncollected today (COD+Prepaid combined — Prepaid always nets to ₹0 since it settles same-month; the partner breakdown below is COD only because Prepaid has no courier)"
+          subtitle={`Carried forward from earlier months + this month's own sales, still uncollected as of ${MONTHS[month]} ${year}'s close (COD+Prepaid combined — Prepaid always nets to ₹0 since it settles same-month; the partner breakdown below is COD only because Prepaid has no courier)`}
           total={k.total_receivable_as_of_date}
           showMonthTable={false}
           summary={[
@@ -1231,7 +1242,7 @@ const ReceivableDashboard = () => {
       {showCarriedForwardModal && (
         <ReceivableByMonthModal
           title={`Carried forward as of ${MONTHS[month]} ${year} — by origin month`}
-          subtitle="Orders sold BEFORE this month, still uncollected today — excludes this month's own sales (COD+Prepaid combined; Prepaid nets to ₹0)"
+          subtitle={`Orders sold BEFORE this month, still uncollected as of ${MONTHS[month]} ${year}'s close — excludes this month's own sales (COD+Prepaid combined; Prepaid nets to ₹0)`}
           rows={(data?.receivableByMonth || []).filter((r) => !(r.month === month && r.year === year))}
           total={k.carried_forward_receivable}
           movementNote={

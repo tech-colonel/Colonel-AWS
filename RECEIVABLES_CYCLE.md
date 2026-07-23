@@ -56,12 +56,16 @@ still returned in month Y afterwards; collapsing that into one status would
 either block the return from posting or silently erase the settlement from its
 own month's "received" total.
 
-**"Still receivable" = `NOT settled_flag AND NOT returned_flag`.** Every pending/
-receivable figure on the dashboard checks *both* flags, not just `settled_flag` —
-a returned COD order is never real cash (RTO'd before collection, or collected
-then refunded) and must stop counting as outstanding the moment `returned_flag`
-is set, regardless of which month the return itself landed in. See §4 for the
-worked examples this is built to satisfy.
+**"Still receivable" = `NOT SETTLED_ASOF AND NOT RETURNED_ASOF`**, where
+`SETTLED_ASOF`/`RETURNED_ASOF` mean "`settled_flag`/`returned_flag` is true, **and**
+the settlement/return itself landed on or before the selected month's own end"
+(`(settled_year*12+settled_month) <= ($3*12+$2)`, same shape for returns). Every
+pending/receivable figure on the dashboard checks both, not just the raw flag — a
+returned COD order is never real cash (RTO'd before collection, or collected then
+refunded) and must stop counting as outstanding once returned, **but only once that
+return has actually happened as of the period being viewed** — a return that lands
+next month must not retroactively empty out this month's receivable when this
+month is what's on screen. See §4 for the worked examples this is built to satisfy.
 
 ---
 
@@ -167,21 +171,34 @@ with `$2` = selected month, `$3` = selected year. "As of date" comparisons use
 `(order_year * 12 + order_month)` so month/year pairs compare correctly across
 year boundaries.
 
-**Optional "cycle start" (`$4` in every query below):** the dashboard has a
+**Optional "cycle start" (`$4` in most queries below):** the dashboard has a
 second picker, above the "as of" month/year one, letting the user set a
 `startMonth`/`startYear`. When set, `$4 = startYear*12 + startMonth`
 (otherwise `$4 = 0`, a sentinel below every real order index so it's always
-satisfied) and **every single query in this endpoint** adds
+satisfied) and every **accrual** query in this endpoint (sales, receivable,
+settlements-anchored-to-the-order's-own-month, returns) adds
 `AND (order_year * 12 + order_month) >= $4` — an order sold before the cycle
-start is treated as if it never existed, for sales, receivable, settlements,
-and returns alike, not merely excluded from carried-forward. This exists
-because some months' source data is known-incomplete (e.g. the missing
-Delhivery FY24-25 settlement file, §6) — setting a cycle start lets a CFO say
-"only count from the month our data is trustworthy onward." If the *selected*
+start is treated as if it never existed for those figures. This exists because
+some months' source data is known-incomplete (e.g. the missing Delhivery
+FY24-25 settlement file, §6) — setting a cycle start lets a CFO say "only
+count from the month our data is trustworthy onward." If the *selected*
 month/year itself is before the cycle start, the endpoint short-circuits and
 returns `{ beforeCycleStart: true, cycleStart: {month,year}, kpis: null, ... }`
 before running any of the queries below — there is no partial view of a month
 that predates the cycle's own origin.
+
+**The one deliberate exception: "Cash collected" and its by-source/by-channel/
+carried-forward breakdowns (`received_this_month`, `received_from_carried_forward`,
+`receivedBySource`, `receivedByChannel`, `carriedForwardCollections`) do NOT add
+the `>= $4` cycle-start gate.** These are pure treasury facts — cash that
+physically landed in the selected month — true regardless of which earlier
+month the underlying order was sold in, even one before the cycle start. Gating
+them by cycle start would silently drop real cash that arrived this month
+(e.g. an old, pre-cycle-start due finally collected in Feb) from a card whose
+whole definition is "money that physically arrived this calendar month, from
+orders sold in any month" (§4). Every other figure (Net sales, Received,
+Receivable, Total receivable, Carried forward, Returns) keeps the cycle-start
+gate as described above.
 
 The dashboard's top row is one deliberate equation, read left to right, so a
 CFO can see the whole story without opening a single modal:
@@ -189,19 +206,24 @@ CFO can see the whole story without opening a single modal:
 Net sales − Received = Receivable          (all three, this month's own sale)
 ```
 All three cards below share the exact same population (COD+Prepaid) and the
-exact same time semantic (status of this month's own orders, **as of today**
-— not "as of the end of that month"), which is what makes the subtraction
-land exactly on the third number, every month, to the rupee. A secondary row
-below it ("All-time position & cash flow") holds four more figures that are
-deliberately **not** part of this equation — see the note at the end of this
-section for why.
+exact same time semantic — status of this month's own orders **as of the
+selected month's own end**, i.e. a settlement or return only counts if it
+landed on or before that month's close. Opening an earlier month always shows
+that month exactly as it stood at its own close, even if some of that
+receivable was later collected (or returned) further down the line — those
+later events show up when *that* later month is selected instead. This is
+what makes the subtraction land exactly on the third number, every month, to
+the rupee, and what stops a past month's numbers from silently drifting every
+time the same month is reopened. A secondary row below it ("All-time position
+& cash flow") holds four more figures that are deliberately **not** part of
+this equation — see the note at the end of this section for why.
 
 ### Net sales — {month} (1st card in the equation)
 ```sql
 sales_this_month = SUM(total_amount) WHERE order_month = $2 AND order_year = $3   -- gross
 
 returned_of_this_months_sales =
-  SUM(total_amount) FILTER (WHERE order_month = $2 AND order_year = $3 AND returned_flag)
+  SUM(total_amount) FILTER (WHERE order_month = $2 AND order_year = $3 AND RETURNED_ASOF)
 
 net_sales_this_month = sales_this_month − returned_of_this_months_sales   -- ← card shows THIS
 ```
@@ -211,58 +233,69 @@ money moved). The KPI card's headline number is the **net** figure; the gross
 never hidden.
 
 `returned_of_this_months_sales` counts a return regardless of which month the
-return itself was *processed* in — an order sold in March that gets returned
-in April still reduces March's net figure once the return lands. This is a
-different slice than the "Returns (SRN)" card in the secondary row, which
+return itself was *processed* in, **as long as it was processed on or before
+the selected month's own end** (`RETURNED_ASOF`, §2) — an order sold in March
+that gets returned in the same March still reduces March's net figure once the
+return lands, but a return that only lands in April does not count while
+viewing March; it will show up once April is the selected month instead. This
+is a different slice than the "Returns (SRN)" card in the secondary row, which
 counts returns *processed* in the selected month regardless of the original
 sale's month.
 
 ### Received — {month} (2nd card in the equation)
 ```sql
 settled_of_this_months_sales =
-  SUM(total_amount) FILTER (WHERE settled_flag AND NOT returned_flag AND order_month = $2 AND order_year = $3)
+  SUM(total_amount) FILTER (WHERE SETTLED_ASOF AND NOT RETURNED_ASOF AND order_month = $2 AND order_year = $3)
 ```
-**This is an accrual figure, not a cash figure**: how much of *this month's
-own orders* has been settled **as of today**, no matter which calendar month
-the settlement itself happened in (next month's courier remittance run still
-counts here). It is deliberately not `SUM(settled_amount) WHERE settled_month
-= $2` (that's the "Cash collected" card in the secondary row below) — using
-`order_month` instead of `settled_month` as the anchor is exactly what makes
-`Net sales − Received = Receivable` hold. Click it for the by-source
-breakdown (`settledOfThisMonthsSalesBySource`, §5) — how much, and from
-where (Ekart / Xpressbees / Delhivery / Prepaid).
+How much of *this month's own orders* has been settled **as of this month's own
+close** — a settlement that lands in this same month or an earlier-closing one
+counts; a settlement that only lands after the selected month (e.g. next
+month's courier remittance run) does not. It is deliberately not
+`SUM(settled_amount) WHERE settled_month = $2` (that's the "Cash collected"
+card in the secondary row below) — using `order_month` instead of
+`settled_month` as the anchor (while still gating by the settlement's own
+timing via `SETTLED_ASOF`) is exactly what makes `Net sales − Received =
+Receivable` hold **for the month actually on screen**, without leaking in
+settlements that happen later. Click it for the by-source breakdown
+(`settledOfThisMonthsSalesBySource`, §5) — how much, and from where (Ekart /
+Xpressbees / Delhivery / Prepaid).
 
 ### Receivable — {month} (3rd card in the equation)
 ```sql
 this_month_own_receivable =
-  SUM(total_amount) FILTER (WHERE NOT settled_flag AND NOT returned_flag AND order_month = $2 AND order_year = $3)
+  SUM(total_amount) FILTER (WHERE NOT SETTLED_ASOF AND NOT RETURNED_ASOF AND order_month = $2 AND order_year = $3)
 ```
-COD + Prepaid combined — still uncollected, from this month's own sale,
-**as of today**. This is the exact complement of the first two cards:
+COD + Prepaid combined — still uncollected, from this month's own sale, **as of
+this month's own close** (not as of today — see §2/§4 intro for why that
+distinction matters). This is the exact complement of the first two cards:
 ```
 sales_this_month − returned_of_this_months_sales − settled_of_this_months_sales
   = this_month_own_receivable
 ```
-Verified against real data (March 2025, Flo Mattress): ₹19,63,06,631.58 −
-₹2,90,16,093.75 − ₹15,91,34,994.53 = ₹81,55,543.30, exactly. Click it for the
-by-partner breakdown (`thisMonthPendingByCourier`, §5) — COD only there,
-since Prepaid has no courier, but it sums to the same total because Prepaid
-always nets to ₹0 (§6).
+This identity holds exactly, to the rupee, for whichever month is on screen,
+because all three cards share the same `SETTLED_ASOF`/`RETURNED_ASOF` cutoff.
+Click it for the by-partner breakdown (`thisMonthPendingByCourier`, §5) — COD
+only there, since Prepaid has no courier, but it sums to the same total because
+Prepaid always nets to ₹0 (§6).
 
-**Why `NOT returned_flag` matters** (for both this card and the secondary
-row's all-time figures below): a returned COD order is never real cash —
-either it was RTO'd before the courier ever collected it, or it was collected
-and later refunded. Either way it must stop counting as outstanding, or a
-returned order would sit in "pending" forever. Two worked examples (both hold
-exactly against real data):
-- Sale ₹100 in Jan, ₹20 settled in Jan, the remaining ₹80 returned in Feb →
-  Jan's receivable is **₹0** (100 − 20 settled − 80 returned).
+**Why the returned check matters** (for both this card and the secondary row's
+figures below): a returned COD order is never real cash — either it was RTO'd
+before the courier ever collected it, or it was collected and later refunded.
+Either way it must stop counting as outstanding once the return has actually
+happened **as of the month being viewed** — not before, and not "eventually,
+whenever the return happens to land." Two worked examples:
+- Sale ₹100 in Jan, ₹20 settled in Jan, the remaining ₹80 returned in Feb.
+  **Viewing Jan**: Jan's receivable is **₹80** — the return hasn't happened yet
+  as of Jan's own close, so it's still open. **Viewing Feb or later**: Jan's
+  receivable is **₹0** (100 − 20 settled − 80 returned, both landed by then).
 - Sale ₹100 in Jan, ₹20 settled in Jan, ₹40 returned in Jan (same month) →
-  Jan's receivable is **₹40** (100 − 20 − 40).
+  Jan's receivable is **₹40** (100 − 20 − 40), regardless of which month you
+  view it from, since both events already happened by Jan's own close.
 
 Because `settled_flag` and `returned_flag` are independent facts, an order can
 even be both (courier remitted it, then it was returned later) — that order
-still correctly drops out of "pending" either way.
+still correctly drops out of "pending" either way, once both events have
+happened as of the month being viewed.
 
 ---
 
@@ -273,11 +306,15 @@ either of them into it would break the exact reconciliation, so they're kept
 visually separate underneath instead.
 
 **Total receivable as of {month}** — every month's sale combined (not just
-this month's own), still uncollected today:
+this month's own), still uncollected **as of the selected month's own close**:
 ```sql
-SUM(total_amount) WHERE NOT settled_flag AND NOT returned_flag
+SUM(total_amount) WHERE NOT SETTLED_ASOF AND NOT RETURNED_ASOF
   AND (order_year * 12 + order_month) <= ($3 * 12 + $2)
 ```
+This is the running receivable balance the CFO actually wants: carried-forward
+receivable from every earlier month, minus whatever of that was collected on
+or before this month's close, plus this month's own still-open receivable — a
+collection that only happens *after* the selected month never reduces it.
 Prepaid orders are always marked `settled_flag = TRUE` the same month they're
 sold (§3.1 — Razorpay settles same-day), so they always fail this filter and
 contribute exactly ₹0 — same reasoning as the "Receivable" card above, just
@@ -286,7 +323,7 @@ extended across every month up to the selected one instead of just this one.
 **Carried forward (from earlier months)** — the slice of the total above that
 predates this month:
 ```sql
-SUM(total_amount) WHERE NOT settled_flag AND NOT returned_flag
+SUM(total_amount) WHERE NOT SETTLED_ASOF AND NOT RETURNED_ASOF
   AND (order_year * 12 + order_month) < ($3 * 12 + $2)
 ```
 `Total receivable = Carried forward + Receivable (this month's own)` always
@@ -294,15 +331,23 @@ holds exactly (both queries partition the same universe by the same
 boundary).
 
 **Cash collected — {month}** — actual cash that physically arrived this
-calendar month, regardless of which month the underlying order was sold in:
+calendar month, regardless of which month the underlying order was sold in
+(deliberately **not** gated by the cycle-start sentinel — see the note in the
+intro above), **net of any of those orders returned by the selected period's
+own close** (`NOT RETURNED_ASOF`, §2):
 ```sql
-SUM(settled_amount) WHERE settled_month = $2 AND settled_year = $3
+SUM(settled_amount) WHERE settled_month = $2 AND settled_year = $3 AND NOT RETURNED_ASOF
 ```
-This is the figure the equation above deliberately avoids: it mixes in old
+The returns exclusion matters because a courier can remit an order's COD amount
+and then RTO/refund it later — that cash physically landed, but it was never
+real revenue, so it's netted out here exactly like it is on the Received/
+Receivable cards, rather than showing up as an unexplained gap between "Cash
+collected" and "Received" for the same month. This is the figure the equation
+above still deliberately avoids for a different reason: it mixes in old
 carried-forward collections and excludes this month's sale not yet paid, so
 `Net sales − Cash collected` will **never** equal `Receivable` by simple
 subtraction — that gap is the COD settlement lag, not a bug (§6). Split into
-two sub-figures shown in the drill-down:
+two sub-figures shown in the drill-down (both also net of returns):
 - **From this month's own sales**: adds `AND order_month = $2 AND order_year = $3`
 - **Collected from earlier months**: adds `AND (order_year*12+order_month) < ($3*12+$2)`
 
@@ -317,19 +362,22 @@ SUM(returned_amount), COUNT(*) WHERE returned_month = $2 AND returned_year = $3
 
 ### "Total receivable" → by origin month + by partner
 - **By origin month** (`receivableByMonth`): `GROUP BY order_month, order_year` of every COD order up to the selected month (`<=`) — `cod_sales`, `settled_amount`, `returned_amount`, `pending`, using the **mutually-exclusive partition** described below, so `cod_sales = settled_amount + returned_amount + pending` exactly, every row.
-- **By partner/courier** (`receivableByCourierAsOfDate`): same "still pending" universe (`NOT settled_flag AND NOT returned_flag`, `<=` selected month), `GROUP BY courier` instead of by month.
+- **By partner/courier** (`receivableByCourierAsOfDate`): same "still pending" universe (`NOT SETTLED_ASOF AND NOT RETURNED_ASOF`, `<=` selected month), `GROUP BY courier` instead of by month.
 
-**The partition** (used identically by `receivableByMonth`, `courierAging`, and `thisMonthPendingByCourier`):
+**The partition** (used identically by `receivableByMonth` and `thisMonthPendingByCourier`;
+`courierAging` deliberately keeps the live, today-as-of-now flags instead — see its
+own section below for why):
 ```sql
-settled_amount  = SUM(total_amount) FILTER (WHERE settled_flag AND NOT returned_flag)
-returned_amount = SUM(total_amount) FILTER (WHERE returned_flag)
-pending         = SUM(total_amount) FILTER (WHERE NOT settled_flag AND NOT returned_flag)
+settled_amount  = SUM(total_amount) FILTER (WHERE SETTLED_ASOF AND NOT RETURNED_ASOF)
+returned_amount = SUM(total_amount) FILTER (WHERE RETURNED_ASOF)
+pending         = SUM(total_amount) FILTER (WHERE NOT SETTLED_ASOF AND NOT RETURNED_ASOF)
 ```
 This is deliberately **not** `SUM(settled_amount)` / `SUM(returned_amount)` (the
 ledger's own per-order amount columns) — an order that was settled and *then*
 returned would get counted in both sums, double-subtracting it and breaking
 `cod_sales = settled + returned + pending`. Using `total_amount` gated by the
-flags instead keeps the three buckets strictly non-overlapping.
+`*_ASOF` conditions instead keeps the three buckets strictly non-overlapping,
+*and* pinned to the selected month's own close rather than to today.
 
 ### "Carried forward" → by origin month
 Same `receivableByMonth` array, filtered client-side in `ReceivableDashboard.jsx`
@@ -339,12 +387,12 @@ it's the same dataset, one row removed).
 ### "This month's own receivable" → by partner
 ```sql
 SELECT courier, COUNT(*) total_orders, SUM(total_amount) total_amount,
-       COUNT(*) FILTER (WHERE settled_flag AND NOT returned_flag) settled_orders,
-       SUM(total_amount) FILTER (WHERE settled_flag AND NOT returned_flag) settled_amount,
-       COUNT(*) FILTER (WHERE returned_flag) returned_orders,
-       SUM(total_amount) FILTER (WHERE returned_flag) returned_amount,
-       COUNT(*) FILTER (WHERE NOT settled_flag AND NOT returned_flag) pending_orders,
-       SUM(total_amount) FILTER (WHERE NOT settled_flag AND NOT returned_flag) pending_amount
+       COUNT(*) FILTER (WHERE SETTLED_ASOF AND NOT RETURNED_ASOF) settled_orders,
+       SUM(total_amount) FILTER (WHERE SETTLED_ASOF AND NOT RETURNED_ASOF) settled_amount,
+       COUNT(*) FILTER (WHERE RETURNED_ASOF) returned_orders,
+       SUM(total_amount) FILTER (WHERE RETURNED_ASOF) returned_amount,
+       COUNT(*) FILTER (WHERE NOT SETTLED_ASOF AND NOT RETURNED_ASOF) pending_orders,
+       SUM(total_amount) FILTER (WHERE NOT SETTLED_ASOF AND NOT RETURNED_ASOF) pending_amount
 FROM receivable_ledger
 WHERE payment_method = 'COD' AND order_month = $2 AND order_year = $3
 GROUP BY courier
@@ -362,16 +410,17 @@ uses which population and time semantic.
 ```sql
 SELECT COALESCE(settled_source, 'unknown') AS source, COUNT(*) AS count, SUM(total_amount) AS amount
 FROM receivable_ledger
-WHERE order_month = $2 AND order_year = $3 AND settled_flag AND NOT returned_flag
+WHERE order_month = $2 AND order_year = $3 AND SETTLED_ASOF AND NOT RETURNED_ASOF
 GROUP BY 1 ORDER BY amount DESC
 ```
 COD + Prepaid combined — `settled_source` is one of `ekart` / `xpressbees` /
-`delhivery` / `prepaid` (§3). **Not filtered by `settled_month`/`settled_year`**
-— unlike `receivedBySource` behind the "Received" card, an order sold this
-month but settled via Ekart next month still counts here under `ekart`. Rows
-sum to exactly `settled_of_this_months_sales` (§4) — verified against real
-data (March 2025, Flo Mattress): prepaid ₹13,44,91,880 + ekart ₹2,31,79,053 +
-delhivery ₹14,59,892 + xpressbees ₹4,169 = ₹15,91,34,995.
+`delhivery` / `prepaid` (§3). **Not filtered by `settled_month`/`settled_year`
+being exactly the selected month** — unlike `receivedBySource` behind the
+"Cash collected" card, an order sold this month but settled via Ekart in a
+later month still counts here under `ekart`, **provided that settlement landed
+on or before the selected month's own close** (`SETTLED_ASOF`); a settlement
+that only lands after the selected month does not. Rows sum to exactly
+`settled_of_this_months_sales` (§4).
 
 ### "Total sales" → by portal/channel
 ```sql
@@ -431,20 +480,28 @@ because a real chunk of what used to look like "pending due to a missing
 settlement file" turned out to actually be **returned** orders, correctly
 reclassified out of pending.
 
+This is the one table on the dashboard that deliberately keeps the live,
+today-as-of-now `settled_flag`/`returned_flag` rather than `SETTLED_ASOF`/
+`RETURNED_ASOF` — it has no month selector to be "as of" in the first place,
+so it exists purely to answer "what does the ledger look like right now," for
+data-quality triage, not as part of any month's reconciliation.
+
 ### 12-month trend chart
 ```sql
 SELECT order_month, order_year,
        SUM(total_amount) AS sales,
        SUM(settled_amount) FILTER (WHERE settled_month = order_month AND settled_year = order_year) AS received_same_month,
-       SUM(returned_amount) AS returned_amount,
-       SUM(total_amount) FILTER (WHERE payment_method='COD' AND NOT settled_flag AND NOT returned_flag) AS still_pending
+       SUM(returned_amount) FILTER (WHERE RETURNED_ASOF) AS returned_amount,
+       SUM(total_amount) FILTER (WHERE payment_method='COD' AND NOT SETTLED_ASOF AND NOT RETURNED_ASOF) AS still_pending
 FROM receivable_ledger
 WHERE (order_year*12+order_month) BETWEEN ($3*12+$2-11) AND ($3*12+$2)
 GROUP BY order_month, order_year
 ```
-"Still pending" per month is *today's* state for orders sold in that month —
-"of what we sold in month X, how much is still stuck today" — not a rewind to
-what was pending as of that month's own end.
+"Still pending" per month is a rewind to what was pending as of **the selected
+period's own end** for orders sold in that month — "of what we sold in month X,
+how much was still stuck as of the month currently selected on the dashboard" —
+not today's live state. Reopening the same past chart later shows the same
+numbers every time, instead of drifting downward as later settlements land.
 
 ### "View sheet data" row browser (Main Sheet / COD main sheet / per-courier tabs)
 Each tab filters the same `receivable_ledger` table for the selected month:
@@ -455,8 +512,9 @@ Each tab filters the same `receivable_ledger` table for the selected month:
 | COD main sheet | `payment_method = 'COD'` |
 | Delivery / Ekart / Xpressbees / DTDC / Self shipping / Other COD | `payment_method = 'COD' AND courier = '<name>'` |
 
-Plus an optional status filter (`pending` → `NOT settled_flag`, `settled` →
-`settled_flag`, `returned` → `returned_flag`) and search
+Plus an optional status filter (`pending` → `NOT SETTLED_ASOF`, `settled` →
+`SETTLED_ASOF`, `returned` → `RETURNED_ASOF` — all gated to the selected
+month's own close, same as every other card) and search
 (`invoice_number/awb/sale_order_number ILIKE '%term%'`), paginated 25 rows/page.
 
 ---
@@ -483,47 +541,53 @@ because Prepaid nets to ₹0 they sum to the exact same total as the headline
 card above them.
 
 **The population is identical everywhere; the one axis that genuinely
-differs is time semantic — accrual vs cash.** The three headline equation
-cards (Net sales, Received, Receivable) and the "Total receivable"/"Carried
-forward" cards in the secondary row are all **accrual**: status of an
-order *as of today*, regardless of which calendar month a settlement or
-return actually happened in. **"Cash collected — {month}"**, in the secondary
-row, is the one deliberately **cash** figure: money that physically arrived
-in this calendar month, from orders sold in any month. That's why `Net sales
-− Cash collected` will never simplify to `Receivable` — it isn't supposed to;
-using accrual-vs-accrual (`Net sales − Received`) is what makes the headline
-equation hold, to the rupee, every month:
+differs is time semantic — accrual-as-of-period-end vs cash.** The three
+headline equation cards (Net sales, Received, Receivable) and the "Total
+receivable"/"Carried forward" cards in the secondary row are all **accrual,
+pinned to the selected month's own close** (via `SETTLED_ASOF`/`RETURNED_ASOF`,
+§2): status of an order as of that month's end, regardless of which later
+calendar month a settlement or return might additionally have happened in by
+today. **"Cash collected — {month}"**, in the secondary row, is the one
+deliberately **cash** figure: money that physically arrived in this calendar
+month, from orders sold in any month. That's why `Net sales − Cash collected`
+will never simplify to `Receivable` — it isn't supposed to; using
+accrual-vs-accrual (`Net sales − Received`) is what makes the headline
+equation hold, to the rupee, for whichever month is selected:
 ```
-Net sales this month − Returned − Received (accrual) = Receivable
+Net sales this month − Returned − Received (accrual, as of that month's close) = Receivable
 ```
-Verified against real data (March 2025, Flo Mattress): ₹19,63,06,631.58 −
-₹2,90,16,093.75 − ₹15,91,34,994.53 = ₹81,55,543.30, exactly. See §4 for the
-full SQL.
+See §4 for the full SQL. Because every accrual figure is now capped at the
+selected month's own close instead of today, reopening an earlier month's
+dashboard always reproduces the same numbers — a settlement or return that
+happens later shows up only once the later month it actually landed in is
+selected, never by retroactively changing an earlier month you've already
+looked at.
 
 ### Why three different "returns" numbers can show for the same month
 
 The dashboard shows a return figure in three places for the same month, and
 **they are not meant to match** — each answers a different question, along
 two independent axes: (a) COD-only vs COD+Prepaid combined, and (b) returns
-*dated in this calendar month* vs *ever recorded for a sale made this month*
-(a return can be dated a month or more after its sale).
+*dated in this calendar month* vs *recorded (by that month's own close) for a
+sale made this month* (a return can be dated a month or more after its sale,
+but only counts in the second/third columns if it landed on or before the
+selected month's close).
 
 | Card | Scope | Time window |
 |---|---|---|
 | **Returns (SRN)** (`returns_this_month_amount`) | COD + Prepaid | Returns **dated/processed** in the selected month, regardless of the sale's own month |
-| **Total Sales** modal (`returned_of_this_months_sales`) | COD + Prepaid | ALL returns ever recorded for a sale **made** in the selected month, regardless of when the return itself was dated |
-| **This Month's Own Receivable** modal (`thisMonthPendingByCourier.returned_amount`) | **COD only** | Same "ever recorded for a sale made this month" window as above — this is the COD-only subset of that figure |
+| **Total Sales** modal (`returned_of_this_months_sales`) | COD + Prepaid | Returns recorded, on or before the selected month's own close, for a sale **made** in the selected month, regardless of exactly which earlier-or-same month the return itself was dated |
+| **This Month's Own Receivable** modal (`thisMonthPendingByCourier.returned_amount`) | **COD only** | Same "recorded by this month's close, for a sale made this month" window as above — this is the COD-only subset of that figure |
 
-Worked example against real data (Feb 2025, with cycle start = Feb so no
-earlier months exist): Returns (SRN) showed ₹71,62,272 (returns dated in Feb);
-Total Sales' returns showed ₹2,82,67,614 (every return ever recorded for a
-Feb sale, COD+Prepaid, including ones dated March or later); This Month's Own
-Receivable showed ₹1,04,31,315 (the COD-only slice of that same ₹2,82,67,614).
-None of these are wrong — the gap between the first and the other two is
-returns of Feb sales that hadn't happened yet by Feb's own end but are known
-today; the gap between the last two is Prepaid returns. Every modal on the
-dashboard that shows a "returns" figure now states in its own footnote which
-of these three it is and how it relates to the other two.
+The gap between the first and the other two is returns of this month's sales
+that were dated in an earlier month than the sale itself was returned in but
+still land within the selected month's close; the gap between the last two is
+Prepaid returns. A return that only gets recorded *after* the selected
+month's close does not appear in any of the three while that month is
+selected — it will surface once the month it actually landed in is opened
+instead. Every modal on the dashboard that shows a "returns" figure states in
+its own footnote which of these three it is and how it relates to the other
+two.
 
 ---
 
