@@ -793,6 +793,18 @@ const getBrandAgentDetail = async (req, res) => {
   }
 };
 
+// A ledger row only counts as "settled"/"returned" for a selected reporting period
+// if the settlement/return itself happened on or before that period's end — a March
+// courier remittance for a Feb-sold order must never leak into a dashboard scoped to
+// Feb. settled_flag/returned_flag alone are live, as-of-today facts; gating them by
+// settled_month/settled_year (resp. returned_month/returned_year) not exceeding the
+// selected month/year turns them into "as of the selected period" facts instead, so
+// picking an earlier month reconstructs what the ledger looked like at that month's
+// end rather than leaking in cash/returns that only happened later. Both fragments
+// assume the query's bind array is [brandId, month, year, ...] ($2 = month, $3 = year).
+const SETTLED_ASOF = `(settled_flag AND (settled_year * 12 + settled_month) <= ($3 * 12 + $2))`;
+const RETURNED_ASOF = `(returned_flag AND (returned_year * 12 + returned_month) <= ($3 * 12 + $2))`;
+
 /**
  * GET /api/dashboard/receivables/:brandId?month=&year=
  * Global Receivable Cycle dashboard — reads the cross-year receivable_ledger
@@ -802,11 +814,13 @@ const getBrandAgentDetail = async (req, res) => {
  * was carried forward from earlier months, how much was actually collected
  * this month (and from whom), and how many returns landed this month.
  *
- * "Still pending" figures are always current-state (today's ledger), not a
- * historical point-in-time reconstruction — the ledger keeps each order's
- * FINAL settled/returned fact, not a snapshot per day. monthlyTrend therefore
- * reads as "of orders sold in month X, how much is still stuck as of today",
- * which is the aging view CFOs actually want, not a fabricated balance sheet.
+ * "Still pending"/"settled"/"returned" figures are all reconstructed AS OF THE
+ * SELECTED PERIOD'S END (via SETTLED_ASOF/RETURNED_ASOF above), not as of today —
+ * so viewing Feb always shows Feb's own state at Feb's close, even if some of that
+ * receivable was later collected (or returned) in March or beyond. monthlyTrend
+ * therefore reads as "of orders sold in month X, how much was still stuck as of the
+ * selected period", which is the aging view CFOs actually want, not a live-today
+ * figure that silently drifts every time the same past month is reopened.
  */
 const getReceivableDashboard = async (req, res) => {
   const { brandId } = req.params;
@@ -850,57 +864,75 @@ const getReceivableDashboard = async (req, res) => {
 
     const data = await withBypass(seq, async (t) => {
       const bind = [brandId, month, year, startIndex];
+      // Cash-collected queries deliberately drop the $4 cycle-start placeholder (see the
+      // comment above received_this_month) — Postgres' prepared-statement bind requires
+      // the parameter count to match exactly how many placeholders the query text uses.
+      const bindNoCycleStart = [brandId, month, year];
 
       const [[kpis]] = await seq.query(
         `SELECT
            COALESCE(SUM(total_amount) FILTER (WHERE order_month = $2 AND order_year = $3), 0) AS sales_this_month,
-           -- "Still receivable" = not yet settled AND not returned. A returned COD order
-           -- (RTO, or a post-delivery return) never generates real cash, so once
-           -- returned_flag flips it must stop counting as outstanding, regardless of
-           -- which month the return itself landed in. Same population as sales_this_month
+           -- "Still receivable" = not yet settled AND not returned, both AS OF THE
+           -- SELECTED PERIOD'S END (SETTLED_ASOF/RETURNED_ASOF above). A returned COD
+           -- order (RTO, or a post-delivery return) never generates real cash, so once
+           -- the return has landed by the selected month's own close it must stop
+           -- counting as outstanding — but a return that only lands afterward does not
+           -- retroactively empty out an earlier month's receivable. Same population as sales_this_month
            -- (COD+Prepaid, no payment_method filter) — Prepaid rows are always settled
            -- the same month they're sold (see buildReceivableLedger.js), so they always
            -- fall out of this filter on their own and contribute exactly ₹0; the number
            -- is unaffected, but the population now matches every other KPI on this card
            -- exactly, so Sales − Returned − Settled always reconciles to this to the rupee.
            COALESCE(SUM(total_amount) FILTER (
-             WHERE NOT settled_flag AND NOT returned_flag
+             WHERE NOT ${SETTLED_ASOF} AND NOT ${RETURNED_ASOF}
                AND (order_year * 12 + order_month) <= ($3 * 12 + $2) AND (order_year * 12 + order_month) >= $4
            ), 0) AS total_receivable_as_of_date,
            COALESCE(SUM(total_amount) FILTER (
-             WHERE NOT settled_flag AND NOT returned_flag
+             WHERE NOT ${SETTLED_ASOF} AND NOT ${RETURNED_ASOF}
                AND order_month = $2 AND order_year = $3
            ), 0) AS this_month_own_receivable,
            COALESCE(SUM(total_amount) FILTER (
-             WHERE NOT settled_flag AND NOT returned_flag
+             WHERE NOT ${SETTLED_ASOF} AND NOT ${RETURNED_ASOF}
                AND (order_year * 12 + order_month) < ($3 * 12 + $2) AND (order_year * 12 + order_month) >= $4
            ), 0) AS carried_forward_receivable,
-           -- Settled-to-date of THIS MONTH'S OWN sales, regardless of which calendar month
-           -- the settlement itself landed in (same total_amount partition as the receivable
-           -- figures above, so it is the exact complement: sales_this_month −
-           -- returned_of_this_months_sales − settled_of_this_months_sales =
-           -- this_month_own_receivable, always, to the rupee). This is an ACCRUAL figure
-           -- (status of this month's orders as of today) — do not confuse with
-           -- received_this_month below, which is a CASH figure (money that physically
-           -- arrived in this calendar month, from orders sold in any month).
+           -- Settled AS OF THIS PERIOD'S END of THIS MONTH'S OWN sales — same total_amount
+           -- partition as the receivable figures above, so it is the exact complement:
+           -- sales_this_month − returned_of_this_months_sales − settled_of_this_months_sales
+           -- = this_month_own_receivable, always, to the rupee. A settlement that happened
+           -- after the selected period (e.g. a Feb sale settled in March) does NOT count here
+           -- when Feb is selected — do not confuse with received_this_month below, which is a
+           -- CASH figure (money that physically arrived in this exact calendar month, from
+           -- orders sold in any month).
            COALESCE(SUM(total_amount) FILTER (
-             WHERE settled_flag AND NOT returned_flag AND order_month = $2 AND order_year = $3
+             WHERE ${SETTLED_ASOF} AND NOT ${RETURNED_ASOF} AND order_month = $2 AND order_year = $3
            ), 0) AS settled_of_this_months_sales,
-           COALESCE(SUM(settled_amount) FILTER (WHERE settled_month = $2 AND settled_year = $3 AND (order_year * 12 + order_month) >= $4), 0) AS received_this_month,
+           -- Cash collected — deliberately NOT gated by the cycle-start sentinel ($4):
+           -- cycle start means "treat orders sold before this month as untrustworthy/
+           -- nonexistent," which is right for accrual figures anchored to the ORDER's own
+           -- month, but wrong here — this is a pure treasury fact (cash that physically
+           -- landed this calendar month), true regardless of whether we trust the sales
+           -- data from whichever earlier month that cash's underlying order was sold in.
+           -- IS however net of returns (NOT RETURNED_ASOF): an order the courier remitted
+           -- and then RTO'd/refunded by the selected period's close never became real
+           -- revenue, so it's excluded here too — same rule as the Received/Receivable
+           -- cards, applied to the cash figure so the two don't diverge by exactly the
+           -- settled-then-returned population.
+           COALESCE(SUM(settled_amount) FILTER (WHERE settled_month = $2 AND settled_year = $3 AND NOT ${RETURNED_ASOF}), 0) AS received_this_month,
            COALESCE(SUM(settled_amount) FILTER (
-             WHERE settled_month = $2 AND settled_year = $3 AND order_month = $2 AND order_year = $3
+             WHERE settled_month = $2 AND settled_year = $3 AND order_month = $2 AND order_year = $3 AND NOT ${RETURNED_ASOF}
            ), 0) AS received_from_this_months_sales,
            COALESCE(SUM(settled_amount) FILTER (
              WHERE settled_month = $2 AND settled_year = $3
-               AND (order_year * 12 + order_month) < ($3 * 12 + $2) AND (order_year * 12 + order_month) >= $4
+               AND (order_year * 12 + order_month) < ($3 * 12 + $2) AND NOT ${RETURNED_ASOF}
            ), 0) AS received_from_carried_forward,
            COALESCE(SUM(returned_amount) FILTER (WHERE returned_month = $2 AND returned_year = $3 AND (order_year * 12 + order_month) >= $4), 0) AS returns_this_month_amount,
            COUNT(*) FILTER (WHERE returned_month = $2 AND returned_year = $3 AND (order_year * 12 + order_month) >= $4) AS returns_this_month_count,
            -- Behind "Total sales" card's net-of-returns view — returns of an order SOLD
-           -- this month, regardless of which month the return itself was processed in
-           -- (same month or a later one). Different from returns_this_month_amount above,
-           -- which is returns PROCESSED this month regardless of the sale's own month.
-           COALESCE(SUM(total_amount) FILTER (WHERE order_month = $2 AND order_year = $3 AND returned_flag), 0) AS returned_of_this_months_sales
+           -- this month, processed on or before this period's end (same month or an
+           -- earlier-closing later one; a return processed AFTER the selected period does
+           -- not count here). Different from returns_this_month_amount above, which is
+           -- returns PROCESSED this month regardless of the sale's own month.
+           COALESCE(SUM(total_amount) FILTER (WHERE order_month = $2 AND order_year = $3 AND ${RETURNED_ASOF}), 0) AS returned_of_this_months_sales
          FROM receivable_ledger WHERE brand_id = $1`,
         { bind, transaction: t }
       );
@@ -908,15 +940,16 @@ const getReceivableDashboard = async (req, res) => {
       // Behind the "Received" KPI card's by-source table — for each courier/prepaid
       // source, how much of what it paid out THIS calendar month was for an order
       // sold this same month vs an order sold in an earlier month (i.e. it was
-      // finally collecting old carried-forward debt).
+      // finally collecting old carried-forward debt). Net of returns (NOT RETURNED_ASOF),
+      // same as received_this_month above.
       const [receivedBySource] = await seq.query(
         `SELECT COALESCE(settled_source, 'unknown') AS source, COUNT(*) AS count, SUM(settled_amount) AS amount,
                 COALESCE(SUM(settled_amount) FILTER (WHERE order_month = $2 AND order_year = $3), 0) AS from_this_month,
                 COALESCE(SUM(settled_amount) FILTER (WHERE NOT (order_month = $2 AND order_year = $3)), 0) AS from_earlier_months
          FROM receivable_ledger
-         WHERE brand_id = $1 AND settled_month = $2 AND settled_year = $3 AND (order_year * 12 + order_month) >= $4
+         WHERE brand_id = $1 AND settled_month = $2 AND settled_year = $3 AND NOT ${RETURNED_ASOF}
          GROUP BY 1 ORDER BY amount DESC`,
-        { bind, transaction: t }
+        { bind: bindNoCycleStart, transaction: t }
       );
 
       // Same split as receivedBySource above, but by sales portal/channel instead of
@@ -926,24 +959,26 @@ const getReceivableDashboard = async (req, res) => {
                 COALESCE(SUM(settled_amount) FILTER (WHERE order_month = $2 AND order_year = $3), 0) AS from_this_month,
                 COALESCE(SUM(settled_amount) FILTER (WHERE NOT (order_month = $2 AND order_year = $3)), 0) AS from_earlier_months
          FROM receivable_ledger
-         WHERE brand_id = $1 AND settled_month = $2 AND settled_year = $3 AND (order_year * 12 + order_month) >= $4
+         WHERE brand_id = $1 AND settled_month = $2 AND settled_year = $3 AND NOT ${RETURNED_ASOF}
          GROUP BY 1 ORDER BY amount DESC`,
-        { bind, transaction: t }
+        { bind: bindNoCycleStart, transaction: t }
       );
 
       // Behind the reconciliation strip's "Settled to date" figure
       // (kpis.settled_of_this_months_sales) — same mutually-exclusive total_amount
       // partition, grouped by settled_source, so "how much of THIS MONTH'S OWN sales
       // is settled, and from where" is a literal breakdown instead of one lump sum.
-      // Unlike receivedBySource above, this is NOT filtered by settled_month/year —
-      // an order sold this month but settled next month via Ekart still counts here,
-      // under 'ekart'. Rows are ranked by amount so the biggest channel leads.
+      // Unlike receivedBySource above, this is NOT filtered by settled_month/year being
+      // exactly this month — an order sold this month but settled later via Ekart still
+      // counts here, under 'ekart', AS LONG AS that settlement landed on or before the
+      // selected period's end (SETTLED_ASOF); a settlement after the selected period does
+      // not. Rows are ranked by amount so the biggest channel leads.
       const [settledOfThisMonthsSalesBySource] = await seq.query(
         `SELECT COALESCE(settled_source, 'unknown') AS source, COUNT(*) AS count,
                 SUM(total_amount) AS amount
          FROM receivable_ledger
          WHERE brand_id = $1 AND order_month = $2 AND order_year = $3
-           AND settled_flag AND NOT returned_flag AND (order_year * 12 + order_month) >= $4
+           AND ${SETTLED_ASOF} AND NOT ${RETURNED_ASOF} AND (order_year * 12 + order_month) >= $4
          GROUP BY 1 ORDER BY amount DESC`,
         { bind, transaction: t }
       );
@@ -951,16 +986,17 @@ const getReceivableDashboard = async (req, res) => {
       // Drills into the "Previous months' sale" slice of the Received card — exactly
       // which origin month's backlog got cleared this calendar month, and via which
       // courier/prepaid source, so "we collected a Jan sale via Ekart in March" is a
-      // literal row instead of one lump carried-forward number.
+      // literal row instead of one lump carried-forward number. Net of returns, same as
+      // received_from_carried_forward above.
       const [carriedForwardCollections] = await seq.query(
         `SELECT order_month, order_year, COALESCE(settled_source, 'unknown') AS source,
                 COUNT(*) AS count, SUM(settled_amount) AS amount
          FROM receivable_ledger
          WHERE brand_id = $1 AND settled_month = $2 AND settled_year = $3
-           AND NOT (order_month = $2 AND order_year = $3) AND (order_year * 12 + order_month) >= $4
+           AND NOT (order_month = $2 AND order_year = $3) AND NOT ${RETURNED_ASOF}
          GROUP BY order_month, order_year, settled_source
          ORDER BY order_year DESC, order_month DESC, amount DESC`,
-        { bind, transaction: t }
+        { bind: bindNoCycleStart, transaction: t }
       );
 
       // Behind the "Total sales" KPI card — which portal/channel this month's sales
@@ -1002,12 +1038,12 @@ const getReceivableDashboard = async (req, res) => {
       // Same mutually-exclusive partition as courierAging above.
       const [thisMonthPendingByCourier] = await seq.query(
         `SELECT courier, COUNT(*) AS total_orders, SUM(total_amount) AS total_amount,
-                COUNT(*) FILTER (WHERE settled_flag AND NOT returned_flag) AS settled_orders,
-                COALESCE(SUM(total_amount) FILTER (WHERE settled_flag AND NOT returned_flag), 0) AS settled_amount,
-                COUNT(*) FILTER (WHERE returned_flag) AS returned_orders,
-                COALESCE(SUM(total_amount) FILTER (WHERE returned_flag), 0) AS returned_amount,
-                COUNT(*) FILTER (WHERE NOT settled_flag AND NOT returned_flag) AS pending_orders,
-                COALESCE(SUM(total_amount) FILTER (WHERE NOT settled_flag AND NOT returned_flag), 0) AS pending_amount
+                COUNT(*) FILTER (WHERE ${SETTLED_ASOF} AND NOT ${RETURNED_ASOF}) AS settled_orders,
+                COALESCE(SUM(total_amount) FILTER (WHERE ${SETTLED_ASOF} AND NOT ${RETURNED_ASOF}), 0) AS settled_amount,
+                COUNT(*) FILTER (WHERE ${RETURNED_ASOF}) AS returned_orders,
+                COALESCE(SUM(total_amount) FILTER (WHERE ${RETURNED_ASOF}), 0) AS returned_amount,
+                COUNT(*) FILTER (WHERE NOT ${SETTLED_ASOF} AND NOT ${RETURNED_ASOF}) AS pending_orders,
+                COALESCE(SUM(total_amount) FILTER (WHERE NOT ${SETTLED_ASOF} AND NOT ${RETURNED_ASOF}), 0) AS pending_amount
          FROM receivable_ledger
          WHERE brand_id = $1 AND payment_method = 'COD' AND order_month = $2 AND order_year = $3
            AND (order_year * 12 + order_month) >= $4
@@ -1022,7 +1058,7 @@ const getReceivableDashboard = async (req, res) => {
       const [receivableByCourierAsOfDate] = await seq.query(
         `SELECT courier, COUNT(*) AS pending_orders, SUM(total_amount) AS pending_amount
          FROM receivable_ledger
-         WHERE brand_id = $1 AND payment_method = 'COD' AND NOT settled_flag AND NOT returned_flag
+         WHERE brand_id = $1 AND payment_method = 'COD' AND NOT ${SETTLED_ASOF} AND NOT ${RETURNED_ASOF}
            AND (order_year * 12 + order_month) <= ($3 * 12 + $2) AND (order_year * 12 + order_month) >= $4
          GROUP BY courier ORDER BY pending_amount DESC`,
         { bind, transaction: t }
@@ -1062,9 +1098,9 @@ const getReceivableDashboard = async (req, res) => {
       const [receivableByMonth] = await seq.query(
         `SELECT order_month AS month, order_year AS year,
                 SUM(total_amount) AS cod_sales,
-                COALESCE(SUM(total_amount) FILTER (WHERE settled_flag AND NOT returned_flag), 0) AS settled_amount,
-                COALESCE(SUM(total_amount) FILTER (WHERE returned_flag), 0) AS returned_amount,
-                SUM(total_amount) FILTER (WHERE NOT settled_flag AND NOT returned_flag) AS pending
+                COALESCE(SUM(total_amount) FILTER (WHERE ${SETTLED_ASOF} AND NOT ${RETURNED_ASOF}), 0) AS settled_amount,
+                COALESCE(SUM(total_amount) FILTER (WHERE ${RETURNED_ASOF}), 0) AS returned_amount,
+                SUM(total_amount) FILTER (WHERE NOT ${SETTLED_ASOF} AND NOT ${RETURNED_ASOF}) AS pending
          FROM receivable_ledger
          WHERE brand_id = $1 AND payment_method = 'COD' AND (order_year * 12 + order_month) <= ($3 * 12 + $2)
            AND (order_year * 12 + order_month) >= $4
@@ -1077,8 +1113,8 @@ const getReceivableDashboard = async (req, res) => {
         `SELECT order_month AS month, order_year AS year,
                 SUM(total_amount) AS sales,
                 SUM(settled_amount) FILTER (WHERE settled_month = order_month AND settled_year = order_year) AS received_same_month,
-                SUM(returned_amount) AS returned_amount,
-                SUM(total_amount) FILTER (WHERE payment_method = 'COD' AND NOT settled_flag AND NOT returned_flag) AS still_pending
+                COALESCE(SUM(returned_amount) FILTER (WHERE ${RETURNED_ASOF}), 0) AS returned_amount,
+                SUM(total_amount) FILTER (WHERE payment_method = 'COD' AND NOT ${SETTLED_ASOF} AND NOT ${RETURNED_ASOF}) AS still_pending
          FROM receivable_ledger
          WHERE brand_id = $1 AND (order_year * 12 + order_month) <= ($3 * 12 + $2)
            AND (order_year * 12 + order_month) > ($3 * 12 + $2) - 12
@@ -1163,9 +1199,12 @@ const getReceivableSheetRows = async (req, res) => {
   if (!month || !year) return res.status(400).json({ error: 'month and year query params required' });
   if (!(sheet in RECEIVABLE_SHEET_FILTERS)) return res.status(400).json({ error: `Unknown sheet "${sheet}"` });
 
-  const statusClause = status === 'pending' ? 'AND NOT settled_flag'
-    : status === 'settled' ? 'AND settled_flag'
-    : status === 'returned' ? 'AND returned_flag'
+  // Gated by SETTLED_ASOF/RETURNED_ASOF (not the live settled_flag/returned_flag) so a
+  // row settled or returned AFTER the selected month doesn't show as settled/returned
+  // (or drop out of "pending") when browsing that earlier month's sheet.
+  const statusClause = status === 'pending' ? `AND NOT ${SETTLED_ASOF}`
+    : status === 'settled' ? `AND ${SETTLED_ASOF}`
+    : status === 'returned' ? `AND ${RETURNED_ASOF}`
     : '';
 
   try {
