@@ -324,7 +324,12 @@ const getGeneratedFiles = async (req, res, next) => {
             raw: true,
         });
 
-        res.json(rows);
+        // Postgres COUNT() comes back as a bigint string (e.g. "66560") — cast so
+        // downstream numeric use (e.g. summing across files) doesn't silently
+        // concatenate instead of add.
+        const withNumericCounts = rows.map(r => ({ ...r, row_count: Number(r.row_count) }));
+
+        res.json(withNumericCounts);
     } catch (error) {
         console.error('[OrderCycle] GetFiles Error:', error);
         next(error);
