@@ -1029,7 +1029,7 @@ const OrderCycleShopifyWorkspace = ({ agent }) => {
         } catch { toast.error('Delete failed'); }
     };
 
-    const totalRows  = files.reduce((s, f) => s + (f.row_count || 0), 0);
+    const totalRows  = files.reduce((s, f) => s + Number(f.row_count || 0), 0);
     const latestFile = files[0] || null;
     const stepLabels = ['Select Partners', 'Upload Files', 'Preview & Save'];
 
