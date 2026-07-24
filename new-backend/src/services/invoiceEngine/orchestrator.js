@@ -1,35 +1,30 @@
 /**
  * orchestrator.js — the in-app invoice engine (code replacement for the n8n flow).
  *
- * Phase 1a: Drive-poll intake for ONE brand (Koparo), writing to the new
- * `invoice_code` table via the `Invoice code` agent. Existing Invoice Process
- * (n8n) flow is untouched.
+ * Fetches invoice PDFs from Drive, extracts them with Claude (verbatim prompt),
+ * resolves vendor/category/TDS in code, writes to the `invoice_code` table, then
+ * moves each file into its vendor folder — the full n8n Koparo flow, in code.
  *
- * Pipeline per file (faithful to the n8n graph):
- *   Drive list → skip already-processed → download → pdf-parse text →
- *   Claude Haiku extraction (verbatim prompt) → inject vendor_name_tally+category
- *   from the code Vendor Master lookup (replaces the n8n tool) →
- *   verbatim Code-node (TDS/category/voucher/dedup/invoice-total) → write invoice_code.
+ * Drive access is pluggable per-brand via invoice_config.source:
+ *   "composio"        → Google Super toolkit as the connected account (composioUserId)
+ *   "service-account" → the colonel-drive service account (default)
  */
-const path = require('path');
 const { QueryTypes } = require('sequelize');
 const { masterSequelize, getBrandConnection } = require('../../config/database');
 const { Brand, Agent } = require('../../models/master');
-const drive = require('../driveService');
-const sheets = require('./core/sheetsService');
+const driveSA = require('../driveService');
+const driveComposio = require('./core/driveComposio');
 const { buildVendorLookup } = require('./core/vendorLookup');
 const { extractPdfText, runExtraction } = require('./core/extract');
 const ingest = require('./core/ingest');
 
-// variant -> brand engine module (verbatim prompt + Code node)
-const ENGINES = {
-  koparo: require('./brands/koparo.engine'),
-};
-
-const log = (verbose, ...a) => { if (verbose) console.log('[invoice-code]', ...a); };
+const ENGINES = { koparo: require('./brands/koparo.engine') };
+const isPdf = (f) => f.mimeType === 'application/pdf' || /\.pdf$/i.test(f.name || '');
+const log = (v, ...a) => { if (v) console.log('[invoice-code]', ...a); };
 
 function safeParseArray(str) {
-  if (typeof str !== 'string') return Array.isArray(str) ? str : null;
+  if (Array.isArray(str)) return str;
+  if (typeof str !== 'string') return null;
   let s = str.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '');
   try { const v = JSON.parse(s); return Array.isArray(v) ? v : [v]; } catch {}
   const a = s.indexOf('['), b = s.lastIndexOf(']');
@@ -37,17 +32,46 @@ function safeParseArray(str) {
   return null;
 }
 
-async function processBrand(opts = {}) {
-  const { brand: brandName = 'Koparo', limit = 0, file = null, dryRun = false, verbose = false } = opts;
+// Pick the vendor folder name for a file from its processed rows.
+function pickVendor(rows) {
+  const good = rows.find((r) => r.vendor_name_tally && !/^n\/?a$/i.test(String(r.vendor_name_tally).trim()));
+  const name = (good && good.vendor_name_tally) || (rows[0] && rows[0].company) || 'Unknown';
+  return String(name).replace(/[\\/]/g, '-').trim() || 'Unknown';
+}
 
-  // 1. Resolve brand + the "Invoice code" agent
+// Build the Drive source (composio | service-account) from config.
+function makeSource(config, verbose) {
+  if (config.source === 'composio') {
+    const userId = config.composioUserId || 'central';
+    return {
+      kind: 'composio', userId, canMove: true,
+      listPdfs: async (folderId) => (await driveComposio.listChildren(userId, folderId)).filter(isPdf),
+      download: (fileId) => driveComposio.downloadFile(userId, fileId), // {buffer, webViewLink}
+      ensureFolder: (name, parent) => driveComposio.ensureFolder(userId, name, parent),
+      moveFile: (fileId, add, remove) => driveComposio.moveFile(userId, fileId, add, remove),
+    };
+  }
+  return {
+    kind: 'service-account', canMove: false,
+    listPdfs: async (folderId) => (await driveSA.listChildren(folderId)).filter(isPdf),
+    download: async (fileId) => {
+      const buffer = await driveSA.downloadFile(fileId);
+      let webViewLink = null;
+      try { webViewLink = (await driveSA.getMeta(fileId, 'id,name,webViewLink')).webViewLink; } catch {}
+      return { buffer, webViewLink };
+    },
+  };
+}
+
+async function processBrand(opts = {}) {
+  const { brand: brandName = 'Koparo', limit = 0, file = null, dryRun = false, verbose = false, move } = opts;
+
   const brand = await Brand.findOne({ where: { name: brandName } })
     || await Brand.findOne({ where: { name: brandName.toLowerCase() } });
   if (!brand) throw new Error(`Brand not found: ${brandName}`);
   const agent = await Agent.findOne({ where: { name: 'Invoice code' } });
-  if (!agent) throw new Error(`Agent "Invoice code" not found — run migration 100_invoice_code_agent.sql`);
+  if (!agent) throw new Error('Agent "Invoice code" not found — run migration 100_invoice_code_agent.sql');
 
-  // 2. Per-brand config (Pattern A: brand_agents.invoice_config)
   const cfgRows = await masterSequelize.query(
     'SELECT invoice_config FROM brand_agents WHERE brand_id = :b AND agent_id = :a LIMIT 1',
     { replacements: { b: brand.id, a: agent.id }, type: QueryTypes.SELECT }
@@ -58,88 +82,86 @@ async function processBrand(opts = {}) {
   if (!engine) throw new Error(`No engine module for variant "${variant}"`);
   if (config.enabled === false) throw new Error(`invoice_config.enabled is false for ${brandName}`);
 
-  const folderId = drive.parseFolderId(config.driveFolderId) || config.driveFolderId;
+  const folderId = driveSA.parseFolderId(config.driveFolderId) || config.driveFolderId;
   if (!folderId) throw new Error(`invoice_config.driveFolderId missing for ${brandName}`);
 
-  log(verbose, `brand=${brand.name} (${brand.id}) agent=${agent.id} variant=${variant}`);
-  log(verbose, `service account = ${drive.serviceAccountEmail()}`);
+  const src = makeSource(config, verbose);
+  const doMove = (move !== undefined ? move : (config.moveVendorWise !== false)) && src.canMove && !dryRun;
+  const vendorParent = driveSA.parseFolderId(config.vendorFolderParentId) || config.vendorFolderParentId || folderId;
+  log(verbose, `brand=${brand.name} agent=${agent.id} variant=${variant} source=${src.kind} move=${doMove}`);
 
-  // 3. Vendor Master — prefer the in-code module (brands/<variant>.vendorMaster.js,
-  //    like TDS + category master); fall back to reading the sheet only if absent.
+  // Vendor Master — prefer the in-code module.
   let vmRows;
-  try {
-    vmRows = require(`./brands/${variant}.vendorMaster`).rows;
-    log(verbose, `vendor master: code module (${vmRows.length - 1} rows)`);
-  } catch (e) {
+  try { vmRows = require(`./brands/${variant}.vendorMaster`).rows; log(verbose, `vendor master: code (${vmRows.length - 1} rows)`); }
+  catch (e) {
     const vm = config.vendorMaster || {};
-    if (!vm.sheetId) throw new Error(`No code vendor master for "${variant}" and no config.vendorMaster.sheetId`);
+    if (!vm.sheetId) throw new Error(`No code vendor master for "${variant}"`);
+    const sheets = require('./core/sheetsService');
     vmRows = await sheets.readSheetCsv(vm.sheetId, vm.gid);
-    log(verbose, `vendor master: sheet fallback (${vmRows.length} rows)`);
   }
   const vendorLookup = buildVendorLookup(vmRows);
 
-  // 4. Drive files (PDFs), minus already-processed (by filename in invoice_code)
-  let files = await drive.listChildren(folderId);
-  files = files.filter(f => f.mimeType === 'application/pdf' || /\.pdf$/i.test(f.name || ''));
-  if (file) files = files.filter(f => f.id === file || f.name === file);
-
+  // List PDFs minus already-processed (by filename in invoice_code)
+  let files = await src.listPdfs(folderId);
+  if (file) {
+    const wanted = String(file).split(',').map((s) => s.trim()).filter(Boolean);
+    files = files.filter((f) => wanted.includes(f.id) || wanted.includes(f.name));
+  }
   const brandDb = getBrandConnection(brand.db_name);
   const processed = await brandDb.query('SELECT DISTINCT filename FROM invoice_code', { type: QueryTypes.SELECT });
-  const seen = new Set(processed.map(r => r.filename).filter(Boolean));
-  const pending = files.filter(f => !seen.has(f.name));
+  const seen = new Set(processed.map((r) => r.filename).filter(Boolean));
+  const pending = files.filter((f) => !seen.has(f.name));
   const toRun = limit > 0 ? pending.slice(0, limit) : pending;
-  log(verbose, `folder files=${files.length}, already-processed=${seen.size}, to-run=${toRun.length}`);
+  log(verbose, `folder=${files.length} processed=${seen.size} to-run=${toRun.length}`);
 
-  // 5. Process each file
   const allRows = [];
   const perFile = [];
   for (const f of toRun) {
-    let meta = {};
-    try { meta = await drive.getMeta(f.id, 'id,name,webViewLink'); } catch {}
-    const webViewLink = meta.webViewLink || `https://drive.google.com/file/d/${f.id}/view`;
+    let dl;
+    try { dl = await src.download(f.id); } catch (e) { log(verbose, `  download failed ${f.name}: ${e.message}`); continue; }
+    const webViewLink = dl.webViewLink || f.webViewLink || `https://drive.google.com/file/d/${f.id}/view`;
+    const text = await extractPdfText(dl.buffer);
 
-    const buffer = await drive.downloadFile(f.id);
-    const text = await extractPdfText(buffer);
-
-    let outputStr;
-    if (!text || !text.trim()) {
-      outputStr = '[]'; // scanned/empty → matches n8n empty-text behavior (OCR is Phase 2)
-    } else {
+    let outputStr = '[]';
+    if (text && text.trim()) {
       const llmRaw = await runExtraction(engine.buildPrompt(text));
-      // Inject vendor_name_tally + category from code lookup (replaces n8n Vendor_Master tool)
       const parsed = safeParseArray(llmRaw);
       if (Array.isArray(parsed)) {
-        for (const r of parsed) {
-          if (r && typeof r === 'object') {
-            const res = vendorLookup(r.seller_gstin, r.company);
-            r.vendor_name_tally = res.vendor_name_tally;
-            r.category = res.nature_of_expense;
-          }
+        for (const r of parsed) if (r && typeof r === 'object') {
+          const res = vendorLookup(r.seller_gstin, r.company);
+          r.vendor_name_tally = res.vendor_name_tally;
+          r.category = res.nature_of_expense;
         }
         outputStr = JSON.stringify(parsed);
-      } else {
-        outputStr = llmRaw; // let the Code node's own guards handle unparseable output
-      }
+      } else { outputStr = llmRaw; }
     }
-
-    const rows = engine.runCodeNode([{ json: { output: outputStr, webViewLink } }]);
-    const plain = rows.map(r => ({ ...r.json, _filename: f.name }));
-    allRows.push(...plain);
-    perFile.push({ file: f.name, lines: plain.length, statuses: plain.map(p => p.status) });
-    log(verbose, `  ${f.name}: text=${text.length}b → ${plain.length} row(s)`);
+    const rows = engine.runCodeNode([{ json: { output: outputStr, webViewLink } }]).map((r) => r.json);
+    rows.forEach((r) => allRows.push({ ...r, _filename: f.name }));
+    perFile.push({ id: f.id, name: f.name, vendor: pickVendor(rows), lines: rows.length, statuses: rows.map((r) => r.status) });
+    log(verbose, `  ${f.name}: text=${text.length}b → ${rows.length} row(s) → vendor "${pickVendor(rows)}"`);
   }
 
-  // 6. Write (unless dry run)
-  let writeSummary = null;
-  if (!dryRun && allRows.length) {
-    writeSummary = await ingest.writeRows(brand, agent, allRows);
+  // Write to invoice_code
+  let write = null;
+  if (!dryRun && allRows.length) write = await ingest.writeRows(brand, agent, allRows);
+
+  // Move each file into its vendor folder (create-if-missing) — the n8n cleanup step
+  const moved = [];
+  if (doMove) {
+    for (const pf of perFile) {
+      try {
+        const vf = await src.ensureFolder(pf.vendor, vendorParent);
+        if (vf) { await src.moveFile(pf.id, vf, folderId); moved.push({ file: pf.name, vendor: pf.vendor, folderId: vf }); }
+        log(verbose, `  moved ${pf.name} → "${pf.vendor}" (${vf})`);
+      } catch (e) { log(verbose, `  move failed ${pf.name}: ${e.message}`); }
+    }
   }
 
   return {
-    brand: brand.name, agent: agent.name, variant,
+    brand: brand.name, agent: agent.name, variant, source: src.kind,
     folderFiles: files.length, alreadyProcessed: seen.size, ran: toRun.length,
-    rowsProduced: allRows.length, perFile, write: writeSummary,
-    sampleRows: allRows.slice(0, 3),
+    rowsProduced: allRows.length, perFile, write, moved,
+    sampleRows: allRows.slice(0, 2),
   };
 }
 

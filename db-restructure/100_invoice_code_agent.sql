@@ -132,6 +132,9 @@ SELECT
       "variant": "koparo",
       "enabled": true,
       "intake": "drive-poll",
+      "source": "composio",
+      "composioUserId": "central",
+      "moveVendorWise": true,
       "driveFolderId": "1ywK4YwD6Jhh9OFpo87z10_g6ALijnM5Y",
       "vendorMaster": {
         "sheetId": "1YxpTZSnpus_B8vK4VvFytVkbsj3LOJwTWsuQhjQTr2g",
@@ -153,6 +156,9 @@ SET invoice_config = '{
       "variant": "koparo",
       "enabled": true,
       "intake": "drive-poll",
+      "source": "composio",
+      "composioUserId": "central",
+      "moveVendorWise": true,
       "driveFolderId": "1ywK4YwD6Jhh9OFpo87z10_g6ALijnM5Y",
       "vendorMaster": {
         "sheetId": "1YxpTZSnpus_B8vK4VvFytVkbsj3LOJwTWsuQhjQTr2g",
