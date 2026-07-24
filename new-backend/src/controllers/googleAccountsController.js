@@ -38,6 +38,9 @@ function resolveGoogleUserId(kind, req) {
 }
 
 function isAdmin(req) { return req.user && req.user.role === 'admin'; }
+// Accountants own the central-account / Composio features, so they may connect and
+// disconnect the firm's central team@ account as well (not only admins).
+function canManageCentral(req) { return req.user && (req.user.role === 'admin' || req.user.role === 'accountant'); }
 
 /* ── GET /api/google/accounts ─────────────────────────────────────────────────
    The accounts available to the current user: the shared central account plus
@@ -78,8 +81,8 @@ const connect = async (req, res, next) => {
   try {
     if (!composio.isConfigured()) return res.status(400).json({ error: 'Google login is not configured on this server.' });
     const kind = req.body?.kind === 'central' ? 'central' : 'personal';
-    if (kind === 'central' && !isAdmin(req)) {
-      return res.status(403).json({ error: 'Only an admin can connect the central team@ account.' });
+    if (kind === 'central' && !canManageCentral(req)) {
+      return res.status(403).json({ error: 'You do not have permission to connect the central team@ account.' });
     }
     const slug = (req.body?.slug || LOGIN_SLUG).toString().toLowerCase();
     const userId = resolveGoogleUserId(kind, req);
@@ -106,8 +109,8 @@ const disconnect = async (req, res, next) => {
   try {
     const { id } = req.params;
     if (!id) return res.status(400).json({ error: 'Missing account id' });
-    if (String(req.query.kind) === 'central' && !isAdmin(req)) {
-      return res.status(403).json({ error: 'Only an admin can disconnect the central account.' });
+    if (String(req.query.kind) === 'central' && !canManageCentral(req)) {
+      return res.status(403).json({ error: 'You do not have permission to disconnect the central account.' });
     }
     await composio.disconnect(id);
     // Bust cached emails for both buckets (cheap, avoids stale labels).

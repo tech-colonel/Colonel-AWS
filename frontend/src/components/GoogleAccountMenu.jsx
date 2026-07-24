@@ -97,6 +97,9 @@ export default function GoogleAccountMenu({ user }) {
   const [busy, setBusy] = React.useState(false);
 
   const isAdmin = user?.role === 'admin';
+  // Accountants own the central-account / Composio features (per project setup),
+  // so they can connect the firm's team@ account too — not just admins.
+  const canManageCentral = user?.role === 'admin' || user?.role === 'accountant';
   const central = accounts?.central || null;
   const personal = Array.isArray(accounts?.personal) ? accounts.personal : [];
   const logo = accounts?.logo || null;
@@ -148,7 +151,7 @@ export default function GoogleAccountMenu({ user }) {
               onSelect={() => setActive('central')}
             />
           ) : (
-            isAdmin && (
+            canManageCentral && (
               <button
                 type="button"
                 disabled={busy}
