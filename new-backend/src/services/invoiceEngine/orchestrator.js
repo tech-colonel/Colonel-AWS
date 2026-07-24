@@ -64,11 +64,19 @@ async function processBrand(opts = {}) {
   log(verbose, `brand=${brand.name} (${brand.id}) agent=${agent.id} variant=${variant}`);
   log(verbose, `service account = ${drive.serviceAccountEmail()}`);
 
-  // 3. Vendor Master (Drive CSV export via service account — Sheets API is disabled)
-  const vm = config.vendorMaster || {};
-  const vmRows = await sheets.readSheetCsv(vm.sheetId, vm.gid);
+  // 3. Vendor Master — prefer the in-code module (brands/<variant>.vendorMaster.js,
+  //    like TDS + category master); fall back to reading the sheet only if absent.
+  let vmRows;
+  try {
+    vmRows = require(`./brands/${variant}.vendorMaster`).rows;
+    log(verbose, `vendor master: code module (${vmRows.length - 1} rows)`);
+  } catch (e) {
+    const vm = config.vendorMaster || {};
+    if (!vm.sheetId) throw new Error(`No code vendor master for "${variant}" and no config.vendorMaster.sheetId`);
+    vmRows = await sheets.readSheetCsv(vm.sheetId, vm.gid);
+    log(verbose, `vendor master: sheet fallback (${vmRows.length} rows)`);
+  }
   const vendorLookup = buildVendorLookup(vmRows);
-  log(verbose, `vendor master rows: ${vmRows.length}`);
 
   // 4. Drive files (PDFs), minus already-processed (by filename in invoice_code)
   let files = await drive.listChildren(folderId);

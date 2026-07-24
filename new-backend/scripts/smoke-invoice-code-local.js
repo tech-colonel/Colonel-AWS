@@ -21,7 +21,7 @@ const engine = require('../src/services/invoiceEngine/brands/koparo.engine');
 const { buildVendorLookup } = require('../src/services/invoiceEngine/core/vendorLookup');
 const { extractPdfText, runExtraction, MODEL } = require('../src/services/invoiceEngine/core/extract');
 
-const VENDOR_SNAPSHOT = '/private/tmp/claude-501/-Users-dhavalchauhan-Colonel-Full/67732eda-f6b5-476a-b85f-71d55eda38a0/scratchpad/vendor_master.json';
+const VENDOR_MASTER_ROWS = require('../src/services/invoiceEngine/brands/koparo.vendorMaster').rows;
 const FILES = [
   '/Users/dhavalchauhan/Downloads/Processed_Sales-Other_AH_26-27_567.pdf',
   '/Users/dhavalchauhan/Downloads/Processed_Sales-Other_AH_26-27_568.pdf',
