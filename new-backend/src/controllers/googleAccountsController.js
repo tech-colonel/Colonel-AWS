@@ -19,8 +19,13 @@ try { driveService = require('../services/driveService'); } catch (_) { /* optio
 
 // The firm's central mailbox. Central connections are always this identity.
 const CENTRAL_EMAIL = process.env.CENTRAL_GOOGLE_EMAIL || 'team@colonel.co.in';
-// The toolkit we connect for login — Gmail gives send + profile (email) scope.
+// The toolkit we connect for login. Default 'googlesuper' = the combined Google
+// toolkit (Drive + Sheets + Gmail + Calendar + Meet + Slides) so one sign-in grants
+// everything (incl. Drive for the invoice engine). Detection below still accepts a
+// legacy 'gmail' connection so accounts connected before this switch keep working.
 const LOGIN_SLUG = process.env.GOOGLE_LOGIN_SLUG || 'gmail';
+const LOGIN_SLUGS = [...new Set([LOGIN_SLUG, 'googlesuper', 'gmail'])].map((s) => s.toLowerCase());
+const isLoginSlug = (slug) => LOGIN_SLUGS.includes(String(slug || '').toLowerCase());
 
 // Where the browser returns after authorizing.
 const FRONT_URL = process.env.COMPOSIO_FRONT_URL
@@ -45,7 +50,7 @@ const listAccounts = async (req, res, next) => {
     let central = null;
     try {
       const cs = await composio.listConnections('central');
-      const gmail = cs.find((c) => String(c.slug || '').toLowerCase() === LOGIN_SLUG) || cs[0];
+      const gmail = cs.find((c) => isLoginSlug(c.slug)) || cs[0];
       if (gmail) central = { id: gmail.id, kind: 'central', email: CENTRAL_EMAIL, slug: gmail.slug, status: gmail.status };
     } catch (_) { /* central not connected yet */ }
 
@@ -128,7 +133,7 @@ const status = async (req, res, next) => {
     if (configured) {
       try {
         const cs = await composio.listConnections('central');
-        mailOk = cs.some((c) => String(c.slug || '').toLowerCase() === LOGIN_SLUG);
+        mailOk = cs.some((c) => isLoginSlug(c.slug));
         if (mailOk) centralEmail = CENTRAL_EMAIL;
       } catch (_) { /* not connected */ }
     }
