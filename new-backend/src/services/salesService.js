@@ -194,10 +194,61 @@ const deleteSkuMasterSingle = async (brandId, agentId, tallySku) => {
   return { success: true, count: updatedSkuMaster.length };
 };
 
+/**
+ * Delete a single sku_master/ledger_master entry by its array index.
+ * Index-based so it works regardless of which column headers a given
+ * bulk-uploaded sheet happened to use (SKU/FG vs Sales portal SKU/Tally new SKU, etc).
+ */
+const deleteMasterEntryAtIndex = async (brandId, agentId, type, index) => {
+  const brand = await Brand.findByPk(brandId);
+  if (!brand) throw new Error('Brand not found');
+
+  const brandDb = getBrandConnection(brand.db_name);
+  const BrandAgentModel = getBrandAgentModel(brandDb);
+
+  const [brandAgent] = await BrandAgentModel.findOrCreate({
+    where: { brand_id: brandId, agent_id: agentId }
+  });
+
+  const field = type === 'sku' ? 'sku_master' : 'ledger_master';
+  const current = brandAgent[field] || [];
+  const idx = parseInt(index, 10);
+  if (!Number.isInteger(idx) || idx < 0 || idx >= current.length) {
+    const err = new Error('Invalid entry index');
+    err.status = 400;
+    throw err;
+  }
+
+  const updated = current.filter((_, i) => i !== idx);
+  await brandAgent.update({ [field]: updated });
+  return { success: true, count: updated.length };
+};
+
+/**
+ * Wipe the entire sku_master or ledger_master array for a brand-agent (bulk delete).
+ */
+const clearMasterData = async (brandId, agentId, type) => {
+  const brand = await Brand.findByPk(brandId);
+  if (!brand) throw new Error('Brand not found');
+
+  const brandDb = getBrandConnection(brand.db_name);
+  const BrandAgentModel = getBrandAgentModel(brandDb);
+
+  const [brandAgent] = await BrandAgentModel.findOrCreate({
+    where: { brand_id: brandId, agent_id: agentId }
+  });
+
+  const field = type === 'sku' ? 'sku_master' : 'ledger_master';
+  await brandAgent.update({ [field]: [] });
+  return { success: true, count: 0 };
+};
+
 module.exports = {
   uploadMasterData,
   getMasterData,
   generateAmazonWorkingFile,
   addSkuMasterSingle,
-  deleteSkuMasterSingle
+  deleteSkuMasterSingle,
+  deleteMasterEntryAtIndex,
+  clearMasterData
 };

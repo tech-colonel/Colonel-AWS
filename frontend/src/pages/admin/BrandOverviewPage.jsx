@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import DashboardLayout from '../../components/layout/DashboardLayout';
-import { LayoutDashboard, Building2, Bot, Users, Link as LinkIcon, ArrowLeft, FileText, CheckCircle2, XCircle } from 'lucide-react';
+import { LayoutDashboard, Building2, Bot, Users, Link as LinkIcon, ArrowLeft, FileText, CheckCircle2, XCircle, Trash2 } from 'lucide-react';
 import { Button } from '../../components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '../../components/ui/card';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../../components/ui/modal';
@@ -24,6 +24,15 @@ const BrandOverviewPage = () => {
   const [showFilesModal, setShowFilesModal] = useState(false);
   const [selectedAgentForFiles, setSelectedAgentForFiles] = useState(null);
   const [isDownloading, setIsDownloading] = useState(false);
+
+  // SKU / Ledger master modal state
+  const [showMasterModal, setShowMasterModal] = useState(false);
+  const [masterModalType, setMasterModalType] = useState('sku'); // 'sku' | 'ledger'
+  const [selectedAgentForMaster, setSelectedAgentForMaster] = useState(null);
+  const [masterEntries, setMasterEntries] = useState([]);
+  const [isLoadingMaster, setIsLoadingMaster] = useState(false);
+  const [deletingMasterIndex, setDeletingMasterIndex] = useState(null);
+  const [isClearingMaster, setIsClearingMaster] = useState(false);
 
   useEffect(() => {
     fetchStatus();
@@ -59,6 +68,73 @@ const BrandOverviewPage = () => {
       toast.error('Failed to download file');
     } finally {
       setIsDownloading(false);
+    }
+  };
+
+  const openMasterModal = async (agent, type) => {
+    setMasterModalType(type);
+    setSelectedAgentForMaster(agent);
+    setShowMasterModal(true);
+    setIsLoadingMaster(true);
+    try {
+      const res = await api.get(`/api/brands/${id}/agents/${agent.agentId}/master`);
+      setMasterEntries(res.data?.[type === 'sku' ? 'sku_master' : 'ledger_master'] || []);
+    } catch (error) {
+      toast.error(`Failed to load ${type === 'sku' ? 'SKU' : 'Ledger'} master`);
+      setMasterEntries([]);
+    } finally {
+      setIsLoadingMaster(false);
+    }
+  };
+
+  const handleDeleteMasterEntry = async (index) => {
+    if (!window.confirm(`Delete this ${masterModalType === 'sku' ? 'SKU' : 'ledger'} entry? This cannot be undone.`)) return;
+    setDeletingMasterIndex(index);
+    try {
+      await api.delete(`/api/brands/${id}/agents/${selectedAgentForMaster.agentId}/master/entry/${masterModalType}/${index}`);
+      toast.success(`${masterModalType === 'sku' ? 'SKU' : 'Ledger'} entry deleted successfully`);
+      setMasterEntries(prev => prev.filter((_, i) => i !== index));
+      // Keep the count badges on the underlying page in sync without a full reload.
+      setStatus(prev => {
+        if (!prev) return prev;
+        const field = masterModalType === 'sku' ? 'skuMasterCount' : 'ledgerMasterCount';
+        return {
+          ...prev,
+          agents: prev.agents.map(a => a.agentId === selectedAgentForMaster.agentId
+            ? { ...a, masterStatus: { ...a.masterStatus, [field]: Math.max(0, (a.masterStatus?.[field] || 0) - 1) } }
+            : a)
+        };
+      });
+    } catch (error) {
+      toast.error(error.response?.data?.error || 'Failed to delete entry');
+    } finally {
+      setDeletingMasterIndex(null);
+    }
+  };
+
+  const handleClearAllMasterEntries = async () => {
+    const label = masterModalType === 'sku' ? 'SKU' : 'ledger';
+    if (!window.confirm(`Delete ALL ${masterEntries.length} ${label} entries for ${selectedAgentForMaster?.agentName}? This cannot be undone.`)) return;
+    setIsClearingMaster(true);
+    try {
+      await api.delete(`/api/brands/${id}/agents/${selectedAgentForMaster.agentId}/master/${masterModalType}/clear-all`);
+      toast.success(`All ${label} entries deleted successfully`);
+      setMasterEntries([]);
+      setStatus(prev => {
+        if (!prev) return prev;
+        const countField = masterModalType === 'sku' ? 'skuMasterCount' : 'ledgerMasterCount';
+        const hasField = masterModalType === 'sku' ? 'hasSkuMaster' : 'hasLedgerMaster';
+        return {
+          ...prev,
+          agents: prev.agents.map(a => a.agentId === selectedAgentForMaster.agentId
+            ? { ...a, masterStatus: { ...a.masterStatus, [countField]: 0, [hasField]: false } }
+            : a)
+        };
+      });
+    } catch (error) {
+      toast.error(error.response?.data?.error || `Failed to delete all ${label} entries`);
+    } finally {
+      setIsClearingMaster(false);
     }
   };
 
@@ -128,15 +204,22 @@ const BrandOverviewPage = () => {
                             <p className="font-medium text-slate-700 text-sm">SKU Master</p>
                             <p className="text-xs text-slate-500 mt-0.5">{agent.masterStatus?.skuMasterCount || 0} mapping entries</p>
                           </div>
-                          {agent.masterStatus?.hasSkuMaster ? (
-                            <Badge variant="success" className="gap-1 bg-emerald-50 text-emerald-700 border-emerald-200 hover:bg-emerald-100">
-                              <CheckCircle2 className="w-3 h-3" /> Uploaded
-                            </Badge>
-                          ) : (
-                            <Badge variant="secondary" className="gap-1 text-slate-500">
-                              <XCircle className="w-3 h-3" /> Missing
-                            </Badge>
-                          )}
+                          <div className="flex items-center gap-2">
+                            {agent.masterStatus?.hasSkuMaster ? (
+                              <Badge variant="success" className="gap-1 bg-emerald-50 text-emerald-700 border-emerald-200 hover:bg-emerald-100">
+                                <CheckCircle2 className="w-3 h-3" /> Uploaded
+                              </Badge>
+                            ) : (
+                              <Badge variant="secondary" className="gap-1 text-slate-500">
+                                <XCircle className="w-3 h-3" /> Missing
+                              </Badge>
+                            )}
+                            {agent.masterStatus?.hasSkuMaster && (
+                              <Button variant="outline" size="sm" onClick={() => openMasterModal(agent, 'sku')}>
+                                Manage
+                              </Button>
+                            )}
+                          </div>
                         </div>
 
                         <div className="flex items-center justify-between p-3 border rounded-lg bg-white">
@@ -144,15 +227,22 @@ const BrandOverviewPage = () => {
                             <p className="font-medium text-slate-700 text-sm">Ledger Configurations (State)</p>
                             <p className="text-xs text-slate-500 mt-0.5">{agent.masterStatus?.ledgerMasterCount || 0} ledger configurations</p>
                           </div>
-                          {agent.masterStatus?.hasLedgerMaster ? (
-                            <Badge variant="success" className="gap-1 bg-emerald-50 text-emerald-700 border-emerald-200 hover:bg-emerald-100">
-                              <CheckCircle2 className="w-3 h-3" /> Uploaded
-                            </Badge>
-                          ) : (
-                            <Badge variant="secondary" className="gap-1 text-slate-500">
-                              <XCircle className="w-3 h-3" /> Missing
-                            </Badge>
-                          )}
+                          <div className="flex items-center gap-2">
+                            {agent.masterStatus?.hasLedgerMaster ? (
+                              <Badge variant="success" className="gap-1 bg-emerald-50 text-emerald-700 border-emerald-200 hover:bg-emerald-100">
+                                <CheckCircle2 className="w-3 h-3" /> Uploaded
+                              </Badge>
+                            ) : (
+                              <Badge variant="secondary" className="gap-1 text-slate-500">
+                                <XCircle className="w-3 h-3" /> Missing
+                              </Badge>
+                            )}
+                            {agent.masterStatus?.hasLedgerMaster && (
+                              <Button variant="outline" size="sm" onClick={() => openMasterModal(agent, 'ledger')}>
+                                Manage
+                              </Button>
+                            )}
+                          </div>
                         </div>
                       </div>
                     </div>
@@ -240,6 +330,82 @@ const BrandOverviewPage = () => {
                           >
                             <Download className="w-3.5 h-3.5 mr-1.5" />
                             {file.fileExists === false ? "Missing" : "Download"}
+                          </Button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={showMasterModal} onOpenChange={setShowMasterModal}>
+        <DialogContent onClose={() => setShowMasterModal(false)} className="sm:max-w-6xl w-[95vw] max-h-[85vh] overflow-y-auto">
+          <DialogHeader>
+            <div className="flex items-center justify-between gap-4 pr-8">
+              <DialogTitle className="capitalize text-xl font-bold flex items-center gap-2">
+                <Bot className="w-5 h-5 text-indigo-600 shrink-0" />
+                <span>{selectedAgentForMaster?.agentName} {masterModalType === 'sku' ? 'SKU Master' : 'Ledger Configurations'}</span>
+              </DialogTitle>
+              {masterEntries.length > 0 && (
+                <Button
+                  variant="destructive"
+                  size="sm"
+                  className="shrink-0"
+                  disabled={isClearingMaster}
+                  onClick={handleClearAllMasterEntries}
+                >
+                  <Trash2 className="w-3.5 h-3.5 mr-1.5" />
+                  {isClearingMaster ? 'Deleting…' : `Delete All (${masterEntries.length})`}
+                </Button>
+              )}
+            </div>
+          </DialogHeader>
+
+          <div className="mt-6 space-y-4">
+            {isLoadingMaster ? (
+              <div className="flex justify-center p-8">
+                <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-indigo-600"></div>
+              </div>
+            ) : masterEntries.length === 0 ? (
+              <div className="text-center p-8 border border-dashed rounded-lg bg-slate-50">
+                <p className="text-slate-500 italic">
+                  No {masterModalType === 'sku' ? 'SKU' : 'ledger'} entries found.
+                </p>
+              </div>
+            ) : (
+              <div className="border border-slate-200 rounded-lg overflow-x-auto">
+                <table className="w-full text-sm text-left table-fixed">
+                  <thead className="bg-slate-50 border-b border-slate-200">
+                    <tr>
+                      {Object.keys(masterEntries[0]).map(col => (
+                        <th key={col} className="px-4 py-3 font-medium text-slate-600 uppercase text-xs tracking-wider w-48">
+                          {col}
+                        </th>
+                      ))}
+                      <th className="px-4 py-3 font-medium text-slate-600 uppercase text-xs tracking-wider text-right w-28">Action</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100 bg-white">
+                    {masterEntries.map((entry, idx) => (
+                      <tr key={idx} className="hover:bg-slate-50">
+                        {Object.keys(masterEntries[0]).map(col => (
+                          <td key={col} className="px-4 py-3 text-slate-700 align-top break-words">
+                            {entry[col] ?? ''}
+                          </td>
+                        ))}
+                        <td className="px-4 py-3 text-right align-top">
+                          <Button
+                            variant="destructive"
+                            size="sm"
+                            disabled={deletingMasterIndex === idx}
+                            onClick={() => handleDeleteMasterEntry(idx)}
+                          >
+                            <Trash2 className="w-3.5 h-3.5 mr-1.5" />
+                            {deletingMasterIndex === idx ? 'Deleting…' : 'Delete'}
                           </Button>
                         </td>
                       </tr>

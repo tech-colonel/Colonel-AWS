@@ -186,13 +186,55 @@ const deleteSkuMasterSingle = async (req, res, next) => {
   try {
     const { brandId, agentId } = req.params;
     const { tallySku } = req.query;
-    
+
     if (!tallySku) {
       return res.status(400).json({ error: 'Tally SKU is required' });
     }
 
     const result = await salesService.deleteSkuMasterSingle(brandId, agentId, tallySku);
     res.json({ message: 'SKU mapping deleted successfully', ...result });
+  } catch (error) {
+    next(error);
+  }
+};
+
+// Agent-agnostic master-data fetch (any sales portal) — used by the admin brand overview page.
+const getMasterDataAny = async (req, res, next) => {
+  try {
+    const { brandId, agentId } = req.params;
+    const result = await salesService.getMasterData(brandId, agentId);
+    res.json(result);
+  } catch (error) {
+    next(error);
+  }
+};
+
+// Delete a single SKU/Ledger master row by its index — precise regardless of column naming.
+const deleteMasterEntry = async (req, res, next) => {
+  try {
+    const { brandId, agentId, type, index } = req.params;
+    if (!['sku', 'ledger'].includes(type)) {
+      return res.status(400).json({ error: 'type must be "sku" or "ledger"' });
+    }
+
+    const result = await salesService.deleteMasterEntryAtIndex(brandId, agentId, type, index);
+    res.json({ message: `${type === 'sku' ? 'SKU' : 'Ledger'} entry deleted successfully`, ...result });
+  } catch (error) {
+    if (error.status === 400) return res.status(400).json({ error: error.message });
+    next(error);
+  }
+};
+
+// Bulk delete — wipes every SKU/Ledger master row for this agent.
+const clearMasterEntries = async (req, res, next) => {
+  try {
+    const { brandId, agentId, type } = req.params;
+    if (!['sku', 'ledger'].includes(type)) {
+      return res.status(400).json({ error: 'type must be "sku" or "ledger"' });
+    }
+
+    const result = await salesService.clearMasterData(brandId, agentId, type);
+    res.json({ message: `All ${type === 'sku' ? 'SKU' : 'Ledger'} entries deleted successfully`, ...result });
   } catch (error) {
     next(error);
   }
@@ -703,5 +745,8 @@ module.exports = {
   deleteWorkingFile,
   downloadWorkingFile,
   addSkuMasterSingle,
-  deleteSkuMasterSingle
+  deleteSkuMasterSingle,
+  getMasterDataAny,
+  deleteMasterEntry,
+  clearMasterEntries
 };
