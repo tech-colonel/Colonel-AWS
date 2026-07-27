@@ -660,7 +660,8 @@ const uploadOutputExcel = async (req, res) => {
     // never fail an import the accountant just did.
     let sideRules = { created: 0, suggested: 0 };
     try {
-      sideRules = await deriveSideRules(brandId, seq, toImport);
+      const sideBrand = await Brand.findByPk(brandId);
+      sideRules = await deriveSideRules(brandId, seq, toImport, sideBrand && sideBrand.name);
     } catch (e) {
       console.warn('[SIDE-RULES] derivation skipped:', e.message);
     }
@@ -801,7 +802,19 @@ const loadSideRules = async (brandId, seq) => {
  * Thin evidence, or it contradicts an existing seed/manual rule -> status 'suggested'
  * (an accountant confirms those in one click; nothing silently overrides a human).
  */
-const deriveSideRules = async (brandId, seq, rows) => {
+// Brands allowed to have a LEARNED side rule go live on its own. Everyone else still gets
+// the rule derived, but as 'suggested' — an accountant confirms it before it can affect a
+// run. Side rules are a powerful override (they sit above the payee directory), so a brand
+// that has never opted in must not silently acquire one from a routine corrections upload.
+// Override with BANK_SIDE_RULE_BRANDS="Brand A,Brand B"; set to "*" to allow every brand.
+const SIDE_RULE_AUTO_BRANDS = (process.env.BANK_SIDE_RULE_BRANDS || 'Urban Plant,M Brands')
+  .split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
+
+const sideRulesAutoAllowed = (brandName) =>
+  SIDE_RULE_AUTO_BRANDS.includes('*') ||
+  SIDE_RULE_AUTO_BRANDS.includes(String(brandName || '').trim().toLowerCase());
+
+const deriveSideRules = async (brandId, seq, rows, brandName = '') => {
   const bySideKey = new Map();   // payeeKey -> {credit: Map<ledger,n>, debit: Map<ledger,n>}
   for (const r of rows) {
     if (!r.side || !r.correct_ledger) continue;
@@ -832,7 +845,8 @@ const deriveSideRules = async (brandId, seq, rows) => {
       if (existing.length && existing[0].source !== 'learned') continue;
 
       const confident = cN >= 2 && dN >= 2;
-      const status = confident && !existing.length ? 'active' : 'suggested';
+      const status = (confident && !existing.length && sideRulesAutoAllowed(brandName))
+        ? 'active' : 'suggested';
       await seq.query(
         `INSERT INTO bank_side_rules
            (brand_id, tokens, credit_ledger, debit_ledger, tier, priority, status, source, evidence)
