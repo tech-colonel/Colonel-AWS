@@ -162,8 +162,14 @@ const getBrandStatus = async (req, res, next) => {
     }
 
     const BrandAgentModel = getBrandAgentModel(brandDb);
-    const brandAgentsData = await BrandAgentModel.findAll();
-    
+    // MUST be scoped to this brand. On the unified DB findAll() returns every brand's rows,
+    // and masterDataMap is keyed by agent_id alone — so the last brand processed won and its
+    // counts were displayed against whichever brand you were looking at. Live example:
+    // Koparo's Sales-Amazon card read "162 mapping entries · Uploaded" while Koparo actually
+    // had 0; the 162 belonged to Nestroots. The Manage modal (correctly scoped by
+    // brand_id + agent_id) then showed "No SKU entries found", contradicting the card.
+    const brandAgentsData = await BrandAgentModel.findAll({ where: { brand_id: brand.id } });
+
     const masterDataMap = {};
     for (const ba of brandAgentsData) {
       masterDataMap[ba.agent_id] = {
