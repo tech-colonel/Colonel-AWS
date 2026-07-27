@@ -33,6 +33,21 @@ const authenticateToken = async (req, res, next) => {
 };
 
 const authorize = (...roles) => {
+  // Fail FAST, at route-definition time, on `authorize()` with no roles.
+  //
+  // It reads like "any authenticated user", but it evaluates `[].includes(req.user.role)`,
+  // which is false for every role — so the route returns 403 to everyone, admin included.
+  // Four bank-corrections routes carried this for months: inline correction saving and both
+  // bulk-upload endpoints were silently dead, and nothing in the logs said so.
+  //
+  // Throwing here surfaces the mistake the moment the server boots instead of as a runtime
+  // 403. Deliberately NOT defaulted to "allow any role" — that would silently widen access.
+  if (roles.length === 0) {
+    throw new Error(
+      'authorize() requires at least one role, e.g. authorize("admin", "accountant"). ' +
+      'Called with none, it denies every role including admin.'
+    );
+  }
   return (req, res, next) => {
     if (!roles.includes(req.user.role)) {
       return res.status(403).json({ error: 'Access denied. Unauthorized role.' });

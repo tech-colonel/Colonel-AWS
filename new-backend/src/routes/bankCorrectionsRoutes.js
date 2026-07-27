@@ -9,22 +9,23 @@ const {
   seedPayeeDirectory,
   getBankAssets,
   deleteBankAsset,
+  setSideRuleStatus,
 } = require('../controllers/bankCorrectionsController');
 
 const router = express.Router();
 const upload = multer({ storage: multer.memoryStorage() });
 
 // GET  /api/bank-reco/corrections/:brandId
-router.get('/corrections/:brandId', authenticateToken, authorize(), getCorrections);
+router.get('/corrections/:brandId', authenticateToken, authorize('admin', 'accountant'), getCorrections);
 
 // POST /api/bank-reco/corrections/:brandId  (inline UI edits)
-router.post('/corrections/:brandId', authenticateToken, authorize(), saveCorrections);
+router.post('/corrections/:brandId', authenticateToken, authorize('admin', 'accountant'), saveCorrections);
 
 // POST /api/bank-reco/corrections/:brandId/upload-excel  (reviewed Excel with CHANGES column)
 router.post(
   '/corrections/:brandId/upload-excel',
   authenticateToken,
-  authorize(),
+  authorize('admin'),
   upload.single('file'),
   uploadCorrectionsExcel
 );
@@ -33,7 +34,7 @@ router.post(
 router.post(
   '/corrections/:brandId/upload-output',
   authenticateToken,
-  authorize(),
+  authorize('admin'),
   upload.single('file'),
   uploadOutputExcel
 );
@@ -48,6 +49,10 @@ router.get('/assets/:brandId', authenticateToken, authorize('admin', 'accountant
 // Admin-only: wiping a brand's CoA invalidates every side rule and learned key that is
 // validated against it, so this is not something a brand user should be able to do.
 router.delete('/assets/:brandId/:type', authenticateToken, authorize('admin'), deleteBankAsset);
+
+// PATCH /api/bank-reco/assets/:brandId/side-rules/:ruleId  { status }
+// Approve a 'suggested' rule into 'active', or disable one that is misbehaving.
+router.patch('/assets/:brandId/side-rules/:ruleId', authenticateToken, authorize('admin'), setSideRuleStatus);
 
 // POST /api/bank-reco/payee-directory/:brandId/seed
 // Body: { directory: { phone:{…}, vpa:{…}, neft_name:{…}, name:{…}, exact:{…} } }

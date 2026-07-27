@@ -931,10 +931,13 @@ const getBankAssets = async (req, res) => {
               { bind: [brandId], transaction: t });
             sample = rows;
           } else if (key === 'side_rules') {
+            // id + status are returned so the UI can approve a 'suggested' rule in place.
             const [rows] = await seq.query(
-              `SELECT array_to_string(tokens,', ')||'  ['||status||'/'||source||']' AS a,
+              `SELECT id, status, source,
+                      array_to_string(tokens,', ') AS a,
                       'CR: '||credit_ledger||'   DR: '||debit_ledger AS b
-                 FROM bank_side_rules WHERE brand_id = $1 ORDER BY priority, id LIMIT 500`,
+                 FROM bank_side_rules WHERE brand_id = $1
+                ORDER BY (status='suggested') DESC, priority, id LIMIT 500`,
               { bind: [brandId], transaction: t });
             sample = rows;
           }
@@ -978,6 +981,39 @@ const deleteBankAsset = async (req, res) => {
   }
 };
 
+/**
+ * PATCH /api/bank-reco/assets/:brandId/side-rules/:ruleId — approve or disable one rule.
+ *
+ * Rules derived for a brand outside the auto-activation allow-list land as 'suggested',
+ * which is inert (loadSideRules only reads 'active'). Without this they would simply pile
+ * up with no way to act on them, so the gate would be a dead end rather than a review step.
+ */
+const setSideRuleStatus = async (req, res) => {
+  const { brandId, ruleId } = req.params;
+  const { status } = req.body || {};
+  const ALLOWED = ['active', 'suggested', 'disabled'];
+  if (!ALLOWED.includes(status)) {
+    return res.status(400).json({ error: `status must be one of ${ALLOWED.join(', ')}` });
+  }
+  try {
+    const seq = await getBrandSeq(brandId);
+    let updated = 0;
+    await withBypass(seq, async (t) => {
+      if (!(await tableExists(seq, 'bank_side_rules', t))) return;
+      const [, meta] = await seq.query(
+        `UPDATE bank_side_rules SET status = $1, updated_at = NOW()
+          WHERE id = $2 AND brand_id = $3`,
+        { bind: [status, ruleId, brandId], transaction: t });
+      updated = (meta && (meta.rowCount ?? 0)) || 0;
+    });
+    if (!updated) return res.status(404).json({ error: 'Rule not found for this brand' });
+    console.log(`[SIDE-RULES] rule ${ruleId} -> ${status} (brand ${brandId})`);
+    res.json({ success: true, id: ruleId, status });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+};
+
 // ─── Utility: bulk-upsert a seeded directory JSON into bank_payee_directory ──
 // Called by the seed endpoint. directoryJson is the keyed JSON from seed_payee_directory.py.
 
@@ -1016,6 +1052,7 @@ module.exports = {
   uploadOutputExcel,
   getBankAssets,
   deleteBankAsset,
+  setSideRuleStatus,
   loadCorrectionMap,
   loadSideRules,
   deriveSideRules,

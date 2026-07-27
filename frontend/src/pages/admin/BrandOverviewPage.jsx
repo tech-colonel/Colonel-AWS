@@ -66,6 +66,23 @@ const BrandOverviewPage = () => {
     }
   };
 
+  // Approve a 'suggested' side rule (or disable a live one). Rules derived for brands
+  // outside the auto-activation allow-list land as 'suggested' and do nothing until
+  // approved here — loadSideRules only ever reads status='active'.
+  const setSideRuleStatus = async (ruleId, nextStatus) => {
+    try {
+      await api.patch(`/bank-reco/assets/${id}/side-rules/${ruleId}`, { status: nextStatus });
+      toast.success(nextStatus === 'active' ? 'Rule approved — now live' : `Rule ${nextStatus}`);
+      setBankAssetData(prev => prev && ({
+        ...prev,
+        sample: prev.sample.map(r => (r.id === ruleId ? { ...r, status: nextStatus } : r)),
+      }));
+      fetchStatus();
+    } catch (err) {
+      toast.error(err.response?.data?.error || 'Could not update rule');
+    }
+  };
+
   const handleClearBankAsset = async () => {
     const meta = BANK_ASSET_META[bankAssetType];
     const n = bankAssetData?.count || 0;
@@ -559,9 +576,38 @@ const BrandOverviewPage = () => {
                   </thead>
                   <tbody>
                     {bankAssetData.sample.map((row, idx) => (
-                      <tr key={idx} className="border-t">
-                        <td className="px-4 py-2 align-top break-words max-w-md text-slate-700">{row.a}</td>
-                        <td className="px-4 py-2 align-top break-words max-w-md text-slate-500">{row.b}</td>
+                      <tr key={row.id || idx} className={`border-t ${row.status === 'suggested' ? 'bg-amber-50' : ''}`}>
+                        <td className="px-4 py-2 align-top break-words max-w-md text-slate-700">
+                          {row.a}
+                          {row.status && (
+                            <span className="ml-2 text-[11px] text-slate-400">
+                              {row.status}{row.source ? ` · ${row.source}` : ''}
+                            </span>
+                          )}
+                        </td>
+                        <td className="px-4 py-2 align-top break-words max-w-md text-slate-500">
+                          <div className="flex items-start justify-between gap-3">
+                            <span>{row.b}</span>
+                            {row.id && bankAssetType === 'side_rules' && (
+                              row.status === 'suggested' ? (
+                                <Button size="sm" variant="outline" className="shrink-0"
+                                  onClick={() => setSideRuleStatus(row.id, 'active')}>
+                                  Approve
+                                </Button>
+                              ) : row.status === 'active' ? (
+                                <Button size="sm" variant="ghost" className="shrink-0 text-slate-400"
+                                  onClick={() => setSideRuleStatus(row.id, 'disabled')}>
+                                  Disable
+                                </Button>
+                              ) : (
+                                <Button size="sm" variant="outline" className="shrink-0"
+                                  onClick={() => setSideRuleStatus(row.id, 'active')}>
+                                  Enable
+                                </Button>
+                              )
+                            )}
+                          </div>
+                        </td>
                       </tr>
                     ))}
                   </tbody>
