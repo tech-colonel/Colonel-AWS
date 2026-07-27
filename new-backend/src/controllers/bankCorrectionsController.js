@@ -71,6 +71,133 @@ const impsFromPayee = (u) => {
   return normKey(joined);
 };
 
+// ── Dash/slash narration rails (ICICI, Kotak, NACH) ─────────────────────────
+// Mirrors the same-named helpers in classify.py — these MUST stay in sync, because this
+// file WRITES the keys that classify.py READS. When they disagreed, every correction was
+// stored under a key the classifier never looked up: 598 learned Urban Plant entries
+// matched 0 of 261 rows on the 2026-06 statement.
+const GENERIC_BIZ_WORDS = new Set([
+  'enterprises', 'enterprise', 'services', 'service', 'foods', 'food', 'traders', 'trader',
+  'private', 'limited', 'pvt', 'ltd', 'llp', 'and', 'co', 'company', 'the', 'industries',
+  'industry', 'products', 'product', 'solutions', 'solution', 'india', 'indian', 'inc',
+  'corporation', 'corp', 'logistics', 'logistic', 'technologies', 'technology', 'global',
+  'retail', 'online', 'store', 'sons', 'son', 'bros', 'brothers', 'group', 'international',
+  'intl', 'trading', 'exports', 'imports', 'distributors', 'distributor', 'agencies',
+  'agency', 'marketing', 'sales', 'a/c', 'ac',
+]);
+const PLACEHOLDER_WORDS = new Set(['bank', 'account', 'accounts', 'ac', 'a', 'self', 'other', 'misc']);
+// Bare IFSC/bank prefixes — see the matching note on _BANK_PREFIXES in classify.py.
+// A bank code that slips through is the one kind of bad key that COLLIDES, so the closed
+// set of Indian bank prefixes is rejected by name. MUST stay in sync with classify.py.
+const BANK_PREFIXES = new Set([
+  'hdfc', 'icic', 'sbin', 'utib', 'axis', 'kkbk', 'punb', 'barb', 'ubin', 'ioba',
+  'cnrb', 'idib', 'yesb', 'indb', 'ratn', 'deut', 'citi', 'hsbc', 'scbl', 'idfb',
+  'fdrl', 'karb', 'tmbl', 'jaka', 'mahb', 'orbc', 'ucba', 'psib', 'cbin', 'ibkl',
+  'bkid', 'aubl', 'esfb', 'usfb', 'jsfb', 'fino', 'pytm', 'airp', 'kvbl', 'svcb',
+]);
+const NOISE_KEY_WORDS = new Set(['NEFT', 'RTGS', 'IMPS', 'UPI', 'TO', 'FROM', 'DR', 'CR', 'BANK']);
+
+// Every word is filler: a generic business suffix, a placeholder, or a repeated-letter
+// stub ('x','xx'). "UPI/Bank Account XX/<ref>/Gaurav may" must not key on the placeholder,
+// or every unrelated payee sharing it collapses onto one ledger.
+const isPlaceholder = (nm) => {
+  const words = String(nm || '').toLowerCase().split(/\s+/).filter(Boolean);
+  if (!words.length) return true;
+  return words.every((w) =>
+    GENERIC_BIZ_WORDS.has(w) || PLACEHOLDER_WORDS.has(w) || new Set(w).size === 1);
+};
+
+const usableKey = (nm) => {
+  if (!nm || nm.length < 3) return false;
+  if (/^\d+$/.test(nm.replace(/ /g, ''))) return false;
+  if (NOISE_KEY_WORDS.has(nm.toUpperCase())) return false;
+  return !isPlaceholder(nm);
+};
+
+const alphaCount = (t) => (t.match(/[A-Za-z]/g) || []).length;
+
+// Richest-in-letters non-junk field. Used where the payee is not at a fixed position.
+const fieldsByAlpha = (fields) => fields
+  .map((f) => (f || '').trim()).filter(Boolean)
+  .filter((f) => f.includes(' ') || !isJunkToken(f))
+  .sort((a, b) => alphaCount(b) - alphaCount(a));
+
+// First non-junk field in POSITIONAL order — for rails where the payee precedes the bank
+// (UPI/<PAYEE>/<BANK>/…, MMT/IMPS/<ref>/<utr>/<PAYEE>/<BANK>). Only digit-bearing fields
+// count as junk here, so a genuinely short payee ('AZAD') survives; a bare 4-letter code
+// followed by a long digit run is an IFSC prefix ('…/UBIN/708815530180/…') and is skipped.
+const firstAlphaField = (fields) => {
+  const clean = fields.map((f) => (f || '').trim());
+  let bankFallback = null;
+  for (let i = 0; i < clean.length; i += 1) {
+    const f = clean[i];
+    if (!f) continue;
+    if (!(f.includes(' ') || !/\d/.test(f))) continue;
+    if (!/[A-Za-z]/.test(f)) continue;
+    if (isPlaceholder(normKey(f))) continue;
+    // A known bank prefix LOSES to a real payee that follows it ("…/HDFC/SOMEBODY" →
+    // 'somebody'), but when it is the ONLY thing in the payee slot the transfer really is
+    // to that bank ("INF/NEFT/<ref>/HDFC0000044/HDFC" = own-account transfer). Remember it
+    // and use it only if nothing better turns up.
+    if (BANK_PREFIXES.has(normKey(f))) { if (!bankFallback) bankFallback = f; continue; }
+    const nxt = clean[i + 1] || '';
+    if (BANKCODE_RE.test(f.toUpperCase()) && /^\d{6,}$/.test(nxt)) continue;
+    return f;
+  }
+  return bankFallback;
+};
+
+// ICICI: NEFT-<REF>-<PAYEE>-<digits>-<digits>
+const dashNeftPayee = (u) => {
+  const m = u.match(/^(?:NEFT|RTGS)-[A-Z0-9]+-(.+)$/);
+  if (!m) return null;
+  const best = fieldsByAlpha(m[1].split('-'));
+  return best.length ? normKey(best[0]) : null;
+};
+
+// Kotak: 'NEFT <REF> <PAYEE...>'
+const spaceNeftPayee = (u) => {
+  const m = u.match(/^(?:NEFT|RTGS)\s+(.+)$/);
+  if (!m) return null;
+  const joined = m[1].split(/\s+/).filter((t) => t && !isJunkToken(t)).join(' ');
+  if (!/[A-Za-z]/.test(joined)) return null;
+  return normKey(joined);
+};
+
+// Slash rails where the payee is the first non-junk field after the prefix.
+const slashRailPayee = (u) => {
+  const m = u.match(/^(?:MMT\/IMPS|INF\/(?:NEFT|RTGS|IMPS|INFT)|BIL\/ONL|UPI)\/(.+)$/);
+  if (!m) return null;
+  const best = firstAlphaField(m[1].split('/'));
+  return best ? normKey(best) : null;
+};
+
+// NACH-<n>-<DR|CR>-<SPONSOR>-<COUNTERPARTY>. The sponsor is the collecting aggregator;
+// the counterparty is the last field. Banks often concatenate a per-instalment mandate ref
+// onto it (STRATEGICFT6FWSD8 / STRATEGICFT3UYYAU), which would yield a new key every month
+// — emit nothing there and let the side rule's substring token handle those rows.
+const nachCounterparty = (u) => {
+  const m = u.match(/^NACH-\d+-(?:DR|CR)-(.+)$/);
+  if (!m) return null;
+  const fields = m[1].split('-').map((f) => f.trim()).filter(Boolean);
+  for (let i = fields.length - 1; i >= 0; i -= 1) {
+    const f = fields[i];
+    if (!/[A-Za-z]/.test(f)) continue;
+    if (!f.includes(' ') && f.length > 12) return null;
+    return normKey(f);
+  }
+  return null;
+};
+
+// Kotak plain-language rail: 'FUNDS TRANSFER TO|FROM <PAYEE>'
+const fundsTransferPayee = (u) => {
+  const m = u.match(/\bFUNDS\s+TRANSFER\s+(?:TO|FROM)\s+(.+)$/);
+  if (!m) return null;
+  const joined = m[1].split(/\s+/).filter((t) => t && !isJunkToken(t)).join(' ');
+  if (!/[A-Za-z]/.test(joined)) return null;
+  return normKey(joined);
+};
+
 const extractPayeeKeys = (narration) => {
   if (!narration) return {};
   const raw = String(narration).trim();
@@ -96,6 +223,20 @@ const extractPayeeKeys = (narration) => {
     // FLO slash-NEFT/RTGS + IMPS-FROM (Task 2.5a)
     const nm = slashNeftPayee(u) || impsFromPayee(u);
     if (nm) keys.neft_name = nm;
+  }
+  // Dash/slash rails (ICICI, Kotak, NACH). Tried only after the patterns above, so no
+  // brand that already produces keys can change behaviour.
+  if (!keys.neft_name) {
+    const nm = dashNeftPayee(u) || spaceNeftPayee(u);
+    if (nm && usableKey(nm)) keys.neft_name = nm;
+  }
+  if (!keys.name) {
+    const nm = nachCounterparty(u) || slashRailPayee(u) || fundsTransferPayee(u);
+    if (nm && usableKey(nm)) keys.name = nm;
+  }
+  // Final guard: never store an identity key that cannot identify anyone.
+  for (const sec of ['name', 'neft_name']) {
+    if (keys[sec] && !usableKey(keys[sec])) delete keys[sec];
   }
   return keys;
 };
@@ -358,11 +499,33 @@ const uploadOutputExcel = async (req, res) => {
                name === 'details' || name === 'remarks' || name === 'cheque details')) {
             colIndex.description = i;
           }
-          if (!colIndex.ledgerName &&
-              (name.includes('ledger') || name.includes('tally') ||
-               name.includes('chart of account') || name.includes('gl account') ||
-               name === 'account name' || name === 'account' || name === 'gl')) {
-            colIndex.ledgerName = i;
+          // Ledger columns, by PRECEDENCE rather than first-match.
+          //
+          // An accountant-audited workbook has TWO ledger columns: the agent's answer
+          // ("Ledger Name") and the accountant's fix ("Correct Ledger Name"). Binding to
+          // whichever appears first scans left-to-right and picks the agent's own answer
+          // — so importing an audited file taught the system its own mistakes and
+          // reinforced them. The correction column always wins.
+          const looksLedger = name.includes('ledger') || name.includes('tally') ||
+              name.includes('chart of account') || name.includes('gl account') ||
+              name === 'account name' || name === 'account' || name === 'gl';
+          const looksCorrection = /correct|revised|final|actual|change/.test(name);
+          if (looksLedger && looksCorrection) {
+            colIndex.correctedLedger = i;           // highest precedence
+          } else if (looksLedger && !colIndex.ledgerName) {
+            colIndex.ledgerName = i;                // the predicted value
+          }
+          // Amounts — required to know which SIDE a correction applies to. Without them
+          // a two-sided vendor rule (Receipt vs Payment) can never be derived.
+          if (!colIndex.debit &&
+              (name === 'debit' || name.includes('withdrawal') || name.includes('dr amount') ||
+               name.includes('debit amt'))) {
+            colIndex.debit = i;
+          }
+          if (!colIndex.credit &&
+              (name === 'credit' || name.includes('deposit') || name.includes('cr amount') ||
+               name.includes('credit amt'))) {
+            colIndex.credit = i;
           }
           if (!colIndex.txnType &&
               (name === 'type' || name.includes('txn type') || name.includes('transaction type') ||
@@ -382,33 +545,64 @@ const uploadOutputExcel = async (req, res) => {
       let colIndex = scanHeaderRow(1);
 
       // If row 1 has no useful headers (merged title row), try row 2
-      if (!colIndex.description && !colIndex.ledgerName) {
+      if (!colIndex.description && !colIndex.ledgerName && !colIndex.correctedLedger) {
         colIndex = scanHeaderRow(2);
-        if (colIndex.description || colIndex.ledgerName) headerRowNum = 2;
+        if (colIndex.description || colIndex.ledgerName || colIndex.correctedLedger) headerRowNum = 2;
       }
 
       const allHeaders = ws.getRow(headerRowNum).values.map(c => cellText(c)).filter(Boolean);
       console.log(`[UPLOAD-OUTPUT] sheet="${ws.name}" headerRow=${headerRowNum} headers=${JSON.stringify(allHeaders)} colIndex=`, colIndex);
 
-      if (!colIndex.description || !colIndex.ledgerName) {
+      // The ledger we LEARN from is the correction column when present, else the single
+      // ledger column (a file with no correction column is accountant-prepared already).
+      const learnCol = colIndex.correctedLedger || colIndex.ledgerName;
+      if (!colIndex.description || !learnCol) {
         console.log(`[UPLOAD-OUTPUT] skipping "${ws.name}" — no narration+ledger match in headers`);
         continue;
+      }
+      if (colIndex.correctedLedger) {
+        console.log(`[UPLOAD-OUTPUT] learning from correction column ${colIndex.correctedLedger}` +
+          (colIndex.ledgerName ? ` (predicted column ${colIndex.ledgerName} kept for comparison)` : ''));
       }
 
       ws.eachRow((row, rowNum) => {
         if (rowNum <= headerRowNum) return;
-        const conf = colIndex.confidence
-          ? cellText(row.getCell(colIndex.confidence).value)
-          : 'High'; // no confidence column → accountant-prepared file, import all rows
-        if (conf && conf !== 'High') { skipped++; return; }
+        // A confidence filter only makes sense for a RAW agent output. Once an accountant
+        // has added a correction column, every row they touched is authoritative
+        // regardless of what the agent's confidence said — in fact the Low rows are the
+        // most valuable ones to learn from.
+        if (!colIndex.correctedLedger) {
+          const conf = colIndex.confidence
+            ? cellText(row.getCell(colIndex.confidence).value)
+            : 'High'; // no confidence column → accountant-prepared file, import all rows
+          if (conf && conf !== 'High') { skipped++; return; }
+        }
 
         const description    = cellText(row.getCell(colIndex.description).value);
-        const correct_ledger = cellText(row.getCell(colIndex.ledgerName).value);
+        const correct_ledger = cellText(row.getCell(learnCol).value);
         const correct_type   = colIndex.txnType
           ? cellText(row.getCell(colIndex.txnType).value)
           : null;
         if (!description || !correct_ledger) return;
-        toImport.push({ description, correct_ledger, correct_type });
+
+        const num = (idx) => {
+          if (!idx) return 0;
+          const v = row.getCell(idx).value;
+          const n = typeof v === 'number' ? v : parseFloat(String(v ?? '').replace(/[^0-9.\-]/g, ''));
+          return Number.isFinite(n) ? n : 0;
+        };
+        const debit  = num(colIndex.debit);
+        const credit = num(colIndex.credit);
+        // side drives two-sided vendor rules; 'agreed' distinguishes a confirmation
+        // (agent was already right) from a genuine correction.
+        const side = credit > 0 ? 'credit' : (debit > 0 ? 'debit' : null);
+        const predicted = colIndex.ledgerName && colIndex.correctedLedger
+          ? cellText(row.getCell(colIndex.ledgerName).value)
+          : null;
+        toImport.push({
+          description, correct_ledger, correct_type, debit, credit, side,
+          agreed: predicted != null ? predicted === correct_ledger : null,
+        });
       });
     }
 
@@ -462,7 +656,22 @@ const uploadOutputExcel = async (req, res) => {
       }
     });
 
-    res.json({ saved, skipped, message: `${saved} corrections imported from output Excel` });
+    // Learn two-sided vendor rules from this batch. Best-effort: a derivation hiccup must
+    // never fail an import the accountant just did.
+    let sideRules = { created: 0, suggested: 0 };
+    try {
+      sideRules = await deriveSideRules(brandId, seq, toImport);
+    } catch (e) {
+      console.warn('[SIDE-RULES] derivation skipped:', e.message);
+    }
+
+    res.json({
+      saved, skipped, sideRules,
+      message: `${saved} corrections imported from output Excel`
+        + (sideRules.created || sideRules.suggested
+          ? ` · ${sideRules.created} side rule(s) learned, ${sideRules.suggested} suggested`
+          : ''),
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -511,6 +720,137 @@ const loadCorrectionMap = async (brandId, seq) => {
   }
 };
 
+// ─── Side rules: per-brand, side-dependent vendor → ledger mapping ──────────
+//
+// One vendor can need two ledgers: the credit-side ledger when money arrives (a Receipt)
+// and the debit-side ledger when money goes out (a Payment). bank_payee_directory stores
+// exactly one ledger per key, so it structurally cannot express that — which is why these
+// rules previously lived in hand-edited JSON files on disk.
+//
+// The table is additive and self-creating. A brand with no rows behaves exactly as before.
+
+const ensureSideRulesTable = async (seq, t) => {
+  await seq.query(`
+    CREATE TABLE IF NOT EXISTS bank_side_rules (
+      id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      brand_id      uuid NOT NULL,
+      tokens        text[] NOT NULL,
+      credit_ledger text NOT NULL,
+      debit_ledger  text NOT NULL,
+      fixed_type    text,
+      tier          text NOT NULL DEFAULT 'primary',
+      priority      int  NOT NULL DEFAULT 100,
+      status        text NOT NULL DEFAULT 'active',
+      source        text NOT NULL DEFAULT 'manual',
+      evidence      jsonb,
+      created_at    timestamptz NOT NULL DEFAULT now(),
+      updated_at    timestamptz NOT NULL DEFAULT now()
+    )`, { transaction: t });
+  await seq.query(
+    `CREATE INDEX IF NOT EXISTS bank_side_rules_brand_idx ON bank_side_rules (brand_id, status)`,
+    { transaction: t });
+};
+
+/**
+ * Load a brand's ACTIVE side rules in match order, shaped exactly like the JSON files
+ * classify.py already consumes ({tokens, credit, debit, type, fallback}).
+ *
+ * Order is `priority ASC, longest-token DESC`: the more specific token wins without
+ * anyone hand-maintaining list order, so a 'STRATEGIC' rule beats a bare 'RAZORPAY' on a
+ * NACH mandate that merely passes through Razorpay.
+ *
+ * Returns [] on any failure — the caller then falls back to the checked-in JSON, so a
+ * brand can never end up worse off than before this table existed.
+ */
+const loadSideRules = async (brandId, seq) => {
+  try {
+    let out = [];
+    await withBypass(seq, async (t) => {
+      await ensureSideRulesTable(seq, t);
+      const [rows] = await seq.query(
+        `SELECT tokens, credit_ledger, debit_ledger, fixed_type, tier, priority
+           FROM bank_side_rules
+          WHERE brand_id = $1 AND status = 'active'`,
+        { bind: [brandId], transaction: t });
+      const longest = (r) => Math.max(0, ...(r.tokens || []).map((x) => String(x).length));
+      out = rows
+        .sort((a, b) => (a.priority - b.priority) || (longest(b) - longest(a)))
+        .map((r) => ({
+          tokens: r.tokens,
+          credit: r.credit_ledger,
+          debit: r.debit_ledger,
+          ...(r.fixed_type ? { type: r.fixed_type } : {}),
+          ...(r.tier === 'fallback' ? { fallback: true } : {}),
+        }));
+    });
+    return out;
+  } catch (err) {
+    console.warn('[SIDE-RULES] load failed, falling back to seed JSON:', err.message);
+    return [];
+  }
+};
+
+/**
+ * Derive side rules from a batch of accountant-confirmed rows.
+ *
+ * A vendor becomes a side rule when its payee key appears with a DIFFERENT majority
+ * ledger on each side of the statement. Requiring >= 2 rows per side stops one odd refund
+ * from minting a rule that then governs a whole month.
+ *
+ * Confident and unclaimed  -> status 'active'   (source 'learned')
+ * Thin evidence, or it contradicts an existing seed/manual rule -> status 'suggested'
+ * (an accountant confirms those in one click; nothing silently overrides a human).
+ */
+const deriveSideRules = async (brandId, seq, rows) => {
+  const bySideKey = new Map();   // payeeKey -> {credit: Map<ledger,n>, debit: Map<ledger,n>}
+  for (const r of rows) {
+    if (!r.side || !r.correct_ledger) continue;
+    const keys = extractPayeeKeys(r.description);
+    const kv = keys.name || keys.neft_name;
+    if (!kv) continue;
+    if (!bySideKey.has(kv)) bySideKey.set(kv, { credit: new Map(), debit: new Map() });
+    const bucket = bySideKey.get(kv)[r.side];
+    bucket.set(r.correct_ledger, (bucket.get(r.correct_ledger) || 0) + 1);
+  }
+
+  const top = (mp) => [...mp.entries()].sort((a, b) => b[1] - a[1])[0];
+  let created = 0; let suggested = 0;
+
+  await withBypass(seq, async (t) => {
+    await ensureSideRulesTable(seq, t);
+    for (const [kv, sides] of bySideKey) {
+      if (!sides.credit.size || !sides.debit.size) continue;      // only ever seen one way
+      const [cLed, cN] = top(sides.credit);
+      const [dLed, dN] = top(sides.debit);
+      if (cLed === dLed) continue;                                // not side-dependent
+      const token = kv.toUpperCase();
+
+      const [existing] = await seq.query(
+        `SELECT id, source FROM bank_side_rules WHERE brand_id = $1 AND $2 = ANY(tokens)`,
+        { bind: [brandId, token], transaction: t });
+      // Never silently overwrite a human-authored or seeded rule.
+      if (existing.length && existing[0].source !== 'learned') continue;
+
+      const confident = cN >= 2 && dN >= 2;
+      const status = confident && !existing.length ? 'active' : 'suggested';
+      await seq.query(
+        `INSERT INTO bank_side_rules
+           (brand_id, tokens, credit_ledger, debit_ledger, tier, priority, status, source, evidence)
+         VALUES ($1, ARRAY[$2], $3, $4, 'primary', 100, $5, 'learned', $6::jsonb)`,
+        { bind: [brandId, token, cLed, dLed, status,
+                 JSON.stringify({ credit_rows: cN, debit_rows: dN, key: kv })],
+          transaction: t });
+      if (status === 'active') created++; else suggested++;
+    }
+  });
+
+  if (created || suggested) {
+    console.log(`[SIDE-RULES] derived ${created} active + ${suggested} suggested rule(s) ` +
+      `for brand ${brandId}`);
+  }
+  return { created, suggested };
+};
+
 // ─── Utility: bulk-upsert a seeded directory JSON into bank_payee_directory ──
 // Called by the seed endpoint. directoryJson is the keyed JSON from seed_payee_directory.py.
 
@@ -548,6 +888,8 @@ module.exports = {
   uploadCorrectionsExcel,
   uploadOutputExcel,
   loadCorrectionMap,
+  loadSideRules,
+  deriveSideRules,
   seedPayeeDirectory,
   normalizeNarration,
   extractPayeeKeys,

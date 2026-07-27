@@ -372,6 +372,179 @@ def _imps_from_payee(u: str):
     return _norm_key(joined)
 
 
+# ── Payee-key patterns for the dash/slash narration formats (ICICI, Kotak, NACH) ──
+# The original extractor only recognised FLO's slash-NEFT and IMPS-FROM shapes, so
+# ICICI/Kotak statements yielded nothing but the 'exact' key -- and every 'exact' key
+# embeds a one-time transaction reference, so nothing a brand learned could ever match
+# again. These add the shapes those banks actually emit. Each pattern below is derived
+# from a real narration; see tests/test_payee_keys.py for the fixtures.
+
+def _fields_by_alpha(fields):
+    """Non-junk fields, richest in letters first. A multi-word field is never dropped
+    wholesale (an alphanumeric token inside a real payee name must survive)."""
+    cand = [f.strip() for f in fields if f and f.strip()]
+    cand = [f for f in cand if ' ' in f or not _is_junk_token(f)]
+    return sorted(cand, key=lambda t: -sum(c.isalpha() for c in t))
+
+
+# Filler words that can never identify a payee. Some banks put a literal placeholder in
+# the payee position ("UPI/Bank Account XX/<ref>/Gaurav may"); keying on it would map every
+# unrelated payee that shares the placeholder onto one ledger -- the worst kind of wrong.
+_PLACEHOLDER_WORDS = {'bank', 'account', 'accounts', 'ac', 'a', 'self', 'other', 'misc'}
+
+# Bare IFSC/bank prefixes. A 4-letter token cannot be told apart from a short real payee
+# name ('AZAD') by shape alone, and positional rules only catch the code when a long digit
+# run follows it. A bank code that slips through is the one kind of bad key that COLLIDES
+# -- every narration mentioning that bank maps onto one ledger -- so the closed set of
+# Indian bank prefixes is rejected by name. Mirrored in bankCorrectionsController.js.
+_BANK_PREFIXES = {
+    'hdfc', 'icic', 'sbin', 'utib', 'axis', 'kkbk', 'punb', 'barb', 'ubin', 'ioba',
+    'cnrb', 'idib', 'yesb', 'indb', 'ratn', 'deut', 'citi', 'hsbc', 'scbl', 'idfb',
+    'fdrl', 'karb', 'tmbl', 'jaka', 'mahb', 'orbc', 'ucba', 'psib', 'cbin', 'ibkl',
+    'bkid', 'aubl', 'esfb', 'usfb', 'jsfb', 'fino', 'pytm', 'airp', 'kvbl', 'svcb',
+}
+
+
+def _is_placeholder(nm) -> bool:
+    """True when every word is filler: a generic business suffix, a placeholder word, or a
+    repeated-letter stub ('x', 'xx', 'xxx')."""
+    words = [w for w in str(nm).lower().split() if w]
+    if not words:
+        return True
+    return all(w in _GENERIC_BIZ_WORDS or w in _PLACEHOLDER_WORDS or len(set(w)) == 1
+               for w in words)
+
+
+def _first_alpha_field(fields):
+    """First non-junk field in positional order -- for rails where the payee precedes
+    the bank name (UPI/<PAYEE>/<BANK>/..., MMT/IMPS/<ref>/<utr>/<PAYEE>/<BANK>).
+
+    Only digit-bearing fields count as junk here, NOT bare 4-letter codes: in these
+    rails the bank field always carries digits (SBIN0003, UTIB0CCH274) while the payee
+    may legitimately be four letters ('AZAD'), and the bank-code rule would eat it.
+    Any 4-letter code that does appear (UPI/<PAYEE>/ICIC/...) sits after the payee, so
+    positional order already excludes it."""
+    clean = [(f or '').strip() for f in fields]
+    bank_fallback = None
+    for i, f in enumerate(clean):
+        if not f:
+            continue
+        if not (' ' in f or not any(c.isdigit() for c in f)):
+            continue
+        if not any(c.isalpha() for c in f):
+            continue
+        # Skip a placeholder in the payee slot and keep scanning -- the real payee is
+        # usually a later field ("UPI/Bank Account XX/<ref>/Gaurav may").
+        if _is_placeholder(_norm_key(f)):
+            continue
+        # A known bank prefix LOSES to a real payee that follows it, so "…/HDFC/SOMEBODY"
+        # yields 'somebody'. But when the bank code is the ONLY thing in the payee slot the
+        # transfer really is to that bank: Urban Plant's "INF/NEFT/<ref>/HDFC0000044/HDFC"
+        # is a transfer to their own HDFC account, and dropping it outright cost 14
+        # correctly-classified rows. So remember it, and use it only if nothing better
+        # turns up.
+        if _norm_key(f) in _BANK_PREFIXES:
+            if bank_fallback is None:
+                bank_fallback = f
+            continue
+        # A bare 4-letter code followed by a long digit run is an IFSC prefix
+        # ("…/UBIN/708815530180/…"), not a payee. A genuinely short payee name ("AZAD")
+        # is not followed by a reference number, so it survives this test.
+        nxt = clean[i + 1] if i + 1 < len(clean) else ''
+        if _BANKCODE_RE.match(f.upper()) and re.fullmatch(r'\d{6,}', nxt or ''):
+            continue
+        return f
+    return bank_fallback
+
+
+def _usable_key(nm) -> bool:
+    """Reject keys that cannot identify a payee: too short, all digits, a bank code,
+    a noise word, or nothing but generic business-suffix words ('bank account x')."""
+    if not nm or len(nm) < 3:
+        return False
+    if nm.replace(' ', '').isdigit():
+        return False
+    # NOTE: deliberately NO bare 4-letter bank-code rejection here. Every producer above
+    # either drops bank codes via _is_junk_token or picks the payee positionally, so a
+    # 4-letter key reaching this point is a real short payee name ('AZAD'), not an IFSC.
+    if nm.upper() in NOISE_WORDS:
+        return False
+    if _is_placeholder(nm):
+        return False
+    return True
+
+
+def _dash_neft_payee(u: str):
+    """ICICI: NEFT-<REF>-<PAYEE>-<digits>-<digits>  /  RTGS-<REF>-<PAYEE>-...
+    Drop the leading rail word and the reference field, then take the field with the
+    most letters (the trailing fields are numeric ids)."""
+    m = re.match(r'^(?:NEFT|RTGS)-[A-Z0-9]+-(.+)$', u)
+    if not m:
+        return None
+    best = _fields_by_alpha(m.group(1).split('-'))
+    return _norm_key(best[0]) if best else None
+
+
+def _space_neft_payee(u: str):
+    """Kotak: 'NEFT <REF> <PAYEE...>' / 'RTGS-<REF>-<PAYEE>' with no trailing tail.
+    Tokenize and drop junk tokens (the reference carries digits)."""
+    m = re.match(r'^(?:NEFT|RTGS)\s+(.+)$', u)
+    if not m:
+        return None
+    survivors = [t for t in m.group(1).split() if not _is_junk_token(t)]
+    joined = ' '.join(survivors)
+    if not any(c.isalpha() for c in joined):
+        return None
+    return _norm_key(joined)
+
+
+def _slash_rail_payee(u: str):
+    """Slash rails where the payee is the first non-junk field after the rail prefix:
+      MMT/IMPS/<ref>/<utr>/<PAYEE>/<BANK>      (ICICI IMPS)
+      INF/NEFT/<ref>/<IFSC>/<PAYEE>/<purpose>  (ICICI netbanking)
+      BIL/ONL/<ref>/<VENDOR>                   (ICICI bill-pay)
+      UPI/<PAYEE>/<BANK>/<ref>/<note>          (Kotak UPI)
+      INF/INFT/<ref>/<code>/<PAYEE>            (ICICI internal transfer)"""
+    m = re.match(r'^(?:MMT/IMPS|INF/(?:NEFT|RTGS|IMPS|INFT)|BIL/ONL|UPI)/(.+)$', u)
+    if not m:
+        return None
+    best = _first_alpha_field(m.group(1).split('/'))
+    return _norm_key(best) if best else None
+
+
+def _funds_transfer_payee(u: str):
+    """Kotak plain-language rail: 'FUNDS TRANSFER TO <PAYEE>' / '... FROM <PAYEE>'."""
+    m = re.search(r'\bFUNDS\s+TRANSFER\s+(?:TO|FROM)\s+(.+)$', u)
+    if not m:
+        return None
+    survivors = [t for t in m.group(1).split() if not _is_junk_token(t)]
+    joined = ' '.join(survivors)
+    if not any(c.isalpha() for c in joined):
+        return None
+    return _norm_key(joined)
+
+
+def _nach_counterparty(u: str):
+    """NACH-<n>-<DR|CR>-<SPONSOR>-<COUNTERPARTY>. The sponsor is the collecting bank or
+    aggregator (e.g. RAZORPAYSOFTWAREPRIV); the real counterparty is the LAST field.
+    Keying on the sponsor is what made a Strategic Finvest EMI look like a Razorpay row."""
+    m = re.match(r'^NACH-\d+-(?:DR|CR)-(.+)$', u)
+    if not m:
+        return None
+    fields = [f.strip() for f in m.group(1).split('-') if f.strip()]
+    for f in reversed(fields):
+        if not any(c.isalpha() for c in f):
+            continue
+        # Banks often concatenate a per-instalment mandate reference onto the counterparty
+        # with no separator: STRATEGICFT6FWSD8 / STRATEGICFT3UYYAU / STRATEGICFSXWJMCE are
+        # the same payee on three different months. Such a field yields a different key
+        # every time, so emit nothing and let the side rule's substring token handle it.
+        if ' ' not in f and len(f) > 12:
+            return None
+        return _norm_key(f)
+    return None
+
+
 def extract_payee_keys(narration) -> dict:
     """Return the stable identity keys extractable from a bank narration.
     Any subset of: exact, phone, vpa, name (UPI payee), neft_name."""
@@ -401,6 +574,21 @@ def extract_payee_keys(narration) -> dict:
         nm = _slash_neft_payee(u) or _imps_from_payee(u)
         if nm:
             keys['neft_name'] = nm
+    # Dash/slash rails (ICICI, Kotak, NACH). Tried only after the patterns above so no
+    # brand that already produces keys can change behaviour.
+    if 'neft_name' not in keys:
+        nm = _dash_neft_payee(u) or _space_neft_payee(u)
+        if nm and _usable_key(nm):
+            keys['neft_name'] = nm
+    if 'name' not in keys:
+        nm = (_nach_counterparty(u) or _slash_rail_payee(u)
+              or _funds_transfer_payee(u))
+        if nm and _usable_key(nm):
+            keys['name'] = nm
+    # Final guard: never emit an identity key that cannot identify anyone.
+    for sec in ('name', 'neft_name'):
+        if sec in keys and not _usable_key(keys[sec]):
+            del keys[sec]
     return keys
 
 
@@ -448,8 +636,11 @@ class BankClassifier:
             if any(tok in narration_upper for tok in e['tokens']):
                 ledger = e['credit'] if txn_type == "Receipt" else e['debit']
                 if ledger in self.master_ledgers:
+                    # 'credit'/'debit' are carried through so the constrained side-verdict
+                    # pass can offer Claude exactly these two ledgers and nothing else.
                     return {"ledger": ledger, "type": e.get('type') or txn_type, "confidence": "High",
-                            "rule": rule, "entity": e['tokens'][0]}
+                            "rule": rule, "entity": e['tokens'][0],
+                            "credit": e['credit'], "debit": e['debit']}
         return None
 
     @staticmethod
@@ -775,7 +966,8 @@ class BankClassifier:
         return best_ledger if best_score >= 200 else None
 
     # ------------------------------------------------------------------
-    def classify(self, narration: str, debit: float, credit: float) -> dict:
+    def classify(self, narration: str, debit: float, credit: float,
+                 skip_side_map: bool = False) -> dict:
         orig  = str(narration).strip() if narration else ""
         orig_upper = orig.upper()
         is_credit  = credit > 0
@@ -792,9 +984,14 @@ class BankClassifier:
         # STEP 0 (pre) — per-brand SIDE-DEPENDENT ledger map (M-Brands marketplaces),
         # checked ABOVE the directory: same counterparty → credit ledger on Receipt,
         # debit ledger on Payment. Empty for other brands, so a no-op there.
-        sm = self._side_map_lookup(orig_upper, txn_type)
-        if sm:
-            return sm
+        # skip_side_map=True is used to re-classify a row after Claude answered
+        # NOT-THIS-VENDOR: the token matched but the counterparty is someone else, so the
+        # row must fall through to the directory / COA / LLM layers exactly as if no side
+        # rule existed for it.
+        if not skip_side_map:
+            sm = self._side_map_lookup(orig_upper, txn_type)
+            if sm:
+                return sm
 
         hit = self._directory_lookup(orig, txn_type)
         if hit:
@@ -1713,13 +1910,41 @@ def write_output(rows: list, summary: dict, brand: str, output_path: str):
         top=Side(style='thin', color='CCCCCC'),    bottom=Side(style='thin', color='CCCCCC'),
     )
 
-    headers = ["Txn Date", "Description", "Chq / Ref No.", "Debit", "Credit", "Balance", "Type", "Ledger Name", "Confidence"]
+    # "Source" is APPENDED as column 10 on purpose: recoController reads this workbook by
+    # fixed column indices 1-9, so a trailing column is invisible to it while giving the
+    # accountant the provenance of every row. Without it "High" is unfalsifiable from their
+    # seat — they cannot tell a learned mapping from a fuzzy guess without re-checking all
+    # 261 rows by hand, and a misbehaving layer stays invisible for months.
+    headers = ["Txn Date", "Description", "Chq / Ref No.", "Debit", "Credit", "Balance", "Type", "Ledger Name", "Confidence", "Source"]
     ws.append(headers)
     ws.row_dimensions[1].height = 25
     for ci, _ in enumerate(headers, 1):
         cell = ws.cell(row=1, column=ci)
         cell.fill, cell.font, cell.border = HEADER, WHITE_BOLD, THIN
         cell.alignment = Alignment(horizontal="center", vertical="center")
+
+    def _source_label(rule):
+        """Collapse the internal rule string into a provenance label the accountant can act
+        on: which LAYER decided this row."""
+        rule = str(rule or "")
+        claude = " + Claude" if "Claude" in rule else ""
+        for prefix, label in (
+            ("Side Ledger (flipped)", "Side Rule (flipped)"),
+            ("Side Ledger (unconfirmed)", "Side Rule (unconfirmed)"),
+            ("Side Ledger", "Side Rule"),
+            ("Stored Correction", "Stored"),
+            ("Payee Directory", "Directory"),
+            ("Own Account", "Own Account"), ("OAT", "Own Account"), ("Sweep", "Own Account"),
+            ("Contra", "Contra"),
+            ("BDP Statutory", "Statutory"), ("GSTN", "Statutory"), ("TDS", "Statutory"),
+            ("EPF", "Statutory"), ("ESIC", "Statutory"), ("PT ", "Statutory"),
+            ("Bank Charges", "Bank Charges"), ("Interest", "Interest"),
+        ):
+            if rule.startswith(prefix):
+                return label + claude
+        if not rule:
+            return "Claude" if claude else "Suspense"
+        return (rule.split("(")[0].strip() or "Rule") + claude
 
     for r in rows:
         ws.append([
@@ -1732,6 +1957,7 @@ def write_output(rows: list, summary: dict, brand: str, output_path: str):
             r.get("predicted_type", ""),
             r.get("predicted_ledger", ""),
             r.get("confidence", ""),
+            _source_label(r.get("rule", "")),
         ])
         row_num = ws.max_row
         ws.row_dimensions[row_num].height = 20
@@ -1869,6 +2095,88 @@ def gemini_classify(narration, candidates, api_key, model="gemini-2.5-flash", ti
 # invented name, timeout, API/refusal error) yields None and the caller keeps
 # "Suspense A/c". Raw HTTPS (urllib) to mirror gemini_classify — no SDK dependency.
 # ---------------------------------------------------------------------------
+def anthropic_side_verdict(narration, credit_ledger, debit_ledger, assigned,
+                           debit, credit, api_key, model="claude-haiku-4-5", timeout=30):
+    """Constrained verdict for a row a per-brand side rule already claimed.
+
+    Claude may ONLY answer with one of the rule's own two ledgers, ABSTAIN, or
+    NOT-THIS-VENDOR. It can never write an unrelated COA name onto a side-rule row --
+    that containment is the whole point, and is what stops the arbitration failure from
+    recurring in a new form.
+
+    Returns (verdict, ledger):
+      ('confirm',  <assigned>)      Claude agrees with the amount-implied side
+      ('flip',     <other side>)    genuine refund / reversal -> use the other side
+      ('abstain',  <assigned>)      ambiguous -> keep the ledger, caller demotes to Medium
+      ('reject',   None)            token matched but the counterparty is someone else
+      (None,       None)            call failed -> caller keeps the rule's answer as-is
+    """
+    import urllib.request, json as _json, ssl
+    if not api_key or not str(narration).strip():
+        return (None, None)
+    other = debit_ledger if assigned == credit_ledger else credit_ledger
+    # The bank statement itself is the authority on direction -- state it explicitly.
+    # Without this the model infers direction from narration wording, which carries no
+    # reliable cue on most rails, and it flips rows essentially at random.
+    if credit and credit > 0:
+        direction = f"money was RECEIVED into the account (credit {credit})"
+    else:
+        direction = f"money was PAID out of the account (debit {debit})"
+    prompt = (
+        "You are an expert Indian bank-reconciliation assistant. A per-brand rule matched "
+        "a vendor token in this bank narration and assigned a Tally ledger based on which "
+        "side the money moved.\n\n"
+        f"NARRATION:\n{narration}\n\n"
+        f"BANK STATEMENT FACT: {direction}. This is authoritative -- do not second-guess "
+        "the direction of the money.\n\n"
+        f"CREDIT-SIDE LEDGER (used when money is received): {credit_ledger}\n"
+        f"DEBIT-SIDE LEDGER  (used when money is paid):     {debit_ledger}\n"
+        f"RULE ASSIGNED: {assigned}\n\n"
+        "The assigned ledger is correct in the overwhelming majority of cases. Answer "
+        "OTHER-SIDE ONLY if the narration gives POSITIVE evidence of a refund, reversal, "
+        "chargeback or return -- not merely because the wording is ambiguous.\n\n"
+        "Reply with EXACTLY ONE of these four tokens and nothing else:\n"
+        "  CONFIRM          - the assigned ledger is correct\n"
+        "  OTHER-SIDE       - explicit refund/reversal evidence; the other ledger is correct\n"
+        "  NOT-THIS-VENDOR  - the token matched but the real counterparty is a different "
+        "party (e.g. a NACH mandate collected by an aggregator on behalf of someone else)\n"
+        "  UNSURE           - genuinely ambiguous\n"
+    )
+    body = _json.dumps({
+        "model": model,
+        "max_tokens": 16,
+        "messages": [{"role": "user", "content": prompt}],
+    }).encode("utf-8")
+    try:
+        import certifi
+        _ctx = ssl.create_default_context(cafile=certifi.where())
+    except Exception:
+        _ctx = ssl.create_default_context()
+    try:
+        req = urllib.request.Request("https://api.anthropic.com/v1/messages", data=body,
+                                     headers={"content-type": "application/json",
+                                              "x-api-key": api_key,
+                                              "anthropic-version": "2023-06-01"})
+        with urllib.request.urlopen(req, timeout=timeout, context=_ctx) as resp:
+            data = _json.loads(resp.read().decode("utf-8"))
+    except Exception as _e:
+        print(f"      → Claude side-verdict failed: {type(_e).__name__}: {str(_e)[:140]}",
+              file=sys.stderr)
+        return (None, None)
+    text = ""
+    for block in data.get("content", []):
+        if block.get("type") == "text":
+            text = (block.get("text") or "").strip().upper()
+            break
+    if "NOT-THIS-VENDOR" in text:
+        return ("reject", None)
+    if "OTHER-SIDE" in text:
+        return ("flip", other)
+    if "CONFIRM" in text:
+        return ("confirm", assigned)
+    return ("abstain", assigned)          # UNSURE, empty, or anything unrecognised
+
+
 def anthropic_classify(narration, candidates, api_key, model="claude-haiku-4-5", timeout=30):
     import urllib.request
     import json as _json
@@ -2135,6 +2443,9 @@ def main():
             "confidence":     result["confidence"],
             "entity":         result.get("entity", ""),
             "rule":           result.get("rule", ""),
+            # only populated for side-rule rows; consumed by the side-verdict pass below
+            "side_credit":    result.get("credit", ""),
+            "side_debit":     result.get("debit", ""),
         })
 
     total = len(rows)
@@ -2158,6 +2469,78 @@ def main():
         if anthropic_key:
             return anthropic_classify(desc, cands, anthropic_key, args.anthropic_model)
         return llm_pick(desc, cands)
+
+    # ------------------------------------------------------------------
+    # STEP 3.4 — constrained verdict on per-brand SIDE-RULE rows.
+    # Runs BEFORE the Low/Medium fallback so a NOT-THIS-VENDOR row is re-classified in
+    # time to be picked up by it. Claude is offered only the rule's own two ledgers, so
+    # it can confirm, flip the side, or disown the vendor -- never invent a third ledger.
+    # Verdicts cache on (entity, side, payee-key), so ~150 side rows cost ~10 calls.
+    # ------------------------------------------------------------------
+    if anthropic_key and total:
+        side_idx = [i for i, r in enumerate(rows)
+                    if str(r.get("rule", "")).startswith("Side Ledger (credit/debit)")
+                    and r.get("side_credit") and r.get("side_debit")]
+        if side_idx:
+            print(f"[3.4/4] Claude side-rule verdict on {len(side_idx)} rows …")
+            from concurrent.futures import ThreadPoolExecutor as _STPE
+            _scache = {}
+
+            def _verdict(i):
+                r = rows[i]
+                pk = extract_payee_keys(r["description"])
+                ck = (r.get("entity", ""), r["predicted_ledger"],
+                      pk.get("name") or pk.get("neft_name") or pk.get("exact", ""))
+                if ck in _scache:
+                    return i, _scache[ck]
+                out = anthropic_side_verdict(
+                    r["description"], r["side_credit"], r["side_debit"],
+                    r["predicted_ledger"], r["debit"], r["credit"],
+                    anthropic_key, args.anthropic_model)
+                _scache[ck] = out
+                return i, out
+
+            n_conf = n_flip = n_abst = n_rej = n_err = 0
+            try:
+                with _STPE(max_workers=6) as ex:
+                    for i, (verdict, ledger) in ex.map(_verdict, side_idx):
+                        if verdict is None:
+                            # Fail OPEN: the rule is accountant-authored and was right ~95%
+                            # of the time unaided. An API outage must not dump every side
+                            # row into the review queue.
+                            n_err += 1
+                            continue
+                        if verdict == "confirm":
+                            n_conf += 1
+                        elif verdict == "flip":
+                            rows[i]["predicted_ledger"] = ledger
+                            rows[i]["rule"] = "Side Ledger (flipped)"
+                            n_flip += 1
+                        elif verdict == "abstain":
+                            if rows[i]["confidence"] == "High":
+                                rows[i]["confidence"] = "Medium"
+                                summary["High"] -= 1; summary["Medium"] += 1
+                            rows[i]["rule"] = "Side Ledger (unconfirmed)"
+                            n_abst += 1
+                        elif verdict == "reject":
+                            res = classifier.classify(rows[i]["description"],
+                                                      rows[i]["debit"], rows[i]["credit"],
+                                                      skip_side_map=True)
+                            old = rows[i]["confidence"]
+                            rows[i].update({
+                                "predicted_ledger": res["ledger"],
+                                "predicted_type":   res["type"],
+                                "confidence":       res["confidence"],
+                                "entity":           res.get("entity", ""),
+                                "rule":             res.get("rule", "") + " (side rule disowned)",
+                            })
+                            if old != res["confidence"]:
+                                summary[old] -= 1; summary[res["confidence"]] += 1
+                            n_rej += 1
+            except Exception as _e:
+                print(f"        → side-verdict pass aborted ({_e}); rows kept as-is")
+            print(f"        → confirmed {n_conf}, flipped {n_flip}, unconfirmed {n_abst}, "
+                  f"disowned {n_rej}, call-failed {n_err} (kept High)")
 
     if llm_key and total:
         low_idx = [i for i, r in enumerate(rows) if r["confidence"] in ("Low", "Medium")]
@@ -2191,14 +2574,19 @@ def main():
                         if pick and pick != suspense_label:
                             old_conf = rows[i]["confidence"]
                             rows[i]["predicted_ledger"] = pick
-                            # Gemini returns a ledger ONLY when it exactly matches a COA
-                            # candidate (temperature 0, abstains→SUSPENSE when unsure). A
-                            # confirmed pick is a strong match → promote the row to High so
-                            # it leaves the Medium/Low review queue.
-                            if old_conf != "High":
-                                rows[i]["confidence"] = "High"
+                            # Confidence contract: High means a deterministic rule fired
+                            # AND (where applicable) Claude agreed.
+                            #   Medium in  → a rule DID fire and Claude confirmed it → High
+                            #   Low in     → NO rule fired; this is an unverified pick, so
+                            #                it stops at Medium and stays in the review
+                            #                queue. Once the accountant confirms it, the
+                            #                payee directory answers it as High next month.
+                            new_conf = "High" if old_conf == "Medium" else "Medium"
+                            rows[i]["rule"] = (rows[i].get("rule") or "") + " + Claude"
+                            if old_conf != new_conf:
+                                rows[i]["confidence"] = new_conf
                                 summary[old_conf] = summary.get(old_conf, 0) - 1
-                                summary["High"] += 1
+                                summary[new_conf] = summary.get(new_conf, 0) + 1
                             resolved += 1
             except Exception as _e:
                 print(f"        → {llm_name} fallback aborted ({_e}); rows kept as-is")
@@ -2214,7 +2602,14 @@ def main():
         # its pick; Gemini abstains → demote to Medium so the accountant reviews it.
         from concurrent.futures import ThreadPoolExecutor as _TPE
         suspense_label = classifier._suspense_ledger
-        AUTHORITATIVE = ('Stored Correction', 'Payee Directory', 'Own Account', 'OAT',
+        # 'Side Ledger (credit/debit)' is accountant-authored and side-aware; arbitration
+        # cannot know the credit-side/debit-side convention, so left arbitrable it silently
+        # rewrote 89 of 148 correct rows on the 2026-06 Urban Plant statement. The
+        # 'Side Ledger (fallback)' tier is deliberately NOT listed -- it is a broad
+        # catch-all (Salary/Stipend → Salary Payable) that Claude should still refine into
+        # named ledgers. Side-rule rows get their own constrained verdict pass instead.
+        AUTHORITATIVE = ('Stored Correction', 'Payee Directory', 'Side Ledger (credit/debit)',
+                         'Own Account', 'OAT',
                          'Sweep', 'Contra', 'BDP Statutory', 'GSTN', 'TDS', 'EPF',
                          'ESIC', 'PT ', 'NEFT Return', 'Bank Charges', 'Interest')
         def _authoritative(rule):

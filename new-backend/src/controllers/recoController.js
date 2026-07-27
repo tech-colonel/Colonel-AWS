@@ -697,7 +697,49 @@ const RECO_TYPE_MAP = {
  * Uses execFile (not exec) — no shell expansion, safe with arbitrary file paths.
  * Path resolved from BANK_CLASSIFIER_PATH env var or project-relative default.
  */
-const runUniversalClassifier = (ledgerPath, bankPath, outputPath, correctionsPath, brandName) => {
+/**
+ * Resolve the per-brand side-rule map for a run and write it to a temp JSON in the shape
+ * classify.py's --side-map already parses.
+ *
+ * DB first (bank_side_rules — editable, learnable), checked-in JSON as the fallback so a
+ * brand whose rules have not been migrated behaves exactly as it did before. Returns null
+ * when the brand has neither, in which case no --side-map is passed at all.
+ */
+const resolveSideMapPath = async (brandId, brandName, jobDir) => {
+  const slug = (brandName || '').trim().toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+  if (!slug) return null;
+
+  if (brandId && brandId !== 'demo' && brandId !== 'other') {
+    try {
+      const { loadSideRules } = require('./bankCorrectionsController');
+      const { Brand } = require('../models/master');
+      const { getBrandConnection } = require('../config/database');
+      const brand = await Brand.findByPk(brandId);
+      if (brand) {
+        const rules = await loadSideRules(brandId, getBrandConnection(brand.db_name));
+        if (rules.length) {
+          const p = path.join(jobDir, 'side_map.json');
+          fs.writeFileSync(p, JSON.stringify({ brand: brandName, counterparties: rules }));
+          console.log(`[RECO] Side-rule map from DB for "${brandName}" (${rules.length} rules).`);
+          return p;
+        }
+      }
+    } catch (e) {
+      console.warn('[RECO] DB side-rule load failed, using seed JSON:', e.message);
+    }
+  }
+
+  const seed = path.resolve(__dirname, '../../output/side_ledgers/' + slug + '.json');
+  if (fs.existsSync(seed)) {
+    console.log(`[RECO] Side-ledger map attached for "${brandName}" (${slug}.json, seed file).`);
+    return seed;
+  }
+  return null;
+};
+
+const runUniversalClassifier = (ledgerPath, bankPath, outputPath, correctionsPath, brandName,
+                                sideMapPath = null) => {
   return new Promise((resolve, reject) => {
     const anthropicKey = process.env.ANTHROPIC_API_KEY;
     const anthropicModel = process.env.ANTHROPIC_MODEL || 'claude-haiku-4-5';
@@ -709,18 +751,11 @@ const runUniversalClassifier = (ledgerPath, bankPath, outputPath, correctionsPat
     if (correctionsPath) args.push('--corrections', correctionsPath);
     if (brandName) args.push('--brand', brandName);
     // Per-brand side-dependent ledger map (credit-side ledger for Receipts, debit-side for
-    // Payments; entries may pin a fixed type e.g. Contra). Resolved by brand slug — ONLY a
-    // brand that has an output/side_ledgers/<slug>.json file gets one (currently M Brands,
-    // Urban Plant). Every other brand loads nothing, so no other brand — and no shared
-    // universal-bank/DB logic — is affected. classify.py treats an absent map as empty.
-    if (brandName) {
-      const slug = brandName.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
-      const sideMapPath = path.resolve(__dirname, '../../output/side_ledgers/' + slug + '.json');
-      if (slug && fs.existsSync(sideMapPath)) {
-        args.push('--side-map', sideMapPath);
-        console.log(`[RECO] Side-ledger map attached for "${brandName}" (${slug}.json).`);
-      }
-    }
+    // Payments; entries may pin a fixed type e.g. Contra). Resolved by resolveSideMapPath:
+    // bank_side_rules first, then the checked-in seed JSON. A brand with neither passes no
+    // --side-map at all, so no other brand — and no shared universal-bank/DB logic — is
+    // affected. classify.py treats an absent map as empty.
+    if (sideMapPath) args.push('--side-map', sideMapPath);
     // LLM fallback: candidate-constrained pass over Low/Medium rows only.
     // Claude is preferred when its key is present; Gemini is the fallback.
     if (anthropicKey) args.push('--anthropic-key', anthropicKey, '--anthropic-model', anthropicModel);
@@ -1049,7 +1084,9 @@ const runReco = async (req, res) => {
 
       // 4. Execute Standalone Classifier Script
       const outputPath = path.join(jobDir, 'output.xlsx');
-      await runUniversalClassifier(ledgerPath, bankPath, outputPath, correctionsPath, brandName);
+      const sideMapPath = await resolveSideMapPath(brandId, brandName, jobDir);
+      await runUniversalClassifier(ledgerPath, bankPath, outputPath, correctionsPath, brandName,
+                                   sideMapPath);
 
       if (!fs.existsSync(outputPath)) {
         throw new Error('Standalone classifier failed to generate output spreadsheet.');

@@ -65,9 +65,35 @@ def test_neft_ref_not_phone_key():
     print("test_neft_ref_not_phone_key PASS")
 
 
+def test_shared_fixtures_parity():
+    """Assert the SHARED fixture file — the same cases tests/test_payee_keys_parity.js
+    runs against the JS writer. This file is the READER; if the two disagree, every
+    correction is stored under a key the classifier never looks up (which is exactly how
+    598 learned Urban Plant entries came to match 0 of 261 rows)."""
+    import json
+    fixtures_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                 'payee_key_fixtures.json')
+    with open(fixtures_path, 'r', encoding='utf-8') as fh:
+        fixtures = json.load(fh)
+
+    identity = ('phone', 'vpa', 'name', 'neft_name')
+    failures = []
+    for case in fixtures['cases']:
+        got = extract_payee_keys(case['narration'])
+        actual = {k: got[k] for k in identity if got.get(k)}
+        want = case.get('keys') or {}
+        if actual != want:
+            failures.append(f"  {case['narration']}\n"
+                            f"    want {want}\n    got  {actual}\n    why  {case['why']}")
+    assert not failures, ("shared payee-key fixtures failed (JS writer / Python reader "
+                          "would disagree):\n" + "\n".join(failures))
+    print(f"test_shared_fixtures_parity PASS ({len(fixtures['cases'])} cases)")
+
+
 if __name__ == "__main__":
     test_neft_slash_payee()
     test_imps_from_junk_token_filtering()
     test_slash_neft_single_word_payee_not_dropped()
     test_neft_ref_not_phone_key()
+    test_shared_fixtures_parity()
     print("ALL PASS")

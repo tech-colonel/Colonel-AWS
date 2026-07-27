@@ -408,6 +408,80 @@ layer rather than requiring a guess.
 
 ---
 
+## 9a. Implementation status (2026-07-27, local 3000 only)
+
+All four components are built. Nothing has been deployed to AWS.
+
+| Component | Status |
+|---|---|
+| 1 Extractor (Python + JS) | Done. 7 new rails, shared `payee_key_fixtures.json` asserted by BOTH suites |
+| 1 Backfill | Done — `new-backend/scripts/backfill_payee_keys.js`, dry-run by default. Applied locally: Urban Plant 84 keys, M Brands 103, 53 leaked phone rows deleted |
+| 2 `bank_side_rules` | Done — `db-restructure/023_bank_side_rules.sql` (RLS + grants), applied locally; 21 rules seeded from the JSON |
+| 2 DB-first side map | Done — `recoController.resolveSideMapPath()`, falls back to seed JSON, then to no map |
+| 2 Learning | Done — `deriveSideRules()` runs after every corrections upload |
+| 3 Ingestion | Done — correction column wins by precedence; Dr/Cr captured; agreements vs corrections distinguished |
+| 4 Confidence | Done — `Side Ledger (credit/debit)` whitelisted; unruled Claude picks land Medium |
+| 4 `Source` column | Done — appended as column 10, invisible to recoController's fixed 1-9 reads |
+
+### Measured results
+
+Rules only, no Claude (reproducible without an API key):
+
+| Brand | Live (Varshita) | New rules-only |
+|---|---|---|
+| Urban Plant | 32.2 % (84/261) | **77.4 %** (202/261) |
+| M Brands | 84.0 % (189/225) | 79.6 % (179/225) |
+
+M Brands' live 84.0 % *included* Claude's fallback and arbitration, so it is not a
+rules-only baseline; against the same bar both numbers are 79.6 %.
+
+With Claude (one real API run, on the build before the last three key fixes — provisional
+until re-run): Urban Plant **80.5 %**, M Brands **89.3 %**. Side-verdict pass reported
+132/135 and 135/135 CONFIRM with **0 flips and 0 disowns**, i.e. the arbitration failure
+cannot recur.
+
+Month-over-month learning (train on the first half of the statement, score the second half
+cold) — the loop that had never once fired before:
+
+| Brand | Month 2 cold | After month-1 corrections |
+|---|---|---|
+| Urban Plant | 79.4 % | **87.8 %** (+8.4 pp) |
+| M Brands | 75.2 % | 75.2 % (only 21 generalizable keys from 112 rows) |
+
+**The > 95 % target is not met.** The largest remaining block is Amazon: the key
+`amazon sel` maps to *both* `Receipt From Amazon (Shopify)` (16 rows) and
+`Receipt From Amazon` (4) in the accountant's own corrections — genuinely ambiguous from
+the narration, so no extractor or rule can separate them. It needs either a second key
+dimension or an accountant-authored rule.
+
+### Bugs found by the acceptance test (all fixed)
+
+1. The side-verdict prompt never stated the bank's Dr/Cr, so Claude inferred direction from
+   wording and flipped 43 M Brands rows — an 84.0 % → 69.3 % regression, caught before it
+   could ship.
+2. `bank account xx` — a bank placeholder became a payee key, collapsing three unrelated
+   payees onto one ledger.
+3. `ubin` — an IFSC prefix leaked once the 4-letter guard was relaxed to save the real
+   4-letter name `AZAD`.
+4. Rejecting bank prefixes outright then cost 14 correct rows, because
+   `INF/NEFT/<ref>/HDFC0000044/HDFC` is a transfer to the brand's own HDFC account. Final
+   rule: a bank prefix loses to a real payee that follows it, and is used only when it is
+   alone in the payee slot.
+
+### Regression status
+
+`test_payee_keys.py` (5 tests incl. 14 shared fixtures), `test_payee_keys_parity.js`
+(14 fixtures), `test_bank_reco.py` (9 tests) — all pass. FLO's and Zaydn's existing keys
+are untouched.
+
+### Cross-brand impact
+
+Only one change reaches the other 15 brands: unruled Claude picks now land **Medium**
+instead of High (§7.3). Everything else is gated on a brand having side rules — only Urban
+Plant and M Brands do.
+
+---
+
 ## 10. Evidence appendix
 
 All figures verified during the 2026-07-27 investigation.
