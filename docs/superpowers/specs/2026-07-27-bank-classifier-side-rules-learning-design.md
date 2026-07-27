@@ -440,6 +440,27 @@ until re-run): Urban Plant **80.5 %**, M Brands **89.3 %**. Side-verdict pass re
 132/135 and 135/135 CONFIRM with **0 flips and 0 disowns**, i.e. the arbitration failure
 cannot recur.
 
+With an **offline judge** substituted for the API on the final build (scratchpad
+`e2e_oracle.py`; the judge answered from narration + candidate list only, and every
+side-rule row was CONFIRMed to match the real API run):
+
+| Brand | Live | Offline judge | High-bucket precision |
+|---|---|---|---|
+| Urban Plant | 32.2 % | **77.8 %** (203/261) | 202/230 = **87.8 %** |
+| M Brands | 84.0 % | **90.2 %** (203/225) | 179/185 = **96.8 %** |
+
+⚠️ **Not a clean benchmark.** The judge had previously seen the mismatch tables for both
+brands during diagnosis, so these figures are biased upward and must not be quoted as
+validation. They are useful only for the *shape* of the result — layer mix, confidence
+distribution, and which rows still fail. Two of the judge's own picks were wrong
+(`Payable SGST` / `Payable CGST` where the accountant wanted `Bank Charges`), which is a
+reminder that it is not simply replaying the key.
+
+**"No High in the wrong" is not yet true for Urban Plant.** 28 wrong rows still sit in the
+High bucket, and 17 of them are the Amazon ambiguity below. M Brands is at 96.8 %, and 1 of
+its 6 residual errors is a case-only difference (`Ria-salary` vs `Ria-Salary`) — a scoring
+artifact, not a real defect. Ledger comparison should be case-insensitive.
+
 Month-over-month learning (train on the first half of the statement, score the second half
 cold) — the loop that had never once fired before:
 
