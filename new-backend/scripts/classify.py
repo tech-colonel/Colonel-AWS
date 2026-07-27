@@ -622,6 +622,27 @@ class BankClassifier:
                 (self.side_map_fallback if e.get('fallback') else self.side_map).append(entry)
         self._build_indices()
 
+    def _coa_resolve(self, name):
+        """Return the ledger's CANONICAL spelling as it appears in the COA, or None.
+
+        Matching is case- and whitespace-insensitive, and the COA's spelling always wins.
+        An accountant who retypes a ledger by hand will eventually vary the capitalisation
+        ('Ria-Salary' for the COA's 'Ria-salary'); a case-sensitive check treats that as a
+        ledger that does not exist and silently drops the correction, so the same row gets
+        re-corrected every month and never learns. Snapping to the COA spelling also stops
+        two casings of one ledger being stored as two separate learned entries.
+        """
+        if not name:
+            return None
+        name = str(name).strip()
+        if name in self.master_ledgers:            # exact hit, the common case
+            return name
+        if not hasattr(self, '_coa_ci'):
+            self._coa_ci = {}
+            for l in self.master_ledgers:          # first spelling wins, stable ordering
+                self._coa_ci.setdefault(' '.join(l.lower().split()), l)
+        return self._coa_ci.get(' '.join(name.lower().split()))
+
     def _side_map_lookup(self, narration_upper: str, txn_type: str):
         """Side-dependent ledger override (per-brand, e.g. M-Brands marketplaces).
         If the narration contains a counterparty token, return its credit-side ledger
@@ -634,8 +655,8 @@ class BankClassifier:
             return None
         for e in entries:
             if any(tok in narration_upper for tok in e['tokens']):
-                ledger = e['credit'] if txn_type == "Receipt" else e['debit']
-                if ledger in self.master_ledgers:
+                ledger = self._coa_resolve(e['credit'] if txn_type == "Receipt" else e['debit'])
+                if ledger:
                     # 'credit'/'debit' are carried through so the constrained side-verdict
                     # pass can offer Claude exactly these two ledgers and nothing else.
                     return {"ledger": ledger, "type": e.get('type') or txn_type, "confidence": "High",
@@ -670,9 +691,10 @@ class BankClassifier:
             if not kv:
                 continue
             fix = self.directory.get(section, {}).get(kv)
-            if fix and fix.get('ledger') and fix['ledger'] in self.master_ledgers:
+            resolved = self._coa_resolve(fix.get('ledger')) if fix else None
+            if resolved:
                 return {
-                    "ledger": fix['ledger'],
+                    "ledger": resolved,
                     "type": fix.get('type') or txn_type,
                     "confidence": "High",
                     "rule": "Stored Correction" if section == 'exact' else f"Payee Directory ({section})",
@@ -1635,16 +1657,40 @@ def load_ledger_master(filepath: str) -> list:
 
     df = pd.read_excel(filepath, sheet_name=target, header=None)
 
-    # Auto-detect the column containing ledger names: the column with the most
-    # text-heavy (non-numeric, length > 2) entries in the first 200 rows.
+    # Auto-detect the column containing ledger names.
+    #
+    # Scored by DISTINCT text values, not raw count. A Tally "List of Ledgers" export has
+    # both a "Name of Ledger" column and an "Under" (group) column; the group column often
+    # has one or two MORE non-empty cells, so a raw-count heuristic silently picks it — and
+    # because group names repeat, the COA collapses to a handful of entries. Seen for real:
+    # Urban Plant's 862-row export loaded as 96 "ledgers", which would have failed COA
+    # validation for every side rule and every learned key. Ledger names are unique;
+    # group names repeat, so cardinality separates them cleanly (856 vs 96).
+    #
+    # An explicit header ("Name of Ledger" / "Ledger Name" / "Particulars") wins outright.
     _col_idx = 0
-    best_text_count = 0
+    best_score = -1
+    _HEADER_RE = re.compile(r'name of ledger|ledger name|particulars|account name', re.I)
+    header_col = None
     for col in df.columns:
-        count = df[col].dropna().apply(
-            lambda v: bool(re.search(r'[A-Za-z]{3,}', str(v))) and not str(v).strip().isdigit()
-        ).sum()
-        if count > best_text_count:
-            best_text_count, _col_idx = count, col
+        for v in df[col].dropna().head(15):
+            if _HEADER_RE.fullmatch(str(v).strip()):
+                header_col = col
+                break
+        if header_col is not None:
+            break
+
+    if header_col is not None:
+        _col_idx = header_col
+    else:
+        for col in df.columns:
+            vals = df[col].dropna().apply(str)
+            text = vals[vals.apply(
+                lambda v: bool(re.search(r'[A-Za-z]{3,}', v)) and not v.strip().isdigit()
+            )]
+            score = text.str.strip().str.lower().nunique()
+            if score > best_score:
+                best_score, _col_idx = score, col
 
     raw = df[_col_idx].dropna().astype(str).tolist()
 
@@ -1664,7 +1710,12 @@ def load_ledger_master(filepath: str) -> list:
         "assets", "liabilities", "income", "expenses", "equity",
     }
 
-    skip_exact = {"total", "grand total", "list of ledgers", "ledger name", "name"}
+    # Header/label cells that sit in the same column as the ledger names and would
+    # otherwise be imported as a ledger (seen: "Name of Ledger" arriving as a new ledger).
+    skip_exact = {"total", "grand total", "list of ledgers", "ledger name", "name",
+                  "name of ledger", "particulars", "account name", "under",
+                  "opening balance", "closing balance", "sl. no.", "sl no", "s. no.",
+                  "sr. no.", "sr no", "amount"}
 
     # Patterns that identify company header / metadata rows — not ledger names.
     # E.g. "Plot - C/59 Platina Bandra Kurla Complex G-Block Near City Union Bank"

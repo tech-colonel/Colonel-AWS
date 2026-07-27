@@ -1206,14 +1206,29 @@ const runReco = async (req, res) => {
               });
             } catch (_) { /* non-fatal */ }
 
+            // Case/whitespace-insensitive COA index. A hand-typed correction eventually
+            // varies the capitalisation ('Ria-Salary' vs the COA's 'Ria-salary'); an exact
+            // check calls that a non-existent ledger and drops the correction silently, so
+            // the accountant re-corrects the same row every month and it never learns.
+            const coaByKey = new Map();
+            for (const l of ledgerSet) coaByKey.set(l.toLowerCase().replace(/\s+/g, ' ').trim(), l);
+            const resolveLedger = (name) => {
+              if (!name) return null;
+              if (ledgerSet.has(name)) return name;
+              return coaByKey.get(String(name).toLowerCase().replace(/\s+/g, ' ').trim()) || null;
+            };
+
             let corrected = 0;
+            const unknownLedgers = new Set();
             results.forEach(row => {
               const key = normalizeNarration(row.description);
               const fix = corrMap.exact ? corrMap.exact[key] : corrMap[key];
               if (!fix) return;
-              // Safeguard: skip if ledger was deleted/renamed from CoA
-              if (ledgerSet.size > 0 && !ledgerSet.has(fix.ledger)) return;
-              row.ledger_name = fix.ledger;
+              // Safeguard: skip if ledger was deleted/renamed from CoA. Snap to the COA's
+              // own spelling so one ledger can never be stored under two casings.
+              const resolved = ledgerSet.size > 0 ? resolveLedger(fix.ledger) : fix.ledger;
+              if (!resolved) { unknownLedgers.add(fix.ledger); return; }
+              row.ledger_name = resolved;
               if (fix.type) row.type = fix.type;
               row.confidence = 'High';
               row.corrected = true;
@@ -1226,6 +1241,13 @@ const runReco = async (req, res) => {
               mediumCount = results.filter(r => r.confidence === 'Medium').length;
               lowCount = results.filter(r => r.confidence === 'Low').length;
               console.log(`[RECO-CORRECTIONS] Applied ${corrected} stored corrections for brand ${brandId}`);
+            }
+            // Never drop a correction in silence: a ledger the accountant typed that is in
+            // no COA at all is either a typo or a ledger that still needs creating, and
+            // they have no other way to find out why their fix keeps not sticking.
+            if (unknownLedgers.size) {
+              console.warn(`[RECO-CORRECTIONS] ${unknownLedgers.size} correction(s) skipped — ` +
+                `ledger not in the CoA: ${[...unknownLedgers].slice(0, 10).join(' | ')}`);
             }
           }
         } catch (corrErr) {
