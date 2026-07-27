@@ -28,7 +28,10 @@ reco-engine/temp_run/
 Extra/
 *.xlsx~
 *.xls~
-*.bak-[0-9]*
+# Pre-edit safety copies. Two shapes are in use: `file.bak-20260721-173600` and
+# the labelled `file.bak-<what>-20260724-162422`; the old [0-9] rule missed the
+# labelled form, so those kept showing up as untracked noise.
+*.bak-*
 
 # ── Local test fixtures (large source Excel exports, never commit) ─────────────
 /test files receivables/
