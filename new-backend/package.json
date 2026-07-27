@@ -1,4 +1,7 @@
 {
+  "engines": {
+    "node": ">=24"
+  },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.40.0",
     "@composio/core": "^0.13.1",
