@@ -301,7 +301,7 @@ def test_workbook_has_live_formulas():
     assert ws["M3"].value == "=F3"                                                     # pending_amount
     assert ws["V3"].value == "=M3-O3"                                                  # gross = Pending - Pay(excl TDS)  (#00004)
     assert ws["W3"].value == "=M3-O3-T3-Q3"                                            # net = Gross - CreditNote - DebitNote (#00004)
-    assert ws["X3"].value == '=IF(AND(V3<=100,W3<=100),"Paid","Not Paid")'             # status (signed)
+    assert ws["X3"].value == '=IF(W3<=10,"Paid","Not Paid")'                            # status (net-only)
     # No #REF!/formula-error leakage -- the 4 live formula strings above are
     # the exact, complete set and none of them reference a shifted-away cell.
     for cell_ref in ("M3", "V3", "W3", "X3"):
@@ -310,9 +310,9 @@ def test_workbook_has_live_formulas():
 
 
 def test_status_signed_threshold_negative_net_is_paid():
-    # Accountant's rule: Paid whenever gross<=100 AND net<=100, INCLUDING
-    # negative values (a debit note pushing Net negative means settled).
-    # gross~17 (<=100), net~-2058 (<=100 since negative) -> Paid (signed rule).
+    # Accountant's rule: Paid whenever NET <= 100 (Gross ignored), INCLUDING
+    # negative net (a debit note pushing Net negative means settled).
+    # net~-2058 (<=100 since negative) -> Paid.
     invd = _xlsx({"Invoice Details": [
         ["title"],
         ["invoice_number","reference_number","customer_name","date","bcy_total","tax_amount",
@@ -334,7 +334,7 @@ def test_status_signed_threshold_negative_net_is_paid():
     by_inv["INV1"]["debit_note_issued"] = -2075.0
     gross1 = by_inv["INV1"]["total_invoice_amt"] - by_inv["INV1"]["payment_received_incl_tds"]
     net1 = gross1 + by_inv["INV1"]["debit_note_issued"]
-    status1 = "Paid" if (gross1 <= 100 and net1 <= 100) else "Not Paid"
+    status1 = "Paid" if net1 <= 10 else "Not Paid"   # net-only rule, threshold 10
     assert round(gross1, 2) == 17.0
     assert round(net1, 2) == -2058.0
     assert status1 == "Paid"
@@ -346,17 +346,17 @@ def test_status_signed_threshold_negative_net_is_paid():
 
 
 def test_reconcile_zepto_signed_status_direct():
-    # Directly exercise the signed rule used inside reconcile_zepto via the
-    # same gross/net -> status formula (mirrors the accountant's examples:
-    # Net -83, -478, -1473, -4335, -5226 are all "Paid").
+    # Directly exercise the NET-ONLY signed rule used inside reconcile_zepto
+    # (Gross is ignored): Net <= 100 -> Paid, including negatives.
     for gross, net, expected in [
         (17.0, -2058.0, "Paid"),
         (-83.0, -83.0, "Paid"),
         (50.0, -478.0, "Paid"),
         (28000.0, 28000.0, "Not Paid"),
-        (150.0, 40.0, "Not Paid"),   # gross > 100 -> Not Paid even if net small
+        (150.0, 40.0, "Not Paid"),   # net 40 > 10 threshold -> Not Paid
+        (150.0, 9.0, "Paid"),        # net <= 10 -> Paid even though gross > 100 (net-only)
     ]:
-        status = "Paid" if (gross <= 100 and net <= 100) else "Not Paid"
+        status = "Paid" if net <= 10 else "Not Paid"
         assert status == expected, (gross, net, expected, status)
     print("test_reconcile_zepto_signed_status_direct OK")
 
@@ -733,7 +733,7 @@ def test_due_date_and_status():
         ["INV-A","SO1","ZEPTO A","2026-07-01",50000,0,50000,"MH","27AAICK4821A1Z5","MH","MH"],  # due 07-31 -> Not Due
         ["INV-B","SO2","ZEPTO B","2026-06-15",40000,0,40000,"MH","27AAICK4821A1Z5","MH","MH"],  # due 07-15 -> Due (today)
         ["INV-C","SO3","ZEPTO C","2026-04-14",30000,0,30000,"MH","27AAICK4821A1Z5","MH","MH"],  # due 05-14 -> Overdue
-        ["INV-D","SO4","ZEPTO D","2026-04-14",50,0,50,"MH","27AAICK4821A1Z5","MH","MH"],        # <=100 -> Paid -> blank
+        ["INV-D","SO4","ZEPTO D","2026-04-14",5,0,5,"MH","27AAICK4821A1Z5","MH","MH"],          # net 5 <=10 -> Paid -> blank
     ]})
     pay = _xlsx({"Zepto Payment track": [["Zepto Payment track PO Number","Invoice Number","Cities"]]})
     grn = b"GRN ID,PO ID,Created On,Status\r\n"
@@ -756,7 +756,7 @@ def test_due_date_and_status():
     assert ws["Z2"].value == "Due Status"
     assert ws["AA2"].value == "GRN No."
     assert ws["AF2"].value == "Payment Date"
-    assert ws["X3"].value == '=IF(AND(V3<=100,W3<=100),"Paid","Not Paid")'   # status formula unchanged
+    assert ws["X3"].value == '=IF(W3<=10,"Paid","Not Paid")'   # status = net-only
     print("test_due_date_and_status OK")
 
 
@@ -802,6 +802,32 @@ def test_detail_tabs_and_hyperlinks():
     print("test_detail_tabs_and_hyperlinks OK")
 
 
+def test_pod_from_payment_track():
+    # POD No <- 'LRN', POD Date <- 'Delivery Date' of the Zepto Payment track,
+    # matched by invoice (slash-normalized): universe "…/000192/" finds the
+    # payment-track "…/000192".
+    import datetime
+    invd = _xlsx({"Invoice Details": [
+        ["t"],
+        ["invoice_number","reference_number","customer_name","date","bcy_total","tax_amount",
+         "amount_without_tax","place_of_supply","gst_no","billing_state","shipping_state"],
+        ["INV26-27/000192/","SO1","ZEPTO MUM","2026-04-30",1000,0,1000,"MH","27AAICK4821A1Z5","MH","MH"],
+    ]})
+    pay = _xlsx({"Zepto Payment track": [
+        ["Zepto Payment track PO Number","Invoice Number","Cities","QTY","Delivery Date","Courier","LRN","GRN"],
+        ["P4254950","INV26-27/000192","MUM","1","2026-04-14","Delhivery","275780443","GrnX"],  # no slash here
+    ]})
+    grn = b"GRN ID,PO ID,Created On,Status\r\n"
+    cn = _xlsx({"Credit Note Details": [["t"], ["invoice_number","bcy_total"]]})
+    files = {"zepto_payment": _file(pay), "grn_list": [_file(grn)],
+             "invoice_details": _file(invd), "payment_advice": [], "credit_note": _file(cn)}
+    res = reconcile_zepto(files, today=datetime.date(2026, 7, 15))
+    r = res[0]
+    assert r["pod_no"] == "275780443"    # LRN, matched despite the universe trailing slash
+    assert r["pod_date"] == "2026-04-14"  # Delivery Date
+    print("test_pod_from_payment_track OK")
+
+
 if __name__ == "__main__":
     test_normalizers_and_dn_transform()
     test_norm_inv_does_not_strip_trailing_slash()
@@ -837,4 +863,5 @@ if __name__ == "__main__":
     test_po_matches_despite_trailing_slash_and_ignores_grn_gate()
     test_due_date_and_status()
     test_detail_tabs_and_hyperlinks()
+    test_pod_from_payment_track()
     print("ALL TESTS PASSED")

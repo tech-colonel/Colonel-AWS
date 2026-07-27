@@ -618,6 +618,33 @@ def parse_lrn(datas: list[bytes]) -> dict[str, dict]:
     return out
 
 
+def parse_payment_track_pod(data: bytes) -> dict[str, dict]:
+    """POD from the Zepto Payment track sheet: POD No <- `LRN` column, POD Date
+    <- `Delivery Date` column, keyed by invoice number with any trailing slash
+    stripped (first row that carries an LRN wins per invoice). This is the
+    primary POD source; the Drips LRN sheet (`parse_lrn`) is the fallback."""
+    try:
+        grid = _read_sheet(data, "Zepto Payment track")
+    except Exception:
+        try:
+            grid = _read_sheet(data, 0)
+        except Exception:
+            return {}
+    try:
+        h = _find_header(grid, ["po number", "invoice number"])
+    except ValueError:
+        return {}
+    out: dict[str, dict] = {}
+    for r in _rows_as_dicts(grid, h):
+        inv = norm_inv(_get(r, ["Invoice Number"])).rstrip("/")
+        if not inv:
+            continue
+        lrn = _get(r, ["LRN"])
+        if lrn and inv not in out:
+            out[inv] = {"pod_no": lrn, "pod_date": _fmt_lrn_date(_raw_get(r, ["Delivery Date"]))}
+    return out
+
+
 COLUMN_KEYS = [
     "po","date","invoice_number","sales_order_no","name","total_invoice_amt","tax",
     "invoice_amt_excl_tax","place_of_supply","gstin","billing_state","shipping_state",
@@ -708,6 +735,7 @@ def reconcile_zepto(files: dict, today=None) -> list[dict]:
     pay_map, dn_map, pmdn_total = parse_payment_advice_pdf(_many(files, "payment_advice"), details)
     cn_map = parse_credit_notes(_one(files, "credit_note") or b"", details)
     lrn_map = parse_lrn(_many(files, "lrn"))
+    pod_track = parse_payment_track_pod(_one(files, "zepto_payment") or b"")   # POD from Payment track LRN/Delivery Date
 
     dn_map = _dn_fallback_remap(dn_map, set(invoice_details.keys()))
 
@@ -753,7 +781,9 @@ def reconcile_zepto(files: dict, today=None) -> list[dict]:
         row["credit_note_issued"] = round(cn["amount"], 2) if cn else 0.0
         row["credit_note_no"] = ", ".join(cn["numbers"]) if cn else ""
 
-        lr = lrn_map.get(inv)
+        # POD: primary = Zepto Payment track (LRN + Delivery Date, slash-
+        # normalized match); fallback = Drips LRN sheet.
+        lr = pod_track.get(inv.rstrip("/")) or lrn_map.get(inv)
         row["pod_no"] = lr["pod_no"] if lr else ""
         row["pod_date"] = lr["pod_date"] if lr else ""
 
@@ -766,10 +796,11 @@ def reconcile_zepto(files: dict, today=None) -> list[dict]:
         net = gross - row["credit_note_issued"] - row["debit_note_issued"]
         row["gross_outstanding"] = round(gross, 2)
         row["net_outstanding"] = round(net, 2)
-        # Signed threshold (NOT abs()): a negative Gross/Net Outstanding means
-        # the vendor owes Zepto less than paid (e.g. a debit note), which the
-        # accountant's reference sheet treats as settled/"Paid" too.
-        row["status"] = "Paid" if (gross <= 100 and net <= 100) else "Not Paid"
+        # Status is driven by NET OUTSTANDING ONLY (Gross is ignored). Signed
+        # threshold (NOT abs()): Net <= 10 -> Paid, INCLUDING negative net
+        # (nothing left to collect / overpaid) which the accountant treats as
+        # settled too.
+        row["status"] = "Paid" if net <= 10 else "Not Paid"
 
         # #00001/#00002: Due Date = invoice date + 30 days; Due status (Not Due /
         # Due / Overdue) vs `today`, for UNPAID rows only (Paid -> blank).
@@ -829,6 +860,11 @@ _COLUMN_WIDTHS = {
     "status": 12, "due_date": 12, "due_status": 12, "grn_no": 14, "grn_date": 12, "invoice_not_in_ledger": 16,
     "pod_no": 12, "pod_date": 12, "payment_date": 12,
 }
+
+# Debit Note display format: value stays NEGATIVE (so `Net = M-O-T-Q` is
+# unchanged) but the minus sign is hidden on screen — "positive;negative;zero"
+# with the negative section written WITHOUT a leading "-".
+_DN_DISPLAY_FMT = "#,##0.00;#,##0.00;0.00"
 
 # Paid/Not-Paid conditional formatting palette (finance-report standard).
 _PAID_FILL_HEX = "C6EFCE"
@@ -990,7 +1026,7 @@ def _build_detail_sheets(wb, results):
     total_font = Font(bold=True, size=10, color="123C69")
     money_fmt = "#,##0.00"
 
-    def make_sheet(title, headers, rows, money_cols, key_col, widths):
+    def make_sheet(title, headers, rows, money_cols, key_col, widths, hide_minus_cols=frozenset()):
         ws = wb.create_sheet(title=title)
         ncol = len(headers)
         c = ws.cell(row=1, column=1, value=title)
@@ -1009,7 +1045,7 @@ def _build_detail_sheets(wb, results):
                 cell = ws.cell(row=r, column=j, value=val)
                 cell.border = border
                 if j in money_cols:
-                    cell.number_format = money_fmt
+                    cell.number_format = _DN_DISPLAY_FMT if j in hide_minus_cols else money_fmt
                     cell.alignment = Alignment(horizontal="right")
                     totals[j] += _to_float(val)
             if key_col is not None:
@@ -1021,7 +1057,8 @@ def _build_detail_sheets(wb, results):
             tc = ws.cell(row=r, column=1, value="TOTAL"); tc.font = total_font; tc.border = border
             for mc in money_cols:
                 cell = ws.cell(row=r, column=mc, value=round(totals[mc], 2))
-                cell.number_format = money_fmt; cell.font = total_font
+                cell.number_format = _DN_DISPLAY_FMT if mc in hide_minus_cols else money_fmt
+                cell.font = total_font
                 cell.border = border; cell.alignment = Alignment(horizontal="right")
         else:
             ws.cell(row=3, column=1, value="(no records)").font = Font(italic=True, color="808080")
@@ -1057,7 +1094,8 @@ def _build_detail_sheets(wb, results):
 
     pay_map = make_sheet("Payments", ["Invoice", "Ref / Payment Doc", "Amount (Excl. TDS)", "TDS", "Amount (Incl. TDS)"],
                          pay_rows, {3, 4, 5}, key_col=1, widths=[22, 22, 18, 12, 18])
-    dn_map = make_sheet("Debit Notes", ["Invoice", "Ref", "Amount"], dn_rows, {3}, key_col=1, widths=[22, 26, 16])
+    dn_map = make_sheet("Debit Notes", ["Invoice", "Ref", "Amount"], dn_rows, {3}, key_col=1,
+                        widths=[22, 26, 16], hide_minus_cols={3})   # show DN amount without the minus sign
     cn_map = make_sheet("Credit Notes", ["Invoice", "Credit Note No", "Amount"], cn_rows, {3}, key_col=1, widths=[22, 22, 16])
     make_sheet("PMDD", ["Ref / Description", "Amount"], pmdd_rows, {2}, key_col=None, widths=[42, 18])
     make_sheet("AP-AR & Manual Adj", ["Ref / Description", "Amount"], apar_rows, {2}, key_col=None, widths=[42, 18])
@@ -1126,7 +1164,8 @@ def build_zepto_workbook(results: list[dict], payload: dict | None = None):
                 if row.get("invoice_not_in_ledger"):
                     val = row.get("status", "")
                 else:
-                    val = f'=IF(AND(V{r}<=100,W{r}<=100),"Paid","Not Paid")'
+                    # Status from NET OUTSTANDING (col W) only — Gross (V) ignored.
+                    val = f'=IF(W{r}<=10,"Paid","Not Paid")'
             else:
                 val = row.get(key, "")
                 if val == "" and key in _MONEY_KEYS:
@@ -1134,7 +1173,9 @@ def build_zepto_workbook(results: list[dict], payload: dict | None = None):
             c = ws.cell(row=r, column=col_i, value=val)
             c.border = border
             if key not in _TEXT_KEYS and (key in _MONEY_KEYS or key in _FORMULA_COLS - {"status"}):
-                c.number_format = "#,##0.00"
+                # Debit Note keeps its negative VALUE (formula -Q unchanged) but
+                # displays without the minus sign.
+                c.number_format = _DN_DISPLAY_FMT if key == "debit_note_issued" else "#,##0.00"
                 c.alignment = Alignment(horizontal="right")
             elif key == "status":
                 c.alignment = Alignment(horizontal="center")
