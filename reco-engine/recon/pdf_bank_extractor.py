@@ -126,6 +126,18 @@ def _tag_for(text: str) -> Optional[str]:
 _AMT_RE = re.compile(r'-?\d[\d,]*\.?\d*')
 
 
+def _fix_ocr_number(s: str) -> str:
+    """OCR frequently misreads a thousands COMMA as a period, producing a number with
+    two or more dots (e.g. '15.487.70' for 15,487.70; '1.23.456.78' for 1,23,456.78).
+    When a token has ≥2 dots, keep the LAST as the decimal point and drop the rest
+    (they were thousands separators). Single-dot (normal) numbers are untouched, so
+    this only ever helps OCR'd scans and never changes a clean digital number."""
+    if s.count('.') >= 2:
+        head, _, tail = s.rpartition('.')
+        return head.replace('.', '') + '.' + tail
+    return s
+
+
 def _parse_amount(value) -> float:
     """Parse a currency cell to float. Returns 0.0 when the cell is not a number.
     Understands 1,234.00 / ₹1,234 / (1,234.00) neg / 1,234.00Dr / 1,234.00 Cr / 1234.00-."""
@@ -145,6 +157,7 @@ def _parse_amount(value) -> float:
     if low.endswith("dr") or low.endswith("dr.") or low.endswith("-"):
         neg = True
     s = re.sub(r"[₹,\s]", "", s)
+    s = _fix_ocr_number(s)   # collapse OCR multi-dot thousands (15.487.70 → 15487.70)
     m = _AMT_RE.search(s.replace("(", "").replace(")", ""))
     if not m:
         return 0.0
@@ -1565,6 +1578,145 @@ def _infer_columns_headerless(raw_lines: list, page_w: float) -> Optional[list[d
     return cols
 
 
+_RUPEE = "₹"
+
+
+def _rb_is_money(w) -> bool:
+    return _looks_amount((w.get('text') or '').replace(_RUPEE, '').strip(_OCR_SEP_CHARS + " "))
+
+
+def _rb_find_date(words):
+    for w in words[:5]:
+        if _parse_date(w['text']):
+            return w
+    return None
+
+
+def _extract_rupee_balance_format(raw_lines: list[dict], meta: dict,
+                                  columns: Optional[list[dict]] = None) -> Optional[dict]:
+    """Fallback for the 'rupee-balance line' layout (e.g. Bank of India): the running
+    balance is printed on a SEPARATE ₹-prefixed line just BELOW each dated anchor, and
+    the transaction amount is a single money token whose column X drifts row-to-row, so
+    the geometry pipeline mis-buckets it. Re-derive line-by-line:
+      • amount   = the anchor line's (non-₹) money token
+      • balance  = the following ₹-line's money token
+      • direction= /DR/·/CR/ (or DR/CR/CREDIT/DEBIT) in the narration, else balance delta
+    Only accepted if it VERIFIES (balance continuity / reverse-chrono / net) — a wrong
+    guess can't self-verify, so this can never silently corrupt output. Returns None when
+    the layout doesn't match or doesn't verify."""
+    # ── classify lines ──
+    L = []
+    for ln in raw_lines:
+        ws = [w for w in ln['words'] if (w.get('text') or '').strip()]
+        if not ws:
+            continue
+        L.append({
+            'y': ln['y'], 'ws': sorted(ws, key=lambda w: w['x0']),
+            'date': _rb_find_date(ws),
+            'monies': [w for w in ws if _rb_is_money(w)],
+            'rupee': any(_RUPEE in w['text'] for w in ws),
+        })
+    anchors = [x for x in L if x['date'] and x['monies']]
+    bal_lines = [x for x in L if x['rupee'] and x['monies'] and not x['date'] and len(x['ws']) <= 3]
+    # Signature guard: needs enough anchors AND a ₹-balance line under a good share of them.
+    if len(anchors) < 5 or len(bal_lines) < len(anchors) * 0.3:
+        return None
+
+    import re as _re
+    dr_re = _re.compile(r'(?:/DR/|\bDR\b|DEBIT|WITHDRAW)', _re.I)
+    cr_re = _re.compile(r'(?:/CR/|\bCR\b|CREDIT|INW)', _re.I)
+
+    def serial_of(ws, date_w):
+        for w in ws:
+            if w['x1'] <= date_w['x0'] and _re.fullmatch(r'\d{1,5}', w['text']):
+                return w['text']
+        return ''
+
+    txns_raw = []
+    n = len(L)
+    i = 0
+    while i < n:
+        cur = L[i]
+        if not (cur['date'] and cur['monies']):
+            i += 1
+            continue
+        date_w = cur['date']
+        amt_tokens = [w for w in cur['monies'] if _RUPEE not in w['text']]
+        amount = _parse_amount(amt_tokens[-1]['text']) if amt_tokens else 0.0
+        amt_w = amt_tokens[-1] if amt_tokens else None
+        narr = [w['text'] for w in cur['ws']
+                if w is not date_w and w is not amt_w and w['x0'] >= date_w['x0'] and not _rb_is_money(w)]
+        serial = serial_of(cur['ws'], date_w)
+        balance = None
+        j = i + 1
+        while j < n and not (L[j]['date'] and L[j]['monies']):
+            nxt = L[j]
+            if balance is None and nxt['rupee'] and nxt['monies']:
+                balance = _parse_amount(nxt['monies'][-1]['text'])
+            else:
+                narr += [w['text'] for w in nxt['ws'] if _RUPEE not in w['text'] and not _rb_is_money(w)]
+            j += 1
+        txns_raw.append({'serial': serial, 'date_raw': date_w['text'],
+                         'date': _parse_date(date_w['text']) or date_w['text'],
+                         'amount': amount, 'balance': balance,
+                         'narr': _clean_text(" ".join(narr)).strip()})
+        i = j
+
+    if len(txns_raw) < 5:
+        return None
+
+    # ── direction: balance MOVEMENT is ground truth (reverse-chrono: this row is newer
+    # than the next). Where the running balance is available, derive debit/credit from
+    # the delta and self-correct the amount to |delta| (guards a mis-read amount token).
+    # Fall back to the /DR//CR/ narration flag only when there's no balance to compare. ──
+    for k, t in enumerate(txns_raw):
+        d = ''
+        if t['balance'] is not None:
+            nb = next((txns_raw[m]['balance'] for m in range(k + 1, len(txns_raw))
+                       if txns_raw[m]['balance'] is not None), None)
+            if nb is not None:
+                delta = round(t['balance'] - nb, 2)
+                d = 'C' if delta >= 0 else 'D'
+                if abs(abs(delta) - t['amount']) > 1.0:   # trust the balance-derived amount
+                    t['amount'] = abs(delta)
+        if not d:
+            d = 'C' if cr_re.search(t['narr']) else ('D' if dr_re.search(t['narr']) else 'D')
+        t['dir'] = d
+
+    cols = columns or [
+        {'key': 'c0', 'header': 'Sr No', 'tag': 'other'},
+        {'key': 'c1', 'header': 'Date', 'tag': 'date'},
+        {'key': 'c2', 'header': 'Remarks', 'tag': 'narr'},
+        {'key': 'c3', 'header': 'Debit', 'tag': 'debit'},
+        {'key': 'c4', 'header': 'Credit', 'tag': 'credit'},
+        {'key': 'c5', 'header': 'Balance', 'tag': 'balance'},
+    ]
+    sk = _tag_key(cols, 'other') or 'c0'
+    dk = _tag_key(cols, 'date') or 'c1'
+    nk = _tag_key(cols, 'narr') or 'c2'
+    debk = _tag_key(cols, 'debit') or 'c3'
+    crk = _tag_key(cols, 'credit') or 'c4'
+    bk = _tag_key(cols, 'balance') or 'c5'
+
+    txns = []
+    for t in txns_raw:
+        debit = t['amount'] if t['dir'] == 'D' else 0.0
+        credit = t['amount'] if t['dir'] == 'C' else 0.0
+        bal = t['balance'] if t['balance'] is not None else 0.0
+        txns.append({
+            'cells': {sk: t['serial'], dk: t['date_raw'], nk: t['narr'],
+                      debk: debit, crk: credit, bk: bal},
+            'date': t['date'], 'debit': debit, 'credit': credit, 'balance': bal,
+            'description': t['narr'], 'ref_no': '',
+        })
+
+    res = _finalize(txns, cols, meta)
+    if not res['validation'].get('verified'):
+        return None
+    res['validation']['verify_method'] += '+rupeebal'
+    return res
+
+
 def extract_bank_statement(pdf_bytes: bytes, password: str = "", _allow_ocr: bool = True) -> dict:
     import pdfplumber
 
@@ -1691,6 +1843,13 @@ def extract_bank_statement(pdf_bytes: bytes, password: str = "", _allow_ocr: boo
             if not cached:                          # auto-learn a template from a good run
                 _save_success_template(sig, bank, columns)
             return result
+
+        # Deterministic geometry didn't verify. Try the 'rupee-balance line' layout
+        # (balance on a separate ₹-line, drifting amount column) before any LLM/OCR.
+        rb = _extract_rupee_balance_format(all_raw_lines, meta, columns)
+        if rb:
+            logger.info("Rupee-balance line format verified: %d txns", rb["transaction_count"])
+            return rb
 
         # A table was detected but did not verify. Before spending any LLM call,
         # confirm this is actually a statement (not an invoice / advice that merely
