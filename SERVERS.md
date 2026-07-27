@@ -34,6 +34,12 @@ Colonel-AWS is the single superset repo. It has **four tiers**: a React frontend
 
 | Service | Port | How to run (from repo root) | Notes |
 |---|---|---|---|
+> **Runtime prerequisite — Node 24.** The repo root has an `.nvmrc`, so `nvm use` in the repo
+> selects it automatically; `new-backend/package.json` also declares `"engines": { "node": ">=24" }`.
+> Production runs `v24.18.0` (upgraded from 20.20.2 on 2026-07-28 — Node 20 left LTS maintenance in
+> April 2026). Keep dev on the same major: an API that exists only in a newer Node will pass locally
+> and crash the box after an rsync. Python on AWS is the **system 3.12** and must not be upgraded.
+
 | **React frontend** | 3000 | `cd frontend && npx craco start` | Dev only; on EC2 it's a compiled `build/` served by Node |
 | **Node backend** | 8001 | `cd new-backend && node server.js` | Entry = `new-backend/server.js` (**NOT** `src/app.js`); runs DB migrations on boot |
 | **Python reco engine** | 8765 | `cd reco-engine && python3 server.py` | Handles GST reco agents; **shared port** |

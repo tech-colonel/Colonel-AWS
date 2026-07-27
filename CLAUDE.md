@@ -14,6 +14,10 @@
 > | SSH | `ssh -i ~/.ssh/colonel2-key.pem ubuntu@13.127.171.66` | — |
 > | CLI profile | `colonel2` | — |
 >
+> **Latest rollback AMI:** **`ami-0a41e4da9e52b6db9`** (`colonel-prod-2-pre-node24-20260728-030609`,
+> taken `--no-reboot`) — the box as it stood on Node 20, before the 2026-07-28 upgrade to Node 24.
+> DB dumps live in `~/backups/` on the box. Full rollback table in `../../AWS2.md`.
+>
 > **Serving path:** nginx (`:80/:443`) → backend `:8001` → `reco-engine` `:8765`; unified DB
 > `colonel_agent_accountant`. **App root on the box is `/opt/colonel` and is NOT a git checkout** —
 > it is rsync-deployed, so drift accumulates in BOTH directions. Deploy named files only and
@@ -44,8 +48,8 @@ superset of the live production app**, shipped with a snapshot of the real datab
 
 ## Overview & tech stack
 - **Frontend** — React 18 + craco, Tailwind, Recharts, `@xyflow/react` — **:3000** (`frontend/`)
-- **Backend** — Node/Express + Sequelize + JWT — **:8001** (`new-backend/`, entry `server.js`)
-- **Reco engine** — Python 3 stdlib HTTP, pandas/openpyxl — **:8765** (`reco-engine/`)
+- **Backend** — Node/Express + Sequelize + JWT — **:8001** (`new-backend/`, entry `server.js`). **Node 24** (`.nvmrc` = 24, `engines.node >=24`); AWS runs `v24.18.0`, dev `v24.15.0`
+- **Reco engine** — Python 3 stdlib HTTP, pandas/openpyxl — **:8765** (`reco-engine/`). AWS runs the **system Python 3.12** — do NOT upgrade it (`apt` depends on it); use a venv if a newer one is ever needed
 - **DB** — PostgreSQL 16, **single unified DB `colonel_agent_accountant`** (default), brands isolated by a `brand_id` column + Row-Level Security; app connects as non-superuser `colonel_app`. Legacy per-brand DBs are an escape hatch (`USE_UNIFIED_DB=false`). See [DATABASES.md](DATABASES.md).
 - **External** — Gemini + Claude, Zoho Books, Fireflies, Google Drive/Sheets, n8n, Shopify
 - **Deploy** — AWS EC2 **t3.large** (Mumbai, account `679930074502`) at **`https://agent.accountant`**, nginx + pm2. **ngrok is retired.** rsync to `/opt/colonel` (not a git checkout) — see `../../AWS2.md`
