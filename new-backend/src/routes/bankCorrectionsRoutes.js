@@ -7,6 +7,8 @@ const {
   uploadCorrectionsExcel,
   uploadOutputExcel,
   seedPayeeDirectory,
+  getBankAssets,
+  deleteBankAsset,
 } = require('../controllers/bankCorrectionsController');
 
 const router = express.Router();
@@ -35,6 +37,17 @@ router.post(
   upload.single('file'),
   uploadOutputExcel
 );
+
+// GET /api/bank-reco/assets/:brandId — real bank-agent assets (CoA, learned directory,
+// stored corrections, side rules) with counts + a sample for the admin Manage view.
+// NOTE: roles must be listed explicitly. `authorize()` with no arguments rejects EVERY
+// role — it checks `[].includes(req.user.role)`, which is always false.
+router.get('/assets/:brandId', authenticateToken, authorize('admin', 'accountant'), getBankAssets);
+
+// DELETE /api/bank-reco/assets/:brandId/:type[?source=…] — clear one asset.
+// Admin-only: wiping a brand's CoA invalidates every side rule and learned key that is
+// validated against it, so this is not something a brand user should be able to do.
+router.delete('/assets/:brandId/:type', authenticateToken, authorize('admin'), deleteBankAsset);
 
 // POST /api/bank-reco/payee-directory/:brandId/seed
 // Body: { directory: { phone:{…}, vpa:{…}, neft_name:{…}, name:{…}, exact:{…} } }

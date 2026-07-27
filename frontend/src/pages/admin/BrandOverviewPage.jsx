@@ -34,6 +34,57 @@ const BrandOverviewPage = () => {
   const [deletingMasterIndex, setDeletingMasterIndex] = useState(null);
   const [isClearingMaster, setIsClearingMaster] = useState(false);
 
+  // Bank-agent assets modal (Chart of Accounts / learned directory / corrections / side rules).
+  // The bank agent stores nothing in brand_agents.sku_master|ledger_master, so it needs its
+  // own view instead of the sales portals' SKU/Ledger cards.
+  const [showBankModal, setShowBankModal] = useState(false);
+  const [bankAssetType, setBankAssetType] = useState(null);
+  const [bankAssetData, setBankAssetData] = useState(null);
+  const [isLoadingBank, setIsLoadingBank] = useState(false);
+  const [isClearingBank, setIsClearingBank] = useState(false);
+
+  const BANK_ASSET_META = {
+    coa:         { label: 'Chart of Accounts',       unit: 'ledgers',     hint: 'Every side rule and learned key is validated against this. Replacing or clearing it affects all bank runs for this brand.' },
+    directory:   { label: 'Learned Payee Directory', unit: 'learned keys', hint: 'Vendor identity keys learned from accountant corrections. Clearing means those vendors must be taught again.' },
+    corrections: { label: 'Stored Corrections',      unit: 'corrections',  hint: 'Exact-narration corrections saved from reviewed output files.' },
+    side_rules:  { label: 'Debit/Credit Side Rules', unit: 'rules',        hint: 'Per-vendor credit-side / debit-side ledger rules. Auto-learning is enabled for Urban Plant and M Brands only.' },
+  };
+
+  const openBankModal = async (agent, type) => {
+    setSelectedAgentForMaster(agent);
+    setBankAssetType(type);
+    setShowBankModal(true);
+    setIsLoadingBank(true);
+    setBankAssetData(null);
+    try {
+      const res = await api.get(`/bank-reco/assets/${id}`);
+      setBankAssetData(res.data?.[type] || null);
+    } catch (err) {
+      toast.error(err.response?.data?.error || 'Failed to load bank data');
+    } finally {
+      setIsLoadingBank(false);
+    }
+  };
+
+  const handleClearBankAsset = async () => {
+    const meta = BANK_ASSET_META[bankAssetType];
+    const n = bankAssetData?.count || 0;
+    if (!window.confirm(
+      `Delete ALL ${n} ${meta.unit} in "${meta.label}" for ${status?.brandName}?\n\n${meta.hint}\n\nThis cannot be undone.`
+    )) return;
+    setIsClearingBank(true);
+    try {
+      const res = await api.delete(`/bank-reco/assets/${id}/${bankAssetType}`);
+      toast.success(`Deleted ${res.data?.deleted ?? n} ${meta.unit} from ${meta.label}`);
+      setShowBankModal(false);
+      fetchStatus();
+    } catch (err) {
+      toast.error(err.response?.data?.error || 'Delete failed');
+    } finally {
+      setIsClearingBank(false);
+    }
+  };
+
   useEffect(() => {
     fetchStatus();
   }, [id]);
@@ -198,6 +249,39 @@ const BrandOverviewPage = () => {
                         Master Files Uploaded
                       </h3>
                       
+                      {/* Bank agents keep their masters in real tables, not in
+                          brand_agents JSONB — so they get their own cards. */}
+                      {agent.bankAssets ? (
+                      <div className="space-y-4">
+                        {Object.entries(BANK_ASSET_META).map(([key, meta]) => {
+                          const count = agent.bankAssets[key] || 0;
+                          return (
+                            <div key={key} className="flex items-center justify-between p-3 border rounded-lg bg-white">
+                              <div>
+                                <p className="font-medium text-slate-700 text-sm">{meta.label}</p>
+                                <p className="text-xs text-slate-500 mt-0.5">{count} {meta.unit}</p>
+                              </div>
+                              <div className="flex items-center gap-2">
+                                {count > 0 ? (
+                                  <Badge variant="success" className="gap-1 bg-emerald-50 text-emerald-700 border-emerald-200 hover:bg-emerald-100">
+                                    <CheckCircle2 className="w-3 h-3" /> Uploaded
+                                  </Badge>
+                                ) : (
+                                  <Badge variant="secondary" className="gap-1 text-slate-500">
+                                    <XCircle className="w-3 h-3" /> Missing
+                                  </Badge>
+                                )}
+                                {count > 0 && (
+                                  <Button variant="outline" size="sm" onClick={() => openBankModal(agent, key)}>
+                                    Manage
+                                  </Button>
+                                )}
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                      ) : (
                       <div className="space-y-4">
                         <div className="flex items-center justify-between p-3 border rounded-lg bg-white">
                           <div>
@@ -245,6 +329,7 @@ const BrandOverviewPage = () => {
                           </div>
                         </div>
                       </div>
+                      )}
                     </div>
 
                     {/* Timeline Column */}
@@ -408,6 +493,75 @@ const BrandOverviewPage = () => {
                             {deletingMasterIndex === idx ? 'Deleting…' : 'Delete'}
                           </Button>
                         </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* Bank agent assets — Chart of Accounts / learned directory / corrections / side rules */}
+      <Dialog open={showBankModal} onOpenChange={setShowBankModal}>
+        <DialogContent className="max-w-4xl">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <FileText className="w-5 h-5 text-indigo-600" />
+              <span>{bankAssetType ? BANK_ASSET_META[bankAssetType].label : ''} — {status?.brandName}</span>
+            </DialogTitle>
+          </DialogHeader>
+
+          <div className="mt-2">
+            {bankAssetType && (
+              <p className="text-xs text-slate-500 mb-4">{BANK_ASSET_META[bankAssetType].hint}</p>
+            )}
+
+            <div className="flex items-center justify-between mb-4">
+              <p className="text-sm text-slate-600">
+                {isLoadingBank ? 'Loading…'
+                  : `${bankAssetData?.count ?? 0} ${bankAssetType ? BANK_ASSET_META[bankAssetType].unit : ''}`}
+                {bankAssetData?.count > (bankAssetData?.sample?.length || 0) && (
+                  <span className="text-slate-400"> · showing first {bankAssetData.sample.length}</span>
+                )}
+              </p>
+              {!isLoadingBank && (bankAssetData?.count || 0) > 0 && (
+                <Button variant="destructive" size="sm" disabled={isClearingBank} onClick={handleClearBankAsset}>
+                  <Trash2 className="w-3.5 h-3.5 mr-1.5" />
+                  {isClearingBank ? 'Deleting…' : `Delete All (${bankAssetData.count})`}
+                </Button>
+              )}
+            </div>
+
+            {bankAssetData?.breakdown?.length > 0 && (
+              <div className="flex flex-wrap gap-2 mb-4">
+                {bankAssetData.breakdown.map(b => (
+                  <Badge key={b.key_type} variant="secondary" className="text-slate-600">
+                    {b.key_type}: {b.n}
+                  </Badge>
+                ))}
+              </div>
+            )}
+
+            {isLoadingBank ? (
+              <div className="py-10 text-center text-slate-500 text-sm">Loading…</div>
+            ) : !bankAssetData || bankAssetData.count === 0 ? (
+              <div className="py-10 text-center text-slate-500 text-sm">Nothing stored yet.</div>
+            ) : (
+              <div className="max-h-[55vh] overflow-auto border rounded-lg">
+                <table className="w-full text-sm">
+                  <thead className="bg-slate-50 sticky top-0">
+                    <tr>
+                      <th className="px-4 py-2 text-left font-medium text-slate-600">Entry</th>
+                      <th className="px-4 py-2 text-left font-medium text-slate-600">Maps to</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {bankAssetData.sample.map((row, idx) => (
+                      <tr key={idx} className="border-t">
+                        <td className="px-4 py-2 align-top break-words max-w-md text-slate-700">{row.a}</td>
+                        <td className="px-4 py-2 align-top break-words max-w-md text-slate-500">{row.b}</td>
                       </tr>
                     ))}
                   </tbody>

@@ -215,15 +215,43 @@ const getBrandStatus = async (req, res, next) => {
         }
       }
 
-      const masterStatus = masterDataMap[agent.id] || { 
-        hasSkuMaster: false, hasLedgerMaster: false, skuMasterCount: 0, ledgerMasterCount: 0 
+      const masterStatus = masterDataMap[agent.id] || {
+        hasSkuMaster: false, hasLedgerMaster: false, skuMasterCount: 0, ledgerMasterCount: 0
       };
+
+      // The bank agent keeps nothing in brand_agents.sku_master/ledger_master — its assets
+      // are real tables (CoA, learned payee directory, stored corrections, side rules).
+      // Without this the overview reported "0 mapping entries / Missing" for a brand that
+      // actually had 855 CoA ledgers and hundreds of learned keys.
+      // ONLY the universal bank statement classifier uses these tables. pdf_bank_extract
+      // (PDF → Excel) and bank_tally_reco (Tally daybook vs output) have no CoA or learned
+      // directory of their own, so a loose /bank/i match would show them borrowed counts.
+      let bankAssets = null;
+      if (/universal.*bank|bank.*statement/i.test(agent.name)) {
+        bankAssets = {};
+        for (const [key, table] of Object.entries({
+          coa: 'ledger_master',
+          directory: 'bank_payee_directory',
+          corrections: 'bank_reco_corrections',
+          side_rules: 'bank_side_rules',
+        })) {
+          try {
+            const [[row]] = await brandDb.query(
+              `SELECT count(*)::int AS n FROM ${table} WHERE brand_id = $1`,
+              { bind: [brand.id] });
+            bankAssets[key] = (row && row.n) || 0;
+          } catch (_) {
+            bankAssets[key] = 0;   // table not created yet for this brand
+          }
+        }
+      }
 
       agentsProgress.push({
         agentId: agent.id,
         agentName: agent.name,
         generatedFiles,
-        masterStatus
+        masterStatus,
+        ...(bankAssets ? { bankAssets } : {})
       });
     }
 

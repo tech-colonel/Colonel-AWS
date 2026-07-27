@@ -865,6 +865,119 @@ const deriveSideRules = async (brandId, seq, rows, brandName = '') => {
   return { created, suggested };
 };
 
+// ─── Bank agent assets: what a brand has "uploaded/learned" for the bank agent ──
+//
+// The sales portals surface SKU Master / Ledger Configurations from brand_agents JSONB.
+// The bank agent stores nothing there — its assets live in real tables — so the admin
+// Brand Overview showed "0 mapping entries / Missing" for a brand that actually had 855
+// CoA ledgers and hundreds of learned keys. These endpoints expose the real thing, and
+// let an admin clear an asset that was uploaded against the wrong company or from a bad
+// file (the CoA in particular governs every layer: a wrong CoA silently invalidates every
+// side rule and learned key, because each is validated against it).
+
+const BANK_ASSET_TABLES = {
+  coa:         { table: 'ledger_master',          label: 'Chart of Accounts' },
+  directory:   { table: 'bank_payee_directory',   label: 'Learned Payee Directory' },
+  corrections: { table: 'bank_reco_corrections',  label: 'Stored Corrections' },
+  side_rules:  { table: 'bank_side_rules',        label: 'Debit/Credit Side Rules' },
+};
+
+const tableExists = async (seq, name, t) => {
+  const [[row]] = await seq.query(`SELECT to_regclass($1) IS NOT NULL AS ok`,
+    { bind: [`public.${name}`], transaction: t });
+  return !!(row && row.ok);
+};
+
+/** GET /api/bank-reco/assets/:brandId — counts + a small sample of each bank asset. */
+const getBankAssets = async (req, res) => {
+  const { brandId } = req.params;
+  try {
+    const seq = await getBrandSeq(brandId);
+    const out = {};
+    await withBypass(seq, async (t) => {
+      for (const [key, { table, label }] of Object.entries(BANK_ASSET_TABLES)) {
+        if (!(await tableExists(seq, table, t))) {
+          out[key] = { label, count: 0, exists: false, sample: [] };
+          continue;
+        }
+        const [[{ count }]] = await seq.query(
+          `SELECT count(*)::int AS count FROM ${table} WHERE brand_id = $1`,
+          { bind: [brandId], transaction: t });
+
+        // Per-table sample + breakdown, shaped for a simple two-column table in the UI.
+        let sample = []; let breakdown = null;
+        if (count > 0) {
+          if (key === 'coa') {
+            const [rows] = await seq.query(
+              `SELECT ledger_name AS a, coalesce(source,'') AS b FROM ledger_master
+                WHERE brand_id = $1 ORDER BY ledger_name LIMIT 500`,
+              { bind: [brandId], transaction: t });
+            sample = rows;
+          } else if (key === 'directory') {
+            const [rows] = await seq.query(
+              `SELECT key_type||': '||key_value AS a, ledger AS b FROM bank_payee_directory
+                WHERE brand_id = $1 ORDER BY key_type, key_value LIMIT 500`,
+              { bind: [brandId], transaction: t });
+            sample = rows;
+            const [bd] = await seq.query(
+              `SELECT key_type, count(*)::int AS n FROM bank_payee_directory
+                WHERE brand_id = $1 GROUP BY key_type ORDER BY n DESC`,
+              { bind: [brandId], transaction: t });
+            breakdown = bd;
+          } else if (key === 'corrections') {
+            const [rows] = await seq.query(
+              `SELECT narration_raw AS a, correct_ledger AS b FROM bank_reco_corrections
+                WHERE brand_id = $1 ORDER BY updated_at DESC LIMIT 500`,
+              { bind: [brandId], transaction: t });
+            sample = rows;
+          } else if (key === 'side_rules') {
+            const [rows] = await seq.query(
+              `SELECT array_to_string(tokens,', ')||'  ['||status||'/'||source||']' AS a,
+                      'CR: '||credit_ledger||'   DR: '||debit_ledger AS b
+                 FROM bank_side_rules WHERE brand_id = $1 ORDER BY priority, id LIMIT 500`,
+              { bind: [brandId], transaction: t });
+            sample = rows;
+          }
+        }
+        out[key] = { label, count, exists: true, sample, ...(breakdown ? { breakdown } : {}) };
+      }
+    });
+    res.json(out);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+};
+
+/**
+ * DELETE /api/bank-reco/assets/:brandId/:type — clear one bank asset for a brand.
+ * Optional ?source=<s> narrows the delete (e.g. only rows written by 'backfill'), so a
+ * bad import can be undone without discarding the accountant's hand-made corrections.
+ */
+const deleteBankAsset = async (req, res) => {
+  const { brandId, type } = req.params;
+  const { source } = req.query;
+  const spec = BANK_ASSET_TABLES[type];
+  if (!spec) return res.status(400).json({ error: `Unknown bank asset type: ${type}` });
+  try {
+    const seq = await getBrandSeq(brandId);
+    let deleted = 0;
+    await withBypass(seq, async (t) => {
+      if (!(await tableExists(seq, spec.table, t))) return;
+      const sql = source
+        ? `DELETE FROM ${spec.table} WHERE brand_id = $1 AND source = $2`
+        : `DELETE FROM ${spec.table} WHERE brand_id = $1`;
+      const bind = source ? [brandId, source] : [brandId];
+      const [, meta] = await seq.query(sql, { bind, transaction: t });
+      deleted = (meta && (meta.rowCount ?? meta.rows)) || 0;
+    });
+    console.log(`[BANK-ASSETS] cleared ${spec.label} for brand ${brandId}` +
+      (source ? ` (source=${source})` : '') + ` — ${deleted} row(s)`);
+    res.json({ success: true, type, label: spec.label, deleted });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+};
+
 // ─── Utility: bulk-upsert a seeded directory JSON into bank_payee_directory ──
 // Called by the seed endpoint. directoryJson is the keyed JSON from seed_payee_directory.py.
 
@@ -901,6 +1014,8 @@ module.exports = {
   saveCorrections,
   uploadCorrectionsExcel,
   uploadOutputExcel,
+  getBankAssets,
+  deleteBankAsset,
   loadCorrectionMap,
   loadSideRules,
   deriveSideRules,
