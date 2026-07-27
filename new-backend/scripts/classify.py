@@ -524,6 +524,77 @@ def _slash_rail_payee(u: str):
     return _norm_key(best) if best else None
 
 
+# ── HDFC rails ───────────────────────────────────────────────────────────────
+# HDFC statements use several shapes none of the rails above cover. Measured on a real
+# 2026-06 Zaydn statement: only 63.9% of narrations produced a reusable key, and the gap
+# was almost entirely NACH loan repayments — so every loan row had to be re-corrected by
+# the accountant every month and could never be learned.
+
+def _tpt_payee(u: str):
+    """<account>-TPT-<ref>-<PAYEE>  (HDFC internal transfer). Payee is the last field."""
+    m = re.match(r'^\d{6,}-TPT-[A-Z0-9]+-(.+)$', u)
+    return _norm_key(m.group(1)) if m else None
+
+
+def _ach_payee(u: str):
+    """ACH D- <BILLER>-<mandate ref>  — NACH loan/mandate debit. The biller is the field
+    after the rail word; the trailing field is a per-instalment reference."""
+    m = re.match(r'^ACH\s+D-\s*(.+)$', u)
+    if not m:
+        return None
+    fields = [f.strip() for f in m.group(1).split('-') if f.strip()]
+    return _norm_key(fields[0]) if fields else None
+
+
+def _ft_payee(u: str):
+    """FT- <tag>-<account> - <PAYEE>  /  FT - DR - <account> - <PAYEE>. Payee is last."""
+    m = re.match(r'^FT\s*-\s*(.+)$', u)
+    if not m:
+        return None
+    fields = [f.strip() for f in m.group(1).split('-') if f.strip()]
+    for f in reversed(fields):
+        if any(c.isalpha() for c in f) and not any(c.isdigit() for c in f):
+            return _norm_key(f)
+    return None
+
+
+def _imps_dash_payee(u: str):
+    """IMPS-<ref>-<PAYEE>-<BANK>-<acct>-<note>. Payee is the field after the reference."""
+    m = re.match(r'^IMPS-\d+-([^-]+)-', u)
+    return _norm_key(m.group(1)) if m else None
+
+
+def _neft_dash_name(u: str):
+    """NEFT|RTGS (DR|CR)-<IFSC>-<PAYEE>-… without the '-NETBANK' tail the older pattern
+    requires (e.g. '…-BLOCK POOL TECHNOLOGIES PRIVATE LIMITED-ZAYDN-IN426…')."""
+    m = re.match(r'^(?:NEFT|RTGS)\s+(?:DR|CR)-[A-Z0-9]+-([^-]+)', u)
+    return _norm_key(m.group(1)) if m else None
+
+
+def _slash_merchant(u: str):
+    """<gateway ref>/<MERCHANT-CODE> — HDFC biller/aggregator rail. The merchant code is
+    the stable half ('DHDF91Y1LQ1SU2/BILLDKGOOGLEADS' -> billdkgoogleads); the leading
+    reference changes every transaction, which is why the whole string was useless."""
+    m = re.match(r'^[A-Z0-9]+/([A-Z][A-Z0-9]{5,})$', u)
+    return _norm_key(m.group(1)) if m else None
+
+
+def _prefix_merchant(u: str):
+    """<MERCHANT>_<ref>_<ref> — e.g. 'BAJAJFINOTP_BFL15092537202_174550516'."""
+    m = re.match(r'^([A-Z]{5,})_[A-Z0-9]+_', u)
+    return _norm_key(m.group(1)) if m else None
+
+
+def _label_rail(u: str):
+    """Fixed-label rails where the narration IS the identity, not a payee:
+    'ACH DEBIT RETURN CHARGES <date>-<ref>' and 'CBDT/BANK REFERENCE NO:…'."""
+    if re.match(r'^ACH\s+DEBIT\s+RETURN\s+CHARGES', u):
+        return 'ach debit return charges'
+    if re.match(r'^CBDT/', u):
+        return 'cbdt'
+    return None
+
+
 def _funds_transfer_payee(u: str):
     """Kotak plain-language rail: 'FUNDS TRANSFER TO <PAYEE>' / '... FROM <PAYEE>'."""
     m = re.search(r'\bFUNDS\s+TRANSFER\s+(?:TO|FROM)\s+(.+)$', u)
@@ -588,14 +659,29 @@ def extract_payee_keys(narration) -> dict:
             keys['neft_name'] = nm
     # Dash/slash rails (ICICI, Kotak, NACH). Tried only after the patterns above so no
     # brand that already produces keys can change behaviour.
+    # Take the first candidate that is actually USABLE, not merely the first that is
+    # non-None. A plain `a or b or c` chain short-circuits on a truthy-but-useless result
+    # and never reaches a later rail that would have worked: 'NEFT CR-<IFSC>-BLOCK POOL
+    # TECHNOLOGIES…' yielded 'technologies private' (all generic words -> rejected), which
+    # then blocked the rail that correctly returns 'block pool technologies private limited'.
+    def _first_usable(*candidates):
+        for fn in candidates:
+            nm = fn(u)
+            if nm and _usable_key(nm):
+                return nm
+        return None
+
     if 'neft_name' not in keys:
-        nm = _dash_neft_payee(u) or _space_neft_payee(u)
-        if nm and _usable_key(nm):
+        nm = _first_usable(_dash_neft_payee, _space_neft_payee, _neft_dash_name)
+        if nm:
             keys['neft_name'] = nm
     if 'name' not in keys:
-        nm = (_nach_counterparty(u) or _slash_rail_payee(u)
-              or _funds_transfer_payee(u))
-        if nm and _usable_key(nm):
+        # HDFC rails last: they are the most shape-specific, so anything an earlier,
+        # broader pattern already resolved keeps the key it had.
+        nm = _first_usable(_nach_counterparty, _slash_rail_payee, _funds_transfer_payee,
+                           _tpt_payee, _ach_payee, _ft_payee, _imps_dash_payee,
+                           _slash_merchant, _prefix_merchant, _label_rail)
+        if nm:
             keys['name'] = nm
     # Final guard: never emit an identity key that cannot identify anyone.
     for sec in ('name', 'neft_name'):

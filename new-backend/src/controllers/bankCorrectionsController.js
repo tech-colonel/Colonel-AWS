@@ -207,6 +207,69 @@ const fundsTransferPayee = (u) => {
   return normKey(joined);
 };
 
+// ── HDFC rails ───────────────────────────────────────────────────────────────
+// Mirrors the same-named helpers in classify.py. Measured on a real 2026-06 Zaydn (HDFC)
+// statement: only 63.9% of narrations produced a reusable key before these, and the gap
+// was almost entirely NACH loan repayments — so every loan row was re-corrected monthly
+// and could never be learned. With these: 99.6%.
+
+// <account>-TPT-<ref>-<PAYEE> (HDFC internal transfer). Payee is the last field.
+const tptPayee = (u) => {
+  const m = u.match(/^\d{6,}-TPT-[A-Z0-9]+-(.+)$/);
+  return m ? normKey(m[1]) : null;
+};
+
+// ACH D- <BILLER>-<mandate ref> — NACH loan/mandate debit.
+const achPayee = (u) => {
+  const m = u.match(/^ACH\s+D-\s*(.+)$/);
+  if (!m) return null;
+  const fields = m[1].split('-').map((f) => f.trim()).filter(Boolean);
+  return fields.length ? normKey(fields[0]) : null;
+};
+
+// FT- <tag>-<account> - <PAYEE>  /  FT - DR - <account> - <PAYEE>. Payee is last.
+const ftPayee = (u) => {
+  const m = u.match(/^FT\s*-\s*(.+)$/);
+  if (!m) return null;
+  const fields = m[1].split('-').map((f) => f.trim()).filter(Boolean);
+  for (let i = fields.length - 1; i >= 0; i -= 1) {
+    if (/[A-Za-z]/.test(fields[i]) && !/\d/.test(fields[i])) return normKey(fields[i]);
+  }
+  return null;
+};
+
+// IMPS-<ref>-<PAYEE>-<BANK>-<acct>-<note>
+const impsDashPayee = (u) => {
+  const m = u.match(/^IMPS-\d+-([^-]+)-/);
+  return m ? normKey(m[1]) : null;
+};
+
+// NEFT|RTGS (DR|CR)-<IFSC>-<PAYEE>-… without the '-NETBANK' tail the older pattern needs.
+const neftDashName = (u) => {
+  const m = u.match(/^(?:NEFT|RTGS)\s+(?:DR|CR)-[A-Z0-9]+-([^-]+)/);
+  return m ? normKey(m[1]) : null;
+};
+
+// <gateway ref>/<MERCHANT-CODE> — the merchant code is the stable half; the leading
+// reference changes every transaction ('DHDF91Y1LQ1SU2/BILLDKGOOGLEADS').
+const slashMerchant = (u) => {
+  const m = u.match(/^[A-Z0-9]+\/([A-Z][A-Z0-9]{5,})$/);
+  return m ? normKey(m[1]) : null;
+};
+
+// <MERCHANT>_<ref>_<ref> — e.g. 'BAJAJFINOTP_BFL15092537202_174550516'
+const prefixMerchant = (u) => {
+  const m = u.match(/^([A-Z]{5,})_[A-Z0-9]+_/);
+  return m ? normKey(m[1]) : null;
+};
+
+// Fixed-label rails where the narration IS the identity, not a payee.
+const labelRail = (u) => {
+  if (/^ACH\s+DEBIT\s+RETURN\s+CHARGES/.test(u)) return 'ach debit return charges';
+  if (/^CBDT\//.test(u)) return 'cbdt';
+  return null;
+};
+
 const extractPayeeKeys = (narration) => {
   if (!narration) return {};
   const raw = String(narration).trim();
@@ -235,13 +298,25 @@ const extractPayeeKeys = (narration) => {
   }
   // Dash/slash rails (ICICI, Kotak, NACH). Tried only after the patterns above, so no
   // brand that already produces keys can change behaviour.
+  // First USABLE candidate, not merely the first non-null: a plain `a || b || c` chain
+  // short-circuits on a truthy-but-useless result and never reaches a later rail that
+  // would have worked. MUST mirror _first_usable() in classify.py.
+  const firstUsable = (...fns) => {
+    for (const fn of fns) {
+      const nm = fn(u);
+      if (nm && usableKey(nm)) return nm;
+    }
+    return null;
+  };
   if (!keys.neft_name) {
-    const nm = dashNeftPayee(u) || spaceNeftPayee(u);
-    if (nm && usableKey(nm)) keys.neft_name = nm;
+    const nm = firstUsable(dashNeftPayee, spaceNeftPayee, neftDashName);
+    if (nm) keys.neft_name = nm;
   }
   if (!keys.name) {
-    const nm = nachCounterparty(u) || slashRailPayee(u) || fundsTransferPayee(u);
-    if (nm && usableKey(nm)) keys.name = nm;
+    const nm = firstUsable(nachCounterparty, slashRailPayee, fundsTransferPayee,
+                           tptPayee, achPayee, ftPayee, impsDashPayee,
+                           slashMerchant, prefixMerchant, labelRail);
+    if (nm) keys.name = nm;
   }
   // Final guard: never store an identity key that cannot identify anyone.
   for (const sec of ['name', 'neft_name']) {

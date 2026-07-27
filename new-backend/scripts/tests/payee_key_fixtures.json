@@ -111,6 +111,69 @@
         "neft_name": "rakesh kumar",
         "phone": "9988776655"
       }
+    },
+    {
+      "why": "HDFC TPT internal transfer \u2014 payee is the last field",
+      "narration": "50100097601120-TPT-NBPVQA0WDIBZ5ZRW-ANKIT DASS",
+      "keys": {
+        "name": "ankit dass"
+      }
+    },
+    {
+      "why": "HDFC NACH loan debit. 28 of these on one Zaydn statement, all previously unkeyable \u2014 so every loan row was re-corrected every month and never learned.",
+      "narration": "ACH D- ADITYA BIRLA FIN LTD-ABNDBIL00000",
+      "keys": {
+        "name": "aditya birla fin ltd"
+      }
+    },
+    {
+      "why": "HDFC biller rail \u2014 the leading gateway ref changes every txn; the merchant code is the stable half",
+      "narration": "DHDF91Y1LQ1SU2/BILLDKGOOGLEADS",
+      "keys": {
+        "name": "billdkgoogleads"
+      }
+    },
+    {
+      "why": "HDFC merchant rail via Razorpay aggregator",
+      "narration": "T4K7T3QMDUO2PQ/RAZPARKAFINCAPLIMITE",
+      "keys": {
+        "name": "razparkafincaplimite"
+      }
+    },
+    {
+      "why": "HDFC FT rail \u2014 payee is the trailing non-numeric field",
+      "narration": "FT - DR - 50200021629664 - RAJESHWARI PETROCHEM PRIVATE LIMITED",
+      "keys": {
+        "name": "rajeshwari petrochem private limited"
+      }
+    },
+    {
+      "why": "HDFC IMPS dash rail \u2014 payee follows the reference",
+      "narration": "IMPS-615520476409-MODQUEST PRIVATE LIM-ICIC-XXXXXXXX4636-BRANDSETTLEMENT",
+      "keys": {
+        "name": "modquest private lim"
+      }
+    },
+    {
+      "why": "NEFT CR with no '-NETBANK' tail. REGRESSION GUARD for the or-chain bug: spaceNeftPayee returns 'technologies private' (all generic -> rejected) and used to short-circuit the rail that works.",
+      "narration": "NEFT CR-ICIC0SF0002-BLOCK POOL TECHNOLOGIES PRIVATE LIMITED-ZAYDN-IN42616056652704",
+      "keys": {
+        "neft_name": "block pool technologies private limited"
+      }
+    },
+    {
+      "why": "Fixed-label rail \u2014 the narration IS the identity, there is no payee",
+      "narration": "ACH DEBIT RETURN CHARGES 020626-EPR2716116468881",
+      "keys": {
+        "name": "ach debit return charges"
+      }
+    },
+    {
+      "why": "Merchant prefix before the underscore refs",
+      "narration": "BAJAJFINOTP_BFL15092537202_174550516",
+      "keys": {
+        "name": "bajajfinotp"
+      }
     }
   ]
 }
