@@ -1,5 +1,26 @@
 # 🪖 CLAUDE.md — Colonel-AWS (index for AI assistants)
 
+> ## 🚨 AWS2 IS THE DEFAULT AWS — read it before ANY infra work
+> **📍 File path: `/Users/dhavalchauhan/Colonel Full/AWS2.md`** (i.e. `../../AWS2.md` from this repo —
+> it lives one level ABOVE the repo and is **not tracked in git**, so a fresh clone will not have it).
+> **AWS2.md is the single source of truth for the live site** — full mapping, security hardening,
+> deploy, and rollback. Read it first; treat anything below that contradicts it as historical.
+>
+> | | Current (AWS **#2** — DEFAULT) | Old (AWS #1 — **STOPPED**) |
+> |---|---|---|
+> | URL | `https://agent.accountant` | `eggbeater-thesis-crowbar.ngrok-free.dev` (ngrok, retired) |
+> | Account | `679930074502` | `364503394269` |
+> | IP / size | `13.127.171.66` · t3.large · Mumbai `ap-south-1` | `43.205.60.250` · t3.small |
+> | SSH | `ssh -i ~/.ssh/colonel2-key.pem ubuntu@13.127.171.66` | — |
+> | CLI profile | `colonel2` | — |
+>
+> **Serving path:** nginx (`:80/:443`) → backend `:8001` → `reco-engine` `:8765`; unified DB
+> `colonel_agent_accountant`. **App root on the box is `/opt/colonel` and is NOT a git checkout** —
+> it is rsync-deployed, so drift accumulates in BOTH directions. Deploy named files only and
+> checksum-compare against the box first; never rsync a whole directory (a wholesale sync has
+> already nearly reverted two production-only fixes). **ngrok is retired.** Never operate the old
+> account without asking.
+
 > **Lean index — detail lives in the focused docs.** Open the one that matches your task; each is
 > self-contained. Full human walkthrough is in **[README.md](README.md)**.
 >
@@ -10,7 +31,8 @@
 > | **[SERVERS.md](SERVERS.md)** | Ports, start/restart, pm2, health checks, fresh-machine bring-up |
 > | **[RECO.md](RECO.md)** | Python reco engine + every agent (2B/2A-2B/3B/GSTR-1/E-Invoice/bank/GSTR-3B Tally/Zepto) |
 > | **[DATABASES.md](DATABASES.md)** | Schema, RLS, migrations, per-brand tables, seed/restore |
-> | **[AWS.md](AWS.md)** | Deploying/operating the live EC2 site — deploy flow, crons, backups |
+> | **`../../AWS2.md`** | 🟢 **CURRENT live infra — READ FIRST for anything touching AWS.** agent.accountant, account #2, nginx/HTTPS, security hardening, deploy + rollback. Absolute path: `/Users/dhavalchauhan/Colonel Full/AWS2.md` |
+> | **[AWS.md](AWS.md)** | ⚠️ **HISTORICAL** — the OLD ngrok box (now stopped). Deploy flow, crons, backups. Superseded by `AWS2.md`; cross-check before trusting any IP/account/URL here |
 
 ---
 
@@ -26,7 +48,7 @@ superset of the live production app**, shipped with a snapshot of the real datab
 - **Reco engine** — Python 3 stdlib HTTP, pandas/openpyxl — **:8765** (`reco-engine/`)
 - **DB** — PostgreSQL 16, **single unified DB `colonel_agent_accountant`** (default), brands isolated by a `brand_id` column + Row-Level Security; app connects as non-superuser `colonel_app`. Legacy per-brand DBs are an escape hatch (`USE_UNIFIED_DB=false`). See [DATABASES.md](DATABASES.md).
 - **External** — Gemini + Claude, Zoho Books, Fireflies, Google Drive/Sheets, n8n, Shopify
-- **Deploy** — AWS EC2 (t3.small, Mumbai) via ngrok; pm2
+- **Deploy** — AWS EC2 **t3.large** (Mumbai, account `679930074502`) at **`https://agent.accountant`**, nginx + pm2. **ngrok is retired.** rsync to `/opt/colonel` (not a git checkout) — see `../../AWS2.md`
 
 ## Tree (high level)
 ```
@@ -49,7 +71,8 @@ Sales agents run in Node → `bulkCreate` to the brand's dynamic tables + `agent
 - **developer** — Colonel AI · Feedback · Plans
 
 ## ⛔ Golden rules (non-negotiable)
-1. **Never touch AWS/EC2** (deploy, restart, migration, DB op) without explicit human permission this session — see [AWS.md](AWS.md).
+1. **Never touch AWS/EC2** (deploy, restart, migration, DB op) without explicit human permission this session — see **`../../AWS2.md`** (`/Users/dhavalchauhan/Colonel Full/AWS2.md`) for the live box; [AWS.md](AWS.md) is the old, stopped one.
+1b. **Deploy named files, never whole directories.** `/opt/colonel` is rsync-deployed and drifts in both directions. Checksum-compare each file against the box (`md5sum` there vs `git show HEAD:<path> | md5 -q` here) before overwriting, and re-audit with `rsync -rcn` after.
 2. **Back up before editing any shared file** — `cp -a <file> <file>.bak-$(date +%Y%m%d-%H%M%S)`. Prefer new files + minimal additive changes.
 3. **DB persistence is fire-and-forget** — never change agent logic when adding DB/UI; DB writes are additive only.
 4. **RLS: no client-settable bypass.** The old `SET LOCAL app.bypass_rls='true'` escape hatch was removed by hardening (`db-restructure/005_harden_rls.sql`) — only the real `postgres` superuser bypasses RLS now (migrations/admin ops). App queries are scoped by `app.brand_id`; use `IS NOT DISTINCT FROM` for nullable month/year.
