@@ -16,10 +16,6 @@
     {
       "header": "Amount(in",
       "tag": "amount"
-    },
-    {
-      "header": "` )",
-      "tag": "other"
     }
   ]
 }
