@@ -2390,6 +2390,111 @@ def anthropic_side_verdict(narration, credit_ledger, debit_ledger, assigned,
     return ("abstain", assigned)          # UNSURE, empty, or anything unrecognised
 
 
+def anthropic_classify_batch(items, coa, api_key, model="claude-haiku-4-5",
+                             timeout=120, chunk=25):
+    """Classify MANY rows against ONE copy of the chart of accounts.
+
+    WHY: the per-row call sent the whole CoA every time. On FLO (3,968 ledgers) a single
+    statement with ~60 unresolved rows meant ~2.14M input tokens, because the same ledger
+    list was re-sent 60 times. The CoA is identical for every row of a brand, so it should
+    be sent ONCE.
+
+    Two savings, stacked:
+      * BATCHING — rows are numbered and answered in one response. ~20x fewer tokens.
+      * PROMPT CACHING — the CoA sits in its own content block marked `cache_control`,
+        in a STABLE (sorted) order so the prefix is byte-identical across chunks, retries
+        and re-runs. Anthropic bills a cache hit at ~10%. Another ~2.5x.
+    Together roughly 50x: FLO ~2.14M -> ~43k input tokens per run.
+
+    Per-row name ranking is kept as a short "closest matches" hint inside each row, so no
+    signal is lost by sorting the shared block.
+
+    `items` = [{'idx': int, 'narration': str, 'hints': [str, ...]}]
+    Returns {idx: ledger} for rows the model resolved; absent/unmatched rows are simply
+    not returned, and the caller leaves them untouched.
+    """
+    import urllib.request, json as _json, ssl
+    if not api_key or not items or not coa:
+        return {}
+
+    # Stable order => cacheable prefix. Never reorder this per row.
+    coa_sorted = sorted(set(coa))
+    coa_block = "\n".join(coa_sorted)
+    valid = {' '.join(re.sub(r'[^a-z0-9 ]', ' ', l.lower()).split()): l for l in coa_sorted}
+
+    try:
+        import certifi
+        ctx = ssl.create_default_context(cafile=certifi.where())
+    except Exception:
+        ctx = ssl.create_default_context()
+
+    out = {}
+    for start in range(0, len(items), chunk):
+        batch = items[start:start + chunk]
+        lines = []
+        for it in batch:
+            hint = ", ".join(it.get('hints') or [])
+            lines.append(f"{it['idx']}. {it['narration']}"
+                         + (f"\n   closest name matches: {hint}" if hint else ""))
+        ask = (
+            "For EACH numbered bank transaction below, choose the ONE ledger from the "
+            "LEDGER LIST that best matches it (consider payee/vendor name, UPI/NEFT "
+            "counterparty, and purpose). You MUST copy a ledger EXACTLY as written in the "
+            "list. If none is a clear match for a row, answer SUSPENSE for that row.\n\n"
+            "Reply with one line per transaction, formatted exactly as:\n"
+            "<number>: <ledger name>\n"
+            "No other text.\n\n"
+            "TRANSACTIONS:\n" + "\n".join(lines)
+        )
+        body = _json.dumps({
+            "model": model,
+            "max_tokens": 32 * len(batch) + 256,
+            "messages": [{"role": "user", "content": [
+                # Cached prefix — identical across every chunk and every run for a brand.
+                {"type": "text",
+                 "text": "You are an expert Indian bank-reconciliation assistant.\n\n"
+                         "LEDGER LIST (the brand's full chart of accounts):\n" + coa_block,
+                 "cache_control": {"type": "ephemeral"}},
+                {"type": "text", "text": ask},
+            ]}],
+        }).encode("utf-8")
+        try:
+            req = urllib.request.Request(
+                "https://api.anthropic.com/v1/messages", data=body,
+                headers={"content-type": "application/json", "x-api-key": api_key,
+                         "anthropic-version": "2023-06-01"})
+            with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
+                data = _json.loads(resp.read().decode("utf-8"))
+        except Exception as _e:
+            print(f"      → Claude batch failed ({type(_e).__name__}: {str(_e)[:120]}); "
+                  f"rows in this chunk keep their rule answer", file=sys.stderr)
+            continue
+
+        usage = data.get("usage") or {}
+        if usage:
+            print(f"        chunk {start//chunk + 1}: in={usage.get('input_tokens')} "
+                  f"cache_write={usage.get('cache_creation_input_tokens')} "
+                  f"cache_read={usage.get('cache_read_input_tokens')}")
+
+        text = ""
+        for block in data.get("content", []):
+            if block.get("type") == "text":
+                text = block.get("text") or ""
+                break
+        for line in text.splitlines():
+            mm = re.match(r'\s*(\d+)\s*[:.\)]\s*(.+?)\s*$', line)
+            if not mm:
+                continue
+            idx, pick = int(mm.group(1)), mm.group(2).strip()
+            if pick.upper() == "SUSPENSE":
+                continue
+            # Only a ledger that really exists is accepted — never free text.
+            hit = valid.get(' '.join(re.sub(r'[^a-z0-9 ]', ' ', pick.lower()).split()))
+            if hit:
+                out[idx] = hit
+    return out
+
+
 def anthropic_classify(narration, candidates, api_key, model="claude-haiku-4-5", timeout=30):
     import urllib.request
     import json as _json
@@ -2759,52 +2864,72 @@ def main():
         low_idx = [i for i, r in enumerate(rows) if r["confidence"] in ("Low", "Medium")]
         if low_idx:
             print(f"[3.5/4] {llm_name} fallback on {len(low_idx)} low/medium-confidence rows …")
-            from concurrent.futures import ThreadPoolExecutor
             suspense_label = classifier._suspense_ledger
-            _cache = {}
 
-            def _resolve(i):
-                desc = rows[i]["description"]
-                entity = rows[i].get("entity", "")
-                key = ' '.join(str(desc).upper().split())
-                if key in _cache:
-                    return i, _cache[key]
-                # Build candidates from the extracted payee entity when available
-                # (cleaner signal), else from the full narration.
-                # llm_candidates (not top_candidates): also offers the brand's actually-used
-                # category ledgers and narration-token matches, so the correct ledger is on
-                # the menu even when it shares no words with the payee name.
-                cands = classifier.llm_candidates(entity or desc, desc, k=15)
-                if suspense_label not in cands:
-                    cands = cands + [suspense_label]
-                pick = llm_pick(desc, cands)
-                _cache[key] = pick
-                return i, pick
+            # De-duplicate by narration BEFORE calling: identical narrations get one
+            # decision, applied to every row that shares it.
+            by_key = {}
+            for i in low_idx:
+                by_key.setdefault(' '.join(str(rows[i]["description"]).upper().split()),
+                                  []).append(i)
+
+            picks = {}
+            if anthropic_key:
+                # Batched: ONE copy of the CoA for the whole run instead of one per row.
+                # Per-row name ranking survives as a short hint, so sorting the shared
+                # (cacheable) ledger block costs nothing.
+                items = []
+                for n, (key, idxs) in enumerate(by_key.items()):
+                    i0 = idxs[0]
+                    ent = rows[i0].get("entity", "") or rows[i0]["description"]
+                    items.append({"idx": n, "narration": rows[i0]["description"],
+                                  "hints": classifier.top_candidates(ent, k=8)})
+                answers = anthropic_classify_batch(items, classifier.master_ledgers,
+                                                   anthropic_key, args.anthropic_model)
+                for n, key in enumerate(by_key):
+                    if n in answers:
+                        picks[key] = answers[n]
+            else:
+                # Gemini path unchanged: per-row, candidate-constrained.
+                from concurrent.futures import ThreadPoolExecutor
+                def _resolve(key):
+                    i0 = by_key[key][0]
+                    ent = rows[i0].get("entity", "") or rows[i0]["description"]
+                    cands = classifier.llm_candidates(ent, rows[i0]["description"], k=15)
+                    if suspense_label not in cands:
+                        cands = cands + [suspense_label]
+                    return key, llm_pick(rows[i0]["description"], cands)
+                try:
+                    with ThreadPoolExecutor(max_workers=6) as ex:
+                        for key, pick in ex.map(_resolve, list(by_key)):
+                            if pick:
+                                picks[key] = pick
+                except Exception as _e:
+                    print(f"        → {llm_name} fallback aborted ({_e}); rows kept as-is")
 
             resolved = 0
-            try:
-                with ThreadPoolExecutor(max_workers=6) as ex:
-                    for i, pick in ex.map(_resolve, low_idx):
-                        if pick and pick != suspense_label:
-                            old_conf = rows[i]["confidence"]
-                            rows[i]["predicted_ledger"] = pick
-                            # Confidence contract: High means a deterministic rule fired
-                            # AND (where applicable) Claude agreed.
-                            #   Medium in  → a rule DID fire and Claude confirmed it → High
-                            #   Low in     → NO rule fired; this is an unverified pick, so
-                            #                it stops at Medium and stays in the review
-                            #                queue. Once the accountant confirms it, the
-                            #                payee directory answers it as High next month.
-                            new_conf = "High" if old_conf == "Medium" else "Medium"
-                            rows[i]["rule"] = (rows[i].get("rule") or "") + " + Claude"
-                            if old_conf != new_conf:
-                                rows[i]["confidence"] = new_conf
-                                summary[old_conf] = summary.get(old_conf, 0) - 1
-                                summary[new_conf] = summary.get(new_conf, 0) + 1
-                            resolved += 1
-            except Exception as _e:
-                print(f"        → {llm_name} fallback aborted ({_e}); rows kept as-is")
-            print(f"        → {llm_name} resolved {resolved}/{len(low_idx)} "
+            for key, idxs in by_key.items():
+                pick = picks.get(key)
+                if not pick or pick == suspense_label:
+                    continue
+                for i in idxs:
+                    old_conf = rows[i]["confidence"]
+                    rows[i]["predicted_ledger"] = pick
+                    # Confidence contract: High means a deterministic rule fired AND
+                    # (where applicable) Claude agreed.
+                    #   Medium in → a rule DID fire and Claude confirmed it → High
+                    #   Low in    → NO rule fired; an unverified pick stops at Medium and
+                    #               stays in the review queue. Once the accountant confirms
+                    #               it, the payee directory answers it as High next month.
+                    new_conf = "High" if old_conf == "Medium" else "Medium"
+                    rows[i]["rule"] = (rows[i].get("rule") or "") + " + Claude"
+                    if old_conf != new_conf:
+                        rows[i]["confidence"] = new_conf
+                        summary[old_conf] = summary.get(old_conf, 0) - 1
+                        summary[new_conf] = summary.get(new_conf, 0) + 1
+                    resolved += 1
+            print(f"        → {llm_name} resolved {resolved}/{len(low_idx)} rows "
+                  f"via {len(by_key)} distinct narration(s) "
                   f"(unresolved stay Suspense A/c / Medium)")
 
         # ── Gemini ARBITRATION on generic-rule High rows ───────────────────
