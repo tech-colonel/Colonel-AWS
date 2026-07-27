@@ -235,6 +235,13 @@ function collectPartnerRows(dataMap, nameHints, detectFn) {
 // that lack it) — the same precedence reco-engine/recon/receivable_cycle.py's
 // parse_srn uses — resolves each return to the correct invoice without ever
 // needing to sum entries across different invoices of the same order.
+//
+// Original Invoice No strings can collide across genuinely unrelated returns
+// (verified case: one invoice number pulled in 3 SRNs worth 3.6x its own sale
+// amount). Grouping alone can't tell a real multi-SKU/multi-tranche return
+// apart from an accidental collision, so this only buckets raw candidates —
+// the Step 2 matching loop cross-validates each candidate's own AWB/Channel
+// against the invoice it's about to be attributed to before summing it in.
 function buildReturnLookup(rows) {
     const byInvoice = {};
     const byAwb = {};
@@ -243,31 +250,32 @@ function buildReturnLookup(rows) {
         const awb = normalizeAWB(getCol(row, 'AWB num', 'AWB Number', 'AWB', 'Tracking Number'));
         if (!origInvoice && !awb) continue;
 
-        const amount = safeNum(getCol(row, 'Total', 'Return Amount', 'Net Amount'));
-        const srn = safeStr(getCol(row, 'Invoice number', 'Invoice Number', 'SRN'));
-        const date = safeDate(getCol(row, 'Date', 'Return Date'));
-        const channel = safeStr(getCol(row, 'Channel Ledger', 'Channel entry', 'Channel'));
+        const candidate = {
+            srn: safeStr(getCol(row, 'Invoice number', 'Invoice Number', 'SRN')),
+            amount: safeNum(getCol(row, 'Total', 'Return Amount', 'Net Amount')),
+            date: safeDate(getCol(row, 'Date', 'Return Date')),
+            channel: safeStr(getCol(row, 'Channel Ledger', 'Channel entry', 'Channel')),
+            awb,
+        };
 
         // Match key precedence mirrors the row itself: invoice number when present,
         // AWB only as a fallback for rows that don't carry an original invoice no.
         const bucket = origInvoice ? byInvoice : byAwb;
         const key = origInvoice || awb;
-        if (!bucket[key]) bucket[key] = { return_date: null, srns: [], return_amount: 0, channel: '' };
-        // Multiple SRN lines against the SAME original invoice (multi-SKU returns) still sum.
-        bucket[key].return_amount += amount;
-        if (srn) bucket[key].srns.push(srn);
-        if (date && !bucket[key].return_date) bucket[key].return_date = date;
-        if (channel && !bucket[key].channel) bucket[key].channel = channel;
+        (bucket[key] ||= []).push(candidate);
     }
+    return { byInvoice, byAwb };
+}
 
-    const finalize = (map) => {
-        const out = {};
-        for (const [k, v] of Object.entries(map)) {
-            out[k] = { return_date: v.return_date, srn: [...new Set(v.srns)].join(', '), return_amount: v.return_amount, channel: v.channel };
-        }
-        return out;
-    };
-    return { byInvoice: finalize(byInvoice), byAwb: finalize(byAwb) };
+// A return candidate only genuinely belongs to `row` if the factors it carries
+// that CAN be cross-checked actually agree — AWB (the shipment the return
+// physically came back on) and Channel (the marketplace/store the sale was
+// made on). A candidate missing one of those fields isn't contradicted by it,
+// so it's neither accepted nor rejected on that factor alone.
+function returnCandidateMatches(candidate, row) {
+    const awbOk = !candidate.awb || !row.awb_number || candidate.awb === row.awb_number;
+    const channelOk = !candidate.channel || !row.shopify || candidate.channel.toUpperCase() === row.shopify.toUpperCase();
+    return awbOk && channelOk;
 }
 
 function buildSalesOrderLookup(rows) {
@@ -576,38 +584,49 @@ async function orderCycleShopifyProcessor(
     const { byInvoice: returnByInvoice, byAwb: returnByAwb } = buildReturnLookup(returnGSTJson);
     const claimedInvoices = new Set();
     const claimedAwbs = new Set();
-    // Channel is a sanity check on top of the invoice/AWB match, not a match key —
-    // Original Invoice No already resolves 1:1, but a channel mismatch on that match
-    // usually means the return file has a data-entry error worth surfacing.
-    const channelMismatches = [];
+    // A candidate sharing this invoice's Original Invoice No / AWB key but whose OWN
+    // AWB or Channel contradicts this invoice's is excluded from its return amount/SRN
+    // — its Original Invoice No collided with an unrelated return, it doesn't belong here.
+    const returnMismatches = [];
 
     for (const row of masterRows) {
-        let ret = null;
+        let candidates = null;
         if (row.invoice_number && returnByInvoice[row.invoice_number]) {
-            ret = returnByInvoice[row.invoice_number];
+            candidates = returnByInvoice[row.invoice_number];
             claimedInvoices.add(row.invoice_number);
         } else if (row.awb_number && returnByAwb[row.awb_number]) {
-            ret = returnByAwb[row.awb_number];
+            candidates = returnByAwb[row.awb_number];
             claimedAwbs.add(row.awb_number);
         }
-        if (ret) {
-            row.return_date = ret.return_date;
-            row.srn = ret.srn;
-            row.return_amount = ret.return_amount;
-            if (ret.channel && row.shopify && ret.channel.toUpperCase() !== row.shopify.toUpperCase()) {
-                channelMismatches.push({ invoice: row.invoice_number, expected: row.shopify, returnChannel: ret.channel, srn: ret.srn });
+
+        if (candidates) {
+            const accepted = candidates.filter(c => returnCandidateMatches(c, row));
+            const rejected = candidates.filter(c => !returnCandidateMatches(c, row));
+
+            if (accepted.length) {
+                row.return_date = (accepted.find(c => c.date) || {}).date || null;
+                row.srn = [...new Set(accepted.map(c => c.srn).filter(Boolean))].join(', ');
+                row.return_amount = accepted.reduce((s, c) => s + c.amount, 0);
             }
+            rejected.forEach(c => returnMismatches.push({
+                invoice: row.invoice_number, expectedAwb: row.awb_number, expectedChannel: row.shopify,
+                candidateAwb: c.awb, candidateChannel: c.channel, srn: c.srn, amount: c.amount,
+            }));
         }
         row.net_amount = row.sales_amount - row.return_amount;
     }
 
     // Return entries that never matched any invoice/AWB in the GST report would
     // otherwise be silently dropped — flag them instead.
+    const sumCandidates = (list) => ({
+        srn: [...new Set(list.map(c => c.srn).filter(Boolean))].join(', '),
+        amount: list.reduce((s, c) => s + c.amount, 0),
+    });
     const unmatchedReturns = [
         ...Object.entries(returnByInvoice).filter(([inv]) => !claimedInvoices.has(inv))
-            .map(([inv, r]) => ({ key: `Invoice ${inv}`, srn: r.srn, amount: r.return_amount })),
+            .map(([inv, list]) => ({ key: `Invoice ${inv}`, ...sumCandidates(list) })),
         ...Object.entries(returnByAwb).filter(([awb]) => !claimedAwbs.has(awb))
-            .map(([awb, r]) => ({ key: `AWB ${awb}`, srn: r.srn, amount: r.return_amount })),
+            .map(([awb, list]) => ({ key: `AWB ${awb}`, ...sumCandidates(list) })),
     ];
 
     // ── STEP 3: Delivery Status ───────────────────────────────────────────────
@@ -668,9 +687,13 @@ async function orderCycleShopifyProcessor(
     // Sale Order Number is reused across unrelated invoices/transactions — including
     // inside the gateway files themselves — so a matching order number alone doesn't
     // prove a settlement belongs to this invoice. Snapmint/BharatX candidates are
-    // additionally validated against their own gross order value before attribution;
-    // Razorpay already bridges through a unique per-payment receipt hash (Payment
-    // References), which the order number itself can't collide on.
+    // additionally validated against their own gross order value before attribution.
+    // Razorpay's receipt-hash bridge rules out colliding with an UNRELATED order, but
+    // it doesn't rule out the order legitimately having more than one invoice (split
+    // fulfillment) — applying the one Razorpay payment to every invoice under that
+    // order (instead of just the one it actually paid for) double- or triple-counts
+    // the same cash received, which is what falsely pushes those invoices into
+    // OVERPAID/INVESTIGATE ("more received" than was actually settled).
     const gatewayIssues = [];
     const masterByOrderForGateway = {};
     for (const row of masterRows) {
@@ -684,11 +707,22 @@ async function orderCycleShopifyProcessor(
         assignGatewayCandidates(rowsForOrder, bharatxLookup[orderNo],
             (row, c) => { row.bharatx_settlement_date = c.settlement_date; row.bharatx_settlement_amount = c.settlement_amount; },
             'BharatX', gatewayIssues);
-    }
 
-    for (const row of masterRows) {
-        const rp = razorpayLookup[row.sale_order_number];
-        if (rp) { row.razorpay_settlement_date = rp.settlement_date; row.razorpay_settlement_amount = rp.settlement_amount; }
+        const rp = razorpayLookup[orderNo];
+        if (!rp) continue;
+        if (rowsForOrder.length === 1) {
+            // Only one invoice under this order — no ambiguity, attribute directly.
+            rowsForOrder[0].razorpay_settlement_date = rp.settlement_date;
+            rowsForOrder[0].razorpay_settlement_amount = rp.settlement_amount;
+        } else {
+            // Order split across multiple invoices — this single Razorpay payment
+            // covers the whole order, so attribute it to whichever invoice's own
+            // sales amount actually corresponds to it, same as Snapmint/BharatX,
+            // instead of copying it onto every invoice under the order.
+            assignGatewayCandidates(rowsForOrder, [{ order_value: rp.settlement_amount, settlement_date: rp.settlement_date, settlement_amount: rp.settlement_amount }],
+                (row, c) => { row.razorpay_settlement_date = c.settlement_date; row.razorpay_settlement_amount = c.settlement_amount; },
+                'Razorpay', gatewayIssues);
+        }
     }
 
     // ── STEP 10: Total Settlement Received ────────────────────────────────────
@@ -753,13 +787,15 @@ async function orderCycleShopifyProcessor(
     }));
     validations.push({ check: 'Unmatched Return Entries', value: unmatchedReturns.length, status: unmatchedReturns.length === 0 ? 'PASS' : 'FAIL' });
 
-    // V3c: Matched return whose Channel Ledger disagrees with its invoice's channel
-    channelMismatches.forEach(c => exceptions.push({
-        type: 'Return Channel Mismatch',
-        reference: c.invoice,
-        detail: `SRN ${c.srn} was filed under channel "${c.returnChannel}" but the invoice's channel is "${c.expected}"`
+    // V3c: Return candidate that shared this invoice's Original Invoice No / AWB key
+    // but whose own AWB or Channel contradicted it — excluded from the invoice's
+    // return amount/SRN (its Original Invoice No collided with an unrelated return).
+    returnMismatches.forEach(m => exceptions.push({
+        type: 'Return Invoice/AWB Mismatch',
+        reference: m.invoice,
+        detail: `SRN ${m.srn || '(none)'} (amount ${m.amount.toFixed(2)}) shares this invoice's Original Invoice No but its own AWB "${m.candidateAwb || '(none)'}"/channel "${m.candidateChannel || '(none)'}" doesn't match the invoice's AWB "${m.expectedAwb || '(none)'}"/channel "${m.expectedChannel || '(none)'}" — excluded, likely belongs to a different return`
     }));
-    validations.push({ check: 'Return Channel Mismatches', value: channelMismatches.length, status: channelMismatches.length === 0 ? 'PASS' : 'FAIL' });
+    validations.push({ check: 'Return Invoice/AWB Mismatches', value: returnMismatches.length, status: returnMismatches.length === 0 ? 'PASS' : 'FAIL' });
 
     // V4: Duplicate AWBs in master
     const awbCount = {};

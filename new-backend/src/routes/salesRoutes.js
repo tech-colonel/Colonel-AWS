@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const multer = require('multer');
-const { flipkart, getWorkingFiles, deleteWorkingFile, downloadWorkingFile, addSkuMasterSingle, deleteSkuMasterSingle } = require('../controllers/salesController');
+const { flipkart, getWorkingFiles, deleteWorkingFile, downloadWorkingFile, addSkuMasterSingle, deleteSkuMasterSingle, getMasterDataAny, deleteMasterEntry, clearMasterEntries } = require('../controllers/salesController');
 const salesAmazonController = require('../controllers/agents/sales-amazon/salesAmazonController');
 const salesMyntraController = require('../controllers/agents/sales-myntra/salesMyntraController');
 const salesShopifyController = require('../controllers/agents/sales-shopify/salesShopifyController');
@@ -18,6 +18,13 @@ router.get('/brands/:brandId/agents/:agentId/working-files/:fileId/download', au
 // ─── Shared SKU Single Entry Routes (agent-agnostic) ──────────────────────────
 router.post('/brands/:brandId/agents/:agentId/master/sku/add', authenticateToken, addSkuMasterSingle);
 router.delete('/brands/:brandId/agents/:agentId/master/sku/delete', authenticateToken, deleteSkuMasterSingle);
+
+// ─── Shared Master Data Routes (agent-agnostic, any sales portal) ────────────
+// Used by the admin Brand Overview page to list + delete individual SKU/Ledger
+// master rows, regardless of which portal-specific slug the agent uses.
+router.get('/brands/:brandId/agents/:agentId/master', authenticateToken, getMasterDataAny);
+router.delete('/brands/:brandId/agents/:agentId/master/entry/:type/:index', authenticateToken, deleteMasterEntry);
+router.delete('/brands/:brandId/agents/:agentId/master/:type/clear-all', authenticateToken, clearMasterEntries);
 
 // ─── Amazon Routes ─────────────────────────────────────────────────────────────
 router.get('/brands/:brandId/agents/:agentId/amazon/master', authenticateToken, salesAmazonController.getMasterData);
