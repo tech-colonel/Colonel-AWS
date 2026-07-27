@@ -1,0 +1,29 @@
+{
+  "signature": "2d704f042defc65fbb1c",
+  "bank": "HDFC Bank",
+  "source": "deterministic",
+  "amount_mode": "debit_credit",
+  "primary_date_header": "Date",
+  "columns": [
+    {
+      "header": "Date",
+      "tag": "date"
+    },
+    {
+      "header": "Particulars",
+      "tag": "narr"
+    },
+    {
+      "header": "WithDrawal",
+      "tag": "debit"
+    },
+    {
+      "header": "Deposit",
+      "tag": "credit"
+    },
+    {
+      "header": "Balance",
+      "tag": "balance"
+    }
+  ]
+}

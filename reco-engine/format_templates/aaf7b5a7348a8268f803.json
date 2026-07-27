@@ -1,0 +1,33 @@
+{
+  "signature": "aaf7b5a7348a8268f803",
+  "bank": "ICICI Bank",
+  "source": "deterministic",
+  "amount_mode": "amount_only",
+  "primary_date_header": "Date",
+  "columns": [
+    {
+      "header": "Date",
+      "tag": "date"
+    },
+    {
+      "header": "Ref. Number",
+      "tag": "ref"
+    },
+    {
+      "header": "Transaction Details",
+      "tag": "narr"
+    },
+    {
+      "header": "Currency",
+      "tag": "other"
+    },
+    {
+      "header": "Amount(in",
+      "tag": "amount"
+    },
+    {
+      "header": "` )",
+      "tag": "other"
+    }
+  ]
+}

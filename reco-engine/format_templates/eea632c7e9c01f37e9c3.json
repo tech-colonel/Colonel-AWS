@@ -1,0 +1,37 @@
+{
+  "signature": "eea632c7e9c01f37e9c3",
+  "bank": "HDFC Bank",
+  "source": "deterministic",
+  "amount_mode": "debit_credit",
+  "primary_date_header": "Date",
+  "columns": [
+    {
+      "header": "Date",
+      "tag": "date"
+    },
+    {
+      "header": "Narration",
+      "tag": "narr"
+    },
+    {
+      "header": "Chq./Ref.No.",
+      "tag": "ref"
+    },
+    {
+      "header": "Value Dt",
+      "tag": "other"
+    },
+    {
+      "header": "Withdrawal Amt.",
+      "tag": "debit"
+    },
+    {
+      "header": "Deposit Amt.",
+      "tag": "credit"
+    },
+    {
+      "header": "Closing Balance",
+      "tag": "balance"
+    }
+  ]
+}

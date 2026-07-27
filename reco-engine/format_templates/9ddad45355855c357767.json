@@ -1,0 +1,29 @@
+{
+  "signature": "9ddad45355855c357767",
+  "bank": "Bandhan Bank",
+  "source": "deterministic",
+  "amount_mode": "amount_only",
+  "primary_date_header": "Transaction Date",
+  "columns": [
+    {
+      "header": "Transaction Date",
+      "tag": "date"
+    },
+    {
+      "header": "|",
+      "tag": "other"
+    },
+    {
+      "header": "Description",
+      "tag": "narr"
+    },
+    {
+      "header": "Amount",
+      "tag": "amount"
+    },
+    {
+      "header": "| Dr/ cr",
+      "tag": "other"
+    }
+  ]
+}

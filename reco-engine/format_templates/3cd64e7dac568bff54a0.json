@@ -1,0 +1,33 @@
+{
+  "signature": "3cd64e7dac568bff54a0",
+  "bank": "ICICI Bank",
+  "source": "deterministic",
+  "amount_mode": "debit_credit",
+  "primary_date_header": "Transaction date",
+  "columns": [
+    {
+      "header": "S.no",
+      "tag": "narr"
+    },
+    {
+      "header": "Transaction date",
+      "tag": "date"
+    },
+    {
+      "header": "Description",
+      "tag": "narr"
+    },
+    {
+      "header": "Withdrawal (Dr)",
+      "tag": "debit"
+    },
+    {
+      "header": "Deposit (Cr)",
+      "tag": "credit"
+    },
+    {
+      "header": "Available Balance",
+      "tag": "balance"
+    }
+  ]
+}

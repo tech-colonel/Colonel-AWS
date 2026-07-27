@@ -1,0 +1,25 @@
+{
+  "signature": "48fe6e3cb7edc4e0e111",
+  "bank": "Union Bank of India",
+  "source": "deterministic",
+  "amount_mode": "amount_only",
+  "primary_date_header": "Date",
+  "columns": [
+    {
+      "header": "Date",
+      "tag": "date"
+    },
+    {
+      "header": "Remarks",
+      "tag": "narr"
+    },
+    {
+      "header": "Amount( )",
+      "tag": "amount"
+    },
+    {
+      "header": "Balance( )",
+      "tag": "balance"
+    }
+  ]
+}

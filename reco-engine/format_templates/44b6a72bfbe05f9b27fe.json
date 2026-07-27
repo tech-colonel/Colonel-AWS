@@ -1,0 +1,37 @@
+{
+  "signature": "44b6a72bfbe05f9b27fe",
+  "bank": "Axis Bank",
+  "source": "deterministic",
+  "amount_mode": "debit_credit",
+  "primary_date_header": "Tran Date",
+  "columns": [
+    {
+      "header": "Tran Date",
+      "tag": "date"
+    },
+    {
+      "header": "Chq No",
+      "tag": "ref"
+    },
+    {
+      "header": "Particulars",
+      "tag": "narr"
+    },
+    {
+      "header": "Debit",
+      "tag": "debit"
+    },
+    {
+      "header": "Credit",
+      "tag": "credit"
+    },
+    {
+      "header": "Balance",
+      "tag": "balance"
+    },
+    {
+      "header": "Init.",
+      "tag": "other"
+    }
+  ]
+}

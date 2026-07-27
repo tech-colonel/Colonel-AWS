@@ -1,0 +1,33 @@
+{
+  "signature": "f9bffdcf17bf69b52b41",
+  "bank": "IDFC First Bank",
+  "source": "deterministic",
+  "amount_mode": "debit_credit",
+  "primary_date_header": "Value Date",
+  "columns": [
+    {
+      "header": "Transaction",
+      "tag": "other"
+    },
+    {
+      "header": "Value Date",
+      "tag": "date"
+    },
+    {
+      "header": "Particulars",
+      "tag": "narr"
+    },
+    {
+      "header": "Debit",
+      "tag": "debit"
+    },
+    {
+      "header": "Credit",
+      "tag": "credit"
+    },
+    {
+      "header": "Balance",
+      "tag": "balance"
+    }
+  ]
+}

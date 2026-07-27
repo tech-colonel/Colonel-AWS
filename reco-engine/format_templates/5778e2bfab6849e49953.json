@@ -1,0 +1,33 @@
+{
+  "signature": "5778e2bfab6849e49953",
+  "bank": "Yes Bank",
+  "source": "deterministic",
+  "amount_mode": "debit_credit",
+  "primary_date_header": "Transaction Date",
+  "columns": [
+    {
+      "header": "Transaction Date",
+      "tag": "date"
+    },
+    {
+      "header": "Value Date",
+      "tag": "date"
+    },
+    {
+      "header": "Description",
+      "tag": "narr"
+    },
+    {
+      "header": "Withdrawals",
+      "tag": "debit"
+    },
+    {
+      "header": "Deposits",
+      "tag": "credit"
+    },
+    {
+      "header": "Balance",
+      "tag": "balance"
+    }
+  ]
+}

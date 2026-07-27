@@ -1,0 +1,33 @@
+{
+  "signature": "ae0df460d3ca4ad4ec3d",
+  "bank": "Punjab National Bank",
+  "source": "deterministic",
+  "amount_mode": "debit_credit",
+  "primary_date_header": "Date",
+  "columns": [
+    {
+      "header": "Date",
+      "tag": "date"
+    },
+    {
+      "header": "Number",
+      "tag": "other"
+    },
+    {
+      "header": "Withdrawal",
+      "tag": "debit"
+    },
+    {
+      "header": "Deposit",
+      "tag": "credit"
+    },
+    {
+      "header": "Balance",
+      "tag": "balance"
+    },
+    {
+      "header": "Narration",
+      "tag": "narr"
+    }
+  ]
+}

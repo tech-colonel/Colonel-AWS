@@ -1,0 +1,37 @@
+{
+  "signature": "3fd3174691c1bee4444d",
+  "bank": "ICICI Bank",
+  "source": "deterministic",
+  "amount_mode": "amount_only",
+  "primary_date_header": "Date",
+  "columns": [
+    {
+      "header": "S No.",
+      "tag": "other"
+    },
+    {
+      "header": "Date",
+      "tag": "date"
+    },
+    {
+      "header": "Cheque Number",
+      "tag": "other"
+    },
+    {
+      "header": "Transaction Remarks",
+      "tag": "narr"
+    },
+    {
+      "header": "Amount (INR)",
+      "tag": "amount"
+    },
+    {
+      "header": "Amount (INR)",
+      "tag": "other"
+    },
+    {
+      "header": "(INR)",
+      "tag": "other"
+    }
+  ]
+}

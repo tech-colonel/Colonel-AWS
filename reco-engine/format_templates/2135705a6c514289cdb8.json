@@ -1,0 +1,29 @@
+{
+  "signature": "2135705a6c514289cdb8",
+  "bank": "ICICI Bank",
+  "source": "deterministic",
+  "amount_mode": "debit_credit",
+  "primary_date_header": "DATE",
+  "columns": [
+    {
+      "header": "DATE",
+      "tag": "date"
+    },
+    {
+      "header": "PARTICULARS",
+      "tag": "narr"
+    },
+    {
+      "header": "DEPOSITS",
+      "tag": "credit"
+    },
+    {
+      "header": "WITHDRAWALS",
+      "tag": "debit"
+    },
+    {
+      "header": "BALANCE",
+      "tag": "balance"
+    }
+  ]
+}

@@ -1,0 +1,33 @@
+{
+  "signature": "d69b5a07f1c747c91588",
+  "bank": "Axis Bank",
+  "source": "deterministic",
+  "amount_mode": "debit_credit",
+  "primary_date_header": "Transaction Date",
+  "columns": [
+    {
+      "header": "S No.",
+      "tag": "other"
+    },
+    {
+      "header": "Transaction Date",
+      "tag": "date"
+    },
+    {
+      "header": "Transaction Remarks",
+      "tag": "narr"
+    },
+    {
+      "header": "Withdrawal Amount (INR)",
+      "tag": "debit"
+    },
+    {
+      "header": "Deposit Amount (INR)",
+      "tag": "credit"
+    },
+    {
+      "header": "Balance (INR)",
+      "tag": "balance"
+    }
+  ]
+}

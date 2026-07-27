@@ -1,0 +1,33 @@
+{
+  "signature": "03dd420f89159283981e",
+  "bank": "State Bank of India",
+  "source": "deterministic",
+  "amount_mode": "debit_credit",
+  "primary_date_header": "Txn Date",
+  "columns": [
+    {
+      "header": "Txn Date",
+      "tag": "date"
+    },
+    {
+      "header": "Value",
+      "tag": "other"
+    },
+    {
+      "header": "Description",
+      "tag": "narr"
+    },
+    {
+      "header": "Debit",
+      "tag": "debit"
+    },
+    {
+      "header": "Credit",
+      "tag": "credit"
+    },
+    {
+      "header": "Balance",
+      "tag": "balance"
+    }
+  ]
+}

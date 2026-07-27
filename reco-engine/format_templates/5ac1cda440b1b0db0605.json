@@ -1,0 +1,33 @@
+{
+  "signature": "5ac1cda440b1b0db0605",
+  "bank": "Yes Bank",
+  "source": "deterministic",
+  "amount_mode": "debit_credit",
+  "primary_date_header": "TXN DATE",
+  "columns": [
+    {
+      "header": "TXN DATE",
+      "tag": "date"
+    },
+    {
+      "header": "VALUE DATE",
+      "tag": "date"
+    },
+    {
+      "header": "DESCRIPTION",
+      "tag": "narr"
+    },
+    {
+      "header": "DEBITS",
+      "tag": "debit"
+    },
+    {
+      "header": "CREDITS",
+      "tag": "credit"
+    },
+    {
+      "header": "BALANCE",
+      "tag": "balance"
+    }
+  ]
+}

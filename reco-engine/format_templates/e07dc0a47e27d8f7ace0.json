@@ -1,0 +1,33 @@
+{
+  "columns": [
+    {
+      "header": "Date",
+      "tag": "date"
+    },
+    {
+      "header": "Instrument ID",
+      "tag": "other"
+    },
+    {
+      "header": "Amount(INR)",
+      "tag": "amount"
+    },
+    {
+      "header": "Type",
+      "tag": "drcr"
+    },
+    {
+      "header": "Balance",
+      "tag": "balance"
+    },
+    {
+      "header": "Remarks",
+      "tag": "narr"
+    }
+  ],
+  "amount_mode": "amount_drcr_flag",
+  "primary_date_header": "Date",
+  "bank": "Punjab National Bank",
+  "source": "llm",
+  "signature": "e07dc0a47e27d8f7ace0"
+}

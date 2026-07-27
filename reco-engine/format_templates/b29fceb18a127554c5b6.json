@@ -1,0 +1,33 @@
+{
+  "signature": "b29fceb18a127554c5b6",
+  "bank": "Kotak Mahindra Bank",
+  "source": "deterministic",
+  "amount_mode": "debit_credit",
+  "primary_date_header": "Date",
+  "columns": [
+    {
+      "header": "#",
+      "tag": "other"
+    },
+    {
+      "header": "Date",
+      "tag": "date"
+    },
+    {
+      "header": "Description",
+      "tag": "narr"
+    },
+    {
+      "header": "Withdrawal (Dr.)",
+      "tag": "debit"
+    },
+    {
+      "header": "Deposit (Cr.)",
+      "tag": "credit"
+    },
+    {
+      "header": "Balance",
+      "tag": "balance"
+    }
+  ]
+}

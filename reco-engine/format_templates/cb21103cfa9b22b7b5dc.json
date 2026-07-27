@@ -1,0 +1,25 @@
+{
+  "signature": "cb21103cfa9b22b7b5dc",
+  "bank": "HDFC Bank",
+  "source": "deterministic",
+  "amount_mode": "amount_only",
+  "primary_date_header": "DATE & TIME",
+  "columns": [
+    {
+      "header": "DATE & TIME",
+      "tag": "date"
+    },
+    {
+      "header": "TRANSACTION DESCRIPTION",
+      "tag": "narr"
+    },
+    {
+      "header": "AMOUNT",
+      "tag": "amount"
+    },
+    {
+      "header": "PI",
+      "tag": "other"
+    }
+  ]
+}

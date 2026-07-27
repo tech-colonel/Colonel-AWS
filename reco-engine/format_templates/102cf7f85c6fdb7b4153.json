@@ -1,0 +1,29 @@
+{
+  "signature": "102cf7f85c6fdb7b4153",
+  "bank": "IndusInd Bank",
+  "source": "deterministic",
+  "amount_mode": "debit_credit",
+  "primary_date_header": "Date",
+  "columns": [
+    {
+      "header": "Date",
+      "tag": "date"
+    },
+    {
+      "header": "Particulars",
+      "tag": "narr"
+    },
+    {
+      "header": "Withdrawal",
+      "tag": "debit"
+    },
+    {
+      "header": "Deposit",
+      "tag": "credit"
+    },
+    {
+      "header": "Balance",
+      "tag": "balance"
+    }
+  ]
+}
