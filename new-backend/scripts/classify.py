@@ -470,6 +470,97 @@ def _first_alpha_field(fields):
     return bank_fallback
 
 
+def _strip_ref_tail(name) -> str:
+    """Drop everything from the first purpose word or number onward.
+
+    'Rn inv 67 balance' -> 'Rn';  'Inky ponky inv 254 272 280' -> 'Inky ponky'.
+    Manual-entry narrations name the counterparty and then trail an invoice/balance
+    reference. Keeping the reference makes the key single-use — it embeds numbers that
+    change every month — so the directory can never generalize.
+    """
+    out = []
+    for w in str(name).split():
+        lw = re.sub(r'[^a-z0-9]', '', w.lower())
+        if not lw:
+            continue
+        if lw in _PURPOSE_WORDS or lw.isdigit():
+            break
+        out.append(w)
+    return ' '.join(out)
+
+
+_TAG_REF_RE = re.compile(r'^[A-Z][A-Z0-9]{0,5}\s*:\s*(.+)$')
+
+
+def _tagged_ref_payee(u):
+    """'MB:Inky ponky inv 254 272 280' -> 'inky ponky'.
+
+    A short alpha tag, a colon, the counterparty, then a reference tail. Without this
+    the only key produced is `exact`, which embeds the invoice numbers and therefore
+    never matches again.
+    """
+    m = _TAG_REF_RE.match(u.strip())
+    if not m:
+        return None
+    return _norm_key(_strip_ref_tail(m.group(1)))
+
+
+_PCD_RE = re.compile(r'^PCD/\d+/([^/]+)/')
+
+
+def _pcd_card_merchant(u):
+    """'PCD/1073/IND*LINKEDIN/MUMBAI240626/20:23' -> 'linkedin'.
+
+    Card-terminal narration: the third slash segment is the merchant. The acquirer tag
+    ('IND*') and any parenthetical qualifier ('(PGSI)') are not identity. The rest of
+    the narration is city + date + time, which is why the exact key is single-use.
+    """
+    m = _PCD_RE.match(u.strip())
+    if not m:
+        return None
+    merch = re.sub(r'^[A-Z]{2,4}\*', '', m.group(1))     # IND*, SBI* acquirer tag
+    merch = re.sub(r'\([^)]*\)', ' ', merch)             # (PGSI)
+    return _norm_key(merch)
+
+
+_ACQ_STAR_RE = re.compile(r'\b[A-Z]{2,4}\*([^/]+)')
+
+
+def _acquirer_star_merchant(u):
+    """'VISA-REFUND/250626/250626/IND*LINKEDIN' -> 'linkedin'.
+
+    Card acquirers tag the merchant as '<ACQ>*<MERCHANT>'. _pcd_card_merchant only sees
+    it in the PCD slash layout; the same tag also appears at the tail of refund and
+    reversal narrations, where everything before it is dates.
+    """
+    m = _ACQ_STAR_RE.search(u.strip())
+    if not m:
+        return None
+    return _norm_key(re.sub(r'\([^)]*\)', ' ', m.group(1)))
+
+
+# Only trims a genuine bank name, never a payee that merely starts with such a word:
+# the bank token must be followed by BANK (or be "BANK OF ..."), so "UNION TRADERS"
+# survives while "... UNION BANK OF INDIA" is cut.
+_BANK_TAIL_RE = re.compile(
+    r'\s+(?:(?:UNION|STATE|CENTRAL|PUNJAB|CANARA|INDIAN|ORIENTAL|CORPORATION|SYNDICATE|'
+    r'HDFC|ICICI|AXIS|KOTAK|YES|IDFC|IDBI|RBL|INDUSIND|BANDHAN|FEDERAL|KARNATAKA)\s+BANK\b.*'
+    r'|BANK\s+OF\b.*)$', re.I)
+_CLG_RE = re.compile(r'\bCLG\s+(?:TO|FROM)\s+(.+)$')
+
+
+def _clg_payee(u):
+    """'CLG TO PS WAREHOUSING ENTERPR UNION BANK OF INDIA' -> 'ps warehousing enterpr'.
+
+    Cheque-clearing narrations append the counterparty's BANK after their name. The
+    bank identifies the rails, not the payee, so it is trimmed.
+    """
+    m = _CLG_RE.search(u.strip())
+    if not m:
+        return None
+    return _norm_key(_BANK_TAIL_RE.sub('', m.group(1)))
+
+
 def _usable_key(nm) -> bool:
     """Reject keys that cannot identify a payee: too short, all digits, a bank code,
     a noise word, or nothing but generic business-suffix words ('bank account x')."""
@@ -681,7 +772,14 @@ def extract_payee_keys(narration) -> dict:
         # broader pattern already resolved keeps the key it had.
         nm = _first_usable(_nach_counterparty, _slash_rail_payee, _funds_transfer_payee,
                            _tpt_payee, _ach_payee, _ft_payee, _imps_dash_payee,
-                           _slash_merchant, _prefix_merchant, _label_rail)
+                           _slash_merchant, _prefix_merchant, _label_rail,
+                           # Appended last so no narration an existing rail already
+                           # resolves can change key. These three shapes previously
+                           # produced ONLY an `exact` key — which embeds invoice
+                           # numbers, dates and times, so it matched once and never
+                           # again (the M Brands regression, 2026-07-28).
+                           _tagged_ref_payee, _pcd_card_merchant, _clg_payee,
+                           _acquirer_star_merchant)
         if nm:
             keys['name'] = nm
     # Final guard: never emit an identity key that cannot identify anyone.

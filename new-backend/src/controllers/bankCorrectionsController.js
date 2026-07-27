@@ -264,6 +264,59 @@ const prefixMerchant = (u) => {
 };
 
 // Fixed-label rails where the narration IS the identity, not a payee.
+// ── Mirrors of classify.py's _strip_ref_tail / _tagged_ref_payee / _pcd_card_merchant /
+// _acquirer_star_merchant / _clg_payee. The reader (Python) and the writer (JS) MUST
+// produce identical keys or a stored correction is filed under a key the classifier
+// never looks up — the failure that made 598 learned entries match 0 of 261 rows.
+// Enforced by scripts/tests/payee_key_fixtures.json via the parity tests.
+
+/** Drop everything from the first purpose word or number: 'Rn inv 67 balance' -> 'Rn'. */
+const stripRefTail = (name) => {
+  const out = [];
+  for (const w of String(name).split(/\s+/)) {
+    const lw = w.toLowerCase().replace(/[^a-z0-9]/g, '');
+    if (!lw) continue;
+    if (PURPOSE_WORDS.has(lw) || /^\d+$/.test(lw)) break;
+    out.push(w);
+  }
+  return out.join(' ');
+};
+
+const TAG_REF_RE = /^[A-Z][A-Z0-9]{0,5}\s*:\s*(.+)$/;
+/** 'MB:Inky ponky inv 254 272 280' -> 'inky ponky'. */
+const taggedRefPayee = (u) => {
+  const m = TAG_REF_RE.exec(u.trim());
+  return m ? normKey(stripRefTail(m[1])) : null;
+};
+
+const PCD_RE = /^PCD\/\d+\/([^/]+)\//;
+/** 'PCD/1073/IND*LINKEDIN/MUMBAI240626/20:23' -> 'linkedin'. */
+const pcdCardMerchant = (u) => {
+  const m = PCD_RE.exec(u.trim());
+  if (!m) return null;
+  return normKey(m[1].replace(/^[A-Z]{2,4}\*/, '').replace(/\([^)]*\)/g, ' '));
+};
+
+const ACQ_STAR_RE = /\b[A-Z]{2,4}\*([^/]+)/;
+/** 'VISA-REFUND/250626/250626/IND*LINKEDIN' -> 'linkedin'. */
+const acquirerStarMerchant = (u) => {
+  const m = ACQ_STAR_RE.exec(u.trim());
+  return m ? normKey(m[1].replace(/\([^)]*\)/g, ' ')) : null;
+};
+
+// Only trims a genuine bank name, never a payee starting with such a word: the token
+// must be followed by BANK (or be 'BANK OF ...'), so 'UNION TRADERS' survives.
+const BANK_TAIL_RE = new RegExp(
+  '\\s+(?:(?:UNION|STATE|CENTRAL|PUNJAB|CANARA|INDIAN|ORIENTAL|CORPORATION|SYNDICATE|'
+  + 'HDFC|ICICI|AXIS|KOTAK|YES|IDFC|IDBI|RBL|INDUSIND|BANDHAN|FEDERAL|KARNATAKA)\\s+BANK\\b.*'
+  + '|BANK\\s+OF\\b.*)$', 'i');
+const CLG_RE = /\bCLG\s+(?:TO|FROM)\s+(.+)$/;
+/** 'CLG TO PS WAREHOUSING ENTERPR UNION BANK OF INDIA' -> 'ps warehousing enterpr'. */
+const clgPayee = (u) => {
+  const m = CLG_RE.exec(u.trim());
+  return m ? normKey(m[1].replace(BANK_TAIL_RE, '')) : null;
+};
+
 const labelRail = (u) => {
   if (/^ACH\s+DEBIT\s+RETURN\s+CHARGES/.test(u)) return 'ach debit return charges';
   if (/^CBDT\//.test(u)) return 'cbdt';
@@ -315,7 +368,13 @@ const extractPayeeKeys = (narration) => {
   if (!keys.name) {
     const nm = firstUsable(nachCounterparty, slashRailPayee, fundsTransferPayee,
                            tptPayee, achPayee, ftPayee, impsDashPayee,
-                           slashMerchant, prefixMerchant, labelRail);
+                           slashMerchant, prefixMerchant, labelRail,
+                           // Appended last so nothing an existing rail already resolves
+                           // can change key. These shapes previously produced ONLY an
+                           // `exact` key, which embeds invoice numbers/dates/times and
+                           // so matched once and never again.
+                           taggedRefPayee, pcdCardMerchant, clgPayee,
+                           acquirerStarMerchant);
     if (nm) keys.name = nm;
   }
   // Final guard: never store an identity key that cannot identify anyone.

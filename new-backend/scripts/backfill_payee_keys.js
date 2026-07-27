@@ -71,20 +71,42 @@ async function backfillBrand(brand) {
   //    usually really a two-sided SIDE rule, which deriveSideRules handles.)
   source.sort((a, b) => new Date(a.updated_at || 0) - new Date(b.updated_at || 0));
   const derived = new Map();                 // "type\0value" -> {ledger, txn_type}
-  const seen = new Map();                    // "type\0value" -> Set(ledger)
+  const votes = new Map();                   // "type\0value" -> Map(normLedger -> {count,label})
+  const normLedger = (s) => String(s || '').toLowerCase().replace(/\s+/g, ' ').trim();
   for (const r of source) {
     const keys = extractPayeeKeys(r.narration);
     for (const [keyType, keyValue] of Object.entries(keys)) {
       if (keyType === 'exact' || keyType === 'phone') continue;
       const id = `${keyType}\0${keyValue}`;
-      if (!seen.has(id)) seen.set(id, new Set());
-      seen.get(id).add(r.ledger);
+      if (!votes.has(id)) votes.set(id, new Map());
+      const v = votes.get(id);
+      const nl = normLedger(r.ledger);
+      v.set(nl, { count: (v.get(nl)?.count || 0) + 1, label: r.ledger });
       derived.set(id, { keyType, keyValue, ledger: r.ledger, txn_type: r.txn_type || null });
     }
   }
+  // A key is only as trustworthy as the agreement behind it. Ledgers are compared
+  // CASE-INSENSITIVELY first: 'Google India Pvt Ltd' and 'GOOGLE INDIA PVT LTD' are one
+  // ledger, and counting them as two used to inflate the conflict count.
+  //
+  // The old rule dropped a key only when MORE THAN TWO distinct ledgers disagreed, which
+  // let a straight 1-vs-1 contradiction survive on most-recent-wins. That is how
+  // name|linkedin came to mean 'Shopify Commerce Singapore' — two historical corrections
+  // labelled the same LinkedIn card payment differently ('Round Off' and 'Shopify'), and
+  // the later one silently won, then asserted itself at High confidence on future rows.
+  // A confidently wrong answer costs the accountant more than no answer.
+  //
+  // Now: a strict majority wins (and its spelling becomes canonical); a tie is dropped.
   let contested = 0;
-  for (const [id, ledgers] of seen) {
-    if (ledgers.size > 2) { derived.delete(id); contested++; }
+  for (const [id, v] of votes) {
+    if (v.size <= 1) continue;                                  // unanimous
+    const ranked = [...v.values()].sort((a, b) => b.count - a.count);
+    if (ranked[0].count > ranked[1].count) {
+      const d = derived.get(id);
+      if (d) d.ledger = ranked[0].label;                        // majority beats most-recent
+    } else {
+      derived.delete(id); contested++;                          // no winner -> untrustworthy
+    }
   }
 
   // 3. Poisoned phone rows: written before the phone key was constrained to [6-9]\d{9},
