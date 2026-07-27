@@ -1,60 +1,116 @@
 {
   "_comment": "Shared fixtures for the payee-key extractor. Read by BOTH tests/test_payee_keys.py (classify.py, the READER) and tests/test_payee_keys.js (bankCorrectionsController.js, the WRITER). They must agree exactly: when they drifted, every stored correction was written under a key the classifier never looked up, and 598 learned Urban Plant entries matched 0 of 261 rows. Each case lists only the identity keys ('exact' is always present and is not asserted here). Every narration below is a real row from a 2026-06 statement.",
   "cases": [
-    { "why": "ICICI NEFT: payee sits between the ref and the trailing numeric ids",
+    {
+      "why": "ICICI NEFT: payee sits between the ref and the trailing numeric ids",
       "narration": "NEFT-AXISP00804036529-DELHIVERY  LIMITED-1062026466-91602005",
-      "keys": { "neft_name": "delhivery limited" } },
-
-    { "why": "ICICI NEFT, long escrow label — stable because it repeats verbatim",
+      "keys": {
+        "neft_name": "delhivery limited"
+      }
+    },
+    {
+      "why": "ICICI NEFT, long escrow label \u2014 stable because it repeats verbatim",
       "narration": "NEFT-AXISCN1360802861-RAZORPAY PAYMENTS PVT LTD PAYMENT AGGREGATOR ESCROW ACCOUNT -RAZORPAY SOFTWAR",
-      "keys": { "neft_name": "razorpay payments pvt ltd payment aggregator escrow account" } },
-
-    { "why": "Kotak NEFT: space separated, ref token dropped for carrying digits",
+      "keys": {
+        "neft_name": "razorpay payments pvt ltd payment aggregator escrow account"
+      }
+    },
+    {
+      "why": "Kotak NEFT: space separated, ref token dropped for carrying digits",
       "narration": "NEFT AXISCN1389928147 RAZORPAY PAYMENTS PVT LTD P",
-      "keys": { "neft_name": "razorpay payments pvt ltd p" } },
-
-    { "why": "ICICI netbanking: 4-letter payee AZAD must survive (not an IFSC — no digit run follows)",
+      "keys": {
+        "neft_name": "razorpay payments pvt ltd p"
+      }
+    },
+    {
+      "why": "ICICI netbanking: 4-letter payee AZAD must survive (not an IFSC \u2014 no digit run follows)",
       "narration": "INF/NEFT/IN42615451081832/SBIN0003/AZAD/AZADSALARY",
-      "keys": { "name": "azad" } },
-
-    { "why": "ICICI bill-pay: single vendor field after the ref",
+      "keys": {
+        "name": "azad"
+      }
+    },
+    {
+      "why": "ICICI bill-pay: single vendor field after the ref",
       "narration": "BIL/ONL/001211144556/DELHIVERYL",
-      "keys": { "name": "delhiveryl" } },
-
-    { "why": "ICICI IMPS: payee precedes the bank name, positional pick",
+      "keys": {
+        "name": "delhiveryl"
+      }
+    },
+    {
+      "why": "ICICI IMPS: payee precedes the bank name, positional pick",
       "narration": "MMT/IMPS/615207439303/DAS4ZU26NBXIRD6/Amazon Sel/HSBC Bank",
-      "keys": { "name": "amazon sel" } },
-
-    { "why": "ICICI IMPS, shorter arity — payee still first non-junk field",
+      "keys": {
+        "name": "amazon sel"
+      }
+    },
+    {
+      "why": "ICICI IMPS, shorter arity \u2014 payee still first non-junk field",
       "narration": "MMT/IMPS/615212924380/PETTYCASH/UTIB0CCH274",
-      "keys": { "name": "pettycash" } },
-
-    { "why": "Kotak UPI: payee first, bank code after",
+      "keys": {
+        "name": "pettycash"
+      }
+    },
+    {
+      "why": "Kotak UPI: payee first, bank code after",
       "narration": "UPI/BIGFOOT RETAIL/ICIC/053382310720/ShiprocketRe",
-      "keys": { "name": "bigfoot retail" } },
-
-    { "why": "NEGATIVE-ish: 'Bank Account XX' is a placeholder, must be skipped so the real payee is found. Keying on the placeholder collapsed Gaurav/Colonel/LABEL REEBA onto one ledger.",
+      "keys": {
+        "name": "bigfoot retail"
+      }
+    },
+    {
+      "why": "NEGATIVE-ish: 'Bank Account XX' is a placeholder, must be skipped so the real payee is found. Keying on the placeholder collapsed Gaurav/Colonel/LABEL REEBA onto one ledger.",
       "narration": "UPI/Bank Account XX/553891886054/Gaurav may",
-      "keys": { "name": "gaurav may" } },
-
-    { "why": "NEGATIVE: NACH mandate ref is concatenated onto the counterparty and changes every instalment (FT6FWSD8 / FT3UYYAU / FSXWJMCE) — emit no key at all",
+      "keys": {
+        "name": "gaurav may"
+      }
+    },
+    {
+      "why": "NEGATIVE: NACH mandate ref is concatenated onto the counterparty and changes every instalment (FT6FWSD8 / FT3UYYAU / FSXWJMCE) \u2014 emit no key at all",
       "narration": "NACH-10-DR-RAZORPAYSOFTWAREPRIV-STRATEGICFT6FWSD8",
-      "keys": {} },
-
-    { "why": "Kotak plain-language transfer rail",
+      "keys": {}
+    },
+    {
+      "why": "Kotak plain-language transfer rail",
       "narration": "FUNDS TRANSFER TO CHIKUDI CREATION",
-      "keys": { "name": "chikudi creation" } },
-
-    { "why": "NEGATIVE: a bare bank prefix in the payee slot must NOT become a key. Unlike a one-time UTR (unique, therefore inert), a bank code COLLIDES — every narration mentioning that bank would map onto one ledger. Seen in the backfill as 'hdfc' -> HDFC Bank-275.",
+      "keys": {
+        "name": "chikudi creation"
+      }
+    },
+    {
+      "why": "NEGATIVE: a bare bank prefix in the payee slot must NOT become a key. Unlike a one-time UTR (unique, therefore inert), a bank code COLLIDES \u2014 every narration mentioning that bank would map onto one ledger. Seen in the backfill as 'hdfc' -> HDFC Bank-275.",
       "narration": "MMT/IMPS/615212924380/HDFC/SOMEBODY",
-      "keys": { "name": "somebody" } },
-
-    { "why": "REGRESSION GUARD (FLO): slash-NEFT must keep working unchanged",
+      "keys": {
+        "name": "somebody"
+      }
+    },
+    {
+      "why": "NEGATIVE-ish: a PURPOSE field sits before the payee on this rail. Keying on 'FEES' collapsed every fee payment onto one ledger (seen live: name 'fees' -> AV Ajmera Ventures). The payee is the field after it.",
+      "narration": "INF/NEFT/IN42613650628419/KKBK0005933/FEES   /AJMERAAV",
+      "keys": {
+        "name": "ajmeraav"
+      }
+    },
+    {
+      "why": "Same rail with SALARY as the purpose word \u2014 payee must win.",
+      "narration": "INF/NEFT/IN42609357111165/UBIN0559393/SALARY /RAJESHEMPLOYEE",
+      "keys": {
+        "name": "rajeshemployee"
+      }
+    },
+    {
+      "why": "REGRESSION GUARD (FLO): slash-NEFT must keep working unchanged",
       "narration": "NEFT/123456/UTIB/NDX P2P PRIVATE LIMITED LENDER/AXIS/998",
-      "keys": { "neft_name": "ndx p2p private limited lender" } },
-
-    { "why": "REGRESSION GUARD (FLO): IMPS-FROM must keep working unchanged",
+      "keys": {
+        "neft_name": "ndx p2p private limited lender"
+      }
+    },
+    {
+      "why": "REGRESSION GUARD (FLO): IMPS-FROM must keep working unchanged",
       "narration": "IMPS 123456789 FROM RAKESH KUMAR UTIB 9988776655",
-      "keys": { "neft_name": "rakesh kumar", "phone": "9988776655" } }
+      "keys": {
+        "neft_name": "rakesh kumar",
+        "phone": "9988776655"
+      }
+    }
   ]
 }

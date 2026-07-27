@@ -86,6 +86,14 @@ const GENERIC_BIZ_WORDS = new Set([
   'agency', 'marketing', 'sales', 'a/c', 'ac',
 ]);
 const PLACEHOLDER_WORDS = new Set(['bank', 'account', 'accounts', 'ac', 'a', 'self', 'other', 'misc']);
+// PURPOSE words — several rails put a free-text purpose in the field BEFORE the payee
+// ("…/<IFSC>/FEES   /AJMERAAV"). Keying on it collapses every fee/salary payment to any
+// party onto one ledger. MUST stay in sync with _PURPOSE_WORDS in classify.py.
+const PURPOSE_WORDS = new Set([
+  'salary', 'salaries', 'wages', 'bonus', 'advance', 'fees', 'fee', 'rent',
+  'payment', 'paid', 'inv', 'invoice', 'bill', 'reimbursement', 'incentive',
+  'commission', 'refund', 'balance', 'settlement', 'expense', 'charges',
+]);
 // Bare IFSC/bank prefixes — see the matching note on _BANK_PREFIXES in classify.py.
 // A bank code that slips through is the one kind of bad key that COLLIDES, so the closed
 // set of Indian bank prefixes is rejected by name. MUST stay in sync with classify.py.
@@ -104,7 +112,8 @@ const isPlaceholder = (nm) => {
   const words = String(nm || '').toLowerCase().split(/\s+/).filter(Boolean);
   if (!words.length) return true;
   return words.every((w) =>
-    GENERIC_BIZ_WORDS.has(w) || PLACEHOLDER_WORDS.has(w) || new Set(w).size === 1);
+    GENERIC_BIZ_WORDS.has(w) || PLACEHOLDER_WORDS.has(w)
+    || PURPOSE_WORDS.has(w) || new Set(w).size === 1);
 };
 
 const usableKey = (nm) => {

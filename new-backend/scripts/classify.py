@@ -392,6 +392,17 @@ def _fields_by_alpha(fields):
 # unrelated payee that shares the placeholder onto one ledger -- the worst kind of wrong.
 _PLACEHOLDER_WORDS = {'bank', 'account', 'accounts', 'ac', 'a', 'self', 'other', 'misc'}
 
+# PURPOSE words. Several rails put a free-text purpose in the field BEFORE the payee:
+#   INF/NEFT/<ref>/<IFSC>/FEES   /AJMERAAV        -> payee is AJMERAAV, not FEES
+#   INF/NEFT/<ref>/<IFSC>/SALARY /RAJESHEMPLOYEE  -> payee is RAJESHEMPLOYEE
+# Keying on the purpose collapses every fee/salary payment to ANY party onto one ledger —
+# the same collision class as 'bank account xx'. Skip these and keep scanning.
+_PURPOSE_WORDS = {
+    'salary', 'salaries', 'wages', 'bonus', 'advance', 'fees', 'fee', 'rent',
+    'payment', 'paid', 'inv', 'invoice', 'bill', 'reimbursement', 'incentive',
+    'commission', 'refund', 'balance', 'settlement', 'expense', 'charges',
+}
+
 # Bare IFSC/bank prefixes. A 4-letter token cannot be told apart from a short real payee
 # name ('AZAD') by shape alone, and positional rules only catch the code when a long digit
 # run follows it. A bank code that slips through is the one kind of bad key that COLLIDES
@@ -411,7 +422,8 @@ def _is_placeholder(nm) -> bool:
     words = [w for w in str(nm).lower().split() if w]
     if not words:
         return True
-    return all(w in _GENERIC_BIZ_WORDS or w in _PLACEHOLDER_WORDS or len(set(w)) == 1
+    return all(w in _GENERIC_BIZ_WORDS or w in _PLACEHOLDER_WORDS
+               or w in _PURPOSE_WORDS or len(set(w)) == 1
                for w in words)
 
 
