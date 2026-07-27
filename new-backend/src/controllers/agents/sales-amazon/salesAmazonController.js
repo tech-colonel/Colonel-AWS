@@ -14,6 +14,7 @@ const path = require('path');
 const fs = require('fs-extra');
 const { v4: uuidv4 } = require('uuid');
 const XLSX = require('xlsx');
+const moment = require('moment');
 
 const OUTPUT_DIR = path.join(__dirname, '../../../../outputs');
 
@@ -93,16 +94,46 @@ const getMasterData = async (req, res, next) => {
  * Generate Amazon Working File
  */
 
+/**
+ * Amazon report date cells arrive as Excel serials, loosely-formatted strings,
+ * or (occasionally, for cancelled/returned rows) the literal text "Invalid Date".
+ * Normalize all of that to a real Date or null so it never hits Postgres as
+ * unparseable text (timestamptz columns reject anything that isn't a valid date).
+ */
+const parseAmazonDate = (value) => {
+    if (value === null || value === undefined) return null;
+    if (value instanceof Date) return isNaN(value.getTime()) ? null : value;
+
+    if (typeof value === 'number') {
+        const parsed = XLSX.SSF?.parse_date_code(value);
+        if (!parsed) return null;
+        const d = new Date(Date.UTC(parsed.y, parsed.m - 1, parsed.d, parsed.H || 0, parsed.M || 0, parsed.S || 0));
+        return isNaN(d.getTime()) ? null : d;
+    }
+
+    const str = String(value).trim();
+    if (!str || str.toLowerCase() === 'invalid date') return null;
+
+    const m = moment(str, [
+        moment.ISO_8601, 'YYYY-MM-DD HH:mm:ss', 'YYYY-MM-DD',
+        'DD-MM-YYYY', 'DD/MM/YYYY', 'MM/DD/YYYY'
+    ], true);
+    if (m.isValid()) return m.toDate();
+
+    const fallback = new Date(str);
+    return isNaN(fallback.getTime()) ? null : fallback;
+};
+
 const mapRowToAmazonSchema = (row, fileType, useInventory) => ({
     // basic info
     seller_gstin: row['Seller Gstin'],
     invoice_number: row['Invoice Number'],
-    invoice_date: row['Invoice Date'],
+    invoice_date: parseAmazonDate(row['Invoice Date']),
     transaction_type: row['Transaction Type'],
     order_id: row['Order Id'],
     shipment_id: row['Shipment Id'],
-    shipment_date: row['Shipment Date'],
-    order_date: row['Order Date'],
+    shipment_date: parseAmazonDate(row['Shipment Date']),
+    order_date: parseAmazonDate(row['Order Date']),
     shipment_item_id: row['Shipment Item Id'],
     quantity: row['Quantity'],
 
@@ -221,11 +252,11 @@ const mapRowToAmazonSchema = (row, fileType, useInventory) => ({
     buyer_name: row['Buyer Name'],
 
     credit_note_number: row['Credit Note No'] || row['Credit Note Number'],
-    credit_note_date: row['Credit Note Date'],
+    credit_note_date: parseAmazonDate(row['Credit Note Date']),
 
     irn_number: row['Irn Number'],
     irn_filing_status: row['Irn Filing Status'],
-    irn_date: row['Irn Date'],
+    irn_date: parseAmazonDate(row['Irn Date']),
     irn_error_code: row['Irn Error Code']
 });
 
