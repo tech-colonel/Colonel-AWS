@@ -10,6 +10,7 @@ Usage:
 
 import os
 import re
+import collections
 import sys
 import pandas as pd
 from thefuzz import process, fuzz
@@ -1031,6 +1032,69 @@ class BankClassifier:
                 seen.add(l)
                 out.append(l)
         return out[:20]
+
+    def _frequent_ledgers(self, n: int = 14) -> list:
+        """Ledgers this brand ACTUALLY uses, ranked by how often they appear in the learned
+        directory. These are the accountant's working vocabulary — the category ledgers
+        (Salary Payable, Raw Material, Courier & Shipping Expense) that a payee-name search
+        can never surface, because a person's name shares no tokens with them."""
+        if not hasattr(self, '_freq_cache'):
+            cnt = collections.Counter()
+            for section in self.directory.values():
+                for fix in section.values():
+                    led = (fix or {}).get('ledger')
+                    if led:
+                        cnt[led] += 1
+            self._freq_cache = [l for l, _ in cnt.most_common()
+                                if self._coa_resolve(l)][:n]
+        return self._freq_cache
+
+    def llm_candidates(self, query: str, narration: str = "", k: int = 15) -> list:
+        """Candidate list for an LLM decision.
+
+        top_candidates() alone scores purely on name similarity to the payee, so a
+        CATEGORY ledger is never offered for a person-named narration. Measured on a real
+        Zaydn statement: of 54 wrong Low/Medium rows, the correct ledger was missing from
+        the 15 candidates in 34 of them — the model could not have got those right at any
+        price. Widened with two signals that don't depend on the payee name:
+
+          * ledgers the brand actually uses (learned-directory frequency)
+          * COA ledgers word-matching any distinctive token of the FULL narration, not just
+            the extracted entity ('…PACKAGING RAW MATE' -> 'Raw Material')
+
+        Kept separate from top_candidates() so the arbitration pass's k=1 "best name match"
+        check keeps its original, stricter meaning.
+
+        NO CAP by default: the whole CoA is offered, RANKED — best name matches first, then
+        narration-token hits, then the brand's most-used ledgers, then everything else. A
+        shortlist is exactly what made the right answer unreachable, so the shortlist is
+        gone; the ranking is what makes a long list usable rather than a wall of names.
+        Set BANK_LLM_MAX_CANDIDATES to a positive integer to re-impose a ceiling (the
+        ranking means a ceiling keeps the most plausible names).
+        """
+        out, seen = [], set()
+
+        def add(items):
+            for l in items:
+                if l and l not in seen:
+                    seen.add(l)
+                    out.append(l)
+
+        add(self.top_candidates(query, k))          # 1. best name matches
+
+        if narration:                                # 2. narration-token hits
+            for t in (t for t in _distinctive_tokens(narration) if len(t) >= 4):
+                pat = re.compile(r'\b' + re.escape(t), re.IGNORECASE)
+                add([l for l in self.master_ledgers if pat.search(l)])
+
+        add(self._frequent_ledgers())                # 3. the brand's working vocabulary
+        add(self.master_ledgers)                     # 4. everything else
+
+        try:
+            cap = int(os.environ.get('BANK_LLM_MAX_CANDIDATES', '0') or 0)
+        except ValueError:
+            cap = 0
+        return out[:cap] if cap > 0 else out
 
     def _match_employee_ledger(self, entity: str, salary_ledgers: list) -> str:
         """
@@ -2707,9 +2771,10 @@ def main():
                     return i, _cache[key]
                 # Build candidates from the extracted payee entity when available
                 # (cleaner signal), else from the full narration.
-                cands = classifier.top_candidates(entity or desc, k=15)
-                if not cands:
-                    cands = classifier.top_candidates(desc, k=15)
+                # llm_candidates (not top_candidates): also offers the brand's actually-used
+                # category ledgers and narration-token matches, so the correct ledger is on
+                # the menu even when it shares no words with the payee name.
+                cands = classifier.llm_candidates(entity or desc, desc, k=15)
                 if suspense_label not in cands:
                     cands = cands + [suspense_label]
                 pick = llm_pick(desc, cands)
@@ -2778,7 +2843,7 @@ def main():
                   f"with a competing COA match …")
             def _arb(i):
                 r = rows[i]; desc = r["description"]; entity = r.get("entity", "") or desc
-                cands = classifier.top_candidates(entity, k=15) or classifier.top_candidates(desc, k=15)
+                cands = classifier.llm_candidates(entity, desc, k=15)
                 assigned = r["predicted_ledger"]
                 if assigned and assigned not in cands:
                     cands = [assigned] + cands
