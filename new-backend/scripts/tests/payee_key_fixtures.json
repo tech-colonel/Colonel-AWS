@@ -235,6 +235,46 @@
    "keys": {
     "name": "union traders pvt ltd"
    }
+  },
+  {
+   "why": "UPI mandate: the payee slot holds the mandate type, so the merchant is the NEXT segment — keying on 'autopay' made Apple, Airtel and Adobe one payee. NOTE: the vpa key carries leading narration text — the VPA regex allows '-' in the local part (real VPAs use it), so it reaches back across the narration's own '-' separators. Pre-existing and IDENTICAL on both sides, so lookups still match; recorded here rather than changed because altering it would orphan every stored vpa key",
+   "narration": "UPI-AUTOPAY-APPLE MEDIA SERVICES-APPLESERVICES.BDSI@HDFCBANK-HDFC0000001-1234-x",
+   "keys": {
+    "name": "apple media services",
+    "vpa": "services-appleservices.bdsi@hdfcbank"
+   }
+  },
+  {
+   "why": "same mandate shape, single-token MERCHANT — exempt from the single-token guard because a business name is a reliable identity. NOTE: the vpa key carries leading narration text — the VPA regex allows '-' in the local part (real VPAs use it), so it reaches back across the narration's own '-' separators. Pre-existing and IDENTICAL on both sides, so lookups still match; recorded here rather than changed because altering it would orphan every stored vpa key",
+   "narration": "UPI-AUTOPAY-AIRTEL-AIRTEL4.PAYU@ICICI-ICIC0DC0099-1100589608-x",
+   "keys": {
+    "name": "airtel",
+    "vpa": "upi-autopay-airtel-airtel4.payu@icici"
+   }
+  },
+  {
+   "why": "single-token PERSON with a VPA present: no name key — two different people called SHIVAM would otherwise collapse onto one ledger",
+   "narration": "UPI-SHIVAM  -GOLUTOMAR284202-3@OKSBI-SBIN0010894-616727139660-SENT USING PAYTM U",
+   "keys": {
+    "vpa": "-golutomar284202-3@oksbi"
+   }
+  },
+  {
+   "why": "the OTHER Shivam — distinct vpa and phone keep him separate now that the shared first name is not emitted",
+   "narration": "UPI-SHIVAM-8826965849@IBL-IPOS0000001-617599952724-SENT USIN",
+   "keys": {
+    "vpa": "upi-shivam-8826965849@ibl",
+    "phone": "8826965849"
+   }
+  },
+  {
+   "why": "guard: a MULTI-word person name is still emitted — it is what unifies Mohammad Sahil's @ptyes and @axl handles",
+   "narration": "UPI-MOHAMMAD  SAHIL-7985245712@AXL-KKBK0005136-615509002618-SENT USING PAYTM U",
+   "keys": {
+    "name": "mohammad sahil",
+    "vpa": "sahil-7985245712@axl",
+    "phone": "7985245712"
+   }
   }
  ]
 }

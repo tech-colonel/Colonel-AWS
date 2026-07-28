@@ -398,6 +398,10 @@ _PLACEHOLDER_WORDS = {'bank', 'account', 'accounts', 'ac', 'a', 'self', 'other',
 #   INF/NEFT/<ref>/<IFSC>/SALARY /RAJESHEMPLOYEE  -> payee is RAJESHEMPLOYEE
 # Keying on the purpose collapses every fee/salary payment to ANY party onto one ledger —
 # the same collision class as 'bank account xx'. Skip these and keep scanning.
+# Mandate/instruction words that occupy the payee slot in a UPI narration. The real
+# counterparty is the NEXT segment.
+_UPI_MANDATE_WORDS = {'autopay', 'mandate', 'si', 'ach', 'nach', 'ecs', 'emandate'}
+
 _PURPOSE_WORDS = {
     'salary', 'salaries', 'wages', 'bonus', 'advance', 'fees', 'fee', 'rent',
     'payment', 'paid', 'inv', 'invoice', 'bill', 'reimbursement', 'incentive',
@@ -731,11 +735,19 @@ def extract_payee_keys(narration) -> dict:
     mph = _PHONE_RE.search(raw)
     if mph:
         keys['phone'] = mph.group(1)
+    _name_is_merchant = False
     if 'UPI' in u:
         mv = _VPA_RE.search(raw)
         if mv:
             keys['vpa'] = mv.group(1).lower()
-        mn = re.match(r'\s*UPI-(.+?)-', u)           # first segment after "UPI-"
+        # First segment after "UPI-" is normally the payee — but for a mandate debit it
+        # is the MANDATE TYPE and the merchant follows it:
+        #   UPI-AUTOPAY-APPLE MEDIA SERVICES-...   -> 'apple media services', not 'autopay'
+        # Keying on 'autopay' made Apple, Airtel and Adobe look like one payee.
+        mn = re.match(r'\s*UPI-(.+?)-', u)
+        if mn and _norm_key(mn.group(1)) in _UPI_MANDATE_WORDS:
+            mn = re.match(r'\s*UPI-[^-]+-(.+?)-', u)  # skip the mandate word
+            _name_is_merchant = True                  # what follows a mandate is a business
         if mn:
             nm = _norm_key(mn.group(1))
             if nm and not nm.isdigit():
@@ -782,6 +794,21 @@ def extract_payee_keys(narration) -> dict:
                            _acquirer_star_merchant)
         if nm:
             keys['name'] = nm
+    # A single-token first name is not an identity when we already hold a precise one.
+    # Two different people called SHIVAM (VPAs golutomar284202@oksbi and 8826965849@ibl,
+    # one a materials supplier, one reimbursed for travel) collapsed onto name|shivam and
+    # would have been assigned the same ledger at High confidence. The vpa/phone keys
+    # already distinguish them, so the bare name adds collision risk and no recall.
+    # Kept when it is the ONLY identifier available, and multi-word names are untouched
+    # ('mohammad sahil' is what unifies his @ptyes and @axl handles).
+    # A single-token MERCHANT ('AIRTEL') is a reliable identity; a single-token PERSON
+    # ('SHIVAM') is not. Merchants also change payment aggregator more often than people
+    # change UPI app, so for them the name outlives the VPA and is the key worth keeping.
+    if ('name' in keys and not _name_is_merchant
+            and len(str(keys['name']).split()) == 1
+            and (keys.get('vpa') or keys.get('phone'))):
+        del keys['name']
+
     # Final guard: never emit an identity key that cannot identify anyone.
     for sec in ('name', 'neft_name'):
         if sec in keys and not _usable_key(keys[sec]):

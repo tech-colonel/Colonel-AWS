@@ -89,6 +89,10 @@ const PLACEHOLDER_WORDS = new Set(['bank', 'account', 'accounts', 'ac', 'a', 'se
 // PURPOSE words — several rails put a free-text purpose in the field BEFORE the payee
 // ("…/<IFSC>/FEES   /AJMERAAV"). Keying on it collapses every fee/salary payment to any
 // party onto one ledger. MUST stay in sync with _PURPOSE_WORDS in classify.py.
+// Mandate/instruction words that occupy the payee slot in a UPI narration; the real
+// counterparty is the NEXT segment. Mirrors _UPI_MANDATE_WORDS in classify.py.
+const UPI_MANDATE_WORDS = new Set(['autopay', 'mandate', 'si', 'ach', 'nach', 'ecs', 'emandate']);
+
 const PURPOSE_WORDS = new Set([
   'salary', 'salaries', 'wages', 'bonus', 'advance', 'fees', 'fee', 'rent',
   'payment', 'paid', 'inv', 'invoice', 'bill', 'reimbursement', 'incentive',
@@ -330,10 +334,17 @@ const extractPayeeKeys = (narration) => {
   const keys = { exact: u.replace(/\s+/g, ' ') };
   const mPh = raw.match(PHONE_RE);
   if (mPh) keys.phone = mPh[1];
+  let nameIsMerchant = false;
   if (u.includes('UPI')) {
     const mVpa = raw.match(VPA_RE);
     if (mVpa) keys.vpa = mVpa[1].toLowerCase();
-    const mName = u.match(/\s*UPI-(.+?)-/);
+    // 'UPI-AUTOPAY-APPLE MEDIA SERVICES-...' -> the payee is Apple, not 'autopay'.
+    // Keying on the mandate word made Apple, Airtel and Adobe look like one payee.
+    let mName = u.match(/\s*UPI-(.+?)-/);
+    if (mName && UPI_MANDATE_WORDS.has(normKey(mName[1]))) {
+      mName = u.match(/\s*UPI-[^-]+-(.+?)-/);
+      nameIsMerchant = true;                    // what follows a mandate is a business
+    }
     if (mName) {
       const nm = normKey(mName[1]);
       if (nm && !/^\d+$/.test(nm)) keys.name = nm;
@@ -377,6 +388,19 @@ const extractPayeeKeys = (narration) => {
                            acquirerStarMerchant);
     if (nm) keys.name = nm;
   }
+  // A single-token first name is not an identity when a precise one is already held.
+  // Two different people called SHIVAM (VPAs golutomar284202@oksbi and 8826965849@ibl —
+  // a materials supplier and a travel reimbursement) collapsed onto name|shivam. The
+  // vpa/phone keys already tell them apart. A single-token MERCHANT ('AIRTEL') is exempt:
+  // it is a reliable identity, and merchants change aggregator more often than people
+  // change UPI app. Multi-word names are untouched — 'mohammad sahil' is what unifies
+  // his @ptyes and @axl handles.
+  if (keys.name && !nameIsMerchant
+      && String(keys.name).trim().split(/\s+/).length === 1
+      && (keys.vpa || keys.phone)) {
+    delete keys.name;
+  }
+
   // Final guard: never store an identity key that cannot identify anyone.
   for (const sec of ['name', 'neft_name']) {
     if (keys[sec] && !usableKey(keys[sec])) delete keys[sec];
