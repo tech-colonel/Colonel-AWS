@@ -95,6 +95,22 @@ const getMasterData = async (req, res, next) => {
  */
 
 /**
+ * Bulk-uploaded SKU master sheets keep whatever header casing the source Excel
+ * file used (e.g. "Sales Portal SKU" vs "Sales portal SKU") — a literal-cased
+ * key lookup silently misses the column, leaving every FG mapping blank for the
+ * whole file with no error. Match case/whitespace-insensitively instead.
+ */
+const getMasterCol = (row, ...names) => {
+    const wanted = names.map(n => n.toLowerCase());
+    for (const key of Object.keys(row)) {
+        if (wanted.includes(key.trim().toLowerCase()) && row[key] !== undefined && row[key] !== null && row[key] !== '') {
+            return row[key];
+        }
+    }
+    return undefined;
+};
+
+/**
  * Amazon report date cells arrive as Excel serials, loosely-formatted strings,
  * or (occasionally, for cancelled/returned rows) the literal text "Invalid Date".
  * Normalize all of that to a real Date or null so it never hits Postgres as
@@ -350,8 +366,8 @@ const generate = async (req, res, next) => {
             }
 
             sourceSheetData = masterData.sku_master.map(sku => ({
-                SKU: sku['Sales portal SKU'] || sku['SKU'] || sku.salesPortalSku || sku.sku,
-                FG: sku['Tally new SKU'] || sku['Tally SKU'] || sku.tallyNewSku || sku.fg || sku.FG
+                SKU: getMasterCol(sku, 'Sales portal SKU', 'SKU', 'salesPortalSku'),
+                FG: getMasterCol(sku, 'Tally new SKU', 'Tally SKU', 'tallyNewSku', 'fg')
             }));
             console.log("SKU ", masterData.sku_master);
             console.log("source sheet data", sourceSheetData);
@@ -521,8 +537,8 @@ const generatePreview = async (req, res, next) => {
         } else {
             if (!masterData.sku_master?.length) return res.status(400).json({ error: 'No SKUs found' });
             sourceSheetData = masterData.sku_master.map(sku => ({
-                SKU: sku['Sales portal SKU'] || sku['SKU'] || sku.salesPortalSku || sku.sku,
-                FG:  sku['Tally new SKU']    || sku['Tally SKU'] || sku.tallyNewSku || sku.fg || sku.FG
+                SKU: getMasterCol(sku, 'Sales portal SKU', 'SKU', 'salesPortalSku'),
+                FG: getMasterCol(sku, 'Tally new SKU', 'Tally SKU', 'tallyNewSku', 'fg')
             }));
             const wb = XLSX.utils.book_new();
             XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(sourceSheetData), 'Source');
