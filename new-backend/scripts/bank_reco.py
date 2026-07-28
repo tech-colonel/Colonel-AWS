@@ -1353,6 +1353,54 @@ def _build_results(result, max_rows=1500):
     return rows
 
 
+def _llm_confirm_aggregate_parties(candidates, api_key, model, base_url, timeout=30):
+    """LLM gate (GenSpark/Haiku) before LEARNING a detected dense party: confirm it is genuinely an
+    aggregate/batch-booked ledger (many individual bank payments booked as fewer Tally vouchers),
+    so a party that is merely dense-by-coincidence is never persisted per brand. `candidates`:
+    [{party, party_base, bank_lines, tally_vouchers, bank_total, tally_total}]. Returns the list of
+    confirmed party_base keys, or None on missing key / any error (caller then keeps the
+    deterministic detected set unchanged). One small call per run — not per row."""
+    if not api_key or not candidates:
+        return None
+    import urllib.request, json as _json, ssl, re as _re
+    rows = "\n".join(
+        'key="%s" name="%s" bank_lines=%d tally_vouchers=%d bank_total=%d tally_total=%d'
+        % (c["party_base"], c["party"], c["bank_lines"], c["tally_vouchers"],
+           round(c["bank_total"]), round(c["tally_total"]))
+        for c in candidates)
+    ask = (
+        "You reconcile Indian bank statements against Tally books. A DENSE AGGREGATE PARTY is a "
+        "ledger where MANY individual bank payments are booked in Tally as FEWER aggregate vouchers "
+        "(salary batches, or a vendor/branch account the accountant lumps into periodic entries) — "
+        "its bank and Tally totals are roughly comparable and it has many bank lines vs few Tally "
+        "vouchers. For each candidate, decide if it is genuinely such a party. Reply with ONLY a "
+        "compact JSON object mapping each key to true or false.\n\n" + rows)
+    try:
+        if base_url:
+            url = "%s/chat/completions" % base_url.rstrip("/")
+            headers = {"content-type": "application/json", "authorization": "Bearer %s" % api_key}
+        else:
+            url = "https://api.anthropic.com/v1/messages"
+            headers = {"content-type": "application/json", "x-api-key": api_key,
+                       "anthropic-version": "2023-06-01"}
+        body = _json.dumps({"model": model, "max_tokens": 400,
+                            "messages": [{"role": "user", "content": ask}]}).encode("utf-8")
+        req = urllib.request.Request(url, data=body, headers=headers)
+        with urllib.request.urlopen(req, timeout=timeout, context=ssl.create_default_context()) as resp:
+            data = _json.loads(resp.read().decode("utf-8"))
+        if base_url:
+            text = ((data.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
+        else:
+            text = next((b.get("text", "") for b in data.get("content", []) if b.get("type") == "text"), "")
+        m = _re.search(r"\{.*\}", text, _re.S)
+        verdict = _json.loads(m.group(0)) if m else {}
+        return [c["party_base"] for c in candidates
+                if verdict.get(c["party_base"]) is True or verdict.get(c["party"]) is True]
+    except Exception as e:
+        sys.stderr.write("[bank_reco] LLM confirm skipped: %s\n" % e)
+        return None
+
+
 import argparse, json, sys
 
 def main():
@@ -1375,6 +1423,14 @@ def main():
                           "Recalls parties learned in prior runs so even a single-month file "
                           "catches them. The run prints the parties it detected under "
                           "'detected_aggregate_parties' for the controller to persist per brand.")
+    ap.add_argument("--llm-key", default=None,
+                     help="Optional LLM key (e.g. GenSpark GSK_API_KEY) to CONFIRM a detected dense "
+                          "party before it is learned. One small call per run; absent = no gate.")
+    ap.add_argument("--llm-base-url", default=None,
+                     help="OpenAI-compatible base URL for the LLM (e.g. GenSpark's proxy). "
+                          "Absent = Anthropic native.")
+    ap.add_argument("--llm-model", default="claude-haiku-4-5",
+                     help="LLM model for the confirm gate (default claude-haiku-4-5).")
     a = ap.parse_args()
     agg_config = {}
     if a.aggregate_config and os.path.exists(a.aggregate_config):
@@ -1416,12 +1472,30 @@ def main():
          "gap": a2["gap"], "bank_lines": a2["bank_lines"], "tally_vouchers": a2["tally_vouchers"]}
         for a2 in res.get("aggregate_reco", [])
     ]
+    # LLM gate: only LEARN detected dense parties the model confirms are genuine aggregate ledgers.
+    # Falls back to the full detected set if no key / any error, so learning still works without it.
+    detected = res.get("detected_aggregate_parties", [])
+    confirmed = detected
+    if a.llm_key and detected:
+        stats = {}
+        for ar2 in res.get("aggregate_reco", []):
+            pb = ar2["party_base"]
+            if pb in detected:
+                s = stats.setdefault(pb, {"party": ar2["party"], "party_base": pb,
+                                          "bank_lines": 0, "tally_vouchers": 0,
+                                          "bank_total": 0.0, "tally_total": 0.0})
+                s["bank_lines"] += ar2["bank_lines"]; s["tally_vouchers"] += ar2["tally_vouchers"]
+                s["bank_total"] += ar2["bank_total"]; s["tally_total"] += ar2["tally_total"]
+        conf = _llm_confirm_aggregate_parties(list(stats.values()), a.llm_key, a.llm_model, a.llm_base_url)
+        if conf is not None:
+            confirmed = conf
     print(json.dumps({"counts": res["counts"],
                       "summary": {"brand": a.brand, "total_bank_rows": len(bank), "total_tally_rows": len(tally)},
                       "results": results,
                       "analytics": analytics,
                       "aggregate_reco": aggregate_reco_summary,
-                      "detected_aggregate_parties": res.get("detected_aggregate_parties", [])}))
+                      "detected_aggregate_parties": detected,
+                      "confirmed_aggregate_parties": confirmed}))
 
 if __name__ == "__main__":
     main()
