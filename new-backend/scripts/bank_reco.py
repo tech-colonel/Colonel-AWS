@@ -169,13 +169,16 @@ def parse_tally(path):
                        "row": i, "subs": []}
             continue
 
-        # --- Sub-row of a pending composite header: amount is in the Vch No. column. ---
-        if pending is not None and not is_header and party and debit == 0 and credit == 0:
-            sub_amt = _num(vch_no_raw)
+        # --- Sub-row of a pending composite header. Tally writes the sub-amount EITHER in the
+        # Vch No. column (Busybees case) OR in the Debit/Credit column (Round Off, Penalty,
+        # Discount, and some party lines). Any non-header party row inside a composite block is a
+        # breakdown line — absorb it (never let it fall through to become a standalone, date-less
+        # row) and buffer its amount for the explode-or-keep-lump decision at flush. ---
+        if pending is not None and not is_header and party:
+            sub_amt = _num(vch_no_raw) or debit or credit
             if sub_amt > 0:
                 pending["subs"].append((party, sub_amt))
-                continue
-            # a stray non-amount row under a composite -> keep the block open, fall through
+            continue
 
         # Any real voucher header ends the current composite block.
         if is_header:
@@ -453,8 +456,13 @@ def _bank_amt(brow):
     return brow["credit"] if brow["direction"] == "in" else brow["debit"]
 
 def _d(x):
-    """Extract date-only component from datetime, returning None if conversion fails."""
+    """Date-only component of a datetime, or None for a missing/unparseable value.
+    NOTE: pandas `NaT.date()` returns NaT (not None and not a raise), so an explicit NaN/NaT
+    check is required — otherwise callers that test `_d(x) is None` silently mis-handle NaT
+    dates (they'd treat an undated row as dated). Guards the same-date/nearest-date matcher."""
     try:
+        if pd.isna(x):
+            return None
         return x.date()
     except Exception:
         return None
