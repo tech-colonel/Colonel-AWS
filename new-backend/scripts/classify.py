@@ -2940,7 +2940,10 @@ def main():
         if anthropic_key:
             return anthropic_classify(desc, cands, anthropic_key, args.anthropic_model,
                                       base_url=llm_base_url)
-        return llm_pick(desc, cands)
+        # Was `return llm_pick(...)` — an infinite self-call. Only reachable with a Gemini
+        # key and no Anthropic/GenSpark key, which is why it survived: every run so far had
+        # one of the other two. It would have hit RecursionError, not a graceful skip.
+        return gemini_classify(desc, cands, gemini_key, args.gemini_model)
 
     # ------------------------------------------------------------------
     # STEP 3.4 — constrained verdict on per-brand SIDE-RULE rows.
