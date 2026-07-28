@@ -2309,73 +2309,58 @@ def write_output(rows: list, summary: dict, brand: str, output_path: str,
         return (rule.split("(")[0].strip() or "Rule") + claude
 
     # ── Remark column ────────────────────────────────────────────────────────
-    # Confidence says how sure the classifier is; it cannot say that a row is a
-    # DUPLICATE, or that the ledger it chose does not exist in Tally. Both are things
-    # the accountant currently has to catch by eye, and both block a clean import.
+    # Short, actionable notes for things Confidence cannot express. Kept terse on
+    # purpose — a remark is scanned in a spreadsheet cell, not read as prose.
     #
-    #   DUPLICATE ENTRIES — same narration AND same debit/credit appearing more than
-    #     once. Usually a failed auto-debit and its reversal (Zaydn's June statement has
-    #     several: Aditya Birla, Clix Capital, Bajaj Finance each twice), occasionally a
-    #     genuinely double-posted row. Every copy is flagged and names the others, so the
-    #     pair is visible from either row.
-    #   MISSING IN COA — the predicted ledger is not in the brand's chart of accounts, so
-    #     the row cannot be posted as-is. Happens when a learned key still points at a
-    #     ledger that has since been renamed or removed in Tally.
+    # Matching is on the bank's REFERENCE NUMBER, not on vendor+amount. A recurring
+    # EMI to the same lender for the same amount is ordinary, not a duplicate: Zaydn's
+    # June statement pays Yes Bank 70,314 on both the 4th and the 7th under different
+    # references. Only the bank's own reference identifies the same transaction.
     _coa_norm = {" ".join(str(l).lower().split()) for l in (master_ledgers or [])}
+
+    def _ref(r):
+        v = str(r.get("chq_ref") or "").strip()
+        return "" if not v or set(v) <= {"0"} else v          # placeholder refs are not refs
+
     _dupe_of, _reversal_of = {}, {}
-    _groups, _amount_groups = {}, {}
+    _by_ref = {}
     for _i, _r in enumerate(rows):
-        _narr = " ".join(str(_r.get("description", "")).upper().split())
-        _deb, _cred = _r.get("debit") or 0, _r.get("credit") or 0
-        # true duplicate: identical narration AND identical side+amount
-        _groups.setdefault((_narr, _deb, _cred), []).append(_i)
-        # reversal candidate: identical narration and magnitude, opposite side
-        if _deb or _cred:
-            _amount_groups.setdefault((_narr, round(abs(_deb or _cred), 2)), []).append(_i)
-    for _idxs in _groups.values():
-        if len(_idxs) > 1:
-            for _i in _idxs:
-                _dupe_of[_i] = [j for j in _idxs if j != _i]
-    for _idxs in _amount_groups.values():
+        _rf = _ref(_r)
+        if _rf:
+            _by_ref.setdefault(_rf, []).append(_i)
+    for _idxs in _by_ref.values():
         if len(_idxs) < 2:
             continue
         _debs = [j for j in _idxs if rows[j].get("debit")]
         _creds = [j for j in _idxs if rows[j].get("credit")]
-        if _debs and _creds:                      # both directions present
+        if _debs and _creds:
+            # Same reference, money both ways: a failed auto-debit and its reversal.
             for _i in _idxs:
-                _other = _creds if rows[_i].get("debit") else _debs
-                _other = [j for j in _other if j != _i]
+                _other = [j for j in (_creds if rows[_i].get("debit") else _debs) if j != _i]
                 if _other:
                     _reversal_of[_i] = _other
+        else:
+            # Same reference, same direction: the bank listed one transaction twice.
+            for _i in _idxs:
+                _dupe_of[_i] = [j for j in _idxs if j != _i]
 
     def _remark_for(i, r):
         parts = []
-        if i in _dupe_of:
-            # +2: worksheet rows are 1-based and row 1 is the header.
-            others = ", ".join(str(j + 2) for j in _dupe_of[i])
-            parts.append(f"DUPLICATE ENTRIES \u2014 same narration and amount also on row(s) "
-                         f"{others} ({len(_dupe_of[i]) + 1} occurrences) \u2014 verify before posting")
-        elif i in _reversal_of:
-            # Reported separately from a duplicate: the money moved BOTH ways, so the pair
-            # nets to zero. A failed auto-debit and its bank reversal is the usual cause.
-            others = ", ".join(str(j + 2) for j in _reversal_of[i])
-            side = "debit" if r.get("debit") else "credit"
-            parts.append(f"REVERSAL PAIR \u2014 this {side} is matched by the opposite entry on "
-                         f"row(s) {others}; the two net to zero \u2014 post both or neither")
+        # +2: worksheet rows are 1-based and row 1 is the header.
+        if i in _reversal_of:
+            parts.append("Reversal pair \u2014 see row "
+                         + ", ".join(str(j + 2) for j in _reversal_of[i]))
+        elif i in _dupe_of:
+            parts.append("Duplicate (same bank ref) \u2014 see row "
+                         + ", ".join(str(j + 2) for j in _dupe_of[i]))
         led = str(r.get("predicted_ledger") or "").strip()
         if r.get("ledger_not_in_coa") and led:
-            parts.append(f'NOT IN COA \u2014 "{led}" comes from the accountant\'s own earlier '
-                         f"correction for this payee and is used here, but it does not exist in "
-                         f"the uploaded chart of accounts. Create it in Tally before importing.")
-        # Suspense is the designated fallback LABEL, and load_ledger_master deliberately
-        # keeps it out of master_ledgers so it is never a fuzzy-match target. Checking it
-        # against the CoA would therefore flag every unclassified row — noise on exactly
-        # the rows the accountant is already going to look at.
-        _is_suspense = " ".join(led.lower().split()) in ("suspense a/c", "suspense", "suspense account")
-        if (led and not _is_suspense and not r.get("ledger_not_in_coa")
-                and _coa_norm and " ".join(led.lower().split()) not in _coa_norm):
-            parts.append(f'MISSING IN COA \u2014 "{led}" is not in the chart of accounts; '
-                         f"create it in Tally or re-map this row")
+            parts.append(f'Not in CoA \u2014 create "{led}" in Tally')
+        elif led and _coa_norm and " ".join(led.lower().split()) not in _coa_norm and (
+                " ".join(led.lower().split()) not in ("suspense a/c", "suspense", "suspense account")):
+            # Suspense is the fallback LABEL and load_ledger_master keeps it out of
+            # master_ledgers, so checking it would flag every unclassified row.
+            parts.append(f'Not in CoA \u2014 "{led}"')
         return " | ".join(parts)
 
     for _i, r in enumerate(rows):
@@ -2423,7 +2408,7 @@ def write_output(rows: list, summary: dict, brand: str, output_path: str,
         ltr = get_column_letter(col[0].column)
         _is_remark = (ltr == get_column_letter(len(headers)))
         ws.column_dimensions[ltr].width = (
-            46 if _is_remark
+            32 if _is_remark
             else min(max(max(len(str(c.value or '')) for c in col) + 3, 10), 55))
 
     # --- Summary sheet ---
