@@ -816,6 +816,53 @@ def extract_payee_keys(narration) -> dict:
     return keys
 
 
+# ---------------------------------------------------------------------------
+# Multi-branch (multi-state) ledger de-ambiguation  [FLO-gated, 2026-07]
+# When a vendor is kept in the COA as several branch ledgers ("Busybees… (Delhi)",
+# "…-Gurgaon", "… (Telangana)") the bank narration names the vendor but never the
+# branch, so picking one branch is a guess. Instead we blank it to the base name +
+# this marker; bank_reco then fills the branch back in from the matched Tally entry,
+# or leaves the marker for a human to complete. Detected dynamically from the master
+# ledger list (no hardcoded vendor/city names): only bases that carry ≥2 distinct
+# branch tags are treated as ambiguous.
+# ---------------------------------------------------------------------------
+ADD_STATE_MARKER = "⟨add state⟩"
+
+_COMPANY_SUFFIXES = (" private limited", " pvt ltd", " pvt.ltd.", " pvt. ltd.",
+                     " limited", " ltd", " llp")
+# A trailing branch/location tag: "(Delhi)" OR "-Gurgaon" / " - Gurgaon" (tag starts with a letter).
+_BRANCH_TAG_RE = re.compile(r"\s*(?:\(([^()]*)\)|[-–]\s*([A-Za-z][\w .&']*))\s*$")
+
+
+def _split_branch_tag(name):
+    """Split a trailing branch/location tag off `name`. Returns (base_display, tag): base keeps the
+    original casing/punctuation; tag is the raw inner text, or None when there's no trailing tag."""
+    s = str(name or "").strip()
+    m = _BRANCH_TAG_RE.search(s)
+    if not m:
+        return s, None
+    tag = (m.group(1) or m.group(2) or "").strip()
+    if not tag:
+        return s, None
+    return s[:m.start()].rstrip(), tag
+
+
+def _branch_base_key(name):
+    """Normalized grouping key for ledgers that differ only by a branch tag / company suffix."""
+    base, _ = _split_branch_tag(name)
+    s = base.lower()
+    for suf in _COMPANY_SUFFIXES:
+        if s.endswith(suf):
+            s = s[:-len(suf)]; break
+    s = re.sub(r"[^a-z0-9 ]", " ", s)
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def _tag_key(tag):
+    """Collapse a branch tag to a comparable token, e.g. 'Delhi ' -> 'delhi'."""
+    return re.sub(r"[^a-z0-9]", "", str(tag or "").lower())
+
+
 class BankClassifier:
     def __init__(self, master_ledgers: list, corrections: dict | None = None,
                  brand_name: str = "", side_map: list | None = None):
@@ -845,6 +892,45 @@ class BankClassifier:
                          'type': (str(e['type']).strip() if e.get('type') else None)}
                 (self.side_map_fallback if e.get('fallback') else self.side_map).append(entry)
         self._build_indices()
+        self._build_branch_map()
+
+    def _build_branch_map(self):
+        """Precompute multi-branch vendor groups from the master ledger list (FLO-gated).
+        self._branch_groups maps a base key -> {"tags": {tag_key -> canonical ledger}, "display":
+        base name}, kept only for bases carrying ≥2 distinct branch tags (genuinely ambiguous)."""
+        toks = re.findall(r'[a-z]+', (self._brand_name or '').lower())
+        self._is_flo_brand = 'flo' in toks
+        self._branch_groups = {}
+        if not self._is_flo_brand:
+            return
+        groups = {}
+        for led in self.master_ledgers:
+            key = _branch_base_key(led)
+            if not key:
+                continue
+            base_disp, tag = _split_branch_tag(led)
+            g = groups.setdefault(key, {"tags": {}, "display": base_disp})
+            if tag:
+                g["tags"][_tag_key(tag)] = led
+            # prefer the shortest base spelling (usually the bare "…Pvt.Ltd." form) for display
+            if len(base_disp) < len(g["display"]):
+                g["display"] = base_disp
+        self._branch_groups = {k: v for k, v in groups.items() if len(v["tags"]) >= 2}
+
+    def _deambiguate_state(self, ledger, narration):
+        """If `ledger` is one branch of a multi-branch vendor, either resolve it from a branch named
+        in the narration, or blank it to '<base>- ⟨add state⟩'. No-op unless FLO + multi-branch base."""
+        if not getattr(self, "_is_flo_brand", False) or not self._branch_groups or not ledger:
+            return ledger
+        g = self._branch_groups.get(_branch_base_key(ledger))
+        if not g:
+            return ledger
+        nwords = set(re.findall(r'[a-z0-9]+', str(narration or "").lower()))
+        named = {led for tagk, led in g["tags"].items() if tagk and tagk in nwords}
+        if len(named) == 1:
+            return next(iter(named))                       # narration names exactly one branch
+        base_disp = g["display"].rstrip("- ").rstrip()
+        return f"{base_disp}- {ADD_STATE_MARKER}"
 
     def _coa_resolve(self, name):
         """Return the ledger's CANONICAL spelling as it appears in the COA, or None.
@@ -1299,6 +1385,19 @@ class BankClassifier:
     # ------------------------------------------------------------------
     def classify(self, narration: str, debit: float, credit: float,
                  skip_side_map: bool = False) -> dict:
+        """Public entry: core classification, then (FLO only) the multi-branch state guard so a
+        multi-state vendor is never pinned to a guessed branch. See _deambiguate_state."""
+        res = self._classify_core(narration, debit, credit, skip_side_map)
+        if getattr(self, "_is_flo_brand", False) and res.get("ledger"):
+            new_led = self._deambiguate_state(res["ledger"], narration)
+            if new_led != res["ledger"]:
+                res = dict(res)
+                res["ledger"] = new_led
+                res["rule"] = (res.get("rule", "") + " +StateBlanked").strip()
+        return res
+
+    def _classify_core(self, narration: str, debit: float, credit: float,
+                       skip_side_map: bool = False) -> dict:
         orig  = str(narration).strip() if narration else ""
         orig_upper = orig.upper()
         is_credit  = credit > 0
