@@ -879,13 +879,20 @@ class BankClassifier:
             return None
         for e in entries:
             if any(tok in narration_upper for tok in e['tokens']):
-                ledger = self._coa_resolve(e['credit'] if txn_type == "Receipt" else e['debit'])
-                if ledger:
+                wanted = e['credit'] if txn_type == "Receipt" else e['debit']
+                ledger = self._coa_resolve(wanted)
+                stored = str(wanted or '').strip()
+                if ledger or stored:
+                    # Side rules are derived from accountant corrections as well, so the
+                    # same reasoning applies as in _directory_lookup: use the mapping even
+                    # when the ledger is absent from the CoA, and let the Remark ask for it
+                    # to be created. Discarding it lost a correct answer.
                     # 'credit'/'debit' are carried through so the constrained side-verdict
                     # pass can offer Claude exactly these two ledgers and nothing else.
-                    return {"ledger": ledger, "type": e.get('type') or txn_type, "confidence": "High",
-                            "rule": rule, "entity": e['tokens'][0],
-                            "credit": e['credit'], "debit": e['debit']}
+                    return {"ledger": ledger or stored, "type": e.get('type') or txn_type,
+                            "confidence": "High", "rule": rule, "entity": e['tokens'][0],
+                            "credit": e['credit'], "debit": e['debit'],
+                            "ledger_not_in_coa": not ledger}
         return None
 
     @staticmethod
@@ -903,8 +910,6 @@ class BankClassifier:
         out['exact'] = {' '.join(str(k).upper().split()): v for k, v in out['exact'].items()}
         return out
 
-    _orphan_note = None          # set by _directory_lookup, consumed by classify()
-
     def _directory_lookup(self, narration: str, txn_type: str):
         """Look up the row's payee identity in the learned directory.
         Most-specific-first: exact → phone → vpa → neft_name → name. Only returns
@@ -917,22 +922,30 @@ class BankClassifier:
             if not kv:
                 continue
             fix = self.directory.get(section, {}).get(kv)
-            resolved = self._coa_resolve(fix.get('ledger')) if fix else None
-            if resolved:
+            if not fix:
+                continue
+            resolved = self._coa_resolve(fix.get('ledger'))
+            stored = str(fix.get('ledger') or '').strip()
+            if resolved or stored:
+                # A learned mapping is the accountant's OWN answer for this payee. It used
+                # to be discarded whenever its ledger was absent from the current CoA, and
+                # the row fell to Suspense — throwing away a correct answer because a
+                # ledger had been renamed, or had not been created in Tally yet. Zaydn's
+                # 11 ACH-return rows were exactly that: we held the right answer and
+                # reported "unclassified".
+                #
+                # The mapping is now used either way. When the ledger is not in the CoA the
+                # row carries `ledger_not_in_coa`, and write_output turns that into a
+                # Remark telling the accountant to create it before importing. Right
+                # answer, plus the one action needed to post it.
                 return {
-                    "ledger": resolved,
+                    "ledger": resolved or stored,
                     "type": fix.get('type') or txn_type,
                     "confidence": "High",
                     "rule": "Stored Correction" if section == 'exact' else f"Payee Directory ({section})",
                     "entity": kv,
+                    "ledger_not_in_coa": not resolved,
                 }
-            if fix and self._orphan_note is None:
-                # A learned mapping EXISTS but its ledger is no longer in the CoA (renamed
-                # or never created in Tally). Previously the hit was discarded in silence
-                # and the row simply became Suspense, so the accountant saw "unclassified"
-                # rather than "you are missing a ledger". Zaydn's 11 ACH-return rows sat
-                # like that until someone analysed them by hand.
-                self._orphan_note = str(fix.get('ledger') or '').strip() or None
         return None
 
     def _build_indices(self):
@@ -1290,7 +1303,6 @@ class BankClassifier:
         orig_upper = orig.upper()
         is_credit  = credit > 0
         txn_type   = "Receipt" if is_credit else "Payment"
-        self._orphan_note = None          # per-row; set if a learned ledger has gone missing
 
         # ------------------------------------------------------------------
         # STEP 0 — Per-brand learned payee directory (highest priority)
@@ -1910,8 +1922,7 @@ class BankClassifier:
         # FALLBACK — Suspense A/c (pre-computed from master during init)
         # ------------------------------------------------------------------
         return {"ledger": self._suspense_ledger, "type": txn_type, "confidence": "Low",
-                "rule": "Suspense Fallback", "entity": entity,
-                "orphan_ledger": self._orphan_note}
+                "rule": "Suspense Fallback", "entity": entity}
 
 
 # ---------------------------------------------------------------------------
@@ -2351,18 +2362,18 @@ def write_output(rows: list, summary: dict, brand: str, output_path: str,
             side = "debit" if r.get("debit") else "credit"
             parts.append(f"REVERSAL PAIR \u2014 this {side} is matched by the opposite entry on "
                          f"row(s) {others}; the two net to zero \u2014 post both or neither")
-        orphan = str(r.get("orphan_ledger") or "").strip()
-        if orphan:
-            parts.append(f'MISSING IN COA \u2014 a learned mapping for this payee points at '
-                         f'"{orphan}", which is not in the chart of accounts, so the row fell '
-                         f"to Suspense. Create the ledger in Tally and re-run.")
         led = str(r.get("predicted_ledger") or "").strip()
+        if r.get("ledger_not_in_coa") and led:
+            parts.append(f'NOT IN COA \u2014 "{led}" comes from the accountant\'s own earlier '
+                         f"correction for this payee and is used here, but it does not exist in "
+                         f"the uploaded chart of accounts. Create it in Tally before importing.")
         # Suspense is the designated fallback LABEL, and load_ledger_master deliberately
         # keeps it out of master_ledgers so it is never a fuzzy-match target. Checking it
         # against the CoA would therefore flag every unclassified row — noise on exactly
         # the rows the accountant is already going to look at.
         _is_suspense = " ".join(led.lower().split()) in ("suspense a/c", "suspense", "suspense account")
-        if led and not _is_suspense and _coa_norm and " ".join(led.lower().split()) not in _coa_norm:
+        if (led and not _is_suspense and not r.get("ledger_not_in_coa")
+                and _coa_norm and " ".join(led.lower().split()) not in _coa_norm):
             parts.append(f'MISSING IN COA \u2014 "{led}" is not in the chart of accounts; '
                          f"create it in Tally or re-map this row")
         return " | ".join(parts)
@@ -3105,8 +3116,8 @@ def main():
             # only populated for side-rule rows; consumed by the side-verdict pass below
             "side_credit":    result.get("credit", ""),
             "side_debit":     result.get("debit", ""),
-            # set when a learned mapping was found but its ledger is gone from the CoA
-            "orphan_ledger":  result.get("orphan_ledger"),
+            # set when the ledger chosen by a learned mapping is not in the current CoA
+            "ledger_not_in_coa": bool(result.get("ledger_not_in_coa")),
         })
 
     total = len(rows)
