@@ -289,6 +289,9 @@ def normalize_party(name):
     """Normalize party name by removing suffixes, locations, punctuation, and collapsing whitespace."""
     s = str(name or "").lower().strip()
     s = s.replace("\n", " ")
+    # Drop the classifier's '⟨add state⟩' marker so a branch-blanked ledger normalizes to its base
+    # and matches ANY branch of that vendor (we don't know the branch — the Tally match decides it).
+    s = s.replace(ADD_STATE_MARKER.lower(), " ")
     s = _LOC_SUFFIX.sub("", s).strip()
     for suf in _SUFFIXES:
         if s.endswith(suf): s = s[: -len(suf)].strip()
@@ -417,6 +420,25 @@ def party_matches(a, b, threshold=85):
             if ka == kb or fuzz.token_sort_ratio(ka, kb) >= threshold:
                 return True
     return False
+
+# Marker the Universal classifier writes when it declines to guess a multi-state vendor's branch
+# (kept identical to classify.py's ADD_STATE_MARKER). bank_reco resolves it from the matched Tally
+# party's branch where the match proves one, otherwise leaves it for a human to complete.
+ADD_STATE_MARKER = "⟨add state⟩"
+
+
+def _resolved_ledger(bank_ledger, tally_party=None):
+    """Display ledger for a bank row. If the classifier left a '⟨add state⟩' marker and this row
+    fully matched a Tally party that carries a branch/location tag, show that Tally party (the
+    branch is now proven and the name exists in the COA). Otherwise keep the ledger as-is (marker
+    stays when there's no match, or the matched Tally party is itself branch-less)."""
+    led = bank_ledger or ""
+    if ADD_STATE_MARKER not in led:
+        return led
+    if tally_party and _qualifiers(tally_party):
+        return tally_party
+    return led
+
 
 def _amt_in(trow):
     """Tally money-in magnitude (debit)."""
@@ -874,17 +896,20 @@ def write_workbook(result, ctx, output_path):
             tdate = _fmt_date(m["old_date"])
             flag = ("Date updated → %s" % _fmt_date(m["new_date"])) if m["date_changed"] else "OK"
             fill = YELLOW if m["date_changed"] else GREEN
+            disp_ledger = _resolved_ledger(b["ledger"], party)  # fill branch back from Tally
         elif p:
             status = "Partially matched — verify name"
             party = p["tally"]["party"]
             tdate = _fmt_date(p["tally"]["date"])
             flag = "Amount+date agree, name differs"
             fill = ORANGE
+            disp_ledger = b["ledger"]  # name differs on a partial — don't borrow the branch
         else:
             status, party, tdate, flag, fill = "In bank, not in Tally — add", "", "", "", RED
+            disp_ledger = b["ledger"]  # unmatched — keep the marker for a human
         vals = [_fmt_date(b["txn_date"]),
                 b["description"], b["chq_ref"], b["debit"] or "", b["credit"] or "",
-                b["balance"] or "", b["type"], b["ledger"], status, party, tdate, flag]
+                b["balance"] or "", b["type"], disp_ledger, status, party, tdate, flag]
         ws.append(vals)
         rr = ws.max_row
         for c in (4,5,6):
@@ -969,7 +994,7 @@ def _build_results(result, max_rows=1500):
             "credit": _money(b["credit"]),
             "balance": _money(b["balance"]),
             "type": b["type"],
-            "ledger_name": b["ledger"],
+            "ledger_name": _resolved_ledger(b["ledger"], m["tally"]["party"]),
             "reco_status": "Date updated" if date_changed else "Already in Tally",
             "tally_party": m["tally"]["party"],
             "date_flag": ("Date updated → %s" % _fmt_date(m["new_date"])) if date_changed else "OK",
