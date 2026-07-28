@@ -619,6 +619,26 @@ const getWorkflows = async (req, res, next) => {
   }
 };
 
+// Global list — every workflow across every agent, with its parent agent's
+// id/name attached. Powers the "Workflows" section on the Agents pages
+// (admin + accountant), which otherwise have no way to discover workflows
+// without first opening each agent's workspace individually.
+const getAllWorkflows = async (req, res, next) => {
+  try {
+    const workflows = await AgentWorkflow.findAll({
+      include: [{ model: Agent, attributes: ['id', 'name'] }],
+      order: [['name', 'ASC']]
+    });
+    res.json(workflows.map(wf => {
+      const data = normalizeWorkflow(wf);
+      data.agentName = wf.Agent?.name || null;
+      return data;
+    }));
+  } catch (error) {
+    next(error);
+  }
+};
+
 const getWorkflow = async (req, res, next) => {
   try {
     const { workflowId } = req.params;
@@ -792,6 +812,7 @@ const downloadWorkflowOutput = async (req, res, next) => {
 
 module.exports = {
   getWorkflows,
+  getAllWorkflows,
   getWorkflow,
   createWorkflow,
   updateWorkflow,
