@@ -302,11 +302,13 @@ const BrandAgentsInventory = () => {
   const isAssigned = (agentId) => assignedAgents.some(a => a.id === agentId);
 
   // RECO-only build shows the reco agents PLUS the sales/marketplace agents (Sales-*, Nykaa,
-  // Settlement-Amazon, Total-Sales-Analyzer). Legacy Amazon/Flipkart/Myntra dupes, Meesho/AJIO
-  // (no backend) and order-cycle are excluded. Invoice Process IS shown (accountants
-  // review AI-extracted invoices). Full build shows everything.
+  // Settlement-Amazon, Total-Sales-Analyzer, and order-cycle agents e.g. Shopify-Order-Cycle —
+  // these route to AgentWorkspace which has a dedicated order-cycle workspace). Legacy
+  // Amazon/Flipkart/Myntra dupes and Meesho/AJIO (no backend) are excluded. Invoice Process IS
+  // shown (accountants review AI-extracted invoices). Full build shows everything.
   const isSalesMarketplace = (a) =>
     /^sales-/i.test(a.name || '') ||
+    /order[-\s]?cycle/i.test(a.name || '') ||
     ['nykaa', 'settlement-amazon', 'total-sales-analyzer'].includes((a.name || '').toLowerCase());
   const isInvoice = (a) => (a.name || '').toLowerCase() === 'invoice process';
   const visibleAgents = RECO_ONLY

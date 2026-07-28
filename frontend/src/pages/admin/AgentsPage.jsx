@@ -30,6 +30,9 @@ const RICH_META = {
   universal_bank_statement: { section: 'bank',        displayName: 'Universal Bank Statement',       icon: '🌍', category: 'Bank & Finance',     color: '#059669', bg: '#ECFDF5', border: '#A7F3D0', accuracy: '100%'  },
   amazon_mtr_consolidator:  { section: 'marketplace', displayName: 'Amazon MTR Consolidator',        icon: '🛒', category: 'Marketplace MIS',    color: '#D97706', bg: '#FFFBEB', border: '#FDE68A', accuracy: '99.8%' },
   pdf_bank_extract:         { section: 'bank',        displayName: 'PDF → Bank Statement',           icon: '📄', category: 'Bank & Finance',     color: '#0748EE', bg: '#E8EFFE', border: '#A3BFF8', accuracy: 'Auto-detect' },
+  bank_tally_reco:          { section: 'bank',        displayName: 'Bank Reco',                      icon: '🏦', category: 'Bank & Finance',     color: '#0748EE', bg: '#EFF4FF', border: '#A3BFF8', accuracy: null, fields: ['Tally Daybook', 'Universal Bank Output'] },
+  receivable_cycle:         { section: 'other',       displayName: 'Receivable Cycle',               icon: '📦', category: 'Other',            color: '#7C3AED', bg: '#F5F3FF', border: '#C4B5FD', accuracy: null, fields: ['Tally GST Report', 'Sales Order Combine', 'Courier COD Settlement', 'SRN Report'] },
+  zepto_receivables:        { section: 'marketplace', displayName: 'Zepto Receivables',              icon: '⚡', category: 'Marketplace MIS',    color: '#6C2BD9', bg: '#F5F3FF', border: '#C4B5FD', accuracy: null, fields: ['Drive Folder (Tally + Zepto)'] },
 };
 
 // Category sections, in display order.
@@ -48,7 +51,7 @@ const sectionOf = (agent) => {
   if (/invoice/.test(n)) return 'invoice';
   if (/bank/.test(n)) return 'bank';
   if (/gstr|reco|tally|2b|3b/.test(n)) return 'reco';
-  if (/amazon|flipkart|meesho|myntra|nykaa|ajio|jiomart|firstcry|shopify|blinkit|zepto|seller|marketplace|mtr/.test(n)) return 'marketplace';
+  if (/amazon|flipkart|meesho|myntra|nykaa|ajio|jiomart|firstcry|shopify|blinkit|zepto|seller|marketplace|mtr|sales|settlement|cread|mirrow|limeroad|total|order|receivable/.test(n)) return 'marketplace';
   return 'other';
 };
 
@@ -105,13 +108,22 @@ const RichAgentCard = ({ meta, description, onClick }) => (
         style={{ background: meta.bg, border: `1px solid ${meta.border}` }}>
         {meta.icon}
       </div>
-      <span className="flex items-center gap-1 text-xs font-bold px-2 py-0.5 rounded-full"
-        style={{ background: meta.bg, color: meta.color, border: `1px solid ${meta.border}` }}>
-        <TrendingUp className="w-2.5 h-2.5" /> {meta.accuracy}
-      </span>
+      {meta.accuracy && (
+        <span className="flex items-center gap-1 text-xs font-bold px-2 py-0.5 rounded-full"
+          style={{ background: meta.bg, color: meta.color, border: `1px solid ${meta.border}` }}>
+          <TrendingUp className="w-2.5 h-2.5" /> {meta.accuracy}
+        </span>
+      )}
     </div>
     <h3 className="text-sm font-bold mb-1.5 text-slate-900">{meta.displayName}</h3>
-    <p className="text-xs leading-relaxed mb-4 text-slate-500 line-clamp-3">{description}</p>
+    <p className="text-xs leading-relaxed mb-3 text-slate-500 line-clamp-3">{description}</p>
+    {meta.fields && (
+      <div className="flex flex-wrap gap-1.5 mb-4">
+        {meta.fields.map(f => (
+          <span key={f} className="text-[11px] px-2 py-0.5 rounded-full bg-slate-100 text-slate-600 font-medium">{f}</span>
+        ))}
+      </div>
+    )}
     <div className="flex items-center justify-between">
       <span className="text-xs font-semibold px-2 py-0.5 rounded-full"
         style={{ background: meta.bg, color: meta.color, border: `1px solid ${meta.border}` }}>
