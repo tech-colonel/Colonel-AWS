@@ -71,43 +71,132 @@ def _tally_frame(path):
             return df, h
     raise ValueError("No Tally daybook header row found (Date/Particulars/Debit/Credit)")
 
+def _is_as_per_details(party):
+    """True if the ledger cell is Tally's composite-voucher placeholder '(as per details)' --
+    the header of a multi-party voucher whose real party breakdown is on following sub-rows."""
+    return "as per details" in normalize_party(party)
+
+
 def parse_tally(path):
+    """
+    Parse a Tally bank-ledger daybook into flat transaction rows.
+
+    Composite vouchers: when one voucher pays/receives against several parties, Tally prints a
+    header row with party = '(as per details)' and the *total* in Debit/Credit, then one sub-row
+    per real party where that party's amount sits in the **Vch No. column** (NOT Debit/Credit).
+    We explode such vouchers into one matchable row per party (amount pulled from the Vch No.
+    cell, direction/date/vch_no inherited from the header) so each party line can reconcile
+    against its own bank line. If a '(as per details)' header has no readable sub-rows, we keep
+    the lump as a fallback row so no money is lost and the closing-balance totals never drift.
+    """
     df, h = _tally_frame(path)
     cm = _colmap(df.iloc[h].tolist())
     rows = []
+    pending = None  # active composite-voucher header buffering its sub-rows
+    SPLIT_TOL = 0.05  # explode a composite only if its sub-rows sum to the lump (float-noise
+    # tolerance only) -- keeps the Tally total byte-identical; rounding/complex vouchers stay lumps
+
+    def _flush_pending():
+        # Decide a buffered composite: explode into per-party rows ONLY if the sub-rows sum to
+        # the header lump (a provably-clean split, e.g. one payment across several vendors);
+        # otherwise keep the lump untouched so the total debit/credit never drifts (complex/
+        # mixed vouchers whose sub-rows don't reconcile to the lump, and lumps with no sub-rows).
+        if pending is None:
+            return
+        lump = pending["credit"] or pending["debit"]
+        subs = pending["subs"]
+        subsum = sum(a for _, a in subs)
+        if subs and lump and abs(subsum - lump) <= SPLIT_TOL:
+            d = pending["direction"]
+            for p_party, amt in subs:
+                rows.append({
+                    "date": pending["date"], "party": p_party, "narration": pending["narration"],
+                    "vch_type": pending["vch_type"], "vch_no": pending["vch_no"],
+                    "debit": amt if d == "in" else 0.0,
+                    "credit": amt if d == "out" else 0.0,
+                    "direction": d, "row": pending["row"],
+                })
+        elif lump:
+            rows.append({
+                "date": pending["date"], "party": pending["party"], "narration": pending["narration"],
+                "vch_type": pending["vch_type"], "vch_no": pending["vch_no"],
+                "debit": pending["debit"], "credit": pending["credit"],
+                "direction": "in" if pending["debit"] > 0 else "out", "row": pending["row"],
+            })
+
     for i in range(h + 1, len(df)):
         r = df.iloc[i].tolist()
-        date = r[cm["date"]] if cm.get("date") is not None else None
+
+        def cell(key):
+            j = cm.get(key)
+            return r[j] if j is not None and j < len(r) else None
+
+        date = cell("date")
         # Tally puts Cr/Dr flag in Particulars col and the ledger name in the next col
         pcol = cm.get("particulars", 1)
         party = ""
         for cand in (pcol + 1, pcol, pcol + 2):
             if cand < len(r) and str(r[cand]).strip() not in ("", "nan", "Cr", "Dr"):
                 party = str(r[cand]).strip(); break
-        debit = _num(r[cm["debit"]]) if cm.get("debit") is not None else 0.0
-        credit = _num(r[cm["credit"]]) if cm.get("credit") is not None else 0.0
-        narr = str(r[cm["narration"]]).strip() if cm.get("narration") is not None and cm["narration"] < len(r) else ""
+        debit = _num(cell("debit"))
+        credit = _num(cell("credit"))
+        narr = str(cell("narration")).strip() if cell("narration") is not None else ""
+        if narr == "nan": narr = ""
+        vch_type = str(cell("vch_type")).strip() if cell("vch_type") is not None else ""
+        if vch_type.lower() == "nan": vch_type = ""
+        vch_no_raw = cell("vch_no")
+        vch_no = str(vch_no_raw).strip() if vch_no_raw is not None else ""
+        if vch_no.lower() == "nan": vch_no = ""
+        parsed_date = pd.to_datetime(date, errors="coerce") if date is not None else None
         party_l = party.lower()
+
+        # A voucher header carries either a real date or a Vch Type; sub-rows carry neither.
+        is_header = (not pd.isna(parsed_date)) or bool(vch_type)
+
         # Skip labeled summary/footer rows (opening/closing balance, grand total) — these are
         # daybook bookkeeping rows, not transactions, even though they contain alphabetic text.
         if "opening balance" in party_l or "closing balance" in party_l or "grand total" in party_l:
+            _flush_pending(); pending = None
             continue
+
+        # --- Composite '(as per details)' header: buffer it; decide explode-vs-keep at flush. ---
+        if is_header and _is_as_per_details(party) and (debit or credit):
+            _flush_pending()
+            pending = {"date": parsed_date, "party": party, "narration": narr,
+                       "vch_type": vch_type, "vch_no": vch_no,
+                       "debit": debit, "credit": credit,
+                       "direction": "in" if debit > 0 else "out",
+                       "row": i, "subs": []}
+            continue
+
+        # --- Sub-row of a pending composite header: amount is in the Vch No. column. ---
+        if pending is not None and not is_header and party and debit == 0 and credit == 0:
+            sub_amt = _num(vch_no_raw)
+            if sub_amt > 0:
+                pending["subs"].append((party, sub_amt))
+                continue
+            # a stray non-amount row under a composite -> keep the block open, fall through
+
+        # Any real voucher header ends the current composite block.
+        if is_header:
+            _flush_pending(); pending = None
+
         if debit == 0 and credit == 0: continue
         if not party: continue
         # Skip footer/totals rows: date is NaT/unparseable AND party has no alphabetic chars
-        parsed_date = pd.to_datetime(date, errors="coerce") if date is not None else None
         if pd.isna(parsed_date) and not any(c.isalpha() for c in party):
             continue
         rows.append({
             "date": parsed_date,
             "party": party,
-            "narration": narr if narr != "nan" else "",
-            "vch_type": (str(r[cm["vch_type"]]).strip() if cm.get("vch_type") is not None and cm["vch_type"] < len(r) else ""),
-            "vch_no": (str(r[cm["vch_no"]]).strip() if cm.get("vch_no") is not None and cm["vch_no"] < len(r) else ""),
+            "narration": narr,
+            "vch_type": vch_type,
+            "vch_no": vch_no,
             "debit": debit, "credit": credit,
             "direction": "in" if debit > 0 else "out",
             "row": i,
         })
+    _flush_pending()  # tail composite block at EOF
     return rows
 
 def parse_tally_account(path):
