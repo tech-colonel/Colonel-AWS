@@ -455,12 +455,16 @@ def _bank_amt(brow):
     """Bank amount based on direction: credit for in, debit for out."""
     return brow["credit"] if brow["direction"] == "in" else brow["debit"]
 
-def _is_salary_ledger(name):
-    """True if a ledger is a salary/payroll ledger (dynamic keyword, no hardcoded names).
+# Default salary/payroll keywords (dynamic — extended per brand by the learned aggregate config).
+SALARY_KEYWORDS_DEFAULT = ("salary", "wages", "payroll", "stipend")
+
+def _is_salary_ledger(name, keywords=SALARY_KEYWORDS_DEFAULT):
+    """True if a ledger is a salary/payroll ledger (keyword match, no hardcoded ledger names).
     Salary is paid to many workers individually in the bank but booked in aggregate in Tally
     with a month/period timing lag, so it can't match line-by-line or per-month like vendors --
-    it's excluded from the aggregate pass and reconciled as its own category (see _salary_summary)."""
-    return "salary" in str(name or "").lower()
+    it's reconciled as its own category by monthly total (see the aggregate-reco phase)."""
+    n = str(name or "").lower()
+    return any(k in n for k in keywords)
 
 def _d(x):
     """Date-only component of a datetime, or None for a missing/unparseable value.
@@ -474,7 +478,7 @@ def _d(x):
     except Exception:
         return None
 
-def reconcile(tally_rows, bank_rows, amt_tol=1.0):
+def reconcile(tally_rows, bank_rows, amt_tol=1.0, agg_config=None):
     """
     Reconcile Tally and bank rows using greedy 1:1 matching.
 
@@ -600,6 +604,16 @@ def reconcile(tally_rows, bank_rows, amt_tol=1.0):
     def _agg_key(name, direction, mk):
         return (normalize_party(name), direction, mk)
 
+    # Learnable aggregate config (from prior runs, see Phase 2 + the DB learning loop):
+    #   salary_keywords: extra keywords that mark a salary/payroll ledger
+    #   parties: normalized party-base keys already known to be DENSE aggregate parties (Flo, etc.)
+    #            -- recalled so even a single-month file treats them by total, not line matching.
+    agg_config = agg_config or {}
+    _sal_kw = tuple(set(SALARY_KEYWORDS_DEFAULT) | set(agg_config.get("salary_keywords") or []))
+    _learned_parties = set(agg_config.get("parties") or [])
+    def _is_sal(name):
+        return _is_salary_ledger(name, _sal_kw)
+
     AGG_BUCKET_CAP = 26   # a party-month with more unmatched lines than this is too dense to
                           # line-partition safely (Flo Sleep Solutions, etc.) -> left for the
                           # category/total reconciliation, not force-grouped here.
@@ -607,7 +621,7 @@ def reconcile(tally_rows, bank_rows, amt_tol=1.0):
 
     bank_buckets = {}
     for j, b in enumerate(bank_rows):
-        if bank_used[j] or _is_salary_ledger(b["ledger"]):
+        if bank_used[j] or _is_sal(b["ledger"]):
             continue
         mk = _month_key(b["txn_date"])
         if mk is not None:
@@ -615,7 +629,7 @@ def reconcile(tally_rows, bank_rows, amt_tol=1.0):
 
     tally_buckets = {}
     for t in still_unmatched_tally:
-        if _is_salary_ledger(t["party"]):
+        if _is_sal(t["party"]):
             continue
         mk = _month_key(t["date"])
         t_amt = _amt_in(t) if t["direction"] == "in" else _amt_out(t)
@@ -648,6 +662,77 @@ def reconcile(tally_rows, bank_rows, amt_tol=1.0):
                 agg_tally_ids.add(id(t))
     still_unmatched_tally = [t for t in still_unmatched_tally if id(t) not in agg_tally_ids]
 
+    # --- Phase 2: CATEGORY / TOTAL reconciliation for DENSE aggregate parties (salary + Flo-like
+    # parties). Some parties have so many individual bank lines booked as few Tally aggregates,
+    # with a month/period timing lag, that safe line-matching is impossible. For these we reconcile
+    # by MONTHLY TOTAL: per party-month, sum bank vs sum Tally and show the gap, collapsing hundreds
+    # of noise lines into a summary. Dynamic + learnable: salary is keyword-detected; other parties
+    # are detected THIS run by volume (>= DENSE_MIN unmatched bank lines) AND recalled from
+    # `agg_config['parties']` learned in prior runs (so a single-month file still catches Flo/etc.).
+    from collections import defaultdict as _dd
+    DENSE_MIN = 30       # this-run volume threshold to flag a (non-salary) party as a dense aggregate
+    SALARY_KEY = "__salary__"   # ALL payroll ledgers reconcile as ONE category (sub-ledgers like
+                                # 'Salary Payable' vs 'Salary Payable -Staff' must not split apart)
+
+    def _party_key(name):
+        return SALARY_KEY if _is_sal(name) else normalize_party(name)
+
+    unbank_by_party = _dd(list)
+    for j, b in enumerate(bank_rows):
+        if not bank_used[j] and _month_key(b["txn_date"]) is not None:
+            unbank_by_party[_party_key(b["ledger"])].append(j)
+    untally_by_party = _dd(list)
+    for t in still_unmatched_tally:
+        if _month_key(t["date"]) is not None:
+            untally_by_party[_party_key(t["party"])].append(t)
+
+    # Decide which party-bases are aggregate parties: salary (one bucket) OR dense-this-run OR learned.
+    agg_bases = set(); detected_parties = set()
+    for pb, js in unbank_by_party.items():
+        is_sal = pb == SALARY_KEY
+        if is_sal or pb in _learned_parties or (len(js) >= DENSE_MIN and untally_by_party.get(pb)):
+            # Only reconcile parties present on BOTH sides (else it's a genuine unbooked gap).
+            if is_sal or untally_by_party.get(pb):
+                agg_bases.add(pb)
+                if not is_sal:
+                    detected_parties.add(pb)   # learn dense non-salary parties (Flo, etc.)
+
+    # For a dense/salary party present on BOTH sides, reconcile over the whole PERIOD: fold ALL its
+    # unmatched bank + Tally lines (a party-month with only one side is timing lag, not a per-month
+    # gap -- summed across months the monthly gaps net to the TRUE period gap). One summary row per
+    # (party, month) shows that month's bank vs Tally; the period gap = sum of the monthly gaps.
+    aggregate_reco = []
+    agg_recon_tally_ids = set()
+    for pb in agg_bases:
+        is_sal = pb == SALARY_KEY
+        bmonth = _dd(list); tmonth = _dd(list)
+        for j in unbank_by_party.get(pb, []):
+            if not bank_used[j]:
+                bmonth[_month_key(bank_rows[j]["txn_date"])].append(j)
+        for t in untally_by_party.get(pb, []):
+            tmonth[_month_key(t["date"])].append(t)
+        if is_sal:
+            label = "Salary (all payroll ledgers)"
+        else:
+            label = next((t["party"] for t in untally_by_party.get(pb, [])), None) \
+                or next((bank_rows[j]["ledger"] for j in unbank_by_party.get(pb, [])), pb)
+        for mk in sorted(m for m in (set(bmonth) | set(tmonth)) if m):
+            js = bmonth.get(mk, []); ts = tmonth.get(mk, [])
+            bt = sum(_bank_amt(bank_rows[j]) for j in js)
+            tt = sum((_amt_in(t) if t["direction"] == "in" else _amt_out(t)) for t in ts)
+            for j in js:
+                bank_used[j] = True
+            for t in ts:
+                agg_recon_tally_ids.add(id(t))
+            aggregate_reco.append({
+                "party": label, "party_base": pb, "month": mk,
+                "kind": "salary" if is_sal else "party",
+                "bank_total": bt, "tally_total": tt, "gap": bt - tt,
+                "bank_lines": len(js), "tally_vouchers": len(ts),
+                "banks": [bank_rows[j] for j in js], "tallys": ts,
+            })
+    still_unmatched_tally = [t for t in still_unmatched_tally if id(t) not in agg_recon_tally_ids]
+
     tally_only = still_unmatched_tally
     bank_only = [b for j, b in enumerate(bank_rows) if not bank_used[j]]
     counts = {
@@ -656,10 +741,13 @@ def reconcile(tally_rows, bank_rows, amt_tol=1.0):
         "partial": len(partial),
         "aggregated": sum(len(a["banks"]) for a in aggregated),
         "aggregated_vouchers": len(aggregated),
+        "aggregate_reco": sum(a["bank_lines"] for a in aggregate_reco),
+        "aggregate_reco_groups": len(aggregate_reco),
         "bank_only": len(bank_only),
         "tally_only": len(tally_only),
     }
     return {"matched": matched, "partial": partial, "aggregated": aggregated,
+            "aggregate_reco": aggregate_reco, "detected_aggregate_parties": sorted(detected_parties),
             "bank_only": bank_only, "tally_only": tally_only, "counts": counts}
 
 
@@ -755,6 +843,7 @@ def _write_summary(wb, result, ctx):
         ("Matched", c["matched"]),
         ("Date-updated", c["date_updated"]),
         ("Aggregated in Tally", "%d lines → %d vouchers" % (c.get("aggregated", 0), c.get("aggregated_vouchers", 0))),
+        ("Aggregate reconciled (salary/dense)", "%d lines → %d party-months" % (c.get("aggregate_reco", 0), c.get("aggregate_reco_groups", 0))),
         ("Partially matched", c["partial"]),
         ("Bank-only", c["bank_only"]),
         ("Tally-only", c["tally_only"]),
@@ -821,6 +910,43 @@ def _write_tally_only(wb, result):
         for c in (3, 4):
             ws.cell(row=rr, column=c).number_format = MONEY
         _fill_row(ws, rr, len(vals), GREY)
+    _autowidth(ws)
+
+
+def _write_aggregate_reco(wb, result):
+    """Sheet 6: Aggregate Reco — dense/salary parties reconciled by monthly total (not line-by-line
+    -- the bank shows many individual payments that Tally books as few aggregate vouchers). One row
+    per (party, month): bank total, Tally total, and the gap; a green period subtotal per party.
+    The gap is the real 'needs review / booking' amount -- everything else is reconciled."""
+    reco = result.get("aggregate_reco", [])
+    if not reco:
+        return
+    ws = _sheet(wb, "Aggregate Reco",
+                ["Party / Category", "Month", "Bank total", "Tally total", "Gap (Bank − Tally)",
+                 "Bank lines", "Tally vouchers"])
+    # group rows by party, print monthly rows then a period subtotal
+    from collections import OrderedDict
+    by_party = OrderedDict()
+    for a in reco:
+        by_party.setdefault(a["party"], []).append(a)
+    for party, rowsp in by_party.items():
+        rowsp.sort(key=lambda a: a["month"])
+        b_sum = t_sum = 0.0; bl = tv = 0
+        for a in rowsp:
+            ws.append([a["party"], a["month"], a["bank_total"], a["tally_total"], a["gap"],
+                       a["bank_lines"], a["tally_vouchers"]])
+            rr = ws.max_row
+            for c in (3, 4, 5):
+                ws.cell(row=rr, column=c).number_format = MONEY
+            _fill_row(ws, rr, 7, BLUE if abs(a["gap"]) <= 1 else YELLOW)
+            b_sum += a["bank_total"]; t_sum += a["tally_total"]; bl += a["bank_lines"]; tv += a["tally_vouchers"]
+        ws.append(["%s — PERIOD TOTAL" % party, "", b_sum, t_sum, b_sum - t_sum, bl, tv])
+        rr = ws.max_row
+        for c in (3, 4, 5):
+            ws.cell(row=rr, column=c).number_format = MONEY
+        _fill_row(ws, rr, 7, GREEN if abs(b_sum - t_sum) <= max(1.0, 0.02 * max(b_sum, t_sum)) else RED)
+        for c in range(1, 8):
+            ws.cell(row=rr, column=c).font = Font(bold=True)
     _autowidth(ws)
 
 
@@ -1004,10 +1130,16 @@ def write_workbook(result, ctx, output_path):
     for a in result.get("aggregated", []):
         for bk in a["banks"]:
             agg_by_bankrow[id(bk)] = (a["tally"], len(a["banks"]))
+    # aggregate-reco (dense/salary category): each bank line -> its (party label, month)
+    aggreco_by_bankrow = {}
+    for a in result.get("aggregate_reco", []):
+        for bk in a["banks"]:
+            aggreco_by_bankrow[id(bk)] = a
     for b in ctx["bank_rows"]:
         m = matched_by_bankrow.get(id(b))
         p = partial_by_bankrow.get(id(b))
         ag = agg_by_bankrow.get(id(b))
+        ar = aggreco_by_bankrow.get(id(b))
         if m:
             status = "Already in Tally"
             party = m["tally"]["party"]
@@ -1023,6 +1155,14 @@ def write_workbook(result, ctx, output_path):
             flag = "%d bank lines → 1 voucher (vch %s)" % (n, tv.get("vch_no") or "")
             fill = BLUE
             disp_ledger = _resolved_ledger(b["ledger"], party)
+        elif ar:
+            status = "Aggregate reconciled"
+            party = ar["party"]
+            tdate = ar["month"]
+            flag = ("Salary — reconciled in aggregate" if ar["kind"] == "salary"
+                    else "Booked in aggregate under %s" % ar["party"])
+            fill = BLUE
+            disp_ledger = b["ledger"]
         elif p:
             status = "Partially matched — verify name"
             party = p["tally"]["party"]
@@ -1048,12 +1188,13 @@ def write_workbook(result, ctx, output_path):
     _write_date_updates(wb, result)          # sheet 3
     _write_ready_to_paste(wb, result, ctx)   # sheet 4
     _write_tally_only(wb, result)            # sheet 5
-    _write_pivot(wb, ctx)                    # sheet 6
-    _write_query(wb, ctx)                    # sheet 7
-    _write_closing(wb, ctx)                  # sheet 8
-    _write_universal(wb, ctx)                # sheet 9
+    _write_aggregate_reco(wb, result)        # sheet 6 (only if any)
+    _write_pivot(wb, ctx)                    # sheet 7
+    _write_query(wb, ctx)                    # sheet 8
+    _write_closing(wb, ctx)                  # sheet 9
+    _write_universal(wb, ctx)                # sheet 10
     # reorder tabs to spec order
-    order = ["Summary","Reconciliation","Date Updates","Add to Tally","Tally-only","Pivot","Query","Bank vs Tally","Universal Output"]
+    order = ["Summary","Reconciliation","Date Updates","Add to Tally","Tally-only","Aggregate Reco","Pivot","Query","Bank vs Tally","Universal Output"]
     wb._sheets.sort(key=lambda s: order.index(s.title) if s.title in order else 99)
     wb.save(output_path)
 
@@ -1103,10 +1244,12 @@ def _build_results(result, max_rows=1500):
 
     partial = result.get("partial", [])
     aggregated = result.get("aggregated", [])
+    aggregate_reco = result.get("aggregate_reco", [])
     caps = _fair_caps({
         "matched": len(result["matched"]),
         "partial": len(partial),
         "aggregated": sum(len(a["banks"]) for a in aggregated),
+        "aggregate_reco": sum(a["bank_lines"] for a in aggregate_reco),
         "bank_only": len(result["bank_only"]),
         "tally_only": len(result["tally_only"]),
     }, max_rows)
@@ -1160,6 +1303,23 @@ def _build_results(result, max_rows=1500):
             "date_flag": "%d bank lines → 1 voucher" % n,
         })
 
+    aggreco_flat = [(bk, a) for a in aggregate_reco for bk in a["banks"]]
+    for b, a in aggreco_flat[:caps["aggregate_reco"]]:
+        rows.append({
+            "txn_date": _fmt_date(b["txn_date"]),
+            "description": b["description"],
+            "chq_ref": b["chq_ref"],
+            "debit": _money(b["debit"]),
+            "credit": _money(b["credit"]),
+            "balance": _money(b["balance"]),
+            "type": b["type"],
+            "ledger_name": b["ledger"],
+            "reco_status": "Aggregate reconciled",
+            "tally_party": a["party"],
+            "date_flag": ("Salary — reconciled in aggregate" if a["kind"] == "salary"
+                          else "Booked in aggregate (%s)" % a["month"]),
+        })
+
     for b in result["bank_only"][:caps["bank_only"]]:
         rows.append({
             "txn_date": _fmt_date(b["txn_date"]),
@@ -1209,11 +1369,24 @@ def main():
     ap.add_argument("--tolerance", type=float, default=1.0,
                      help="Amount-match tolerance in ₹ (bank vs Tally). Amounts within this "
                           "range are treated as equal. Defaults to 1.0 (matches the UI default).")
+    ap.add_argument("--aggregate-config", default=None,
+                     help="Path to a per-BRAND learned aggregate-reco config JSON: "
+                          '{"parties": [<normalized dense-party keys>], "salary_keywords": [...]}. '
+                          "Recalls parties learned in prior runs so even a single-month file "
+                          "catches them. The run prints the parties it detected under "
+                          "'detected_aggregate_parties' for the controller to persist per brand.")
     a = ap.parse_args()
+    agg_config = {}
+    if a.aggregate_config and os.path.exists(a.aggregate_config):
+        try:
+            with open(a.aggregate_config) as f:
+                agg_config = json.load(f) or {}
+        except Exception:
+            agg_config = {}
     tally = parse_tally(a.tally)
     bank = parse_bank_output(a.bank)
     opening = parse_tally_opening(a.tally)
-    res = reconcile(tally, bank, amt_tol=max(a.tolerance, 0.0))
+    res = reconcile(tally, bank, amt_tol=max(a.tolerance, 0.0), agg_config=agg_config)
     # Resolve the bank-account ledger name for "Add to Tally" rows:
     # 1. explicit --bank-ledger CLI override
     # 2. the ledger parsed straight from the daybook's own title row (authoritative --
@@ -1235,10 +1408,20 @@ def main():
     write_workbook(res, ctx, a.output)
     results = _build_results(res)
     analytics = _build_analytics(res, ctx)
+    # aggregate-reco summary for the controller/UI + the parties detected this run (to be persisted
+    # per brand so future single-month files recall them).
+    aggregate_reco_summary = [
+        {"party": a2["party"], "party_base": a2["party_base"], "month": a2["month"],
+         "kind": a2["kind"], "bank_total": a2["bank_total"], "tally_total": a2["tally_total"],
+         "gap": a2["gap"], "bank_lines": a2["bank_lines"], "tally_vouchers": a2["tally_vouchers"]}
+        for a2 in res.get("aggregate_reco", [])
+    ]
     print(json.dumps({"counts": res["counts"],
                       "summary": {"brand": a.brand, "total_bank_rows": len(bank), "total_tally_rows": len(tally)},
                       "results": results,
-                      "analytics": analytics}))
+                      "analytics": analytics,
+                      "aggregate_reco": aggregate_reco_summary,
+                      "detected_aggregate_parties": res.get("detected_aggregate_parties", [])}))
 
 if __name__ == "__main__":
     main()
