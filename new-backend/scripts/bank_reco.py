@@ -455,6 +455,24 @@ def _bank_amt(brow):
     """Bank amount based on direction: credit for in, debit for out."""
     return brow["credit"] if brow["direction"] == "in" else brow["debit"]
 
+# Aggressive company-ROOT key for the dense-party aggregate reco: collapse every branch/unit
+# variant of one party to a single root so "Flo Sleep Solutions (HYD) Factory", "…(Medchal)",
+# "…- ⟨add state⟩" and "FLO SLEEP SOLUTIONS LLP(HIPL)" all bucket together (bank and Tally name
+# their branches differently, so only the root is common). Strips the state marker, ALL
+# parentheticals (branch/city/code tags), punctuation, and trailing generic unit/company words.
+_AGG_DROP_WORDS = {"factory", "llp", "pvt", "ltd", "limited", "private", "unit", "units",
+                   "godown", "warehouse", "branch", "division", "dept", "department", "co", "company"}
+
+def _agg_base_key(name):
+    s = str(name or "").lower().replace(ADD_STATE_MARKER.lower(), " ")
+    s = re.sub(r"\([^)]*\)", " ", s)      # drop all parentheticals (branch/city/code tags)
+    s = re.sub(r"[^a-z0-9 ]", " ", s)     # punctuation -> space
+    toks = s.split()
+    while toks and toks[-1] in _AGG_DROP_WORDS:   # drop trailing generic unit/company words
+        toks.pop()
+    return " ".join(toks).strip()
+
+
 # Default salary/payroll keywords (dynamic — extended per brand by the learned aggregate config).
 SALARY_KEYWORDS_DEFAULT = ("salary", "wages", "payroll", "stipend")
 
@@ -675,7 +693,9 @@ def reconcile(tally_rows, bank_rows, amt_tol=1.0, agg_config=None):
                                 # 'Salary Payable' vs 'Salary Payable -Staff' must not split apart)
 
     def _party_key(name):
-        return SALARY_KEY if _is_sal(name) else normalize_party(name)
+        # Salary -> one category; every other party -> its company ROOT so all branch/unit variants
+        # (bank's "(HYD) Factory" vs Tally's "(Medchal)") fold into one dense-party bucket.
+        return SALARY_KEY if _is_sal(name) else _agg_base_key(name)
 
     unbank_by_party = _dd(list)
     for j, b in enumerate(bank_rows):
