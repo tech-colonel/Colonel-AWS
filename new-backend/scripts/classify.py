@@ -2406,9 +2406,17 @@ def gemini_classify(narration, candidates, api_key, model="gemini-2.5-flash", ti
 # invented name, timeout, API/refusal error) yields None and the caller keeps
 # "Suspense A/c". Raw HTTPS (urllib) to mirror gemini_classify — no SDK dependency.
 # ---------------------------------------------------------------------------
+def _post_via(router, api_key, model, ask, max_tokens, timeout, base_url=None,
+              cached_block=None):
+    """Send through the router when one exists (so failover applies), else direct."""
+    if router is not None:
+        return router.post(model, ask, max_tokens, timeout, cached_block)
+    return _llm_post(api_key, model, ask, max_tokens, timeout, base_url, cached_block)
+
+
 def anthropic_side_verdict(narration, credit_ledger, debit_ledger, assigned,
                            debit, credit, api_key, model="claude-haiku-4-5", timeout=30,
-                           base_url=None):
+                           base_url=None, router=None):
     """Constrained verdict for a row a per-brand side rule already claimed.
 
     Claude may ONLY answer with one of the rule's own two ledgers, ABSTAIN, or
@@ -2455,8 +2463,8 @@ def anthropic_side_verdict(narration, credit_ledger, debit_ledger, assigned,
         "  UNSURE           - genuinely ambiguous\n"
     )
     try:
-        _txt, _ = _llm_post(api_key, model, prompt, max_tokens=16, timeout=timeout,
-                            base_url=base_url)
+        _txt, _ = _post_via(router, api_key, model, prompt, max_tokens=16,
+                            timeout=timeout, base_url=base_url)
         data = {"content": [{"type": "text", "text": _txt}]}
     except Exception as _e:
         print(f"      → Claude side-verdict failed: {type(_e).__name__}: {str(_e)[:140]}",
@@ -2500,6 +2508,85 @@ def _llm_ssl_ctx():
         return ssl.create_default_context(cafile=certifi.where())
     except Exception:
         return ssl.create_default_context()
+
+
+def _credential_is_finished(exc):
+    """Does this error mean the credential will not work again for the rest of the run?
+
+    Returns (True, reason) only for conditions that are permanent for this key:
+      * 401 / 403        — revoked, wrong, or not permitted
+      * 400 + a billing/quota message — Anthropic reports an exhausted balance as a
+        400 ("Your credit balance is too low"), NOT a 402, so the status alone is not
+        enough; the body has to be read.
+
+    Deliberately NOT failover-worthy: timeouts, connection resets, 429 (rate limit) and
+    529 (overloaded). Those are transient on a WORKING credential — treating them as
+    fatal would abandon the primary for the whole run because one call was unlucky, and
+    would throw away the prompt cache already built up on it.
+    """
+    import urllib.error
+    if not isinstance(exc, urllib.error.HTTPError):
+        return False, ""                      # timeout / DNS / reset -> transient
+    try:
+        body = exc.read().decode("utf-8", "replace")[:400]
+    except Exception:
+        body = ""
+    if exc.code in (401, 403):
+        return True, f"HTTP {exc.code}"
+    if exc.code == 400 and re.search(
+            r"credit balance|billing|insufficient|quota|exceeded your", body, re.I):
+        return True, f"HTTP 400 — {' '.join(body.split())[:100]}"
+    return False, ""
+
+
+class _LLMRouter:
+    """One primary transport with a sticky, one-way failover to a secondary.
+
+    The switch happens at most ONCE per run. After it, every later call goes straight to
+    the secondary — the alternative (retrying the primary each time) would pay a failed
+    round trip on every single call once the primary is dry.
+
+    Note the cache consequence: prompt caches are per-endpoint, so the first call after a
+    switch writes a fresh cache on the secondary instead of reading the primary's. That
+    is a one-off cost of the failover, not a per-call one.
+    """
+
+    def __init__(self, primary, secondary=None):
+        import threading
+        self.active = primary                 # (label, api_key, base_url)
+        self.standby = secondary
+        self.switched = False
+        self._lock = threading.Lock()
+
+    @property
+    def label(self):
+        return self.active[0]
+
+    def post(self, model, ask, max_tokens, timeout, cached_block=None):
+        # Layer 3.4 runs six threads in parallel, so several calls are usually in flight
+        # when the primary dies. Each of those threads gets the same fatal error. Only
+        # ONE performs the switch; the others must RETRY on the new transport rather than
+        # give up — otherwise a single dead credential fails every request that happened
+        # to be concurrent with the discovery (measured: 66 of 135 rows lost that way).
+        for _ in range(2):
+            label, key, base = self.active
+            try:
+                return _llm_post(key, model, ask, max_tokens, timeout, base, cached_block)
+            except Exception as exc:
+                finished, why = _credential_is_finished(exc)
+                if not finished:
+                    raise                       # transient — caller decides
+                with self._lock:
+                    if self.active != (label, key, base):
+                        continue                # another thread already switched: retry
+                    if not self.standby:
+                        raise                   # nothing left to fall back to
+                    nlabel = self.standby[0]
+                    print(f"[llm] {label} credential is finished ({why}) — failing over "
+                          f"to {nlabel} for the rest of this run", file=sys.stderr)
+                    self.active, self.standby, self.switched = self.standby, None, True
+                continue                        # retry once on the new transport
+        raise RuntimeError("LLM transport exhausted after failover")
 
 
 def _llm_post(api_key, model, ask, max_tokens, timeout, base_url=None,
@@ -2546,7 +2633,7 @@ def _llm_post(api_key, model, ask, max_tokens, timeout, base_url=None,
 
 
 def anthropic_classify_batch(items, coa, api_key, model="claude-haiku-4-5",
-                             timeout=120, chunk=25, base_url=None):
+                             timeout=120, chunk=25, base_url=None, router=None):
     """Classify MANY rows against ONE copy of the chart of accounts.
 
     WHY: the per-row call sent the whole CoA every time. On FLO (3,968 ledgers) a single
@@ -2606,7 +2693,7 @@ def anthropic_classify_batch(items, coa, api_key, model="claude-haiku-4-5",
         cached_block = ("You are an expert Indian bank-reconciliation assistant.\n\n"
                         "LEDGER LIST (the brand's full chart of accounts):\n" + coa_block)
         try:
-            text, usage = _llm_post(api_key, model, ask,
+            text, usage = _post_via(router, api_key, model, ask,
                                     max_tokens=32 * len(batch) + 256,
                                     timeout=timeout, base_url=base_url,
                                     cached_block=cached_block)
@@ -2638,7 +2725,7 @@ def anthropic_classify_batch(items, coa, api_key, model="claude-haiku-4-5",
 
 
 def anthropic_classify(narration, candidates, api_key, model="claude-haiku-4-5", timeout=30,
-                       base_url=None):
+                       base_url=None, router=None):
     import urllib.request
     import json as _json
     if not api_key or not candidates or not str(narration).strip():
@@ -2654,8 +2741,8 @@ def anthropic_classify(narration, candidates, api_key, model="claude-haiku-4-5",
         f"TRANSACTION NARRATION:\n{narration}\n\nCANDIDATES:\n{cand_block}"
     )
     try:
-        _txt, _ = _llm_post(api_key, model, prompt, max_tokens=100, timeout=timeout,
-                            base_url=base_url)
+        _txt, _ = _post_via(router, api_key, model, prompt, max_tokens=100,
+                            timeout=timeout, base_url=base_url)
         data = {"content": [{"type": "text", "text": _txt}]}
     except Exception as _e:
         print(f"      → Claude call failed: {type(_e).__name__}: {str(_e)[:160]}", file=sys.stderr)
@@ -2922,15 +3009,27 @@ def main():
     _prefer_gsk = os.environ.get("LLM_PROVIDER", "").strip().lower() in ("genspark", "gsk")
     _gsk = os.environ.get("GSK_API_KEY")
     _gsk_base = llm_base_url or os.environ.get("GSK_BASE_URL")
-    if (_prefer_gsk or not anthropic_key) and _gsk and _gsk_base:
-        _why = "LLM_PROVIDER=genspark" if _prefer_gsk else "no ANTHROPIC_API_KEY"
-        anthropic_key, llm_base_url = _gsk, _gsk_base
-        print(f"[llm] {_why} — using GenSpark proxy at {_gsk_base}")
+
+    # Build an ordered transport chain. Anthropic is preferred when its key is present,
+    # with GenSpark on standby; LLM_PROVIDER=genspark inverts that. Failover is sticky
+    # and fires only on a permanently-dead credential (see _credential_is_finished), so
+    # an exhausted key costs ONE failed call per run rather than one per request.
+    _anthropic_leg = ("Anthropic", anthropic_key, None) if anthropic_key else None
+    _gsk_leg = ("GenSpark", _gsk, _gsk_base) if (_gsk and _gsk_base) else None
+    _chain = ([_gsk_leg, _anthropic_leg] if _prefer_gsk
+              else [_anthropic_leg, _gsk_leg])
+    _chain = [leg for leg in _chain if leg]
+    llm_router = None
+    if _chain:
+        llm_router = _LLMRouter(_chain[0], _chain[1] if len(_chain) > 1 else None)
+        anthropic_key = _chain[0][1]          # keeps the "is an LLM available?" checks true
+        llm_base_url = _chain[0][2]
+        _standby = f", standby {_chain[1][0]}" if len(_chain) > 1 else ", no standby"
+        print(f"[llm] primary {_chain[0][0]}"
+              + (f" ({_chain[0][2]})" if _chain[0][2] else "") + _standby)
     elif _prefer_gsk:
-        print("[llm] LLM_PROVIDER=genspark but GSK_API_KEY/GSK_BASE_URL missing — "
-              "falling back to Anthropic", file=sys.stderr)
-    elif llm_base_url:
-        print(f"[llm] routing via {llm_base_url}")
+        print("[llm] LLM_PROVIDER=genspark but GSK_API_KEY/GSK_BASE_URL missing",
+              file=sys.stderr)
     gemini_key = args.gemini_key or os.environ.get("GEMINI_API_KEY")
     llm_key = anthropic_key or gemini_key
     llm_name = (f"Claude ({args.anthropic_model})" if anthropic_key
@@ -2939,7 +3038,7 @@ def main():
     def llm_pick(desc, cands):
         if anthropic_key:
             return anthropic_classify(desc, cands, anthropic_key, args.anthropic_model,
-                                      base_url=llm_base_url)
+                                      base_url=llm_base_url, router=llm_router)
         # Was `return llm_pick(...)` — an infinite self-call. Only reachable with a Gemini
         # key and no Anthropic/GenSpark key, which is why it survived: every run so far had
         # one of the other two. It would have hit RecursionError, not a graceful skip.
@@ -2971,7 +3070,8 @@ def main():
                 out = anthropic_side_verdict(
                     r["description"], r["side_credit"], r["side_debit"],
                     r["predicted_ledger"], r["debit"], r["credit"],
-                    anthropic_key, args.anthropic_model, base_url=llm_base_url)
+                    anthropic_key, args.anthropic_model, base_url=llm_base_url,
+                    router=llm_router)
                 _scache[ck] = out
                 return i, out
 
@@ -3043,7 +3143,8 @@ def main():
                                   "hints": classifier.top_candidates(ent, k=8)})
                 answers = anthropic_classify_batch(items, classifier.master_ledgers,
                                                    anthropic_key, args.anthropic_model,
-                                                   base_url=llm_base_url)
+                                                   base_url=llm_base_url,
+                                                   router=llm_router)
                 for n, key in enumerate(by_key):
                     if n in answers:
                         picks[key] = answers[n]
