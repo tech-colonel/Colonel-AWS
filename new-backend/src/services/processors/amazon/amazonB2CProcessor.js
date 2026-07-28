@@ -209,9 +209,13 @@ async function amazonB2CProcessor(
     // STEP 4.4: MAP STATE CONFIG DATA
     // ================================
 
-    // Builds the "-{monthNumber}" or "-{stateNumber}-{monthNumber}" invoice suffix
+    // Builds the "-{sellerGstinPrefix}-{monthNumber}" (single-state) or
+    // "-{stateNumber}-{monthNumber}" (multi-state) invoice suffix.
     const getInvoiceSuffix = (row) => {
-      if (!multiStateSale) return monthNumber;
+      if (!multiStateSale) {
+        const gstinPrefix = String(row[sellerGstinColumn] || '').trim().slice(0, 2);
+        return gstinPrefix ? `${gstinPrefix}-${monthNumber}` : monthNumber;
+      }
       const stateCode = getStateCodeFromName(row[fromStateCol]);
       if (!stateCode) {
         console.warn(`[Amazon B2C] Multi-state sale: no GST state code match for "${fromStateCol}" value "${row[fromStateCol]}"`);
