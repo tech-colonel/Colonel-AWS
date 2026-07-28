@@ -779,13 +779,16 @@ const runUniversalClassifier = (ledgerPath, bankPath, outputPath, correctionsPat
  * { counts: {...}, summary: {...}, results: [...], analytics: {...} } — after writing
  * the output workbook.
  */
-const runBankReco = (tallyPath, bankPath, outputPath, brandName, tolerance) =>
+const runBankReco = (tallyPath, bankPath, outputPath, brandName, tolerance, aggregateConfigPath) =>
   new Promise((resolve, reject) => {
     const script = path.join(__dirname, '../../scripts/bank_reco.py');
     const args = ['--tally', tallyPath, '--bank', bankPath, '--output', outputPath, '--brand', brandName || 'Brand'];
     // Amount-match tolerance from the UI (defaults to 1.0). Guard against NaN/negatives.
     const tol = Number(tolerance);
     args.push('--tolerance', String(Number.isFinite(tol) && tol >= 0 ? tol : 1.0));
+    // Per-brand learned aggregate-reco config (dense parties + salary keywords), so a single-month
+    // file recalls what prior runs learned. Brand-scoped — see load/saveAggregateConfig.
+    if (aggregateConfigPath) args.push('--aggregate-config', aggregateConfigPath);
     console.log(`[RECO-BANK-TALLY] Executing standalone bank_reco CLI (brand=${brandName || 'none'}): ${script}`);
     execFile('python3', [script, ...args], { timeout: 600000, maxBuffer: 64 * 1024 * 1024 },
       (error, stdout, stderr) => {
@@ -799,6 +802,72 @@ const runBankReco = (tallyPath, bankPath, outputPath, brandName, tolerance) =>
       }
     );
   });
+
+// --- Per-brand learned aggregate-reco config (bank_reco_aggregate_config, brand_id-keyed) ---
+// Dense aggregate parties (e.g. "flo sleep solutions") + custom salary keywords LEARNED from prior
+// runs, so even a single-month file recalls them. Brand-scoped exactly like the classifier's
+// per-brand corrections — what FLO learns stays FLO-only. Self-creates the table (additive).
+const AGG_CONFIG_DDL = `
+  CREATE TABLE IF NOT EXISTS bank_reco_aggregate_config (
+    brand_id uuid PRIMARY KEY,
+    parties jsonb NOT NULL DEFAULT '[]'::jsonb,
+    salary_keywords jsonb NOT NULL DEFAULT '[]'::jsonb,
+    updated_at timestamptz NOT NULL DEFAULT now()
+  )`;
+
+const loadAggregateConfig = async (brandId, brandName, jobDir) => {
+  if (!brandId || brandId === 'demo' || brandId === 'other') return null;
+  try {
+    const { Brand } = require('../models/master');
+    const { getBrandConnection } = require('../config/database');
+    const brand = await Brand.findByPk(brandId);
+    if (!brand) return null;
+    const seq = getBrandConnection(brand.db_name);
+    await seq.query(AGG_CONFIG_DDL);
+    const [rows] = await seq.query(
+      `SELECT parties, salary_keywords FROM bank_reco_aggregate_config WHERE brand_id = $1`,
+      { bind: [brandId] }
+    );
+    const cfg = (rows && rows[0]) || { parties: [], salary_keywords: [] };
+    const p = path.join(jobDir, 'aggregate_config.json');
+    fs.writeFileSync(p, JSON.stringify({
+      parties: Array.isArray(cfg.parties) ? cfg.parties : [],
+      salary_keywords: Array.isArray(cfg.salary_keywords) ? cfg.salary_keywords : [],
+    }));
+    console.log(`[RECO] Aggregate config for "${brandName}": ${(cfg.parties || []).length} learned parties`);
+    return p;
+  } catch (e) {
+    console.warn('[RECO] loadAggregateConfig failed (non-fatal):', e.message);
+    return null;
+  }
+};
+
+const saveAggregateConfig = async (brandId, detectedParties) => {
+  if (!brandId || brandId === 'demo' || brandId === 'other') return;
+  if (!Array.isArray(detectedParties) || detectedParties.length === 0) return;
+  try {
+    const { Brand } = require('../models/master');
+    const { getBrandConnection } = require('../config/database');
+    const brand = await Brand.findByPk(brandId);
+    if (!brand) return;
+    const seq = getBrandConnection(brand.db_name);
+    await seq.query(AGG_CONFIG_DDL);
+    const [rows] = await seq.query(
+      `SELECT parties FROM bank_reco_aggregate_config WHERE brand_id = $1`, { bind: [brandId] });
+    const existing = (rows && rows[0] && Array.isArray(rows[0].parties)) ? rows[0].parties : [];
+    const merged = Array.from(new Set([...existing, ...detectedParties]));
+    if (merged.length === existing.length && existing.every((p, i) => p === merged[i])) return;
+    await seq.query(
+      `INSERT INTO bank_reco_aggregate_config (brand_id, parties, updated_at)
+       VALUES ($1, $2::jsonb, now())
+       ON CONFLICT (brand_id) DO UPDATE SET parties = EXCLUDED.parties, updated_at = now()`,
+      { bind: [brandId, JSON.stringify(merged)] }
+    );
+    console.log(`[RECO] Learned ${merged.length - existing.length} new aggregate parties for brand ${brandId} (total ${merged.length})`);
+  } catch (e) {
+    console.warn('[RECO] saveAggregateConfig failed (non-fatal):', e.message);
+  }
+};
 
 /**
  * Build the brand's FULL Chart of Accounts as an Excel buffer for classify.py.
@@ -1418,13 +1487,18 @@ const runReco = async (req, res) => {
         }
         brandName = brandName || 'Brand';
 
-        // 4. Execute Standalone Bank-vs-Tally Reco Script
+        // 4. Execute Standalone Bank-vs-Tally Reco Script — with the brand's learned aggregate
+        //    config (dense parties + salary keywords) so a single-month file recalls prior learning.
+        const aggConfigPath = await loadAggregateConfig(brandId, brandName, jobDir);
         const outputPath = path.join(jobDir, 'output.xlsx');
-        const meta = await runBankReco(tallyPath, bankPath, outputPath, brandName, req.body.tolerance);
+        const meta = await runBankReco(tallyPath, bankPath, outputPath, brandName, req.body.tolerance, aggConfigPath);
 
         if (!fs.existsSync(outputPath)) {
           throw new Error('bank_reco.py failed to generate output spreadsheet.');
         }
+
+        // Learn: persist any newly-detected dense aggregate parties for THIS brand (fire-and-forget).
+        setImmediate(() => saveAggregateConfig(brandId, meta.detected_aggregate_parties));
 
         // 5. Persist Excel File for Direct Download (GET /api/reco/export/:jobId)
         fs.mkdirSync(RECO_OUTPUT_DIR, { recursive: true });
