@@ -455,6 +455,13 @@ def _bank_amt(brow):
     """Bank amount based on direction: credit for in, debit for out."""
     return brow["credit"] if brow["direction"] == "in" else brow["debit"]
 
+def _is_salary_ledger(name):
+    """True if a ledger is a salary/payroll ledger (dynamic keyword, no hardcoded names).
+    Salary is paid to many workers individually in the bank but booked in aggregate in Tally
+    with a month/period timing lag, so it can't match line-by-line or per-month like vendors --
+    it's excluded from the aggregate pass and reconciled as its own category (see _salary_summary)."""
+    return "salary" in str(name or "").lower()
+
 def _d(x):
     """Date-only component of a datetime, or None for a missing/unparseable value.
     NOTE: pandas `NaT.date()` returns NaT (not None and not a raise), so an explicit NaN/NaT
@@ -582,16 +589,78 @@ def reconcile(tally_rows, bank_rows, amt_tol=1.0):
         b = bank_rows[found]
         partial.append({"bank": b, "tally": t, "reason": "amount+date agree, name differs"})
 
+    # --- Pass 3: AGGREGATE match (N bank lines -> 1 Tally voucher). Accountants often book ONE
+    # Tally voucher for several individual bank payments to the SAME party in the SAME month.
+    # Over the leftover unmatched rows (salary EXCLUDED -- reconciled as a separate category),
+    # bucket by party-base + direction + month and, for each Tally voucher (largest first), find
+    # the smallest subset of bank lines that sums to it. Guardrails against coincidental grouping:
+    # same party required, capped bucket + group size, ₹amt_tol. ---
+    from itertools import combinations as _combos
+
+    def _agg_key(name, direction, mk):
+        return (normalize_party(name), direction, mk)
+
+    AGG_BUCKET_CAP = 26   # a party-month with more unmatched lines than this is too dense to
+                          # line-partition safely (Flo Sleep Solutions, etc.) -> left for the
+                          # category/total reconciliation, not force-grouped here.
+    AGG_GROUP_MAX = 6     # a Tally voucher is built from at most this many bank lines
+
+    bank_buckets = {}
+    for j, b in enumerate(bank_rows):
+        if bank_used[j] or _is_salary_ledger(b["ledger"]):
+            continue
+        mk = _month_key(b["txn_date"])
+        if mk is not None:
+            bank_buckets.setdefault(_agg_key(b["ledger"], b["direction"], mk), []).append(j)
+
+    tally_buckets = {}
+    for t in still_unmatched_tally:
+        if _is_salary_ledger(t["party"]):
+            continue
+        mk = _month_key(t["date"])
+        t_amt = _amt_in(t) if t["direction"] == "in" else _amt_out(t)
+        if mk is not None and t_amt > 0:
+            tally_buckets.setdefault(_agg_key(t["party"], t["direction"], mk), []).append((t, t_amt))
+
+    aggregated = []
+    agg_tally_ids = set()
+    for key, aggs in tally_buckets.items():
+        pool = [j for j in bank_buckets.get(key, []) if not bank_used[j]]
+        if len(pool) < 2 or len(pool) > AGG_BUCKET_CAP:
+            continue
+        for t, t_amt in sorted(aggs, key=lambda x: -x[1]):   # biggest voucher claims its lines first
+            avail = [(j, _bank_amt(bank_rows[j])) for j in pool if not bank_used[j]]
+            if len(avail) < 2:
+                break
+            avail.sort(key=lambda ja: ja[1])   # ascending -> first exact match is the smallest group
+            found = None
+            for rsz in range(2, min(len(avail), AGG_GROUP_MAX) + 1):
+                for combo in _combos(range(len(avail)), rsz):
+                    if abs(sum(avail[i][1] for i in combo) - t_amt) <= amt_tol:
+                        found = [avail[i][0] for i in combo]
+                        break
+                if found:
+                    break
+            if found:
+                for j in found:
+                    bank_used[j] = True
+                aggregated.append({"tally": t, "banks": [bank_rows[j] for j in found]})
+                agg_tally_ids.add(id(t))
+    still_unmatched_tally = [t for t in still_unmatched_tally if id(t) not in agg_tally_ids]
+
     tally_only = still_unmatched_tally
     bank_only = [b for j, b in enumerate(bank_rows) if not bank_used[j]]
     counts = {
         "matched": len(matched),
         "date_updated": sum(1 for m in matched if m["date_changed"]),
         "partial": len(partial),
+        "aggregated": sum(len(a["banks"]) for a in aggregated),
+        "aggregated_vouchers": len(aggregated),
         "bank_only": len(bank_only),
         "tally_only": len(tally_only),
     }
-    return {"matched": matched, "partial": partial, "bank_only": bank_only, "tally_only": tally_only, "counts": counts}
+    return {"matched": matched, "partial": partial, "aggregated": aggregated,
+            "bank_only": bank_only, "tally_only": tally_only, "counts": counts}
 
 
 # ---------------------------------------------------------------------------
@@ -606,6 +675,7 @@ GREEN  = PatternFill(start_color="C8E6C9", end_color="C8E6C9", fill_type="solid"
 YELLOW = PatternFill(start_color="FFF9C4", end_color="FFF9C4", fill_type="solid")
 ORANGE = PatternFill(start_color="FFE0B2", end_color="FFE0B2", fill_type="solid")   # partial match
 RED    = PatternFill(start_color="FFCDD2", end_color="FFCDD2", fill_type="solid")
+BLUE   = PatternFill(start_color="BBDEFB", end_color="BBDEFB", fill_type="solid")   # aggregated in Tally
 GREY   = PatternFill(start_color="ECEFF1", end_color="ECEFF1", fill_type="solid")
 HEADER = PatternFill(start_color="263238", end_color="263238", fill_type="solid")
 WHITE_BOLD = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
@@ -684,6 +754,7 @@ def _write_summary(wb, result, ctx):
         ("Period", period),
         ("Matched", c["matched"]),
         ("Date-updated", c["date_updated"]),
+        ("Aggregated in Tally", "%d lines → %d vouchers" % (c.get("aggregated", 0), c.get("aggregated_vouchers", 0))),
         ("Partially matched", c["partial"]),
         ("Bank-only", c["bank_only"]),
         ("Tally-only", c["tally_only"]),
@@ -891,6 +962,7 @@ def _build_analytics(result, ctx):
     buckets = [
         {"key": "matched", "label": "Matched", "count": counts["matched"]},
         {"key": "date_updated", "label": "Date-updated", "count": counts["date_updated"]},
+        {"key": "aggregated", "label": "Aggregated in Tally", "count": counts.get("aggregated", 0)},
         {"key": "partial", "label": "Partially matched", "count": counts["partial"]},
         {"key": "bank_only", "label": "Bank-only", "count": counts["bank_only"]},
         {"key": "tally_only", "label": "Tally-only", "count": counts["tally_only"]},
@@ -927,9 +999,15 @@ def write_workbook(result, ctx, output_path):
         "Balance","Type","Ledger Name","Reco Status","Matched Tally Party","Tally Date","Date Flag"])
     matched_by_bankrow = {id(m["bank"]): m for m in result["matched"]}
     partial_by_bankrow = {id(p["bank"]): p for p in result.get("partial", [])}
+    # aggregated: each bank line -> (its Tally voucher, how many bank lines fed that voucher)
+    agg_by_bankrow = {}
+    for a in result.get("aggregated", []):
+        for bk in a["banks"]:
+            agg_by_bankrow[id(bk)] = (a["tally"], len(a["banks"]))
     for b in ctx["bank_rows"]:
         m = matched_by_bankrow.get(id(b))
         p = partial_by_bankrow.get(id(b))
+        ag = agg_by_bankrow.get(id(b))
         if m:
             status = "Already in Tally"
             party = m["tally"]["party"]
@@ -937,6 +1015,14 @@ def write_workbook(result, ctx, output_path):
             flag = ("Date updated → %s" % _fmt_date(m["new_date"])) if m["date_changed"] else "OK"
             fill = YELLOW if m["date_changed"] else GREEN
             disp_ledger = _resolved_ledger(b["ledger"], party)  # fill branch back from Tally
+        elif ag:
+            tv, n = ag
+            status = "Aggregated in Tally"
+            party = tv["party"]
+            tdate = _fmt_date(tv["date"])
+            flag = "%d bank lines → 1 voucher (vch %s)" % (n, tv.get("vch_no") or "")
+            fill = BLUE
+            disp_ledger = _resolved_ledger(b["ledger"], party)
         elif p:
             status = "Partially matched — verify name"
             party = p["tally"]["party"]
@@ -1016,9 +1102,11 @@ def _build_results(result, max_rows=1500):
         return v if v else ""
 
     partial = result.get("partial", [])
+    aggregated = result.get("aggregated", [])
     caps = _fair_caps({
         "matched": len(result["matched"]),
         "partial": len(partial),
+        "aggregated": sum(len(a["banks"]) for a in aggregated),
         "bank_only": len(result["bank_only"]),
         "tally_only": len(result["tally_only"]),
     }, max_rows)
@@ -1054,6 +1142,22 @@ def _build_results(result, max_rows=1500):
             "reco_status": "Partially matched",
             "tally_party": p["tally"]["party"],
             "date_flag": "amount+date agree, name differs",
+        })
+
+    agg_flat = [(bk, a["tally"], len(a["banks"])) for a in aggregated for bk in a["banks"]]
+    for b, tv, n in agg_flat[:caps["aggregated"]]:
+        rows.append({
+            "txn_date": _fmt_date(b["txn_date"]),
+            "description": b["description"],
+            "chq_ref": b["chq_ref"],
+            "debit": _money(b["debit"]),
+            "credit": _money(b["credit"]),
+            "balance": _money(b["balance"]),
+            "type": b["type"],
+            "ledger_name": _resolved_ledger(b["ledger"], tv["party"]),
+            "reco_status": "Aggregated in Tally",
+            "tally_party": tv["party"],
+            "date_flag": "%d bank lines → 1 voucher" % n,
         })
 
     for b in result["bank_only"][:caps["bank_only"]]:
