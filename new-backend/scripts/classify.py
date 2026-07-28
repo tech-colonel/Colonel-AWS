@@ -2407,7 +2407,8 @@ def gemini_classify(narration, candidates, api_key, model="gemini-2.5-flash", ti
 # "Suspense A/c". Raw HTTPS (urllib) to mirror gemini_classify — no SDK dependency.
 # ---------------------------------------------------------------------------
 def anthropic_side_verdict(narration, credit_ledger, debit_ledger, assigned,
-                           debit, credit, api_key, model="claude-haiku-4-5", timeout=30):
+                           debit, credit, api_key, model="claude-haiku-4-5", timeout=30,
+                           base_url=None):
     """Constrained verdict for a row a per-brand side rule already claimed.
 
     Claude may ONLY answer with one of the rule's own two ledgers, ABSTAIN, or
@@ -2453,23 +2454,10 @@ def anthropic_side_verdict(narration, credit_ledger, debit_ledger, assigned,
         "party (e.g. a NACH mandate collected by an aggregator on behalf of someone else)\n"
         "  UNSURE           - genuinely ambiguous\n"
     )
-    body = _json.dumps({
-        "model": model,
-        "max_tokens": 16,
-        "messages": [{"role": "user", "content": prompt}],
-    }).encode("utf-8")
     try:
-        import certifi
-        _ctx = ssl.create_default_context(cafile=certifi.where())
-    except Exception:
-        _ctx = ssl.create_default_context()
-    try:
-        req = urllib.request.Request("https://api.anthropic.com/v1/messages", data=body,
-                                     headers={"content-type": "application/json",
-                                              "x-api-key": api_key,
-                                              "anthropic-version": "2023-06-01"})
-        with urllib.request.urlopen(req, timeout=timeout, context=_ctx) as resp:
-            data = _json.loads(resp.read().decode("utf-8"))
+        _txt, _ = _llm_post(api_key, model, prompt, max_tokens=16, timeout=timeout,
+                            base_url=base_url)
+        data = {"content": [{"type": "text", "text": _txt}]}
     except Exception as _e:
         print(f"      → Claude side-verdict failed: {type(_e).__name__}: {str(_e)[:140]}",
               file=sys.stderr)
@@ -2488,8 +2476,77 @@ def anthropic_side_verdict(narration, credit_ledger, debit_ledger, assigned,
     return ("abstain", assigned)          # UNSURE, empty, or anything unrecognised
 
 
+# ── LLM transport ─────────────────────────────────────────────────────────────
+# The SAME Claude models are reachable over two different wire formats:
+#   * Anthropic native   POST https://api.anthropic.com/v1/messages
+#                        header  x-api-key + anthropic-version
+#                        reply   data["content"][0]["text"]
+#   * OpenAI-compatible  POST {base}/chat/completions      (GenSpark's llm_proxy)
+#                        header  Authorization: Bearer
+#                        reply   data["choices"][0]["message"]["content"]
+#
+# GenSpark's proxy is the OpenAI shape but forwards to Anthropic underneath, so an
+# Anthropic-style `cache_control` block in the system message IS honoured — verified
+# 2026-07-28: 8,017 tokens written to cache on the first call and read back on the
+# second. That matters because it means the batching + prompt-caching cost design
+# works identically on either transport; we are not trading cost for availability.
+LLM_UA = "curl/8.7.1"   # urllib's default User-Agent trips Cloudflare 1010 on GenSpark
+
+
+def _llm_ssl_ctx():
+    import ssl                                   # imported locally, as elsewhere in this file
+    try:
+        import certifi
+        return ssl.create_default_context(cafile=certifi.where())
+    except Exception:
+        return ssl.create_default_context()
+
+
+def _llm_post(api_key, model, ask, max_tokens, timeout, base_url=None,
+              cached_block=None):
+    """One completion request over whichever wire format `base_url` implies.
+
+    `cached_block` is the large, byte-stable prefix (the chart of accounts) and is sent
+    in its own content block marked for caching. Returns (text, usage_dict).
+    """
+    import urllib.request, json as _json
+    payload_msgs = []
+    if base_url:                                    # OpenAI-compatible
+        url = f"{base_url.rstrip('/')}/chat/completions"
+        headers = {"content-type": "application/json",
+                   "authorization": f"Bearer {api_key}",
+                   "user-agent": LLM_UA}
+        if cached_block:
+            payload_msgs.append({"role": "system", "content": [
+                {"type": "text", "text": cached_block,
+                 "cache_control": {"type": "ephemeral"}}]})
+        payload_msgs.append({"role": "user", "content": ask})
+    else:                                           # Anthropic native
+        url = "https://api.anthropic.com/v1/messages"
+        headers = {"content-type": "application/json", "x-api-key": api_key,
+                   "anthropic-version": "2023-06-01"}
+        content = []
+        if cached_block:
+            content.append({"type": "text", "text": cached_block,
+                            "cache_control": {"type": "ephemeral"}})
+        content.append({"type": "text", "text": ask})
+        payload_msgs.append({"role": "user", "content": content})
+
+    body = _json.dumps({"model": model, "max_tokens": max_tokens,
+                        "messages": payload_msgs}).encode("utf-8")
+    req = urllib.request.Request(url, data=body, headers=headers)
+    with urllib.request.urlopen(req, timeout=timeout, context=_llm_ssl_ctx()) as resp:
+        data = _json.loads(resp.read().decode("utf-8"))
+    if base_url:
+        text = ((data.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
+    else:
+        text = next((b.get("text", "") for b in data.get("content", [])
+                     if b.get("type") == "text"), "")
+    return text, (data.get("usage") or {})
+
+
 def anthropic_classify_batch(items, coa, api_key, model="claude-haiku-4-5",
-                             timeout=120, chunk=25):
+                             timeout=120, chunk=25, base_url=None):
     """Classify MANY rows against ONE copy of the chart of accounts.
 
     WHY: the per-row call sent the whole CoA every time. On FLO (3,968 ledgers) a single
@@ -2544,41 +2601,28 @@ def anthropic_classify_batch(items, coa, api_key, model="claude-haiku-4-5",
             "No other text.\n\n"
             "TRANSACTIONS:\n" + "\n".join(lines)
         )
-        body = _json.dumps({
-            "model": model,
-            "max_tokens": 32 * len(batch) + 256,
-            "messages": [{"role": "user", "content": [
-                # Cached prefix — identical across every chunk and every run for a brand.
-                {"type": "text",
-                 "text": "You are an expert Indian bank-reconciliation assistant.\n\n"
-                         "LEDGER LIST (the brand's full chart of accounts):\n" + coa_block,
-                 "cache_control": {"type": "ephemeral"}},
-                {"type": "text", "text": ask},
-            ]}],
-        }).encode("utf-8")
+        # Cached prefix — byte-identical across every chunk, every retry and every run
+        # for a brand, which is what makes the cache hit.
+        cached_block = ("You are an expert Indian bank-reconciliation assistant.\n\n"
+                        "LEDGER LIST (the brand's full chart of accounts):\n" + coa_block)
         try:
-            req = urllib.request.Request(
-                "https://api.anthropic.com/v1/messages", data=body,
-                headers={"content-type": "application/json", "x-api-key": api_key,
-                         "anthropic-version": "2023-06-01"})
-            with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
-                data = _json.loads(resp.read().decode("utf-8"))
+            text, usage = _llm_post(api_key, model, ask,
+                                    max_tokens=32 * len(batch) + 256,
+                                    timeout=timeout, base_url=base_url,
+                                    cached_block=cached_block)
         except Exception as _e:
-            print(f"      → Claude batch failed ({type(_e).__name__}: {str(_e)[:120]}); "
-                  f"rows in this chunk keep their rule answer", file=sys.stderr)
+            _detail = getattr(_e, 'read', lambda: b'')()
+            print(f"      → LLM batch failed ({type(_e).__name__}: {str(_e)[:110]} "
+                  f"{_detail[:120]}); rows in this chunk keep their rule answer",
+                  file=sys.stderr)
             continue
 
-        usage = data.get("usage") or {}
         if usage:
-            print(f"        chunk {start//chunk + 1}: in={usage.get('input_tokens')} "
+            # prompt_tokens on the OpenAI shape, input_tokens on the native one.
+            print(f"        chunk {start//chunk + 1}: "
+                  f"in={usage.get('input_tokens') or usage.get('prompt_tokens')} "
                   f"cache_write={usage.get('cache_creation_input_tokens')} "
                   f"cache_read={usage.get('cache_read_input_tokens')}")
-
-        text = ""
-        for block in data.get("content", []):
-            if block.get("type") == "text":
-                text = block.get("text") or ""
-                break
         for line in text.splitlines():
             mm = re.match(r'\s*(\d+)\s*[:.\)]\s*(.+?)\s*$', line)
             if not mm:
@@ -2593,7 +2637,8 @@ def anthropic_classify_batch(items, coa, api_key, model="claude-haiku-4-5",
     return out
 
 
-def anthropic_classify(narration, candidates, api_key, model="claude-haiku-4-5", timeout=30):
+def anthropic_classify(narration, candidates, api_key, model="claude-haiku-4-5", timeout=30,
+                       base_url=None):
     import urllib.request
     import json as _json
     if not api_key or not candidates or not str(narration).strip():
@@ -2608,26 +2653,10 @@ def anthropic_classify(narration, candidates, api_key, model="claude-haiku-4-5",
         "explanation, no extra text.\n\n"
         f"TRANSACTION NARRATION:\n{narration}\n\nCANDIDATES:\n{cand_block}"
     )
-    body = _json.dumps({
-        "model": model,
-        "max_tokens": 100,
-        "messages": [{"role": "user", "content": prompt}],
-    }).encode("utf-8")
-    url = "https://api.anthropic.com/v1/messages"
-    import ssl
     try:
-        import certifi
-        _ctx = ssl.create_default_context(cafile=certifi.where())
-    except Exception:
-        _ctx = ssl.create_default_context()
-    try:
-        req = urllib.request.Request(url, data=body, headers={
-            "content-type": "application/json",
-            "x-api-key": api_key,
-            "anthropic-version": "2023-06-01",
-        })
-        with urllib.request.urlopen(req, timeout=timeout, context=_ctx) as resp:
-            data = _json.loads(resp.read().decode("utf-8"))
+        _txt, _ = _llm_post(api_key, model, prompt, max_tokens=100, timeout=timeout,
+                            base_url=base_url)
+        data = {"content": [{"type": "text", "text": _txt}]}
     except Exception as _e:
         print(f"      → Claude call failed: {type(_e).__name__}: {str(_e)[:160]}", file=sys.stderr)
         return None
@@ -2673,6 +2702,11 @@ def main():
     parser.add_argument("--anthropic-key", default=None,
                         help="Anthropic (Claude) API key for the LLM fallback (else env "
                              "ANTHROPIC_API_KEY). Preferred over Gemini when present.")
+    parser.add_argument("--llm-base-url", default=None,
+                        help="OpenAI-compatible base URL (e.g. GenSpark's llm_proxy). When "
+                             "set, the LLM key is sent as 'Authorization: Bearer' to "
+                             "{base}/chat/completions instead of Anthropic's /v1/messages. "
+                             "Defaults to $GSK_BASE_URL when only a GenSpark key is available.")
     parser.add_argument("--anthropic-model", default="claude-haiku-4-5",
                         help="Claude model for the fallback (default: claude-haiku-4-5)")
     parser.add_argument("--list-ledgers", action="store_true",
@@ -2876,6 +2910,19 @@ def main():
     # row stays unchanged. Claude is preferred when its key is present; else Gemini.
     # ------------------------------------------------------------------
     anthropic_key = args.anthropic_key or os.environ.get("ANTHROPIC_API_KEY")
+    # Transport selection. An Anthropic key talks to api.anthropic.com directly. With no
+    # Anthropic key we fall back to a GenSpark proxy key if one is configured: same Claude
+    # models, OpenAI-shaped wire format, and prompt caching still works through it, so the
+    # batching/caching cost design is unchanged. Explicit --llm-base-url overrides both.
+    llm_base_url = args.llm_base_url or None
+    if not anthropic_key:
+        _gsk = os.environ.get("GSK_API_KEY")
+        _gsk_base = llm_base_url or os.environ.get("GSK_BASE_URL")
+        if _gsk and _gsk_base:
+            anthropic_key, llm_base_url = _gsk, _gsk_base
+            print(f"[llm] no ANTHROPIC_API_KEY — using GenSpark proxy at {_gsk_base}")
+    elif llm_base_url:
+        print(f"[llm] routing via {llm_base_url}")
     gemini_key = args.gemini_key or os.environ.get("GEMINI_API_KEY")
     llm_key = anthropic_key or gemini_key
     llm_name = (f"Claude ({args.anthropic_model})" if anthropic_key
@@ -2883,7 +2930,8 @@ def main():
 
     def llm_pick(desc, cands):
         if anthropic_key:
-            return anthropic_classify(desc, cands, anthropic_key, args.anthropic_model)
+            return anthropic_classify(desc, cands, anthropic_key, args.anthropic_model,
+                                      base_url=llm_base_url)
         return llm_pick(desc, cands)
 
     # ------------------------------------------------------------------
@@ -2912,7 +2960,7 @@ def main():
                 out = anthropic_side_verdict(
                     r["description"], r["side_credit"], r["side_debit"],
                     r["predicted_ledger"], r["debit"], r["credit"],
-                    anthropic_key, args.anthropic_model)
+                    anthropic_key, args.anthropic_model, base_url=llm_base_url)
                 _scache[ck] = out
                 return i, out
 
@@ -2983,7 +3031,8 @@ def main():
                     items.append({"idx": n, "narration": rows[i0]["description"],
                                   "hints": classifier.top_candidates(ent, k=8)})
                 answers = anthropic_classify_batch(items, classifier.master_ledgers,
-                                                   anthropic_key, args.anthropic_model)
+                                                   anthropic_key, args.anthropic_model,
+                                                   base_url=llm_base_url)
                 for n, key in enumerate(by_key):
                     if n in answers:
                         picks[key] = answers[n]
