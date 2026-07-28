@@ -459,12 +459,15 @@ def _d(x):
     except Exception:
         return None
 
-def reconcile(tally_rows, bank_rows, amt_tol=0.01):
+def reconcile(tally_rows, bank_rows, amt_tol=1.0):
     """
     Reconcile Tally and bank rows using greedy 1:1 matching.
 
     Two passes:
-    1. Full match — same direction + amount within amt_tol + party_matches True.
+    1. Full match — same direction + amount within amt_tol + party_matches True. Among all such
+       candidates the NEAREST-dated bank row is chosen (same date wins), so a recurring
+       same-amount payment (salary/rent) pairs with the correct month instead of whichever bank
+       row happens to appear first in the file.
     2. Partial match (soft "review" tier) — over rows still unmatched after pass 1,
        greedily pair same direction + amount within amt_tol + same date (date-only)
        where party_matches is False. These are flagged for human review, not auto-merged.
@@ -478,40 +481,75 @@ def reconcile(tally_rows, bank_rows, amt_tol=0.01):
     - "counts": {"matched", "date_updated", "partial", "bank_only", "tally_only"}
     """
     bank_used = [False] * len(bank_rows)
+
+    # Amount index: bucket bank rows by rounded magnitude so each Tally row only compares against
+    # the handful of bank rows near its amount. Without this, scanning every bank row per Tally
+    # row (to find the nearest date) would run party_matches millions of times on 10k+ rows.
+    radius = int(amt_tol) + 1
+    bank_by_amt = {}
+    for j, b in enumerate(bank_rows):
+        bank_by_amt.setdefault(int(round(_bank_amt(b))), []).append(j)
+
+    def _candidates(t_amt, direction):
+        """Unused bank indices with the same direction and amount within amt_tol of t_amt."""
+        base = int(round(t_amt))
+        out = []
+        for k in range(base - radius, base + radius + 1):
+            for j in bank_by_amt.get(k, ()):
+                if bank_used[j]:
+                    continue
+                b = bank_rows[j]
+                if b["direction"] == direction and abs(_bank_amt(b) - t_amt) <= amt_tol:
+                    out.append(j)
+        return out
+
+    def _pick_nearest(cands, t_date):
+        """Choose the candidate whose txn date is nearest t_date (same date = gap 0); unknown
+        dates sort last; ties broken by file row order for determinism."""
+        best_j, best_key = None, None
+        for j in cands:
+            bd = _d(bank_rows[j]["txn_date"])
+            gap = abs((bd - t_date).days) if (bd and t_date) else 10 ** 9
+            key = (gap, bank_rows[j]["row"])
+            if best_key is None or key < best_key:
+                best_j, best_key = j, key
+        return best_j
+
+    # --- Pass 1: full match (direction + amount + party). Two phases so an obvious same-date
+    # pair is never stolen by a far-date one competing for the same bank row:
+    #   1a. claim EXACT same-date pairs first,
+    #   1b. then match each remaining Tally row to its NEAREST available date. ---
     matched, tally_only = [], []
+    t_done = [False] * len(tally_rows)
 
-    for t in tally_rows:
-        # Get Tally amount based on direction
+    def _record(t, j):
+        bank_used[j] = True
+        b = bank_rows[j]
+        od, nd = t["date"], b["txn_date"]
+        matched.append({"bank": b, "tally": t, "old_date": od, "new_date": nd,
+                        "date_changed": bool(_d(od) and _d(nd) and _d(od) != _d(nd))})
+
+    for idx, t in enumerate(tally_rows):          # 1a — exact same-date
+        t_date = _d(t["date"])
+        if t_date is None:
+            continue
         t_amt = _amt_in(t) if t["direction"] == "in" else _amt_out(t)
-        found = None
+        for j in _candidates(t_amt, t["direction"]):
+            if _d(bank_rows[j]["txn_date"]) == t_date and party_matches(t["party"], bank_rows[j]["ledger"]):
+                _record(t, j); t_done[idx] = True
+                break
 
-        for j, b in enumerate(bank_rows):
-            if bank_used[j]:
-                continue
-            if b["direction"] != t["direction"]:
-                continue
-            if abs(_bank_amt(b) - t_amt) > amt_tol:
-                continue
-            if not party_matches(t["party"], b["ledger"]):
-                continue
-            found = j
-            break
-
+    for idx, t in enumerate(tally_rows):          # 1b — nearest available date
+        if t_done[idx]:
+            continue
+        t_amt = _amt_in(t) if t["direction"] == "in" else _amt_out(t)
+        cands = [j for j in _candidates(t_amt, t["direction"])
+                 if party_matches(t["party"], bank_rows[j]["ledger"])]
+        found = _pick_nearest(cands, _d(t["date"]))
         if found is None:
             tally_only.append(t)
             continue
-
-        bank_used[found] = True
-        b = bank_rows[found]
-        od, nd = t["date"], b["txn_date"]
-        changed = bool(_d(od) and _d(nd) and _d(od) != _d(nd))
-        matched.append({
-            "bank": b,
-            "tally": t,
-            "old_date": od,
-            "new_date": nd,
-            "date_changed": changed
-        })
+        _record(t, found)
 
     # Partial tier: over the still-unmatched rows, greedily pair same direction + amount +
     # same date-only where names differ (party_matches False -- if it matched, pass 1 would
@@ -522,17 +560,11 @@ def reconcile(tally_rows, bank_rows, amt_tol=0.01):
         t_amt = _amt_in(t) if t["direction"] == "in" else _amt_out(t)
         t_date = _d(t["date"])
         found = None
-        for j, b in enumerate(bank_rows):
-            if bank_used[j]:
-                continue
-            if b["direction"] != t["direction"]:
-                continue
-            if abs(_bank_amt(b) - t_amt) > amt_tol:
-                continue
-            if t_date is None or _d(b["txn_date"]) != t_date:
-                continue
-            found = j
-            break
+        if t_date is not None:
+            for j in _candidates(t_amt, t["direction"]):
+                if _d(bank_rows[j]["txn_date"]) == t_date:
+                    found = j
+                    break
 
         if found is None:
             still_unmatched_tally.append(t)
@@ -1062,11 +1094,14 @@ def main():
                      help="Override the bank ledger name used on 'Add to Tally' rows. "
                           "Defaults to the ledger parsed from the Tally daybook's own title "
                           "(the '<Ledger Name>  Book' header row).")
+    ap.add_argument("--tolerance", type=float, default=1.0,
+                     help="Amount-match tolerance in ₹ (bank vs Tally). Amounts within this "
+                          "range are treated as equal. Defaults to 1.0 (matches the UI default).")
     a = ap.parse_args()
     tally = parse_tally(a.tally)
     bank = parse_bank_output(a.bank)
     opening = parse_tally_opening(a.tally)
-    res = reconcile(tally, bank)
+    res = reconcile(tally, bank, amt_tol=max(a.tolerance, 0.0))
     # Resolve the bank-account ledger name for "Add to Tally" rows:
     # 1. explicit --bank-ledger CLI override
     # 2. the ledger parsed straight from the daybook's own title row (authoritative --

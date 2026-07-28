@@ -779,10 +779,13 @@ const runUniversalClassifier = (ledgerPath, bankPath, outputPath, correctionsPat
  * { counts: {...}, summary: {...}, results: [...], analytics: {...} } — after writing
  * the output workbook.
  */
-const runBankReco = (tallyPath, bankPath, outputPath, brandName) =>
+const runBankReco = (tallyPath, bankPath, outputPath, brandName, tolerance) =>
   new Promise((resolve, reject) => {
     const script = path.join(__dirname, '../../scripts/bank_reco.py');
     const args = ['--tally', tallyPath, '--bank', bankPath, '--output', outputPath, '--brand', brandName || 'Brand'];
+    // Amount-match tolerance from the UI (defaults to 1.0). Guard against NaN/negatives.
+    const tol = Number(tolerance);
+    args.push('--tolerance', String(Number.isFinite(tol) && tol >= 0 ? tol : 1.0));
     console.log(`[RECO-BANK-TALLY] Executing standalone bank_reco CLI (brand=${brandName || 'none'}): ${script}`);
     execFile('python3', [script, ...args], { timeout: 600000, maxBuffer: 64 * 1024 * 1024 },
       (error, stdout, stderr) => {
@@ -1417,7 +1420,7 @@ const runReco = async (req, res) => {
 
         // 4. Execute Standalone Bank-vs-Tally Reco Script
         const outputPath = path.join(jobDir, 'output.xlsx');
-        const meta = await runBankReco(tallyPath, bankPath, outputPath, brandName);
+        const meta = await runBankReco(tallyPath, bankPath, outputPath, brandName, req.body.tolerance);
 
         if (!fs.existsSync(outputPath)) {
           throw new Error('bank_reco.py failed to generate output spreadsheet.');
