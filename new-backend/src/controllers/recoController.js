@@ -805,16 +805,10 @@ const runBankReco = (tallyPath, bankPath, outputPath, brandName, tolerance, aggr
 
 // --- Per-brand learned aggregate-reco config (bank_reco_aggregate_config, brand_id-keyed) ---
 // Dense aggregate parties (e.g. "flo sleep solutions") + custom salary keywords LEARNED from prior
-// runs, so even a single-month file recalls them. Brand-scoped exactly like the classifier's
-// per-brand corrections — what FLO learns stays FLO-only. Self-creates the table (additive).
-const AGG_CONFIG_DDL = `
-  CREATE TABLE IF NOT EXISTS bank_reco_aggregate_config (
-    brand_id uuid PRIMARY KEY,
-    parties jsonb NOT NULL DEFAULT '[]'::jsonb,
-    salary_keywords jsonb NOT NULL DEFAULT '[]'::jsonb,
-    updated_at timestamptz NOT NULL DEFAULT now()
-  )`;
-
+// runs, so even a single-month file recalls them. Brand-scoped by brand_id + RLS, exactly like
+// bank_reco_corrections. The table is owned by postgres with DML granted to colonel_app; the app
+// user cannot CREATE, so it's provisioned by the migration db-restructure/010_bank_reco_aggregate_config.sql
+// (run per environment as the DB owner). If the table is missing, load/save just no-op gracefully.
 const loadAggregateConfig = async (brandId, brandName, jobDir) => {
   if (!brandId || brandId === 'demo' || brandId === 'other') return null;
   try {
@@ -823,7 +817,6 @@ const loadAggregateConfig = async (brandId, brandName, jobDir) => {
     const brand = await Brand.findByPk(brandId);
     if (!brand) return null;
     const seq = getBrandConnection(brand.db_name);
-    await seq.query(AGG_CONFIG_DDL);
     const [rows] = await seq.query(
       `SELECT parties, salary_keywords FROM bank_reco_aggregate_config WHERE brand_id = $1`,
       { bind: [brandId] }
@@ -851,7 +844,6 @@ const saveAggregateConfig = async (brandId, detectedParties) => {
     const brand = await Brand.findByPk(brandId);
     if (!brand) return;
     const seq = getBrandConnection(brand.db_name);
-    await seq.query(AGG_CONFIG_DDL);
     const [rows] = await seq.query(
       `SELECT parties FROM bank_reco_aggregate_config WHERE brand_id = $1`, { bind: [brandId] });
     const existing = (rows && rows[0] && Array.isArray(rows[0].parties)) ? rows[0].parties : [];
