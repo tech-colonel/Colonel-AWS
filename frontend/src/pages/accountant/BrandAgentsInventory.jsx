@@ -2,12 +2,13 @@ import React, { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import DashboardLayout from '../../components/layout/DashboardLayout';
 import { channelLogoSrc } from '../../components/ChannelLogo';
-import { LayoutDashboard, Bot, TrendingUp, ChevronRight, ShoppingBag } from 'lucide-react';
+import { LayoutDashboard, Bot, TrendingUp, ChevronRight, ShoppingBag, GitBranch } from 'lucide-react';
 import { Card, CardContent } from '../../components/ui/card';
 import api from '../../lib/api';
 import { toast } from 'sonner';
 import { sidebarFor } from '../../lib/adminNav';
 import { RECO_ID_TO_TYPE } from './AgentDispatch';
+import WorkflowApplyModal from './WorkflowApplyModal';
 
 // ── RECO-only visibility (unchanged) ───────────────────────────────────────
 //   - REACT_APP_RECO_ONLY=true/false → explicit override, always wins.
@@ -223,12 +224,54 @@ const AgentCard = ({ agent, assigned, onClick }) => {
   );
 };
 
+// ── Workflow card — saved multi-sheet transform recipes, scoped to a parent agent ──
+const WORKFLOW_ACCENT = { color: '#4F46E5', bg: '#EEF2FF', border: '#C7D2FE' };
+const WorkflowCard = ({ workflow, onClick }) => {
+  const sheets = workflow.sheets || [];
+  return (
+    <div
+      onClick={onClick}
+      data-testid={`workflow-inventory-card-${workflow.id}`}
+      className="rounded-2xl border bg-white transition-all duration-200 flex flex-col overflow-hidden cursor-pointer hover:shadow-lg hover:-translate-y-0.5"
+      style={{ borderColor: WORKFLOW_ACCENT.border }}
+    >
+      <div className="p-5 flex-1">
+        <div className="flex items-start justify-between mb-3">
+          <div className="w-11 h-11 rounded-xl flex items-center justify-center"
+            style={{ background: WORKFLOW_ACCENT.bg, border: `1.5px solid ${WORKFLOW_ACCENT.border}` }}>
+            <GitBranch className="w-5 h-5" style={{ color: WORKFLOW_ACCENT.color }} />
+          </div>
+          <span className="text-xs font-semibold px-2 py-1 rounded-full"
+            style={{ background: WORKFLOW_ACCENT.bg, color: WORKFLOW_ACCENT.color, border: `1px solid ${WORKFLOW_ACCENT.border}` }}>
+            {sheets.length} sheet{sheets.length !== 1 ? 's' : ''}
+          </span>
+        </div>
+        <h3 className="font-bold text-slate-900 text-base mb-1 leading-snug">{workflow.name}</h3>
+        <p className="text-slate-500 text-xs leading-relaxed mb-3 line-clamp-2">
+          {workflow.description || 'Saved multi-sheet transform workflow'}
+        </p>
+      </div>
+      <div className="px-5 py-3 flex items-center justify-between border-t"
+        style={{ borderColor: WORKFLOW_ACCENT.border, background: WORKFLOW_ACCENT.bg }}>
+        <span className="text-xs font-bold uppercase tracking-wide truncate max-w-[65%]" style={{ color: WORKFLOW_ACCENT.color }} title={workflow.agentName}>
+          {workflow.agentName || 'Workflow'}
+        </span>
+        <span className="flex items-center gap-1 text-xs font-semibold shrink-0" style={{ color: WORKFLOW_ACCENT.color }}>
+          Run <ChevronRight className="w-3.5 h-3.5" />
+        </span>
+      </div>
+    </div>
+  );
+};
+
 const BrandAgentsInventory = () => {
   const { brandId } = useParams();
   const navigate = useNavigate();
   const [allAgents, setAllAgents] = useState([]);
   const [assignedAgents, setAssignedAgents] = useState([]);
+  const [workflows, setWorkflows] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [runningWorkflow, setRunningWorkflow] = useState(null);
 
   const sidebarItems = sidebarFor([
     { path: `/brands/${brandId}/dashboard`, label: 'Dashboard', icon: LayoutDashboard, testId: 'nav-dashboard' },
@@ -241,12 +284,14 @@ const BrandAgentsInventory = () => {
 
   const fetchData = async () => {
     try {
-      const [allAgentsRes, assignedAgentsRes] = await Promise.all([
+      const [allAgentsRes, assignedAgentsRes, workflowsRes] = await Promise.all([
         api.get('/api/agents'),
-        api.get(`/api/brands/${brandId}/agents`)
+        api.get(`/api/brands/${brandId}/agents`),
+        api.get('/api/workflows')
       ]);
       setAllAgents(allAgentsRes.data);
       setAssignedAgents(assignedAgentsRes.data);
+      setWorkflows(workflowsRes.data);
     } catch (error) {
       toast.error('Failed to load agents');
     } finally {
@@ -272,6 +317,10 @@ const BrandAgentsInventory = () => {
   const bySection = SECTIONS
     .map(s => ({ ...s, items: visibleAgents.filter(a => sectionOf(a) === s.key) }))
     .filter(s => s.items.length > 0);
+
+  // Only surface workflows whose parent agent is actually assigned to this brand —
+  // same gate as agent cards themselves.
+  const visibleWorkflows = workflows.filter(wf => isAssigned(wf.agent_id));
 
   const handleAgentClick = (agent) => {
     if (!isAssigned(agent.id)) {
@@ -324,9 +373,29 @@ const BrandAgentsInventory = () => {
               </div>
             </div>
           ))}
+
+          {visibleWorkflows.length > 0 && (
+            <div key="workflows">
+              <div className="flex items-center gap-3 mb-4">
+                <div className="flex items-center gap-2">
+                  <div className="w-1 h-5 rounded-full" style={{ background: WORKFLOW_ACCENT.color }} />
+                  <h2 className="text-sm font-bold text-slate-900">Workflows</h2>
+                </div>
+                <div className="flex-1 h-px bg-slate-200" />
+                <span className="text-xs text-slate-400">
+                  {visibleWorkflows.length} workflow{visibleWorkflows.length !== 1 ? 's' : ''}
+                </span>
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6" data-testid="agents-section-workflows">
+                {visibleWorkflows.map(wf => (
+                  <WorkflowCard key={wf.id} workflow={wf} onClick={() => setRunningWorkflow(wf)} />
+                ))}
+              </div>
+            </div>
+          )}
         </div>
 
-        {visibleAgents.length === 0 && (
+        {visibleAgents.length === 0 && visibleWorkflows.length === 0 && (
           <Card>
             <CardContent className="py-12 text-center">
               <Bot className="h-12 w-12 text-slate-400 mx-auto mb-4" />
@@ -336,6 +405,14 @@ const BrandAgentsInventory = () => {
           </Card>
         )}
       </div>
+
+      <WorkflowApplyModal
+        open={!!runningWorkflow}
+        onClose={() => setRunningWorkflow(null)}
+        agentId={runningWorkflow?.agent_id}
+        brandId={brandId}
+        initialWorkflow={runningWorkflow}
+      />
     </DashboardLayout>
   );
 };

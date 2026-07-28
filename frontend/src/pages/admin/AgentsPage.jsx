@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import DashboardLayout from '../../components/layout/DashboardLayout';
 import { channelLogoSrc } from '../../components/ChannelLogo';
-import { Building2, Bot, Plus, TrendingUp, ChevronRight, Activity, FileSpreadsheet, Target, Layers, PieChart as PieIcon } from 'lucide-react';
+import { Building2, Bot, Plus, TrendingUp, ChevronRight, Activity, FileSpreadsheet, Target, Layers, PieChart as PieIcon, GitBranch } from 'lucide-react';
 import { Button } from '../../components/ui/button';
 import { Input } from '../../components/ui/input';
 import { Label } from '../../components/ui/label';
@@ -12,6 +12,7 @@ import api from '../../lib/api';
 import { toast } from 'sonner';
 import { ADMIN_SIDEBAR } from '../../lib/adminNav';
 import ToolDetails from './ToolDetails';
+import WorkflowApplyModal from '../accountant/WorkflowApplyModal';
 
 const nfmt = (n) => (n ?? 0).toLocaleString('en-IN');
 const fmtDate = (s) => { try { return new Date(s).toLocaleDateString('en-IN', { day: '2-digit', month: 'short' }); } catch { return '—'; } };
@@ -198,6 +199,42 @@ const MyntraCard = ({ onClick }) => (
   </div>
 );
 
+// ── Workflow card — saved multi-sheet transform recipes, scoped to a parent agent ──
+const WorkflowCard = ({ workflow, onClick }) => {
+  const sheets = workflow.sheets || [];
+  const accent = { color: '#4F46E5', bg: '#EEF2FF', border: '#C7D2FE' };
+  return (
+    <button onClick={onClick}
+      className="text-left w-full rounded-2xl border bg-white p-5 transition-shadow hover:shadow-md group"
+      style={{ borderColor: accent.border }}>
+      <div className="flex items-start justify-between mb-3">
+        <div className="w-11 h-11 rounded-xl flex items-center justify-center flex-shrink-0"
+          style={{ background: accent.bg, border: `1px solid ${accent.border}` }}>
+          <GitBranch className="w-5 h-5" style={{ color: accent.color }} />
+        </div>
+        <span className="text-xs font-bold px-2 py-0.5 rounded-full"
+          style={{ background: accent.bg, color: accent.color, border: `1px solid ${accent.border}` }}>
+          {sheets.length} sheet{sheets.length !== 1 ? 's' : ''}
+        </span>
+      </div>
+      <h3 className="text-sm font-bold mb-1.5 text-slate-900">{workflow.name}</h3>
+      <p className="text-xs leading-relaxed mb-4 text-slate-500 line-clamp-2">
+        {workflow.description || 'Saved multi-sheet transform workflow'}
+      </p>
+      <div className="flex items-center justify-between">
+        <span className="text-xs font-semibold px-2 py-0.5 rounded-full truncate max-w-[60%]"
+          style={{ background: accent.bg, color: accent.color, border: `1px solid ${accent.border}` }}
+          title={workflow.agentName}>
+          {workflow.agentName || 'Workflow'}
+        </span>
+        <span className="flex items-center gap-1 text-xs font-semibold transition-all group-hover:gap-1.5 shrink-0" style={{ color: accent.color }}>
+          Run <ChevronRight className="w-3.5 h-3.5 group-hover:translate-x-0.5 transition-transform" />
+        </span>
+      </div>
+    </button>
+  );
+};
+
 // ── Analysis tab: platform-wide tool analytics ──────────────────────────────
 // Donut palette for runs-share (per tool). Stable cycle, fintech-muted.
 const DONUT_CYCLE = ['#0748EE', '#7C3AED', '#0F766E', '#D97706', '#E11D48', '#059669', '#2563EB', '#DB2777', '#0891B2', '#CA8A04', '#94A3B8'];
@@ -371,10 +408,12 @@ const AgentsPage = () => {
   const navigate = useNavigate();
   const [tab, setTab] = useState('agents');
   const [agents, setAgents] = useState([]);
+  const [workflows, setWorkflows] = useState([]);
   const [showModal, setShowModal] = useState(false);
   const [formData, setFormData] = useState({ name: '', description: '', useBasicColumns: true });
+  const [runningWorkflow, setRunningWorkflow] = useState(null);
 
-  useEffect(() => { fetchAgents(); }, []);
+  useEffect(() => { fetchAgents(); fetchWorkflows(); }, []);
 
   // Admin opens an agent against the "Other" sandbox brand (real DB: colonel_other).
   // Runs save there so the analytics page works just like for a user — and the data
@@ -388,6 +427,15 @@ const AgentsPage = () => {
       setAgents(response.data);
     } catch (error) {
       toast.error('Failed to load agents');
+    }
+  };
+
+  const fetchWorkflows = async () => {
+    try {
+      const response = await api.get('/api/workflows');
+      setWorkflows(response.data);
+    } catch (error) {
+      toast.error('Failed to load workflows');
     }
   };
 
@@ -436,7 +484,9 @@ const AgentsPage = () => {
         <div className="flex items-center justify-between mb-6">
           <div>
             <h1 className="text-3xl font-bold text-slate-900 tracking-tight">Agents</h1>
-            <p className="text-slate-600 mt-1">{agents.length} agents available across the platform</p>
+            <p className="text-slate-600 mt-1">
+              {agents.length} agents{workflows.length > 0 ? ` · ${workflows.length} workflow${workflows.length !== 1 ? 's' : ''}` : ''} available across the platform
+            </p>
           </div>
           {tab === 'agents' && (
             <Button onClick={() => setShowModal(true)} data-testid="create-agent-button">
@@ -459,7 +509,7 @@ const AgentsPage = () => {
 
         {tab === 'analysis' ? (
           <ToolAnalysis />
-        ) : agents.length === 0 ? (
+        ) : agents.length === 0 && workflows.length === 0 ? (
           <div className="py-16 text-center text-slate-600">
             <Bot className="h-12 w-12 text-slate-400 mx-auto mb-4" />
             No agents created yet
@@ -487,9 +537,35 @@ const AgentsPage = () => {
                 </div>
               </div>
             ))}
+
+            {workflows.length > 0 && (
+              <div key="workflows">
+                <div className="flex items-center gap-3 mb-4">
+                  <div className="flex items-center gap-2">
+                    <div className="w-1 h-5 rounded-full" style={{ background: '#4F46E5' }} />
+                    <h2 className="text-sm font-bold text-slate-900">Workflows</h2>
+                  </div>
+                  <div className="flex-1 h-px bg-slate-200" />
+                  <span className="text-xs text-slate-400">{workflows.length} workflow{workflows.length !== 1 ? 's' : ''}</span>
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                  {workflows.map(wf => (
+                    <WorkflowCard key={wf.id} workflow={wf} onClick={() => setRunningWorkflow(wf)} />
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
         )}
       </div>
+
+      <WorkflowApplyModal
+        open={!!runningWorkflow}
+        onClose={() => setRunningWorkflow(null)}
+        agentId={runningWorkflow?.agent_id}
+        brandId={SANDBOX_BRAND_ID}
+        initialWorkflow={runningWorkflow}
+      />
 
       <Dialog open={showModal} onOpenChange={setShowModal}>
         <DialogContent onClose={() => setShowModal(false)}>

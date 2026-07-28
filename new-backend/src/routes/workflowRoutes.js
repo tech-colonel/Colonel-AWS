@@ -12,6 +12,10 @@ router.get('/agents/:agentId/master-schema', authenticateToken, authorize('admin
 
 // Static routes MUST come before parameterised ones (:workflowId) to avoid conflicts
 
+// Global workflow list (every agent) — powers the "Workflows" section on the
+// admin + accountant Agents pages.
+router.get('/workflows', authenticateToken, wf.getAllWorkflows);
+
 // Extract columns from a sample file (admin, during workflow building)
 router.post('/workflows/extract-columns', authenticateToken, authorize('admin'), ...wf.extractColumns);
 
