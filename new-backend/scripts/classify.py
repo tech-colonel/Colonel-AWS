@@ -2915,12 +2915,20 @@ def main():
     # models, OpenAI-shaped wire format, and prompt caching still works through it, so the
     # batching/caching cost design is unchanged. Explicit --llm-base-url overrides both.
     llm_base_url = args.llm_base_url or None
-    if not anthropic_key:
-        _gsk = os.environ.get("GSK_API_KEY")
-        _gsk_base = llm_base_url or os.environ.get("GSK_BASE_URL")
-        if _gsk and _gsk_base:
-            anthropic_key, llm_base_url = _gsk, _gsk_base
-            print(f"[llm] no ANTHROPIC_API_KEY — using GenSpark proxy at {_gsk_base}")
+    # LLM_PROVIDER=genspark forces the proxy even when ANTHROPIC_API_KEY is present.
+    # Needed because an EXHAUSTED Anthropic key is still a set key: it fails with 400
+    # "credit balance is too low", which an "is the key missing?" test cannot see. To go
+    # back to Anthropic, drop LLM_PROVIDER — nothing else changes.
+    _prefer_gsk = os.environ.get("LLM_PROVIDER", "").strip().lower() in ("genspark", "gsk")
+    _gsk = os.environ.get("GSK_API_KEY")
+    _gsk_base = llm_base_url or os.environ.get("GSK_BASE_URL")
+    if (_prefer_gsk or not anthropic_key) and _gsk and _gsk_base:
+        _why = "LLM_PROVIDER=genspark" if _prefer_gsk else "no ANTHROPIC_API_KEY"
+        anthropic_key, llm_base_url = _gsk, _gsk_base
+        print(f"[llm] {_why} — using GenSpark proxy at {_gsk_base}")
+    elif _prefer_gsk:
+        print("[llm] LLM_PROVIDER=genspark but GSK_API_KEY/GSK_BASE_URL missing — "
+              "falling back to Anthropic", file=sys.stderr)
     elif llm_base_url:
         print(f"[llm] routing via {llm_base_url}")
     gemini_key = args.gemini_key or os.environ.get("GEMINI_API_KEY")
