@@ -903,6 +903,8 @@ class BankClassifier:
         out['exact'] = {' '.join(str(k).upper().split()): v for k, v in out['exact'].items()}
         return out
 
+    _orphan_note = None          # set by _directory_lookup, consumed by classify()
+
     def _directory_lookup(self, narration: str, txn_type: str):
         """Look up the row's payee identity in the learned directory.
         Most-specific-first: exact → phone → vpa → neft_name → name. Only returns
@@ -924,6 +926,13 @@ class BankClassifier:
                     "rule": "Stored Correction" if section == 'exact' else f"Payee Directory ({section})",
                     "entity": kv,
                 }
+            if fix and self._orphan_note is None:
+                # A learned mapping EXISTS but its ledger is no longer in the CoA (renamed
+                # or never created in Tally). Previously the hit was discarded in silence
+                # and the row simply became Suspense, so the accountant saw "unclassified"
+                # rather than "you are missing a ledger". Zaydn's 11 ACH-return rows sat
+                # like that until someone analysed them by hand.
+                self._orphan_note = str(fix.get('ledger') or '').strip() or None
         return None
 
     def _build_indices(self):
@@ -1281,6 +1290,7 @@ class BankClassifier:
         orig_upper = orig.upper()
         is_credit  = credit > 0
         txn_type   = "Receipt" if is_credit else "Payment"
+        self._orphan_note = None          # per-row; set if a learned ledger has gone missing
 
         # ------------------------------------------------------------------
         # STEP 0 — Per-brand learned payee directory (highest priority)
@@ -1900,7 +1910,8 @@ class BankClassifier:
         # FALLBACK — Suspense A/c (pre-computed from master during init)
         # ------------------------------------------------------------------
         return {"ledger": self._suspense_ledger, "type": txn_type, "confidence": "Low",
-                "rule": "Suspense Fallback", "entity": entity}
+                "rule": "Suspense Fallback", "entity": entity,
+                "orphan_ledger": self._orphan_note}
 
 
 # ---------------------------------------------------------------------------
@@ -2224,7 +2235,8 @@ def load_bank_statement(filepath: str) -> tuple:
 # Output writer
 # ---------------------------------------------------------------------------
 
-def write_output(rows: list, summary: dict, brand: str, output_path: str):
+def write_output(rows: list, summary: dict, brand: str, output_path: str,
+                 master_ledgers: list | None = None):
     """
     Write classified rows to a color-coded Excel workbook.
     Sheet 1: Bank Statement (7 columns + Confidence)
@@ -2253,7 +2265,8 @@ def write_output(rows: list, summary: dict, brand: str, output_path: str):
     # accountant the provenance of every row. Without it "High" is unfalsifiable from their
     # seat — they cannot tell a learned mapping from a fuzzy guess without re-checking all
     # 261 rows by hand, and a misbehaving layer stays invisible for months.
-    headers = ["Txn Date", "Description", "Chq / Ref No.", "Debit", "Credit", "Balance", "Type", "Ledger Name", "Confidence", "Source"]
+    headers = ["Txn Date", "Description", "Chq / Ref No.", "Debit", "Credit", "Balance",
+               "Type", "Ledger Name", "Confidence", "Source", "Remark"]
     ws.append(headers)
     ws.row_dimensions[1].height = 25
     for ci, _ in enumerate(headers, 1):
@@ -2284,7 +2297,77 @@ def write_output(rows: list, summary: dict, brand: str, output_path: str):
             return "Claude" if claude else "Suspense"
         return (rule.split("(")[0].strip() or "Rule") + claude
 
-    for r in rows:
+    # ── Remark column ────────────────────────────────────────────────────────
+    # Confidence says how sure the classifier is; it cannot say that a row is a
+    # DUPLICATE, or that the ledger it chose does not exist in Tally. Both are things
+    # the accountant currently has to catch by eye, and both block a clean import.
+    #
+    #   DUPLICATE ENTRIES — same narration AND same debit/credit appearing more than
+    #     once. Usually a failed auto-debit and its reversal (Zaydn's June statement has
+    #     several: Aditya Birla, Clix Capital, Bajaj Finance each twice), occasionally a
+    #     genuinely double-posted row. Every copy is flagged and names the others, so the
+    #     pair is visible from either row.
+    #   MISSING IN COA — the predicted ledger is not in the brand's chart of accounts, so
+    #     the row cannot be posted as-is. Happens when a learned key still points at a
+    #     ledger that has since been renamed or removed in Tally.
+    _coa_norm = {" ".join(str(l).lower().split()) for l in (master_ledgers or [])}
+    _dupe_of, _reversal_of = {}, {}
+    _groups, _amount_groups = {}, {}
+    for _i, _r in enumerate(rows):
+        _narr = " ".join(str(_r.get("description", "")).upper().split())
+        _deb, _cred = _r.get("debit") or 0, _r.get("credit") or 0
+        # true duplicate: identical narration AND identical side+amount
+        _groups.setdefault((_narr, _deb, _cred), []).append(_i)
+        # reversal candidate: identical narration and magnitude, opposite side
+        if _deb or _cred:
+            _amount_groups.setdefault((_narr, round(abs(_deb or _cred), 2)), []).append(_i)
+    for _idxs in _groups.values():
+        if len(_idxs) > 1:
+            for _i in _idxs:
+                _dupe_of[_i] = [j for j in _idxs if j != _i]
+    for _idxs in _amount_groups.values():
+        if len(_idxs) < 2:
+            continue
+        _debs = [j for j in _idxs if rows[j].get("debit")]
+        _creds = [j for j in _idxs if rows[j].get("credit")]
+        if _debs and _creds:                      # both directions present
+            for _i in _idxs:
+                _other = _creds if rows[_i].get("debit") else _debs
+                _other = [j for j in _other if j != _i]
+                if _other:
+                    _reversal_of[_i] = _other
+
+    def _remark_for(i, r):
+        parts = []
+        if i in _dupe_of:
+            # +2: worksheet rows are 1-based and row 1 is the header.
+            others = ", ".join(str(j + 2) for j in _dupe_of[i])
+            parts.append(f"DUPLICATE ENTRIES \u2014 same narration and amount also on row(s) "
+                         f"{others} ({len(_dupe_of[i]) + 1} occurrences) \u2014 verify before posting")
+        elif i in _reversal_of:
+            # Reported separately from a duplicate: the money moved BOTH ways, so the pair
+            # nets to zero. A failed auto-debit and its bank reversal is the usual cause.
+            others = ", ".join(str(j + 2) for j in _reversal_of[i])
+            side = "debit" if r.get("debit") else "credit"
+            parts.append(f"REVERSAL PAIR \u2014 this {side} is matched by the opposite entry on "
+                         f"row(s) {others}; the two net to zero \u2014 post both or neither")
+        orphan = str(r.get("orphan_ledger") or "").strip()
+        if orphan:
+            parts.append(f'MISSING IN COA \u2014 a learned mapping for this payee points at '
+                         f'"{orphan}", which is not in the chart of accounts, so the row fell '
+                         f"to Suspense. Create the ledger in Tally and re-run.")
+        led = str(r.get("predicted_ledger") or "").strip()
+        # Suspense is the designated fallback LABEL, and load_ledger_master deliberately
+        # keeps it out of master_ledgers so it is never a fuzzy-match target. Checking it
+        # against the CoA would therefore flag every unclassified row — noise on exactly
+        # the rows the accountant is already going to look at.
+        _is_suspense = " ".join(led.lower().split()) in ("suspense a/c", "suspense", "suspense account")
+        if led and not _is_suspense and _coa_norm and " ".join(led.lower().split()) not in _coa_norm:
+            parts.append(f'MISSING IN COA \u2014 "{led}" is not in the chart of accounts; '
+                         f"create it in Tally or re-map this row")
+        return " | ".join(parts)
+
+    for _i, r in enumerate(rows):
         ws.append([
             r.get("txn_date", ""),
             r.get("description", ""),
@@ -2296,15 +2379,24 @@ def write_output(rows: list, summary: dict, brand: str, output_path: str):
             r.get("predicted_ledger", ""),
             r.get("confidence", ""),
             _source_label(r.get("rule", "")),
+            _remark_for(_i, r),
         ])
         row_num = ws.max_row
         ws.row_dimensions[row_num].height = 20
         conf   = r.get("confidence", "Low")
         fill   = GREEN if conf == "High" else (YELLOW if conf == "Medium" else RED)
 
+        _remark_text = ws.cell(row=row_num, column=len(headers)).value
+
         for ci in range(1, len(headers) + 1):
             cell = ws.cell(row=row_num, column=ci)
             cell.font, cell.border = REGULAR, THIN
+            if ci == len(headers) and _remark_text:
+                # Amber, and deliberately NOT the confidence colour — a remark is an
+                # action for the accountant, independent of how sure the classifier was.
+                cell.fill = PatternFill(start_color="FFE0B2", end_color="FFE0B2", fill_type="solid")
+                cell.font = Font(name="Calibri", size=10, bold=True, color="8D4E00")
+                cell.alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
             if ci in (4, 5, 6):
                 cell.number_format = '#,##0.00'
                 cell.alignment = Alignment(horizontal="right", vertical="center")
@@ -2318,7 +2410,10 @@ def write_output(rows: list, summary: dict, brand: str, output_path: str):
     # Auto-width
     for col in ws.columns:
         ltr = get_column_letter(col[0].column)
-        ws.column_dimensions[ltr].width = min(max(max(len(str(c.value or '')) for c in col) + 3, 10), 55)
+        _is_remark = (ltr == get_column_letter(len(headers)))
+        ws.column_dimensions[ltr].width = (
+            46 if _is_remark
+            else min(max(max(len(str(c.value or '')) for c in col) + 3, 10), 55))
 
     # --- Summary sheet ---
     ws2 = wb.create_sheet("Summary")
@@ -3010,6 +3105,8 @@ def main():
             # only populated for side-rule rows; consumed by the side-verdict pass below
             "side_credit":    result.get("credit", ""),
             "side_debit":     result.get("debit", ""),
+            # set when a learned mapping was found but its ledger is gone from the CoA
+            "orphan_ledger":  result.get("orphan_ledger"),
         })
 
     total = len(rows)
@@ -3282,7 +3379,8 @@ def main():
                   f"{flagged} flagged Medium for review")
 
     print(f"[4/4] Writing output: {args.output}")
-    write_output(rows, summary, args.brand, args.output)
+    write_output(rows, summary, args.brand, args.output,
+                 master_ledgers=classifier.master_ledgers)
     print(f"\n✅ Done! Output saved to: {args.output}")
     print(f"   Open the file and review any RED (Low confidence) rows manually.")
 
