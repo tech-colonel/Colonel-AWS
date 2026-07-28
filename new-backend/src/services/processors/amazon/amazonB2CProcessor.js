@@ -55,8 +55,8 @@ async function amazonB2CProcessor(
     if (!quantityColumn) throw new Error('Quantity column not found');
     if (!sellerGstinColumn) throw new Error('Seller Gstin column not found');
 
-    // Prefer Bill From/To State for the IGST/CGST/SGST split; fall back to
-    // Ship From/To State when the report doesn't carry Bill columns.
+    // Bill From/To State is used for the multi-state invoice-number GST code
+    // (falls back to Ship From/To State when the report doesn't carry Bill columns).
     const findHeader = name => headers.find(h => h.toLowerCase().trim() === name);
 
     const fromStateCol = findHeader('bill from state') || findHeader('ship from state');
@@ -64,6 +64,13 @@ async function amazonB2CProcessor(
 
     if (!fromStateCol) throw new Error('Bill From State / Ship From State column not found');
     if (!toStateCol) throw new Error('Bill To State / Ship To State column not found');
+
+    // Ship From/To State drives the intra vs inter-state CGST/SGST/IGST split.
+    const shipFromStateCol = findHeader('ship from state');
+    const shipToStateCol = findHeader('ship to state');
+
+    if (!shipFromStateCol) throw new Error('Ship From State column not found');
+    if (!shipToStateCol) throw new Error('Ship To State column not found');
 
     // ================================
     // STEP 3: FILTER Shipment & Refund
@@ -387,7 +394,7 @@ async function amazonB2CProcessor(
         Number(row['Tax Exclusive Gross'] || 0) - shippingValue;
 
       const isIntraState =
-        row[fromStateCol] === row[toStateCol];
+        row[shipFromStateCol] === row[shipToStateCol];
 
       row['Final Tax rate'] = finalTaxRate;
       row['Final Taxable Shipping Value'] = shippingValue;
@@ -469,8 +476,8 @@ async function amazonB2CProcessor(
       'Gift Wrap Promo Discount Basis',
       'Shipping Promo Discount Basis',
       'Tax Exclusive Gross',
-      fromStateCol,
-      toStateCol,
+      shipFromStateCol,
+      shipToStateCol,
       'Tcs Cgst Amount',
       'Tcs Sgst Amount',
       'Tcs Igst Amount'
@@ -509,8 +516,8 @@ async function amazonB2CProcessor(
       const giftWrapPromoBasisCol = col('Gift Wrap Promo Discount Basis');
       const shipPromoBasisCol = col('Shipping Promo Discount Basis');
       const taxExclusiveCol = col('Tax Exclusive Gross');
-      const billFromCol = col(fromStateCol);
-      const billToCol = col(toStateCol);
+      const shipFromCol = col(shipFromStateCol);
+      const shipToCol = col(shipToStateCol);
       const tcsCgstCol = col('Tcs Cgst Amount');
       const tcsSgstCol = col('Tcs Sgst Amount');
       const tcsIgstCol = col('Tcs Igst Amount');
@@ -532,32 +539,32 @@ async function amazonB2CProcessor(
 
       // 4️⃣ Final CGST Tax
       worksheet.getCell(`${finalCgstCol}${excelRowNumber}`).value = {
-        formula: `IF(${billFromCol}${excelRowNumber}=${billToCol}${excelRowNumber},${finalTaxableSalesCol}${excelRowNumber}*${cgstRateCol}${excelRowNumber},0)`
+        formula: `IF(${shipFromCol}${excelRowNumber}=${shipToCol}${excelRowNumber},${finalTaxableSalesCol}${excelRowNumber}*${cgstRateCol}${excelRowNumber},0)`
       };
 
       // 5️⃣ Final SGST Tax
       worksheet.getCell(`${finalSgstCol}${excelRowNumber}`).value = {
-        formula: `IF(${billFromCol}${excelRowNumber}=${billToCol}${excelRowNumber},${finalTaxableSalesCol}${excelRowNumber}*${sgstRateCol}${excelRowNumber},0)`
+        formula: `IF(${shipFromCol}${excelRowNumber}=${shipToCol}${excelRowNumber},${finalTaxableSalesCol}${excelRowNumber}*${sgstRateCol}${excelRowNumber},0)`
       };
 
       // 6️⃣ Final IGST Tax
       worksheet.getCell(`${finalIgstCol}${excelRowNumber}`).value = {
-        formula: `IF(${billFromCol}${excelRowNumber}<>${billToCol}${excelRowNumber},${finalTaxableSalesCol}${excelRowNumber}*${igstRateCol}${excelRowNumber},0)`
+        formula: `IF(${shipFromCol}${excelRowNumber}<>${shipToCol}${excelRowNumber},${finalTaxableSalesCol}${excelRowNumber}*${igstRateCol}${excelRowNumber},0)`
       };
 
       // 7️⃣ Final Shipping CGST
       worksheet.getCell(`${finalShipCgstCol}${excelRowNumber}`).value = {
-        formula: `IF(${billFromCol}${excelRowNumber}=${billToCol}${excelRowNumber},${finalTaxableShippingCol}${excelRowNumber}*${finalTaxRateCol}${excelRowNumber},0)`
+        formula: `IF(${shipFromCol}${excelRowNumber}=${shipToCol}${excelRowNumber},${finalTaxableShippingCol}${excelRowNumber}*${finalTaxRateCol}${excelRowNumber},0)`
       };
 
       // 8️⃣ Final Shipping SGST
       worksheet.getCell(`${finalShipSgstCol}${excelRowNumber}`).value = {
-        formula: `IF(${billFromCol}${excelRowNumber}=${billToCol}${excelRowNumber},${finalTaxableShippingCol}${excelRowNumber}*${finalTaxRateCol}${excelRowNumber},0)`
+        formula: `IF(${shipFromCol}${excelRowNumber}=${shipToCol}${excelRowNumber},${finalTaxableShippingCol}${excelRowNumber}*${finalTaxRateCol}${excelRowNumber},0)`
       };
 
       // 9️⃣ Final Shipping IGST
       worksheet.getCell(`${finalShipIgstCol}${excelRowNumber}`).value = {
-        formula: `IF(${billFromCol}${excelRowNumber}<>${billToCol}${excelRowNumber},${finalTaxableShippingCol}${excelRowNumber}*${finalTaxRateCol}${excelRowNumber},0)`
+        formula: `IF(${shipFromCol}${excelRowNumber}<>${shipToCol}${excelRowNumber},${finalTaxableShippingCol}${excelRowNumber}*${finalTaxRateCol}${excelRowNumber},0)`
       };
 
       // 🔟 Final Amount Receivable
