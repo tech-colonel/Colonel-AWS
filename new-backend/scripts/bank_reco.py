@@ -791,19 +791,32 @@ THIN = Border(*(Side(style='thin', color='CCCCCC'),)*4)
 MONEY = '#,##0.00'
 
 
-def _sheet(wb, title, headers):
+def _sheet(wb, title, headers, subtitle=None):
+    """Create a styled sheet. When `subtitle` is given, it becomes a plain-English italic caption
+    merged across row 1 (what the tab shows / what to do), the column headers move to row 2, and the
+    freeze pane is set below them. Callers keep using ws.append(...) — data lands after the header."""
     ws = wb.create_sheet(title)
+    hrow = 1
+    if subtitle:
+        ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=max(1, len(headers)))
+        cap = ws.cell(row=1, column=1, value=subtitle)
+        cap.font = Font(name="Calibri", size=10, italic=True, color="475569")
+        cap.alignment = Alignment(horizontal="left", vertical="center")
+        ws.row_dimensions[1].height = 18
+        hrow = 2
     for c, h in enumerate(headers, 1):
-        cell = ws.cell(row=1, column=c, value=h)
+        cell = ws.cell(row=hrow, column=c, value=h)
         cell.fill = HEADER; cell.font = WHITE_BOLD; cell.border = THIN
         cell.alignment = Alignment(horizontal="center", vertical="center")
-    ws.freeze_panes = "A2"
+    ws.freeze_panes = "A%d" % (hrow + 1)
     return ws
 
 
 def _autowidth(ws):
+    # Ignore a merged row-1 subtitle so its long caption doesn't blow out the first column width.
+    sub_rows = {r.min_row for r in ws.merged_cells.ranges if r.min_row == 1 and r.min_col != r.max_col}
     for col in ws.columns:
-        width = max((len(str(c.value)) for c in col if c.value is not None), default=10)
+        width = max((len(str(c.value)) for c in col if c.value is not None and c.row not in sub_rows), default=10)
         ws.column_dimensions[get_column_letter(col[0].column)].width = min(max(width + 2, 10), 48)
 
 
@@ -845,8 +858,12 @@ def _fill_row(ws, row, ncols, fill):
 
 
 def _write_summary(wb, result, ctx):
-    """Sheet 1: Summary — two-column key/value."""
-    ws = _sheet(wb, "Summary", ["Field", "Value"])
+    """Sheet 1: Summary — a MAP of the workbook. Every bank line lands in exactly one bucket below,
+    and the last column names the tab that lists those entries."""
+    ws = _sheet(wb, "Summary",
+                ["What", "Count / Value", "Where to see it (tab)"],
+                subtitle="Overview + map. Every bank line falls into exactly ONE bucket below — the "
+                         "last column tells you which tab lists those entries.")
     bank_rows = ctx["bank_rows"]
     dates = [b["txn_date"] for b in bank_rows if _month_key(b["txn_date"]) is not None]
     period = ("%s to %s" % (_fmt_date(min(dates)), _fmt_date(max(dates)))) if dates else ""
@@ -854,39 +871,58 @@ def _write_summary(wb, result, ctx):
     total_out = sum(b["debit"] or 0 for b in bank_rows)
     c = result["counts"]
     reconciled = c["bank_only"] == 0 and c["tally_only"] == 0
+    accounted = (c["matched"] + c.get("aggregated", 0) + c.get("aggregate_reco", 0)
+                 + c["partial"] + c["bank_only"])
+    total_bank = len(bank_rows)
 
     money_fields = {"Total money-in", "Total money-out"}
     rows = [
-        ("Brand", ctx.get("brand", "")),
-        ("Bank", os.path.basename(ctx.get("bank_path") or "")),
-        ("Period", period),
-        ("Matched", c["matched"]),
-        ("Date-updated", c["date_updated"]),
-        ("Aggregated in Tally", "%d lines → %d vouchers" % (c.get("aggregated", 0), c.get("aggregated_vouchers", 0))),
-        ("Aggregate reconciled (salary/dense)", "%d lines → %d party-months" % (c.get("aggregate_reco", 0), c.get("aggregate_reco_groups", 0))),
-        ("Partially matched", c["partial"]),
-        ("Bank-only", c["bank_only"]),
-        ("Tally-only", c["tally_only"]),
-        ("Total money-in", total_in),
-        ("Total money-out", total_out),
-        ("Reconciled?", "Yes" if reconciled else "No"),
+        ("Brand", ctx.get("brand", ""), ""),
+        ("Bank file", os.path.basename(ctx.get("bank_path") or ""), ""),
+        ("Period", period, ""),
+        ("— WHERE EACH ENTRY GOES —", "", ""),
+        ("Matched — already in Tally", c["matched"], "Reconciliation  (green rows)"),
+        ("   ↳ of which date-corrected", c["date_updated"], "Date Updates"),
+        ("Aggregated — many bank lines → 1 Tally voucher",
+         "%d lines → %d vouchers" % (c.get("aggregated", 0), c.get("aggregated_vouchers", 0)),
+         "Reconciliation  (blue rows)"),
+        ("Reconciled in aggregate — salary + dense parties",
+         "%d lines → %d party-months" % (c.get("aggregate_reco", 0), c.get("aggregate_reco_groups", 0)),
+         "Aggregate Reco"),
+        ("Partially matched — verify name", c["partial"], "Reconciliation  (orange rows)"),
+        ("In BANK, not in Tally — add these", c["bank_only"], "In Bank, Not in Tally"),
+        ("In TALLY, not in bank — check these", c["tally_only"], "In Tally, Not in Bank"),
+        ("— TOTALS —", "", ""),
+        ("Total bank lines accounted for", "%d of %d" % (accounted, total_bank),
+         "matched + aggregated + aggregate + partial + bank-only"),
+        ("Total money-in", total_in, ""),
+        ("Total money-out", total_out, ""),
+        ("Fully reconciled?", "Yes" if reconciled else "No", ""),
     ]
-    for field, value in rows:
-        ws.append([field, value])
+    for field, value, where in rows:
+        ws.append([field, value, where])
         rr = ws.max_row
         if field in money_fields:
             ws.cell(row=rr, column=2).number_format = MONEY
-        if field == "Reconciled?":
-            _fill_row(ws, rr, 2, GREEN if reconciled else RED)
+        if field.startswith("—"):
+            _fill_row(ws, rr, 3, HEADER)
+            for col in range(1, 4):
+                ws.cell(row=rr, column=col).font = WHITE_BOLD
+        elif field == "Fully reconciled?":
+            _fill_row(ws, rr, 3, GREEN if reconciled else RED)
+        elif field == "Total bank lines accounted for":
+            _fill_row(ws, rr, 3, GREEN if accounted == total_bank else RED)
         else:
-            ws.cell(row=rr, column=1).border = THIN
-            ws.cell(row=rr, column=2).border = THIN
+            for col in range(1, 4):
+                ws.cell(row=rr, column=col).border = THIN
     _autowidth(ws)
 
 
 def _write_date_updates(wb, result):
     """Sheet 3: Date Updates (old -> new) — matched rows where date_changed."""
-    ws = _sheet(wb, "Date Updates", ["Party", "Amount", "Vch No.", "Old Date", "New Date"])
+    ws = _sheet(wb, "Date Updates", ["Party", "Amount", "Vch No.", "Old Date", "New Date"],
+                subtitle="Matched entries whose Tally voucher date differs from the bank — "
+                         "change the Tally date from 'Old Date' to 'New Date'.")
     for m in result["matched"]:
         if not m["date_changed"]:
             continue
@@ -902,7 +938,9 @@ def _write_date_updates(wb, result):
 
 def _write_ready_to_paste(wb, result, ctx):
     """Sheet 4: Add to Tally (Ready-to-Paste) — one row per bank-only row."""
-    ws = _sheet(wb, "Add to Tally", ["Date", "Dr Ledger", "Cr Ledger", "Amount", "Narration"])
+    ws = _sheet(wb, "In Bank, Not in Tally", ["Date", "Dr Ledger", "Cr Ledger", "Amount", "Narration"],
+                subtitle="Entries that are in the BANK but NOT in Tally — add these to Tally "
+                         "(Dr / Cr ledgers are ready to paste as vouchers).")
     bank_ledger = ctx.get("bank_ledger") or "Bank Account"
     for b in result["bank_only"]:
         amt = b["debit"] if b["direction"] == "out" else b["credit"]
@@ -921,7 +959,9 @@ def _write_ready_to_paste(wb, result, ctx):
 
 def _write_tally_only(wb, result):
     """Sheet 5: Tally-only (Check) — tally rows with no bank match at all."""
-    ws = _sheet(wb, "Tally-only", ["Date", "Party", "Debit", "Credit", "Vch No.", "Remark"])
+    ws = _sheet(wb, "In Tally, Not in Bank", ["Date", "Party", "Debit", "Credit", "Vch No.", "Remark"],
+                subtitle="Entries in TALLY but not found in the bank statement — check for "
+                         "duplicates / wrong brand / wrong bank account.")
     remark = "In Tally, not in bank — check duplicate / wrong-brand entry"
     for t in result["tally_only"]:
         vals = [_fmt_date(t["date"]), t["party"], t["debit"] or "", t["credit"] or "", t["vch_no"], remark]
@@ -943,7 +983,9 @@ def _write_aggregate_reco(wb, result):
         return
     ws = _sheet(wb, "Aggregate Reco",
                 ["Party / Category", "Month", "Bank total", "Tally total", "Gap (Bank − Tally)",
-                 "Bank lines", "Tally vouchers"])
+                 "Bank lines", "Tally vouchers"],
+                subtitle="Salary + dense parties (e.g. Flo) reconciled by monthly TOTAL, not "
+                         "line-by-line. 'Gap' = amount still to book (green = tallies, red = review).")
     # group rows by party, print monthly rows then a period subtotal
     from collections import OrderedDict
     by_party = OrderedDict()
@@ -972,7 +1014,8 @@ def _write_aggregate_reco(wb, result):
 
 def _write_pivot(wb, ctx):
     """Sheet 6: Pivot — bank rows grouped by month, summed debit/credit."""
-    ws = _sheet(wb, "Pivot", ["Month", "Withdrawal", "Deposit"])
+    ws = _sheet(wb, "Pivot", ["Month", "Withdrawal", "Deposit"],
+                subtitle="Bank money-out (Withdrawal) and money-in (Deposit), totalled by month.")
     agg = {}
     for b in ctx["bank_rows"]:
         mk = _month_key(b["txn_date"])
@@ -994,7 +1037,8 @@ def _write_pivot(wb, ctx):
 
 def _write_query(wb, ctx):
     """Sheet 7: Query — bank rows grouped by (ledger, month), dynamic, no hardcoded vendors."""
-    ws = _sheet(wb, "Query", ["Ledger", "Month", "Debit", "Credit"])
+    ws = _sheet(wb, "Query", ["Ledger", "Month", "Debit", "Credit"],
+                subtitle="Bank total per ledger per month — for quick ledger-level checks.")
     agg = {}
     for b in ctx["bank_rows"]:
         mk = _month_key(b["txn_date"]) or ""
@@ -1058,7 +1102,9 @@ def _write_closing(wb, ctx):
     """Sheet 8: Bank vs Tally (Closing) — DIFF = Tally - Bank. Values come from
     `_closing_series`, shared with analytics.monthly so the sheet and the dashboard
     chart can never disagree."""
-    ws = _sheet(wb, "Bank vs Tally", ["Month", "As per Tally", "As per Bank", "DIFF"])
+    ws = _sheet(wb, "Bank vs Tally", ["Month", "As per Tally", "As per Bank", "DIFF"],
+                subtitle="Month-end closing balance: Tally vs Bank, and the difference (DIFF) to "
+                         "investigate.")
     for mk, cum, bank_closing in _closing_series(ctx):
         bank_val = bank_closing if isinstance(bank_closing, (int, float)) else ""
         diff = (cum - bank_closing) if isinstance(bank_closing, (int, float)) else ""
@@ -1121,8 +1167,9 @@ def _build_analytics(result, ctx):
 
 
 def _write_universal(wb, ctx):
-    """Sheet 9: Universal Output — verbatim copy of the raw Universal 'Bank Statement' sheet."""
-    ws = wb.create_sheet("Universal Output")
+    """Sheet: Bank (Classified) — verbatim copy of the raw classified 'Bank Statement' sheet (each
+    bank line mapped to a ledger); this is the input this reconciliation was run against."""
+    ws = wb.create_sheet("Bank (Classified)")
     src_wb = load_workbook(ctx["bank_path"], data_only=True)
     src_ws = None
     for name in src_wb.sheetnames:
@@ -1131,10 +1178,17 @@ def _write_universal(wb, ctx):
             break
     if src_ws is None:
         src_ws = src_wb[src_wb.sheetnames[0]]
+    ncols = max(src_ws.max_column or 1, 1)
+    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=ncols)
+    cap = ws.cell(row=1, column=1,
+                  value="The raw bank statement after auto-classification (each line mapped to a "
+                        "ledger) — the input to this reconciliation.")
+    cap.font = Font(name="Calibri", size=10, italic=True, color="475569")
+    cap.alignment = Alignment(horizontal="left", vertical="center")
+    ws.row_dimensions[1].height = 18
     for row in src_ws.iter_rows():
         ws.append([c.value for c in row])
-    if ws.max_row >= 1:
-        ws.freeze_panes = "A2"
+    ws.freeze_panes = "A3"
     _autowidth(ws)
 
 
@@ -1142,7 +1196,10 @@ def write_workbook(result, ctx, output_path):
     wb = Workbook(); wb.remove(wb.active)
     # --- Sheet 2: Reconciliation (main) ---
     ws = _sheet(wb, "Reconciliation", ["Txn Date","Description","Chq / Ref No.","Debit","Credit",
-        "Balance","Type","Ledger Name","Reco Status","Matched Tally Party","Tally Date","Date Flag"])
+        "Balance","Type","Ledger Name","Reco Status","Matched Tally Party","Tally Date","Date Flag"],
+        subtitle="Every bank line and its status (see 'Reco Status').  Green = already in Tally · "
+                 "Yellow = date corrected · Blue = reconciled in aggregate · Orange = partial "
+                 "(verify name) · Red = in bank, not in Tally (add).")
     matched_by_bankrow = {id(m["bank"]): m for m in result["matched"]}
     partial_by_bankrow = {id(p["bank"]): p for p in result.get("partial", [])}
     # aggregated: each bank line -> (its Tally voucher, how many bank lines fed that voucher)
@@ -1214,7 +1271,7 @@ def write_workbook(result, ctx, output_path):
     _write_closing(wb, ctx)                  # sheet 9
     _write_universal(wb, ctx)                # sheet 10
     # reorder tabs to spec order
-    order = ["Summary","Reconciliation","Date Updates","Add to Tally","Tally-only","Aggregate Reco","Pivot","Query","Bank vs Tally","Universal Output"]
+    order = ["Summary","Reconciliation","Date Updates","In Bank, Not in Tally","In Tally, Not in Bank","Aggregate Reco","Pivot","Query","Bank vs Tally","Bank (Classified)"]
     wb._sheets.sort(key=lambda s: order.index(s.title) if s.title in order else 99)
     wb.save(output_path)
 
