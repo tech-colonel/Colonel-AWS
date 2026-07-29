@@ -7,9 +7,13 @@ import {
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { format } from 'date-fns';
-import api from '../../lib/api';
+import api, { API_URL } from '../../lib/api';
 
-const API_URL = process.env.REACT_APP_BACKEND_URL || 'http://localhost:8001';
+// API_URL comes from lib/api's resolveApiUrl(): same-origin in production
+// (agent.accountant), http://localhost:8001 only on local dev. The old hardcoded
+// `process.env.REACT_APP_BACKEND_URL || 'http://localhost:8001'` fallback made the
+// SSE status stream point at localhost on the live build → the live progress
+// counter never connected (mixed-content/blocked). Using the shared base fixes it.
 
 const T_BLUE = '#2563EB';
 const T_BLUE_BG = '#EFF6FF';
