@@ -4,6 +4,7 @@ import { AuthProvider } from './context/AuthContext';
 import { Toaster } from 'sonner';
 import ProtectedRoute from './components/ProtectedRoute';
 import Login from './pages/Login';
+import Landing from './pages/Landing';
 // ── Admin pages ───────────────────────────────────────────────────────────────
 import AdminDashboard    from './pages/admin/AdminDashboard';
 import BrandsPage        from './pages/admin/BrandsPage';
@@ -299,7 +300,7 @@ function App() {
             }
           />
 
-          <Route path="/" element={<Navigate to="/login" replace />} />
+          <Route path="/" element={<Landing />} />
 
           <Route
             path="/unauthorized"
