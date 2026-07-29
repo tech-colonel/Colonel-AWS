@@ -259,12 +259,19 @@ async function getGoogleEmail(userId, force = false) {
   const hit = _emailCache.get(userId);
   if (!force && hit && now - hit.at < EMAIL_TTL_MS) return hit.email;
   let email = null;
-  try {
-    // GMAIL_GET_PROFILE returns { emailAddress, ... } for the connected account.
-    const res = await executeTool(userId, 'GMAIL_GET_PROFILE', {});
-    const data = (res && (res.data || res)) || {};
-    email = data.emailAddress || data.email || (data.response_data && data.response_data.emailAddress) || null;
-  } catch (_) { /* leave null — caller uses a fallback label */ }
+  // Plain Gmail profile (legacy 'gmail' connections), then the combined Google
+  // Super profile ('googlesuper' connections). Both return { emailAddress, ... }.
+  // GMAIL_GET_PROFILE resolves null against a googlesuper connection, so the
+  // GOOGLESUPER_GET_PROFILE fallback is required for accounts connected that way.
+  for (const slug of ['GMAIL_GET_PROFILE', 'GOOGLESUPER_GET_PROFILE']) {
+    if (email) break;
+    try {
+      const res = await executeTool(userId, slug, {});
+      const data = (res && (res.data || res)) || {};
+      email = data.emailAddress || data.email
+        || (data.response_data && data.response_data.emailAddress) || null;
+    } catch (_) { /* try the next resolver — caller uses a fallback label */ }
+  }
   _emailCache.set(userId, { email, at: now });
   return email;
 }
