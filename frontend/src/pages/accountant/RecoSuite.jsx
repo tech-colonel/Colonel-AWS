@@ -29,7 +29,7 @@ const RECO_AGENTS = [
     id: 'gstr_3b_tally_entry', category: 'Journal Entry',
     name: 'GSTR-3B Tally Entry', icon: '📒',
     color: '#0F766E', bg: '#F0FDFA', border: '#99F6E4',
-    description: 'Parses GSTR-3B files (1–15 months in one shot) and generates ready-to-post Tally journal entries for ITC credit ledger transfer, output liability set-off, and RCM. Optional Chart of Accounts + Voucher Type Master matching.',
+    description: 'Parses GSTR-3B files (1–15 months in one shot) and generates ready-to-post Tally journal entries for ITC credit ledger transfer and output liability set-off. Optional Chart of Accounts + Voucher Type Master matching.',
     fields: ['GSTR-3B Files', 'Chart of Accounts (opt)', 'Voucher Type Master (opt)'], accuracy: '99.9%',
   },
   {

@@ -4,16 +4,17 @@ Parses a GSTR-3B file (PDF or Excel) and generates Tally journal entries per SOP
 
 SOP (GSTR-3B_SOP.docx):
   Part 1 — ITC Transfer to Credit Ledger
-    Debit  : Credit Ledger [Tax] [StateAbbr]  ← Row 4(C) Net ITC Available
-    Credit : Input [Tax] [StateAbbr]          ← Row 4(4) Inward ISD + Row 4(5) All Other ITC
+    Debit  : Credit Ledger [Tax] [StateAbbr]  ← Row 4(C) Net ITC Available (A-B)
+    Credit : Input [Tax] [StateAbbr]          ← Row 4(C) Net ITC Available (A-B)
 
   Part 2 — Setting Off Output Liability
     Debit  : Output [Tax] [StateAbbr]         ← Row 6.1(A) total output tax (ITC + Cash)
     Credit : Credit Ledger [Tax] [StateAbbr]  ← Row 6.1(A) Tax paid through ITC
     Credit : Cash Ledger [StateAbbr]          ← Row 6.1(A) Tax paid in Cash (if > 0)
 
-  Part 3 — RCM (only if Row 6.1(B) has values)
-    Credit : RCM [Tax] [StateAbbr]            ← Row 6.1(B) Reverse Charge amounts
+RCM is out of scope: no RCM ledger line and no RCM tax-payment journal is
+generated. Row 4(C) already carries the RCM/import ITC (rows 4(A)(2)+(3)), so
+taking 4(C) on both legs of Part 1 keeps the journal balanced.
 """
 
 from __future__ import annotations
@@ -618,29 +619,27 @@ def build_tally_entries(
     matched to the brand's Voucher Type master (e.g., 'Journal' → 'Journal UP').
 
     Journal 1 — ITC Availed:
-      Dr Credit Ledger IGST/CGST/SGST  ← Row 4(C)
-      Cr Input IGST/CGST/SGST          ← Row 4(4+5)
-      Cr RCM IGST/CGST/SGST            ← Row 6.1(B) if any
+      Dr Credit Ledger IGST/CGST/SGST  ← Row 4(C) Net ITC available (A-B)
+      Cr Input IGST/CGST/SGST          ← Row 4(C) Net ITC available (A-B)
 
     Journal 2 — ITC Utilized:
       Dr Output IGST/CGST/SGST         ← Row 6.1(A) tax amount
       Cr Credit Ledger IGST/CGST/SGST  ← ITC used
       Cr Electronic Cash Ledger        ← cash paid
 
-    Journal 3 — RCM Tax Payment (only if row_61b > 0):
-      Dr Output IGST/CGST/SGST         ← Row 6.1(B)
-      Cr Electronic Cash Ledger        ← total RCM cash
+    NOTE: RCM ledgers are intentionally NOT posted by this agent — the RCM
+    liability and its cash payment are booked outside these journals. Both legs
+    of Journal 1 therefore take Row 4(C), which keeps the journal balanced
+    (4(C) already includes the RCM/import ITC from rows 4(A)(2) and 4(A)(3)).
     """
     st               = parsed.get('state_short', parsed.get('state', ''))
     period           = parsed.get('period', '')
     voucher_date     = parsed.get('filing_date') or _derive_voucher_date(period)
     r4c              = parsed['row_4c']
-    r4_45            = parsed['row_4_45']
     r61a_tax         = parsed.get('row_61a_tax', _empty_tax())
     r61a_itc         = parsed['row_61a_itc']
     r61a_cash        = parsed['row_61a_cash']
     r61a_credit_type = parsed.get('row_61a_credit_type', _empty_tax())
-    r61b             = parsed['row_61b']
 
     entries: list[dict] = []
 
@@ -669,9 +668,9 @@ def build_tally_entries(
                         'debit': '', 'credit': '', 'date': '', 'voucher_type': ''})
 
     TAX = [('IGST', 'igst'), ('CGST', 'cgst'), ('SGST', 'sgst')]
-    has_rcm = any(r61b[k] for k in ('igst', 'cgst', 'sgst'))
 
     # ── Journal 1: ITC Availed ─────────────────────────────────────────────
+    # Both legs come from Row 4(C) Net ITC available (A-B). No RCM leg.
     section('Journal 1 — ITC Availed (Narration: ITC Availed)')
     col_header()
     sno = 1
@@ -679,12 +678,7 @@ def build_tally_entries(
         row(str(sno), f'Credit Ledger {tax_name} {st}', debit=r4c[tax_key])
         sno += 1
     for tax_name, tax_key in TAX:
-        row('', f'Input {tax_name} {st}', credit=r4_45[tax_key])
-    if has_rcm:
-        for tax_name, tax_key in TAX:
-            amt = r61b[tax_key]
-            if amt:
-                row('', f'RCM {tax_name} {st}', credit=amt)
+        row('', f'Input {tax_name} {st}', credit=r4c[tax_key])
 
     blank()
 
@@ -717,19 +711,6 @@ def build_tally_entries(
         if total_cash:
             row('', f'Electronic Cash Ledger {st}', credit=total_cash)
         blank()
-
-    # ── Journal 3: RCM Tax Payment ────────────────────────────────────────
-    if has_rcm:
-        section('Journal 3 — RCM Tax Payment (Narration: RCM)')
-        col_header()
-        sno = 1
-        for tax_name, tax_key in TAX:
-            amt = r61b[tax_key]
-            if amt:
-                row(str(sno), f'Output {tax_name} {st}', debit=amt)
-                sno += 1
-        total_rcm = sum(r61b[k] for k in ('igst', 'cgst', 'sgst'))
-        row('', f'Electronic Cash Ledger {st}', credit=total_rcm)
 
     return entries
 
@@ -792,7 +773,6 @@ def process_multi(
             'total_credit': total_credit,
             'j1_debit':     j_debit.get(1, 0.0),
             'j2_debit':     j_debit.get(2, 0.0),
-            'j3_debit':     j_debit.get(3, 0.0),
         })
 
         if idx > 0:
@@ -1040,7 +1020,7 @@ def build_gstr3b_tally_workbook(
     ws_m.column_dimensions['H'].width = 16
 
     m_hdrs = ['Period', 'GSTIN', 'State', 'Total Debit (₹)', 'Total Credit (₹)',
-              'ITC Availed Dr (₹)', 'ITC Utilized Dr (₹)', 'RCM Dr (₹)']
+              'ITC Availed Dr (₹)', 'ITC Utilized Dr (₹)']
     for col, val in enumerate(m_hdrs, start=1):
         c = ws_m.cell(row=1, column=col, value=val)
         c.font = _HDR_FONT
@@ -1053,7 +1033,7 @@ def build_gstr3b_tally_workbook(
         vals = [
             m.get('period', ''), m.get('gstin', ''), m.get('state', ''),
             m.get('total_debit', 0.0), m.get('total_credit', 0.0),
-            m.get('j1_debit', 0.0), m.get('j2_debit', 0.0), m.get('j3_debit', 0.0),
+            m.get('j1_debit', 0.0), m.get('j2_debit', 0.0),
         ]
         for col, val in enumerate(vals, start=1):
             c = ws_m.cell(row=ri, column=col, value=val)
