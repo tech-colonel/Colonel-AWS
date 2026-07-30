@@ -3,6 +3,7 @@ const { getBrandConnection } = require('../../../config/database');
 const { getDynamicModel } = require('../../../models/brand');
 const { markProcessing, markDone, resetRun, getState } = require('../../../utils/invoiceEvents');
 const { setExecution, getExecution, clearExecution } = require('../../../utils/executionStore');
+const n8nApi = require('../../../utils/n8nApi');
 
 // ─── Helper: parse dates in DD/MM/YYYY or DD-MM-YYYY format ─────────────────
 const parseDate = (dString) => {
@@ -80,7 +81,14 @@ const processInvoice = async (req, res, next) => {
         });
         const n8nData = await n8nRes.json();
         const executionId = n8nData?.data?.[0]?.id || null;
-        if (executionId) setExecution(brandId, agentId, executionId);
+        if (executionId) {
+          setExecution(brandId, agentId, executionId);
+          // Auto-clear the "Processing" banner if the run is cancelled or errors INSIDE
+          // n8n (no /progress 'done' ping fires then). Polls the n8n API; generic on error.
+          try { require('../../../utils/n8nWatcher').watch(brandId, agentId, executionId); } catch (_) {}
+          // Capture the workflow id (from the running execution) for run-history / status / retry.
+          try { n8nApi.remember(brandId, agentId, n8nData?.data?.[0]?.workflowId); } catch (_) {}
+        }
         return res.json({ success: true, message: 'Processing started. Invoices will appear once n8n finishes.', pending: true, executionId });
       } catch (err) {
         console.error('[Invoice] Could not fetch execution ID:', err.message);
@@ -94,7 +102,8 @@ const processInvoice = async (req, res, next) => {
         return res.json({ success: true, message: 'Processing started. Invoices will appear once n8n finishes.', pending: true });
       }
       console.error('[Invoice] n8n webhook error:', apiError.message);
-      return res.status(502).json({ error: 'Failed to communicate with invoice processing webhook.' });
+      // Generic message — never surface the raw n8n/webhook error to the user.
+      return res.status(502).json({ error: 'Could not start processing right now. Please try again.' });
     }
 
   } catch (error) {
@@ -279,10 +288,62 @@ const cancelInvoice = async (req, res, next) => {
   }
 };
 
+// ─── GET /api/brands/:brandId/agents/:agentId/invoice/runs ───────────────────
+// #3 run history + #4 workflow on/off status. Returns { workflow, runs }.
+const getRunHistory = async (req, res, next) => {
+  try {
+    const { brandId, agentId } = req.params;
+    const brand = await Brand.findByPk(brandId);
+    if (!brand) return res.status(404).json({ error: 'Brand not found' });
+
+    const workflowId = await n8nApi.resolveWorkflowId(brandId, agentId, brand.name);
+    if (!workflowId) return res.json({ workflow: null, runs: [] });
+
+    let workflow = null;
+    try { workflow = await n8nApi.getWorkflow(workflowId); } catch (_) {}
+    let runs = [];
+    try { runs = await n8nApi.listRuns(workflowId, 8); } catch (_) {}
+    res.json({ workflow, runs });
+  } catch (error) { next(error); }
+};
+
+// ─── POST /api/brands/:brandId/agents/:agentId/invoice/retry ──────────────────
+// #5 retry — re-runs the last errored execution (or a specific executionId).
+const retryRun = async (req, res, next) => {
+  try {
+    const { brandId, agentId } = req.params;
+    const brand = await Brand.findByPk(brandId);
+    if (!brand) return res.status(404).json({ error: 'Brand not found' });
+
+    let execId = req.body && req.body.executionId;
+    if (!execId) {
+      const workflowId = await n8nApi.resolveWorkflowId(brandId, agentId, brand.name);
+      if (workflowId) {
+        try {
+          const runs = await n8nApi.listRuns(workflowId, 12);
+          const failed = runs.find((r) => r.status === 'error');
+          execId = failed && failed.id;
+        } catch (_) {}
+      }
+    }
+    if (!execId) return res.status(400).json({ error: 'No failed run to retry.' });
+
+    await n8nApi.retryExecution(execId);
+    markProcessing(brandId, agentId); // show the spinner again for the retried run
+    res.json({ success: true, retried: execId });
+  } catch (error) {
+    // Generic — never surface the raw n8n error.
+    console.error('[Invoice] retry error:', error.message);
+    return res.status(502).json({ error: 'Could not retry the run right now. Please try again.' });
+  }
+};
+
 module.exports = {
   processInvoice,
   getInvoices,
   getSheetUrl,
   updateInvoice,
-  cancelInvoice
+  cancelInvoice,
+  getRunHistory,
+  retryRun,
 };

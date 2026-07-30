@@ -313,6 +313,12 @@ const InvoiceAgentWorkspace = ({ agent }) => {
   const [executionId, setExecutionId] = useState(null);
   const [processingSummary, setProcessingSummary] = useState(null);
 
+  // #3 run history · #4 workflow on/off · #5 retry
+  const [runs, setRuns] = useState([]);
+  const [workflow, setWorkflow] = useState(null);
+  const [showRuns, setShowRuns] = useState(false);
+  const [retrying, setRetrying] = useState(false);
+
   // SSE abort controller ref so we can cancel the stream
   const sseAbortRef = useRef(null);
   // True only after THIS session clicked Process — lets us ignore a stale
@@ -341,6 +347,30 @@ const InvoiceAgentWorkspace = ({ agent }) => {
       setSheetUrl(null);
     }
   }, [brandId, agentId]);
+
+  // #3/#4 — fetch recent n8n runs + workflow on/off status
+  const fetchRuns = useCallback(async () => {
+    try {
+      const res = await api.get(`/api/brands/${brandId}/agents/${agentId}/invoice/runs`);
+      setRuns(res.data?.runs || []);
+      setWorkflow(res.data?.workflow || null);
+    } catch {
+      setRuns([]); setWorkflow(null);
+    }
+  }, [brandId, agentId]);
+
+  // #5 — retry the last failed n8n run
+  const handleRetry = useCallback(async () => {
+    setRetrying(true);
+    try {
+      await api.post(`/api/brands/${brandId}/agents/${agentId}/invoice/retry`, {});
+      setProcessingStatus('processing'); setIsProcessing(true); startedRef.current = true;
+    } catch { /* generic — no raw error surfaced */ }
+    finally { setRetrying(false); setTimeout(fetchRuns, 1500); }
+  }, [brandId, agentId, fetchRuns]);
+
+  // Load runs on mount + refresh whenever the processing status changes.
+  useEffect(() => { fetchRuns(); }, [fetchRuns, processingStatus]);
 
   useEffect(() => {
     fetchInvoices();
@@ -707,6 +737,29 @@ const InvoiceAgentWorkspace = ({ agent }) => {
               >
                 <RefreshCw className={`w-4 h-4 ${invoicesLoading ? 'animate-spin' : ''}`} /> Refresh
               </button>
+              {workflow && (
+                <span title={`n8n workflow: ${workflow.name}`} className="inline-flex items-center gap-1.5 rounded-lg px-3 py-2 text-xs font-semibold" style={{ border: `1px solid ${T_BORDER}`, color: workflow.active ? '#065F46' : '#991B1B', background: workflow.active ? '#ECFDF5' : '#FEF2F2' }}>
+                  <span className="w-2 h-2 rounded-full" style={{ background: workflow.active ? '#10B981' : '#EF4444' }} />
+                  {workflow.active ? 'Workflow On' : 'Workflow Off'}
+                </span>
+              )}
+              <button
+                onClick={() => setShowRuns((v) => !v)}
+                className="inline-flex items-center gap-2 rounded-lg border px-4 py-2 text-sm font-semibold transition-all hover:bg-slate-50"
+                style={{ borderColor: T_BORDER, color: T_TEXT_SECONDARY }}
+              >
+                ⟳ Runs
+              </button>
+              {runs[0] && runs[0].status === 'error' && (
+                <button
+                  onClick={handleRetry}
+                  disabled={retrying}
+                  className="inline-flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-bold text-white transition-all hover:brightness-110 disabled:opacity-60"
+                  style={{ background: '#F59E0B', boxShadow: '0 4px 12px rgba(245,158,11,0.25)' }}
+                >
+                  {retrying ? 'Retrying…' : '↻ Retry last'}
+                </button>
+              )}
               <button
                 onClick={handleProcessInvoices}
                 disabled={isProcessing || processingStatus === 'processing'}
@@ -732,6 +785,22 @@ const InvoiceAgentWorkspace = ({ agent }) => {
                 </button>
               )}
             </div>
+            {showRuns && (
+              <div className="mt-2 w-72 rounded-lg border bg-white shadow-lg p-1.5" style={{ borderColor: T_BORDER }}>
+                <div className="text-[10px] font-bold uppercase tracking-widest px-2 py-1" style={{ color: T_TEXT_SECONDARY }}>Recent runs</div>
+                {runs.length === 0 ? (
+                  <div className="text-xs px-2 py-2" style={{ color: T_TEXT_SECONDARY }}>No runs yet</div>
+                ) : runs.map((r) => (
+                  <div key={r.id} className="flex items-center justify-between px-2 py-1.5 text-xs">
+                    <span className="inline-flex items-center gap-1.5">
+                      <span className="w-2 h-2 rounded-full" style={{ background: r.status === 'success' ? '#10B981' : r.status === 'error' ? '#EF4444' : r.status === 'canceled' ? '#94A3B8' : '#F59E0B' }} />
+                      <span style={{ color: T_TEXT_PRIMARY, fontWeight: 600, textTransform: 'capitalize' }}>{r.status || 'unknown'}</span>
+                    </span>
+                    <span style={{ color: T_TEXT_SECONDARY }}>{(() => { try { return format(new Date(r.startedAt), 'd MMM, h:mm a'); } catch { return ''; } })()}</span>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         </div>
 
@@ -886,6 +955,15 @@ const InvoiceAgentWorkspace = ({ agent }) => {
                       <span className="text-[10px] font-medium" style={{ color: T_TEXT_SECONDARY }}>{formatDate(invoice.invoice_date)}</span>
                       <span className="text-xs font-bold" style={{ color: T_TEXT_PRIMARY }}>{money(invoice.taxable_value)}</span>
                     </div>
+                    {invoice.processed_on && (() => {
+                      let dt = null;
+                      try { dt = format(new Date(invoice.processed_on), 'd MMM yyyy, h:mm a'); } catch { dt = null; }
+                      return dt ? (
+                        <div className="mt-1.5 text-[9px] font-medium" style={{ color: T_TEXT_SECONDARY, opacity: 0.8 }}>
+                          Processed {dt}
+                        </div>
+                      ) : null;
+                    })()}
                   </button>
                 );
               })}

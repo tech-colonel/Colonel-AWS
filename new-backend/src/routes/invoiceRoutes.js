@@ -5,10 +5,12 @@ const { feedInvoicesFromN8n, progressFromN8n } = require('../controllers/agents/
 const { authenticateToken } = require('../middleware/authMiddleware');
 const { addSseClient, removeSseClient, getState } = require('../utils/invoiceEvents');
 
-const { processInvoice, getInvoices, getSheetUrl, updateInvoice, cancelInvoice } = invoiceController;
+const { processInvoice, getInvoices, getSheetUrl, updateInvoice, cancelInvoice, getRunHistory, retryRun } = invoiceController;
 
 router.post('/brands/:brandId/agents/:agentId/invoice/process',          authenticateToken, processInvoice);
 router.post('/brands/:brandId/agents/:agentId/invoice/cancel',           authenticateToken, cancelInvoice);
+router.get('/brands/:brandId/agents/:agentId/invoice/runs',              authenticateToken, getRunHistory);
+router.post('/brands/:brandId/agents/:agentId/invoice/retry',            authenticateToken, retryRun);
 router.get('/brands/:brandId/agents/:agentId/invoices',                  authenticateToken, getInvoices);
 router.get('/brands/:brandId/agents/:agentId/invoice/sheet-url',         authenticateToken, getSheetUrl);
 router.patch('/brands/:brandId/agents/:agentId/invoices/:invoiceId',     authenticateToken, updateInvoice);
