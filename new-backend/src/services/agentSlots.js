@@ -43,7 +43,7 @@ const SLOTS = {
     { key: 'credit_note', label: 'Credit Note Register (Optional)', required: false, match: { keywords: ['credit note', 'credit', 'cn'], extensions: XLS } },
   ],
   einvoice_reco: [
-    { key: 'einvoice', label: 'E-Invoice Register', required: true, match: { keywords: ['e-invoice', 'einvoice', 'e invoice', 'irn'], extensions: XLS } },
+    { key: 'einvoice', label: 'E-Invoice Register', required: true, match: { keywords: ['e-invoice', 'einvoice', 'e invoice', 'einv', 'irn'], extensions: XLS } },
     { key: 'books', label: 'Books — Combined (Sales + Credit Note)', required: true, match: { keywords: ['combined', 'books', 'combine'], extensions: XLS } },
   ],
   bank_statement: [
