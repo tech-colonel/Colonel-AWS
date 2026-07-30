@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Loader2, CheckCircle2, AlertTriangle, X } from 'lucide-react';
 import api from '../lib/api';
 import BrandLogo from './BrandLogos';
@@ -31,30 +31,62 @@ export default function DriveOrUpload({ slots = [], agentType, uploadNode, onDri
   const [scan, setScan] = useState(null);      // { files, mapping, unmatched, ambiguous, usedLlm, serviceAccountEmail }
   const [sel, setSel] = useState({});          // { slotKey: [fileId,...] }
   const [confirmed, setConfirmed] = useState(false);
+  const [lastAnalyzed, setLastAnalyzed] = useState('');
 
   const clearDrive = () => {
-    setScan(null); setSel({}); setConfirmed(false); setUrl(''); setError('');
+    setScan(null); setSel({}); setConfirmed(false); setUrl(''); setError(''); setLastAnalyzed('');
     onDriveConfirmed && onDriveConfirmed(null);
   };
 
-  const analyze = async () => {
+  // Build the { slotKey:[{fileId,name}] } payload from a selection map + file list.
+  const buildSelection = (meta, selMap, fileList) => {
+    const nameOf = (id) => (fileList.find((f) => f.fileId === id)?.name) || id;
+    const selection = {};
+    for (const s of meta) {
+      const ids = selMap[s.key] || [];
+      if (ids.length) selection[s.key] = ids.map((id) => ({ fileId: id, name: nameOf(id) }));
+    }
+    return selection;
+  };
+
+  const runAnalyze = async (link) => {
+    const target = String(link ?? url).trim();
+    if (!target || scanning) return;
     setScanning(true); setError(''); setScan(null); setConfirmed(false);
     onDriveConfirmed && onDriveConfirmed(null);
     try {
-      const { data } = await api.post('/api/drive/route', { folder_url: url, agent_type: agentType });
-      setScan(data);
+      const { data } = await api.post('/api/drive/route', { folder_url: target, agent_type: agentType });
+      const meta = data.slots || slots;
       const seed = {};
-      for (const s of (data.slots || slots)) {
+      for (const s of meta) {
         const guessed = (data.mapping?.[s.key] || []).map((x) => x.fileId);
         seed[s.key] = s.multiple ? guessed : guessed.slice(0, 1);
       }
-      setSel(seed);
+      setScan(data); setSel(seed); setLastAnalyzed(target);
+      // Auto-confirm when every required slot is matched and nothing is ambiguous,
+      // so paste-link → Run just works. Otherwise the user resolves it below.
+      const missing = meta.filter((s) => s.required && !(seed[s.key] || []).length);
+      if (!missing.length && !(data.ambiguous || []).length) {
+        setConfirmed(true);
+        onDriveConfirmed && onDriveConfirmed(buildSelection(meta, seed, data.files || []));
+      }
     } catch (e) {
       setError(e.response?.data?.error || 'Could not scan that Drive link.');
+      setLastAnalyzed(target); // don't loop on a failing link
     } finally {
       setScanning(false);
     }
   };
+
+  // Auto-analyze shortly after a Drive link is pasted/typed (debounced), so the
+  // user doesn't have to hunt for an "Analyze" button.
+  useEffect(() => {
+    const t = String(url || '').trim();
+    if (!t || t === lastAnalyzed || confirmed) return;
+    if (!/(drive\.google\.com|\/folders\/|\/file\/d\/)/.test(t)) return;
+    const id = setTimeout(() => { runAnalyze(t); }, 700);
+    return () => clearTimeout(id);
+  }, [url]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const files = scan?.files || [];
   const slotMeta = scan?.slots || slots;
@@ -77,13 +109,8 @@ export default function DriveOrUpload({ slots = [], agentType, uploadNode, onDri
 
   const confirm = () => {
     if (missingRequired.length) return;
-    const selection = {};
-    for (const s of slotMeta) {
-      const ids = sel[s.key] || [];
-      if (ids.length) selection[s.key] = ids.map((id) => ({ fileId: id, name: fileName(id) }));
-    }
     setConfirmed(true);
-    onDriveConfirmed && onDriveConfirmed(selection);
+    onDriveConfirmed && onDriveConfirmed(buildSelection(slotMeta, sel, files));
   };
 
   const sectionStyle = {
@@ -128,10 +155,11 @@ export default function DriveOrUpload({ slots = [], agentType, uploadNode, onDri
             <input
               type="text" value={url} placeholder="https://drive.google.com/drive/folders/…  (or a file link)"
               onChange={(e) => setUrl(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter') runAnalyze(); }}
               style={{ flex: 1, padding: '10px 12px', borderRadius: 8, border: '1px solid var(--card-border)', background: 'var(--page-bg)', color: 'var(--text-heading)', fontSize: 13 }}
             />
             <button
-              onClick={analyze} disabled={!url || scanning}
+              onClick={() => runAnalyze()} disabled={!url || scanning}
               style={{
                 display: 'inline-flex', alignItems: 'center', gap: 6,
                 padding: '10px 18px', borderRadius: 8, border: 'none', background: ACCENT, color: '#fff',
