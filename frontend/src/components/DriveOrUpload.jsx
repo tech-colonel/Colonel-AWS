@@ -170,9 +170,9 @@ export default function DriveOrUpload({ slots = [], agentType, uploadNode, onDri
               {scanning ? 'Scanning…' : 'Analyze'}
             </button>
           </div>
-          <p style={{ color: 'var(--text-muted)', fontSize: 11.5, margin: '7px 2px 0' }}>
-            Share the folder with the service account first
-            {scan?.serviceAccountEmail ? <> (<code style={{ fontSize: 11 }}>{scan.serviceAccountEmail}</code>)</> : ''}, then paste the link.
+          <p style={{ color: 'var(--text-muted)', fontSize: 11.5, margin: '7px 2px 0', lineHeight: 1.5 }}>
+            First set the folder/file to <strong>“Anyone with the link → Viewer”</strong>
+            {scan?.serviceAccountEmail ? <> (or share it with <code style={{ fontSize: 11 }}>{scan.serviceAccountEmail}</code>)</> : ''}, then paste the link.
           </p>
 
           {error && (

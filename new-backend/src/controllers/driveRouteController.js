@@ -51,7 +51,13 @@ async function routeDriveFiles(req, res) {
       serviceAccountEmail: driveService.serviceAccountEmail ? driveService.serviceAccountEmail() : null,
     });
   } catch (err) {
-    return res.status(500).json({ error: err.message || 'Failed to scan the Drive link.' });
+    const raw = `${err && err.message} ${err && err.code} ${JSON.stringify((err && err.response && err.response.data) || '')}`;
+    if (/403|404|not found|permission|insufficient|forbidden|cannot access|does not have/i.test(raw)) {
+      return res.status(403).json({
+        error: 'Can’t open that link — set the folder/file to “Anyone with the link → Viewer” (or share it with the service account), then try again.',
+      });
+    }
+    return res.status(500).json({ error: (err && err.message) || 'Failed to scan the Drive link.' });
   }
 }
 
