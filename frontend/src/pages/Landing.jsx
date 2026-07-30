@@ -1,6 +1,7 @@
 import React, { useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
+import AgentShowcase from './AgentShowcase';
 
 /* Landing — the first screen at the root of the app. A plain black stage with a
    dithered wave rising from the bottom in the Colonel brand gradient
@@ -95,7 +96,8 @@ export default function Landing() {
   };
 
   return (
-    <div
+    <div style={{ background: '#000', width: '100%' }}>
+    <section
       style={{
         position: 'relative', minHeight: '100vh', width: '100%', overflow: 'hidden',
         background: '#000', display: 'flex', flexDirection: 'column',
@@ -135,6 +137,19 @@ export default function Landing() {
           {user ? 'Enter app' : 'Login'}
         </button>
       </div>
+
+      {/* Scroll cue into the agent showcase */}
+      <div style={{ position: 'absolute', bottom: 26, left: 0, right: 0, textAlign: 'center', zIndex: 1 }}>
+        <span style={{
+          fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', fontSize: 11,
+          letterSpacing: '0.2em', textTransform: 'uppercase', color: 'rgba(255,255,255,0.35)',
+        }}>
+          Meet the agents ↓
+        </span>
+      </div>
+    </section>
+
+    <AgentShowcase />
     </div>
   );
 }
