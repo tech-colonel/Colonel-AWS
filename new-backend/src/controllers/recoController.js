@@ -966,6 +966,31 @@ const runReco = async (req, res) => {
     const isDemo = req.body.is_demo === 'true';
     const brandId = req.body.brand_id;
 
+    // --- "From Drive" input: materialize req.files from a confirmed Drive selection ---
+    // Body `drive` = { slotKey: [{fileId,name}] }. We download each file via the
+    // service account and push it into req.files with fieldname = slotKey, so EVERY
+    // downstream branch (which reads req.files by fieldname) works unchanged. This
+    // adds an alternate file SOURCE only — no agent logic changes.
+    if (req.body.drive) {
+      let driveSel;
+      try { driveSel = JSON.parse(req.body.drive); } catch (_) { driveSel = null; }
+      if (driveSel && typeof driveSel === 'object') {
+        req.files = req.files || [];
+        for (const [slotKey, items] of Object.entries(driveSel)) {
+          for (const it of (Array.isArray(items) ? items : [items])) {
+            if (!it || !it.fileId) continue;
+            const buffer = await drive.downloadFile(it.fileId);
+            req.files.push({
+              fieldname: slotKey,
+              originalname: it.name || `${slotKey}`,
+              buffer,
+              size: buffer.length,
+            });
+          }
+        }
+      }
+    }
+
     // --- Zepto Receivables: fetch classified files from Drive folder, proxy to Python engine ---
     if (recoType === 'zepto_receivables') {
       const folderUrl = req.body.folder_url || req.body.folderLink;

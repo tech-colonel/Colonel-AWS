@@ -34,6 +34,7 @@ async function routeDriveFiles(req, res) {
       mapping: result.mapping,
       unmatched: result.unmatched,
       ambiguous: result.ambiguous,
+      files: result.files,            // every detected file: [{fileId,name}] — powers the dropdowns
       usedLlm: !!result.usedLlm,
       serviceAccountEmail: driveService.serviceAccountEmail ? driveService.serviceAccountEmail() : null,
     });

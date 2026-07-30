@@ -17,6 +17,7 @@ import OtherBrandReset from '../../components/OtherBrandReset';
 import { DEMO_SAMPLES, urlToFile } from '../../lib/demoSamples';
 import { toast } from 'sonner';
 import GoogleDriveFolderInput from './GoogleDriveFolderInput';
+import DriveOrUpload from '../../components/DriveOrUpload';
 
 const HISTORY_MONTHS_SHORT = ['', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
@@ -500,6 +501,9 @@ const RecoWorkspace = ({ agentTypeProp } = {}) => {
 
   const [driveUrl, setDriveUrl] = useState('');
   const [uploadedFiles, setUploadedFiles] = useState({});
+  // Generic "From Drive" input (non-Zepto agents): confirmed selection, or null.
+  // When present, the run uses these Drive files instead of manual uploads.
+  const [driveFiles, setDriveFiles] = useState(null); // { slotKey: [{fileId,name}] } once confirmed
   const [tolerance, setTolerance] = useState('1.0');
   const [running, setRunning] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(null);
@@ -712,13 +716,14 @@ const RecoWorkspace = ({ agentTypeProp } = {}) => {
       } finally { setRunning(false); }
       return;
     }
-    const missing = activeFiles.filter(f => {
+    const useDrive = !!(driveFiles && Object.keys(driveFiles).length > 0);
+    const missing = useDrive ? [] : activeFiles.filter(f => {
       if (!f.required) return false;
       const v = uploadedFiles[f.key];
       return f.multiple ? (!v || (Array.isArray(v) && v.length === 0)) : !v;
     });
     if (missing.length > 0) { toast.error(`Please upload: ${missing.map(f => f.label).join(', ')}`); return; }
-    if (agentType === 'bank_statement' && isDemo && !uploadedFiles['ledger_master']) {
+    if (!useDrive && agentType === 'bank_statement' && isDemo && !uploadedFiles['ledger_master']) {
       toast.error('In demo mode, please upload the Ledger Master file'); return;
     }
     if (isReceivableCycle) {
@@ -750,12 +755,17 @@ const RecoWorkspace = ({ agentTypeProp } = {}) => {
           formData.append('period_end_year', periodEndYear);
         }
       }
-      for (const [key, val] of Object.entries(uploadedFiles)) {
-        if (!val) continue;
-        if (Array.isArray(val)) {
-          for (const f of val) formData.append(key, f);
-        } else {
-          formData.append(key, val);
+      if (useDrive) {
+        // Files come from Drive — backend downloads them server-side via the service account.
+        formData.append('drive', JSON.stringify(driveFiles));
+      } else {
+        for (const [key, val] of Object.entries(uploadedFiles)) {
+          if (!val) continue;
+          if (Array.isArray(val)) {
+            for (const f of val) formData.append(key, f);
+          } else {
+            formData.append(key, val);
+          }
         }
       }
       const response = await api.post('/api/reco/run', formData, {
@@ -1563,36 +1573,41 @@ const RecoWorkspace = ({ agentTypeProp } = {}) => {
                 {isDriveMode ? (
                   <GoogleDriveFolderInput value={driveUrl} onChange={setDriveUrl} />
                 ) : (
-                  activeFiles.map((f, idx) => (
-                  <React.Fragment key={f.key}>
-                    {f.multiple ? (
-                      <MultiFileDropzone
-                        fileConfig={f} files={uploadedFiles[f.key] || []}
-                        onChange={(arr) => handleFileChange(f.key, arr)}
-                        disabled={running} stepIndex={idx}
-                      />
-                    ) : (
-                      <FileDropzone
-                        fileConfig={f} file={uploadedFiles[f.key]}
-                        onChange={(file) => handleFileChange(f.key, file)}
-                        disabled={running} stepIndex={idx}
-                        prefilled={handoffLoaded(f.key)}
-                      />
-                    )}
-                    {f.isDemo && (
-                      <div style={{
-                        display: 'flex', alignItems: 'flex-start', gap: 8,
-                        padding: '10px 14px', borderRadius: 8,
-                        background: 'rgba(217,119,6,0.06)', border: '1px solid rgba(217,119,6,0.18)',
-                      }}>
-                        <Info style={{ width: 13, height: 13, color: '#D97706', flexShrink: 0, marginTop: 2 }} />
-                        <p style={{ fontSize: 11, color: 'var(--text-body)', margin: 0, lineHeight: 1.5 }}>
-                          <strong>Demo mode:</strong> Ledger Master required here. In production, it's auto-loaded from your brand's saved master data.
-                        </p>
-                      </div>
-                    )}
-                  </React.Fragment>
-                  ))
+                  <DriveOrUpload
+                    slots={activeFiles}
+                    agentType={agentType}
+                    onDriveConfirmed={setDriveFiles}
+                    uploadNode={activeFiles.map((f, idx) => (
+                    <React.Fragment key={f.key}>
+                      {f.multiple ? (
+                        <MultiFileDropzone
+                          fileConfig={f} files={uploadedFiles[f.key] || []}
+                          onChange={(arr) => handleFileChange(f.key, arr)}
+                          disabled={running} stepIndex={idx}
+                        />
+                      ) : (
+                        <FileDropzone
+                          fileConfig={f} file={uploadedFiles[f.key]}
+                          onChange={(file) => handleFileChange(f.key, file)}
+                          disabled={running} stepIndex={idx}
+                          prefilled={handoffLoaded(f.key)}
+                        />
+                      )}
+                      {f.isDemo && (
+                        <div style={{
+                          display: 'flex', alignItems: 'flex-start', gap: 8,
+                          padding: '10px 14px', borderRadius: 8,
+                          background: 'rgba(217,119,6,0.06)', border: '1px solid rgba(217,119,6,0.18)',
+                        }}>
+                          <Info style={{ width: 13, height: 13, color: '#D97706', flexShrink: 0, marginTop: 2 }} />
+                          <p style={{ fontSize: 11, color: 'var(--text-body)', margin: 0, lineHeight: 1.5 }}>
+                            <strong>Demo mode:</strong> Ledger Master required here. In production, it's auto-loaded from your brand's saved master data.
+                          </p>
+                        </div>
+                      )}
+                    </React.Fragment>
+                    ))}
+                  />
                 )}
 
                 {agentType === 'bank_statement' && !isDemo && (
