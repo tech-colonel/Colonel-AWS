@@ -151,6 +151,28 @@ async function uploadXlsxAsSheet(localPath, name) {
   return { id: res.data.id, webViewLink: res.data.webViewLink };
 }
 
+/**
+ * Upload a local .xlsx as a Google Sheet using the connected Google OAuth account
+ * (a real account WITH storage — a service account has none). Also makes it
+ * readable by anyone with the link. Returns { id, webViewLink } or null when no
+ * OAuth account is connected (caller falls back to the service-account path).
+ */
+async function uploadXlsxAsSheetOAuth(localPath, name) {
+  const auth = await getOAuthClient();
+  if (!auth) return null;
+  const d = google.drive({ version: 'v3', auth });
+  const res = await d.files.create({
+    requestBody: { name: name || path.basename(localPath, '.xlsx'), mimeType: SHEET_MIME },
+    media: { mimeType: XLSX_MIME, body: fs.createReadStream(localPath) },
+    fields: 'id, webViewLink',
+    supportsAllDrives: true,
+  });
+  try {
+    await d.permissions.create({ fileId: res.data.id, requestBody: { role: 'reader', type: 'anyone' }, supportsAllDrives: true });
+  } catch (e) { console.warn('[DRIVE] OAuth share failed:', e.message); }
+  return { id: res.data.id, webViewLink: res.data.webViewLink };
+}
+
 /** Make a file readable by anyone with the link (so accountants can open it). */
 async function makeAnyoneReader(fileId) {
   const drive = getDrive();
@@ -234,6 +256,7 @@ module.exports = {
   listSubfolders,
   downloadFile,
   uploadXlsxAsSheet,
+  uploadXlsxAsSheetOAuth,
   makeAnyoneReader,
   getOAuthClient,
   hasOutputFolder: () => !!OUTPUT_FOLDER_ID,

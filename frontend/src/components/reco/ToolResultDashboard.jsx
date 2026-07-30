@@ -1,5 +1,10 @@
 import React, { useMemo } from 'react';
 import { Download } from 'lucide-react';
+import OpenInSheetsButton from '../OpenInSheetsButton';
+
+// Lets the shared KpiHeader render an "Open in Google Sheets" button next to
+// Download without threading jobId through every sub-dashboard.
+const SheetsCtx = React.createContext(null);
 import {
   ResponsiveContainer,
   PieChart, Pie, Cell,
@@ -237,6 +242,7 @@ function TableWrap({ children, minWidth = '900px' }) {
 
 // ─── Header row: KPIs + download ───────────────────────────────────────────────
 function KpiHeader({ cards, onDownload, downloading }) {
+  const sheets = React.useContext(SheetsCtx);
   return (
     <div style={{ marginBottom: '20px' }}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px', marginBottom: '12px', flexWrap: 'wrap' }}>
@@ -244,20 +250,25 @@ function KpiHeader({ cards, onDownload, downloading }) {
           Summary
         </h3>
         {onDownload && (
-          <button
-            onClick={onDownload}
-            disabled={downloading}
-            style={{
-              display: 'inline-flex', alignItems: 'center', gap: '8px',
-              background: '#0748EE', color: '#fff', border: 'none', borderRadius: '12px',
-              padding: '9px 16px', fontSize: '13px', fontWeight: 600,
-              cursor: downloading ? 'not-allowed' : 'pointer', opacity: downloading ? 0.7 : 1,
-              boxShadow: '0 2px 8px rgba(7,72,238,0.25)', transition: 'all 0.15s',
-            }}>
-            {downloading
-              ? (<><span className="animate-spin" style={{ width: '14px', height: '14px', border: '2px solid #ffffff80', borderTopColor: '#fff', borderRadius: '50%', display: 'inline-block' }} /> Preparing…</>)
-              : (<><Download style={{ width: '15px', height: '15px' }} /> Download Excel</>)}
-          </button>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+            <button
+              onClick={onDownload}
+              disabled={downloading}
+              style={{
+                display: 'inline-flex', alignItems: 'center', gap: '8px',
+                background: '#0748EE', color: '#fff', border: 'none', borderRadius: '12px',
+                padding: '9px 16px', fontSize: '13px', fontWeight: 600,
+                cursor: downloading ? 'not-allowed' : 'pointer', opacity: downloading ? 0.7 : 1,
+                boxShadow: '0 2px 8px rgba(7,72,238,0.25)', transition: 'all 0.15s',
+              }}>
+              {downloading
+                ? (<><span className="animate-spin" style={{ width: '14px', height: '14px', border: '2px solid #ffffff80', borderTopColor: '#fff', borderRadius: '50%', display: 'inline-block' }} /> Preparing…</>)
+                : (<><Download style={{ width: '15px', height: '15px' }} /> Download Excel</>)}
+            </button>
+            {sheets?.jobId && (
+              <OpenInSheetsButton jobId={sheets.jobId} name={sheets.name} style={{ borderRadius: '12px', padding: '9px 16px' }} />
+            )}
+          </div>
         )}
       </div>
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: '12px' }}>
@@ -499,6 +510,7 @@ export default function ToolResultDashboard({
   agentLabel,
   embedded = false, // chat/inline mode: KPIs + charts only, no row table / download
   columns,          // optional explicit column order (generic dashboard only) — see GenericDashboard
+  jobId,            // reco job id → enables "Open in Google Sheets" next to Download
 }) {
   const kind = classifyAgent(agentType);
   const safeRows = Array.isArray(rows) ? rows : [];
@@ -553,6 +565,14 @@ export default function ToolResultDashboard({
   else if (kind === '3b2b') dash = <Gst3b2bDashboard {...{ safeRows, capped, displayed, onDownload: dld, downloading, embedded }} />;
   else if (kind === 'tally') dash = <TallyDashboard {...{ safeRows, capped, displayed, onDownload: dld, downloading, embedded }} />;
   else dash = <GenericDashboard {...{ safeRows, capped, displayed, onDownload: dld, downloading, embedded, columns }} />;
+
+  // Provide the job id so the shared KpiHeader can offer "Open in Google Sheets"
+  // (hidden in embedded/chat mode, which has its own Sheets action).
+  dash = (
+    <SheetsCtx.Provider value={{ jobId: embedded ? null : jobId, name: label }}>
+      {dash}
+    </SheetsCtx.Provider>
+  );
 
   if (!onSendFeedback) return dash;
 

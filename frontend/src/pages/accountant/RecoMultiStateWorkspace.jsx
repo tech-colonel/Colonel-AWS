@@ -14,6 +14,7 @@ import { MULTISTATE_SAMPLE, urlToFile } from '../../lib/demoSamples';
 import { toast } from 'sonner';
 import { StatusDonut, ByReasons, FeedbackModal, distOf } from '../../components/reco/ToolResultDashboard';
 import DriveMultiState from '../../components/DriveMultiState';
+import OpenInSheetsButton from '../../components/OpenInSheetsButton';
 
 const COLOR  = '#7C3AED';
 const PAGE_SIZE = 100;
@@ -992,6 +993,7 @@ const RecoMultiStateWorkspace = () => {
                       {downloading ? <Loader2 style={{ width: 13, height: 13 }} className="animate-spin" /> : <Download style={{ width: 13, height: 13 }} />}
                       Download Excel
                     </button>
+                    <OpenInSheetsButton jobId={result?.job_id} name="GSTR-2B vs Books Multi-State" style={{ padding: '8px 14px', fontSize: 12 }} />
                     <button
                       onClick={() => navigate(`/brands/${brandId}/reco/gstr_2b_books_multistate/results/${result?.job_id}`)}
                       style={{

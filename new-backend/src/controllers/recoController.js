@@ -1893,8 +1893,15 @@ const openInSheets = async (req, res) => {
     }
 
     const name = `${(req.query.name || 'Reconciliation').replace(/[^a-zA-Z0-9_\- ]/g, '_')} ${jobId.slice(0, 8)}`;
-    const { id, webViewLink } = await drive.uploadXlsxAsSheet(localPath, name);
-    try { await drive.makeAnyoneReader(id); } catch (e) { console.warn('[RECO] share failed:', e.message); }
+    // Prefer the connected Google account (real storage); fall back to the service
+    // account (needs GOOGLE_OUTPUT_FOLDER_ID → a Shared Drive, else no storage).
+    let sheet = await drive.uploadXlsxAsSheetOAuth(localPath, name);
+    if (!sheet) {
+      const { id, webViewLink } = await drive.uploadXlsxAsSheet(localPath, name);
+      try { await drive.makeAnyoneReader(id); } catch (e) { console.warn('[RECO] share failed:', e.message); }
+      sheet = { id, webViewLink };
+    }
+    const { webViewLink } = sheet;
     if (cleanup) fs.unlink(cleanup, () => {});
 
     _sheetUrlCache.set(jobId, webViewLink);

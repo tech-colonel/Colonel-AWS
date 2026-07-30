@@ -18,6 +18,7 @@ import { DEMO_SAMPLES, urlToFile } from '../../lib/demoSamples';
 import { toast } from 'sonner';
 import GoogleDriveFolderInput from './GoogleDriveFolderInput';
 import DriveOrUpload from '../../components/DriveOrUpload';
+import OpenInSheetsButton from '../../components/OpenInSheetsButton';
 
 const HISTORY_MONTHS_SHORT = ['', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
@@ -1828,6 +1829,7 @@ const RecoWorkspace = ({ agentTypeProp } = {}) => {
                   {downloading ? <Loader2 style={{ width: 14, height: 14 }} className="animate-spin" /> : <Download style={{ width: 14, height: 14 }} />}
                   Download Excel
                 </button>
+                <OpenInSheetsButton jobId={result?.job_id} name={config.name} />
                 <button onClick={handleReset} style={{
                   display: 'flex', alignItems: 'center', gap: 6, padding: '8px 14px',
                   borderRadius: 8, fontSize: 12, fontWeight: 600, fontFamily: 'Barlow',
@@ -1953,7 +1955,7 @@ const RecoWorkspace = ({ agentTypeProp } = {}) => {
                   <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
                     <thead>
                       <tr style={{ background: 'var(--page-bg)' }}>
-                        {['Period', 'GSTIN', 'State', 'Total Debit', 'Total Credit', 'J1 Debit', 'J2 Debit', 'J3 Debit'].map(h => (
+                        {['Period', 'GSTIN', 'State', 'Total Debit', 'Total Credit', 'J1 Debit', 'J2 Debit'].map(h => (
                           <th key={h} style={{ padding: '10px 14px', fontSize: 11, fontWeight: 700, color: 'var(--text-muted)', textAlign: h === 'GSTIN' || h === 'Period' || h === 'State' ? 'left' : 'right', borderBottom: '1px solid var(--card-border)', textTransform: 'uppercase', letterSpacing: '0.04em', fontFamily: 'DM Sans' }}>{h}</th>
                         ))}
                       </tr>
@@ -1964,7 +1966,7 @@ const RecoWorkspace = ({ agentTypeProp } = {}) => {
                           <td style={{ padding: '8px 14px', fontWeight: 700, fontFamily: 'Barlow', color: '#0F766E' }}>{m.period}</td>
                           <td style={{ padding: '8px 14px', fontFamily: 'monospace', fontSize: 12, color: 'var(--text-muted)' }}>{m.gstin}</td>
                           <td style={{ padding: '8px 14px', color: 'var(--text-body)' }}>{m.state}</td>
-                          {['total_debit', 'total_credit', 'j1_debit', 'j2_debit', 'j3_debit'].map(k => (
+                          {['total_debit', 'total_credit', 'j1_debit', 'j2_debit'].map(k => (
                             <td key={k} style={{ padding: '8px 14px', textAlign: 'right', fontFamily: 'monospace', fontSize: 12, color: 'var(--text-heading)' }}>₹{fmt(m[k] || 0)}</td>
                           ))}
                         </tr>
@@ -2109,6 +2111,9 @@ const RecoWorkspace = ({ agentTypeProp } = {}) => {
                     {downloading ? <Loader2 style={{ width: 13, height: 13 }} className="animate-spin" /> : <Download style={{ width: 13, height: 13 }} />}
                     Download Excel
                   </button>
+                )}
+                {agentType === 'gstr_1_vs_books' && (
+                  <OpenInSheetsButton jobId={result?.job_id} name={config.name} style={{ padding: '8px 14px', fontSize: 12 }} />
                 )}
                 <button
                   onClick={() => navigate(`/brands/${effectiveBrandId || brandId}/reco/${agentType}/results/${result?.job_id}`)}
