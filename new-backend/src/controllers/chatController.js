@@ -19,15 +19,15 @@ const { Conversation } = require('../models/master');
 // GenSpark LLM proxy — OpenAI-compatible chat completions, proxying real Claude
 // model IDs (confirmed live in workflowAiController). Configured via env.
 const GSK_BASE_URL = process.env.GSK_BASE_URL || 'https://www.genspark.ai/api/llm_proxy/v1';
-const DEFAULT_MODEL = process.env.GSK_MODEL || 'claude-opus-4-8';
+// Chat uses its own model var (NOT GSK_MODEL, which the workflow builder points
+// at a heavier model). Default: Haiku 4.5 — fast + cheap for interactive chat.
+const DEFAULT_MODEL = process.env.CHAT_MODEL || 'claude-haiku-4-5';
 // Claude model IDs GenSpark accepts. Anything else the UI sends (e.g. legacy
 // gemini-* picker values) falls back to the default so chat always works.
 const MODEL_WHITELIST = new Set([
+  'claude-haiku-4-5',
   'claude-opus-4-8',
-  'claude-opus-4-1',
   'claude-sonnet-4-5',
-  'claude-3-7-sonnet',
-  'claude-3-5-sonnet',
 ]);
 
 const SYSTEM_PROMPT = `You are Colonel AI, the in-app assistant for Colonel — an automation platform built for an Indian Chartered Accountancy firm that manages reconciliation and accounting for multiple D2C / e-commerce brands.
