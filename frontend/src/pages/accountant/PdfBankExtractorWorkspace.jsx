@@ -8,6 +8,9 @@ import {
 import DashboardLayout from '../../components/layout/DashboardLayout';
 import { sidebarFor } from '../../lib/adminNav';
 import api from '../../lib/api';
+import DriveOrUpload from '../../components/DriveOrUpload';
+
+const PDF_SLOTS = [{ key: 'bank_pdf', label: 'Bank Statement PDF', required: true }];
 
 const fmt = (n) =>
   n == null ? '' : Number(n).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -25,6 +28,7 @@ export default function PdfBankExtractorWorkspace() {
   const [error,          setError]          = useState('');
   const [password,       setPassword]       = useState('');
   const [needsPassword,  setNeedsPassword]  = useState(false);
+  const [driveFiles,     setDriveFiles]     = useState(null); // { bank_pdf: [{fileId,name}] } once confirmed
 
   const fileInputRef = useRef(null);
 
@@ -66,7 +70,8 @@ export default function PdfBankExtractorWorkspace() {
 
   // ── Convert ────────────────────────────────────────────────────
   const handleConvert = async (pwd = '') => {
-    if (!pdfFile || isProcessing) return;
+    const useDrive = !!(driveFiles && Object.keys(driveFiles).length > 0);
+    if ((!pdfFile && !useDrive) || isProcessing) return;
     setIsProcessing(true);
     setUploadProgress(0);
     setError('');
@@ -76,7 +81,8 @@ export default function PdfBankExtractorWorkspace() {
     form.append('reco_type', 'pdf_bank_extract');
     form.append('brand_id', brandId || 'demo');
     form.append('is_demo', 'false');
-    form.append('bank_pdf', pdfFile);
+    if (useDrive) form.append('drive', JSON.stringify(driveFiles));
+    else form.append('bank_pdf', pdfFile);
     if (pwd) form.append('pdf_password', pwd);
 
     try {
@@ -277,6 +283,14 @@ export default function PdfBankExtractorWorkspace() {
             )}
           </div>
 
+          {/* From Google Drive — alternate source */}
+          <DriveOrUpload
+            slots={PDF_SLOTS}
+            agentType="pdf_bank_extract"
+            uploadNode={null}
+            onDriveConfirmed={setDriveFiles}
+          />
+
           {/* Upload progress */}
           {isProcessing && uploadProgress > 0 && uploadProgress < 100 && (
             <div style={{ marginTop: 16 }}>
@@ -356,11 +370,11 @@ export default function PdfBankExtractorWorkspace() {
           <div style={{ marginTop: 20, display: 'flex', justifyContent: 'center' }}>
             <button
               onClick={() => handleConvert()}
-              disabled={!pdfFile || isProcessing}
+              disabled={(!pdfFile && !driveFiles) || isProcessing}
               style={{
-                padding: '11px 36px', borderRadius: 10, border: 'none', cursor: pdfFile && !isProcessing ? 'pointer' : 'not-allowed',
-                background: pdfFile && !isProcessing ? '#0748EE' : 'var(--card-border)',
-                color: pdfFile && !isProcessing ? '#fff' : 'var(--text-muted)',
+                padding: '11px 36px', borderRadius: 10, border: 'none', cursor: (pdfFile || driveFiles) && !isProcessing ? 'pointer' : 'not-allowed',
+                background: (pdfFile || driveFiles) && !isProcessing ? '#0748EE' : 'var(--card-border)',
+                color: (pdfFile || driveFiles) && !isProcessing ? '#fff' : 'var(--text-muted)',
                 fontSize: 14, fontWeight: 700, fontFamily: 'Barlow', letterSpacing: 0.3,
                 transition: 'all 0.15s',
               }}

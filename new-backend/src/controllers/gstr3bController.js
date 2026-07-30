@@ -2,6 +2,16 @@ const path = require('path');
 const fs = require('fs');
 const { getBrandConnection } = require('../config/database');
 const { Brand } = require('../models/master');
+const drive = require('../services/driveService');
+
+// Guess a mimetype from a filename extension (for Drive-sourced files).
+const mimeForName = (name) => {
+  const n = String(name || '').toLowerCase();
+  if (n.endsWith('.pdf')) return 'application/pdf';
+  if (n.endsWith('.xlsx')) return 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+  if (n.endsWith('.xls')) return 'application/vnd.ms-excel';
+  return 'application/octet-stream';
+};
 
 const PYTHON_URL = process.env.PYTHON_RECO_URL || 'http://localhost:8765';
 const OUTPUT_DIR = path.join(__dirname, '../../output/gstr3b');
@@ -59,6 +69,24 @@ const upload = async (req, res) => {
   try {
     const { brandId } = req.params;
     const files = req.files || {};
+
+    // "From Drive": body.drive = { slotKey: [{fileId,name}] } → download via the
+    // service account and merge into the files object (keyed by fieldname), so the
+    // rest of this handler works unchanged. Alternate file SOURCE only.
+    if (req.body && req.body.drive) {
+      let driveSel;
+      try { driveSel = JSON.parse(req.body.drive); } catch (_) { driveSel = null; }
+      if (driveSel && typeof driveSel === 'object') {
+        for (const [slotKey, items] of Object.entries(driveSel)) {
+          files[slotKey] = files[slotKey] || [];
+          for (const it of (Array.isArray(items) ? items : [items])) {
+            if (!it || !it.fileId) continue;
+            const buffer = await drive.downloadFile(it.fileId);
+            files[slotKey].push({ buffer, originalname: it.name || slotKey, mimetype: mimeForName(it.name) });
+          }
+        }
+      }
+    }
 
     const gstr3bFiles = files['gstr3b'] || [];
     if (gstr3bFiles.length === 0) {

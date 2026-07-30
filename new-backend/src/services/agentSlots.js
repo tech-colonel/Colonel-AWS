@@ -71,7 +71,7 @@ const SLOTS = {
     { key: 'bank_output', label: 'Universal Bank Statement Output', required: false, accept: '.xlsx', match: { keywords: ['universal bank', 'bank output', 'universal', 'output'], extensions: ['.xlsx'] } },
   ],
   pdf_bank_extract: [
-    { key: 'bank_statement', label: 'Bank Statement PDF', required: true, accept: '.pdf', match: { keywords: ['bank', 'statement'], extensions: ['.pdf'] } },
+    { key: 'bank_pdf', label: 'Bank Statement PDF', required: true, accept: '.pdf', match: { keywords: ['bank', 'statement'], extensions: ['.pdf'] } },
   ],
 };
 

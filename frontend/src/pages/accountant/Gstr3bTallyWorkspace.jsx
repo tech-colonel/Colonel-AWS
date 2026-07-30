@@ -11,6 +11,13 @@ import DashboardLayout from '../../components/layout/DashboardLayout';
 import { sidebarFor, isAdminUser } from '../../lib/adminNav';
 import api from '../../lib/api';
 import { toast } from 'sonner';
+import DriveOrUpload from '../../components/DriveOrUpload';
+
+const GSTR3B_SLOTS = [
+  { key: 'gstr3b', label: 'GSTR-3B Files', required: true, multiple: true },
+  { key: 'coa', label: 'Chart of Accounts', required: false },
+  { key: 'vouchertype', label: 'Voucher Type Master', required: false },
+];
 
 const AGENT_COLOR  = '#0F766E';
 const AGENT_BG     = 'rgba(15,118,110,0.08)';
@@ -269,6 +276,7 @@ const Gstr3bTallyWorkspace = () => {
   const [active3bSummaryTab, setActive3bSummaryTab] = useState('entries');
   const [brandName,     setBrandName]     = useState('');
   const [downloading,   setDownloading]   = useState(false);
+  const [driveFiles,    setDriveFiles]    = useState(null); // { slotKey:[{fileId,name}] } once confirmed
 
   const sidebarItems = sidebarFor([
     { path: `/brands/${brandId}/dashboard`, label: 'Dashboard',  icon: LayoutDashboard, testId: 'nav-dashboard' },
@@ -293,7 +301,8 @@ const Gstr3bTallyWorkspace = () => {
   };
 
   const handleRun = async () => {
-    if (gstr3bFiles.length === 0) {
+    const useDrive = !!(driveFiles && Object.keys(driveFiles).length > 0);
+    if (gstr3bFiles.length === 0 && !useDrive) {
       toast.error('Please select at least one GSTR-3B file');
       return;
     }
@@ -304,9 +313,13 @@ const Gstr3bTallyWorkspace = () => {
     setUploadProgress(0);
     try {
       const form = new FormData();
-      for (const f of gstr3bFiles) form.append('gstr3b', f);
-      if (coaFile)  form.append('coa', coaFile);
-      if (vtFile)   form.append('vouchertype', vtFile);
+      if (useDrive) {
+        form.append('drive', JSON.stringify(driveFiles));
+      } else {
+        for (const f of gstr3bFiles) form.append('gstr3b', f);
+        if (coaFile)  form.append('coa', coaFile);
+        if (vtFile)   form.append('vouchertype', vtFile);
+      }
       form.append('tolerance', tolerance);
 
       const res = await api.post(`/api/brands/${brandId}/gstr3b/upload`, form, {
@@ -531,17 +544,26 @@ const Gstr3bTallyWorkspace = () => {
                   </div>
                 )}
 
-                <MultiFileDropzone
-                  fileConfig={files3bConfig} files={gstr3bFiles}
-                  onChange={setGstr3bFiles} disabled={running} stepIndex={0}
-                />
-                <FileDropzone
-                  fileConfig={coaConfig} file={coaFile}
-                  onChange={setCoaFile} disabled={running} stepIndex={1}
-                />
-                <FileDropzone
-                  fileConfig={vtConfig} file={vtFile}
-                  onChange={setVtFile} disabled={running} stepIndex={2}
+                <DriveOrUpload
+                  slots={GSTR3B_SLOTS}
+                  agentType="gstr_3b_tally_entry"
+                  onDriveConfirmed={setDriveFiles}
+                  uploadNode={(
+                    <>
+                      <MultiFileDropzone
+                        fileConfig={files3bConfig} files={gstr3bFiles}
+                        onChange={setGstr3bFiles} disabled={running} stepIndex={0}
+                      />
+                      <FileDropzone
+                        fileConfig={coaConfig} file={coaFile}
+                        onChange={setCoaFile} disabled={running} stepIndex={1}
+                      />
+                      <FileDropzone
+                        fileConfig={vtConfig} file={vtFile}
+                        onChange={setVtFile} disabled={running} stepIndex={2}
+                      />
+                    </>
+                  )}
                 />
 
                 {/* COA status banner */}
@@ -898,7 +920,7 @@ const Gstr3bTallyWorkspace = () => {
                 <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
                   <thead>
                     <tr style={{ background: 'var(--page-bg)' }}>
-                      {['Period', 'GSTIN', 'State', 'Total Debit', 'Total Credit', 'J1 Debit', 'J2 Debit', 'J3 Debit'].map(h => (
+                      {['Period', 'GSTIN', 'State', 'Total Debit', 'Total Credit', 'J1 Debit', 'J2 Debit'].map(h => (
                         <th key={h} style={{
                           padding: '10px 14px', fontSize: 11, fontWeight: 700,
                           color: 'var(--text-muted)',
@@ -926,7 +948,7 @@ const Gstr3bTallyWorkspace = () => {
                           {m.gstin}
                         </td>
                         <td style={{ padding: '8px 14px', color: 'var(--text-body)' }}>{m.state}</td>
-                        {['total_debit', 'total_credit', 'j1_debit', 'j2_debit', 'j3_debit'].map(k => (
+                        {['total_debit', 'total_credit', 'j1_debit', 'j2_debit'].map(k => (
                           <td key={k} style={{ padding: '8px 14px', textAlign: 'right', fontFamily: 'monospace', fontSize: 12, color: 'var(--text-heading)' }}>
                             ₹{fmt(m[k] || 0)}
                           </td>
