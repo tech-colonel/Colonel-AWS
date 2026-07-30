@@ -1,4 +1,4 @@
-/* ── Colonel AI — Gemini chat (streaming) ───────────────────────────────────
+/* ── Colonel AI — GenSpark chat (streaming) ─────────────────────────────────
    POST /api/chat  — auth required.
    Body: { conversationId?, model?, messages: [{role, content}], system? }
 
@@ -8,23 +8,27 @@
      event: done    data: {"text": "<full>"}   ← full assistant text once
      event: error   data: {"error": "..."}
 
-   Uses Google Gemini (generativelanguage API) via streaming REST — no SDK
-   needed (Node fetch). File processing, reco runs and dashboards (Agent mode)
-   go through the Python reco engine and never touch this endpoint.            */
+   Uses GenSpark's OpenAI-compatible LLM proxy (real Claude models) — the same
+   proxy the workflow builder uses. Node fetch, no SDK. If the proxy streams
+   (text/event-stream) we forward token deltas; otherwise we emit the full reply
+   as one delta. File processing / reco runs (Agent mode) go through the Python
+   reco engine and never touch this endpoint.                                   */
 
 const { Conversation } = require('../models/master');
 
-// Gemini models the picker may use. Anything else (e.g. legacy Claude ids the
-// UI might still send) falls back to the default so chat always works.
-const DEFAULT_MODEL = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
+// GenSpark LLM proxy — OpenAI-compatible chat completions, proxying real Claude
+// model IDs (confirmed live in workflowAiController). Configured via env.
+const GSK_BASE_URL = process.env.GSK_BASE_URL || 'https://www.genspark.ai/api/llm_proxy/v1';
+const DEFAULT_MODEL = process.env.GSK_MODEL || 'claude-opus-4-8';
+// Claude model IDs GenSpark accepts. Anything else the UI sends (e.g. legacy
+// gemini-* picker values) falls back to the default so chat always works.
 const MODEL_WHITELIST = new Set([
-  'gemini-2.5-flash',
-  'gemini-2.5-pro',
-  'gemini-2.0-flash',
-  'gemini-1.5-flash',
-  'gemini-1.5-pro',
+  'claude-opus-4-8',
+  'claude-opus-4-1',
+  'claude-sonnet-4-5',
+  'claude-3-7-sonnet',
+  'claude-3-5-sonnet',
 ]);
-const GEMINI_BASE = 'https://generativelanguage.googleapis.com/v1beta/models';
 
 const SYSTEM_PROMPT = `You are Colonel AI, the in-app assistant for Colonel — an automation platform built for an Indian Chartered Accountancy firm that manages reconciliation and accounting for multiple D2C / e-commerce brands.
 
@@ -40,7 +44,7 @@ The platform has these reconciliation agents:
 IMPORTANT: To actually RUN a reconciliation on real files, the user uses "Agent mode" — you do NOT run reconciliations or process uploaded files yourself. Agent mode runs the platform's own engine; the dashboard appears inline in this chat and the output Excel opens on the right.
 
 HOW TO GUIDE USERS THROUGH THE UI (use these exact steps when someone asks "how do I use / run X"):
-- Run a reconciliation: "Click the **+** button below the chat → **Agent** → pick the tool (e.g. **GSTR-2B vs Books (Multi-State)**) → choose your **brand** → upload the required files → click **Run**. The dashboard appears here in the chat and the output Excel opens on the right — use **Download Excel** there for the full file."
+- Run a reconciliation: "Click the **+** button below the chat → **Agent** → pick the tool (e.g. **GSTR-2B vs Books (Multi-State)**) → choose your **brand** → upload the required files (or paste a **Google Drive** link) → click **Run**. The dashboard appears here in the chat and the output Excel opens on the right — use **Download Excel** there for the full file."
   - GSTR-2B vs Books: upload GSTR-2B, Purchase Register, Debit Note Register.
   - GSTR-2B vs Books (Multi-State): per state upload GSTR-2B, Purchase Register, Debit Note; use **Add another state** for more GSTINs.
   - GSTR-2A vs 2B vs Books (3-way): GSTR-2B, Purchase Register, Debit Note Register.
@@ -56,34 +60,35 @@ When a CURRENT RECONCILIATION CONTEXT section is present below, the user has jus
 
 Be concise, accurate, and practical. Use Indian accounting terminology. Format with markdown (headings, lists, bold, tables, code) when it helps.`;
 
-/* Coerce incoming messages → Gemini "contents" (role: user | model). */
-const toGeminiContents = (messages) =>
+/* Coerce incoming messages → OpenAI chat messages (role: user | assistant). */
+const toOpenAiMessages = (messages) =>
   (Array.isArray(messages) ? messages : [])
     .filter((m) => m && (m.role === 'user' || m.role === 'assistant'))
     .map((m) => ({
-      role: m.role === 'assistant' ? 'model' : 'user',
-      parts: [{ text: typeof m.content === 'string' ? m.content : String(m.content ?? '') }],
+      role: m.role,
+      content: typeof m.content === 'string' ? m.content : String(m.content ?? ''),
     }))
-    .filter((m) => m.parts[0].text.trim().length > 0);
+    .filter((m) => m.content.trim().length > 0);
 
 const streamChat = async (req, res, next) => {
-  const apiKey = process.env.GEMINI_API_KEY;
+  const apiKey = process.env.GSK_API_KEY;
   if (!apiKey) {
-    return res.status(503).json({ error: 'Colonel AI is not configured. Set GEMINI_API_KEY on the backend.' });
+    return res.status(503).json({ error: 'Colonel AI is not configured. Set GSK_API_KEY on the backend.' });
   }
 
   const { conversationId, system, context } = req.body || {};
   const model = MODEL_WHITELIST.has(req.body?.model) ? req.body.model : DEFAULT_MODEL;
-  const contents = toGeminiContents(req.body?.messages);
+  const convo = toOpenAiMessages(req.body?.messages);
 
   let systemPrompt = system && String(system).trim() ? String(system) : SYSTEM_PROMPT;
   if (context && String(context).trim()) {
     systemPrompt += `\n\nCURRENT RECONCILIATION CONTEXT (the user just ran this — use it to answer questions about specific entries):\n${String(context).slice(0, 12000)}`;
   }
 
-  if (contents.length === 0) {
+  if (convo.length === 0) {
     return res.status(400).json({ error: 'messages is required' });
   }
+  const openAiMessages = [{ role: 'system', content: systemPrompt }, ...convo];
 
   // SSE handshake
   res.writeHead(200, {
@@ -105,55 +110,66 @@ const streamChat = async (req, res, next) => {
   req.on('close', () => { aborted = true; });
 
   try {
-    const url = `${GEMINI_BASE}/${model}:streamGenerateContent?alt=sse&key=${apiKey}`;
-    const resp = await fetch(url, {
+    const resp = await fetch(`${GSK_BASE_URL}/chat/completions`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', authorization: `Bearer ${apiKey}` },
       body: JSON.stringify({
-        systemInstruction: { parts: [{ text: systemPrompt }] },
-        contents,
-        generationConfig: { maxOutputTokens: 4096, temperature: 0.7 },
+        model,
+        messages: openAiMessages,
+        max_tokens: 4096,
+        temperature: 0.7,
+        stream: true,
+        stream_options: { include_usage: true },
       }),
     });
 
     if (!resp.ok || !resp.body) {
       const errText = await resp.text().catch(() => '');
-      let msg = `Gemini error ${resp.status}`;
+      let msg = `Colonel AI error ${resp.status}`;
       try { msg = JSON.parse(errText)?.error?.message || msg; } catch (_) {}
       send('error', { error: msg });
       return res.end();
     }
 
-    // Parse the SSE stream from Gemini (data: {chunk}\n\n).
-    const reader = resp.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
-    for (;;) {
-      if (aborted) { try { await reader.cancel(); } catch (_) {} break; }
-      const { value, done } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split('\n');
-      buffer = lines.pop() || '';
-      for (const line of lines) {
-        const t = line.trim();
-        if (!t.startsWith('data:')) continue;
-        const payload = t.slice(5).trim();
-        if (!payload || payload === '[DONE]') continue;
-        let obj; try { obj = JSON.parse(payload); } catch (_) { continue; }
-        const parts = obj?.candidates?.[0]?.content?.parts || [];
-        for (const p of parts) {
-          if (p && typeof p.text === 'string' && !p.thought) {
-            fullText += p.text;
-            if (!aborted) send('delta', { text: p.text });
+    const contentType = resp.headers.get('content-type') || '';
+
+    if (contentType.includes('text/event-stream')) {
+      // OpenAI-style streaming: data: {choices:[{delta:{content}}]} … data: [DONE]
+      const reader = resp.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      for (;;) {
+        if (aborted) { try { await reader.cancel(); } catch (_) {} break; }
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+        for (const line of lines) {
+          const t = line.trim();
+          if (!t.startsWith('data:')) continue;
+          const payload = t.slice(5).trim();
+          if (!payload || payload === '[DONE]') continue;
+          let obj; try { obj = JSON.parse(payload); } catch (_) { continue; }
+          const delta = obj?.choices?.[0]?.delta?.content;
+          if (typeof delta === 'string' && delta.length) {
+            fullText += delta;
+            if (!aborted) send('delta', { text: delta });
           }
+          if (obj?.usage) usage = obj.usage;
         }
-        if (obj?.usageMetadata) usage = obj.usageMetadata;
       }
+    } else {
+      // Proxy ignored `stream` → single JSON body. Emit the full reply at once.
+      const data = await resp.json().catch(() => null);
+      const text = data?.choices?.[0]?.message?.content || '';
+      fullText = text;
+      if (text && !aborted) send('delta', { text });
+      if (data?.usage) usage = data.usage;
     }
 
     if (!aborted) {
-      if (usage) send('usage', { input_tokens: usage.promptTokenCount || 0, output_tokens: usage.candidatesTokenCount || 0 });
+      if (usage) send('usage', { input_tokens: usage.prompt_tokens || 0, output_tokens: usage.completion_tokens || 0 });
       send('done', { text: fullText, model });
     }
 
@@ -161,10 +177,10 @@ const streamChat = async (req, res, next) => {
     if (conversationId && fullText) {
       setImmediate(async () => {
         try {
-          const convo = await Conversation.findOne({ where: { id: conversationId, user_id: req.user.id } });
-          if (!convo) return;
-          const next = [...(convo.messages || []), { role: 'assistant', content: fullText }];
-          await convo.update({ messages: next, model });
+          const c = await Conversation.findOne({ where: { id: conversationId, user_id: req.user.id } });
+          if (!c) return;
+          const next = [...(c.messages || []), { role: 'assistant', content: fullText }];
+          await c.update({ messages: next, model });
         } catch (e) { console.warn('[chat] persist failed:', e.message); }
       });
     }
