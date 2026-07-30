@@ -991,6 +991,31 @@ const runReco = async (req, res) => {
       }
     }
 
+    // --- Multi-state "From Drive": body.drive_states = [{gstr2b,purchase,debit}] per
+    // state (each = {fileId,name} or null). Download in STATE ORDER and push to
+    // req.files as repeated gstr2b/purchase/debit fields, with an empty debit
+    // placeholder when a state has none — matching the manual multipart order the
+    // Python engine pairs by index. Alternate file SOURCE only.
+    if (req.body.drive_states) {
+      let states;
+      try { states = JSON.parse(req.body.drive_states); } catch (_) { states = null; }
+      if (Array.isArray(states) && states.length) {
+        req.files = req.files || [];
+        for (const st of states) {
+          for (const key of ['gstr2b', 'purchase', 'debit']) {
+            const item = st && st[key];
+            if (item && item.fileId) {
+              const buffer = await drive.downloadFile(item.fileId);
+              req.files.push({ fieldname: key, originalname: item.name || `${key}.xlsx`, buffer, size: buffer.length });
+            } else if (key === 'debit') {
+              // Keep debit index-aligned with the states (engine tolerates empty).
+              req.files.push({ fieldname: 'debit', originalname: 'empty.xlsx', buffer: Buffer.alloc(0), size: 0 });
+            }
+          }
+        }
+      }
+    }
+
     // --- Zepto Receivables: fetch classified files from Drive folder, proxy to Python engine ---
     if (recoType === 'zepto_receivables') {
       const folderUrl = req.body.folder_url || req.body.folderLink;

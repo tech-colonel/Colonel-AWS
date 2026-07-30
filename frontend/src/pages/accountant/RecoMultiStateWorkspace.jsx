@@ -13,6 +13,7 @@ import { sidebarFor, isAdminUser } from '../../lib/adminNav';
 import { MULTISTATE_SAMPLE, urlToFile } from '../../lib/demoSamples';
 import { toast } from 'sonner';
 import { StatusDonut, ByReasons, FeedbackModal, distOf } from '../../components/reco/ToolResultDashboard';
+import DriveMultiState from '../../components/DriveMultiState';
 
 const COLOR  = '#7C3AED';
 const PAGE_SIZE = 100;
@@ -257,6 +258,7 @@ const RecoMultiStateWorkspace = () => {
     () => loadSlotsFromStorage(brandId) || Array.from({ length: 4 }, () => ({ gstr2b: null, purchase: null, debit: null }))
   );
   const [tolerance, setTolerance] = useState('1.0');
+  const [driveStates, setDriveStates] = useState(null); // [{gstr2b,purchase,debit}] from Drive once confirmed
   const [running, setRunning] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(null);
   const [phase, setPhase] = useState(null); // 'uploading' | 'reconciling' | 'preparing' | null
@@ -317,7 +319,8 @@ const RecoMultiStateWorkspace = () => {
   });
 
   const handleRun = async () => {
-    if (stateSlots.some(s => !s.gstr2b || !s.purchase)) {
+    const useDrive = !!(driveStates && driveStates.length > 0);
+    if (!useDrive && stateSlots.some(s => !s.gstr2b || !s.purchase)) {
       toast.error('Each state needs a GSTR-2B file and a Purchase Register.'); return;
     }
     setRunning(true); setResult(null); setActiveTab('All'); setSearch(''); setPage(0); setUploadProgress(0);
@@ -328,11 +331,16 @@ const RecoMultiStateWorkspace = () => {
       formData.append('tolerance', tolerance);
       formData.append('brand_id', brandId);
       formData.append('is_demo', localStorage.getItem('token') === 'demo-mode-token' ? 'true' : 'false');
-      for (const slot of stateSlots) {
-        if (slot.gstr2b)   formData.append('gstr2b',   slot.gstr2b);
-        if (slot.purchase) formData.append('purchase', slot.purchase);
-        if (slot.debit)    formData.append('debit',    slot.debit);
-        else               formData.append('debit',    new Blob([]), 'empty.xlsx');
+      if (useDrive) {
+        // Files come from Drive, grouped per state — backend downloads via the SA.
+        formData.append('drive_states', JSON.stringify(driveStates));
+      } else {
+        for (const slot of stateSlots) {
+          if (slot.gstr2b)   formData.append('gstr2b',   slot.gstr2b);
+          if (slot.purchase) formData.append('purchase', slot.purchase);
+          if (slot.debit)    formData.append('debit',    slot.debit);
+          else               formData.append('debit',    new Blob([]), 'empty.xlsx');
+        }
       }
       const response = await api.post('/api/reco/run', formData, {
         headers: { 'Content-Type': 'multipart/form-data' },
@@ -719,6 +727,9 @@ const RecoMultiStateWorkspace = () => {
                   <Plus style={{ width: 15, height: 15 }} />
                   Add Another State
                 </button>
+
+                {/* From Google Drive — one folder, grouped per state by GSTIN code */}
+                <DriveMultiState onConfirmed={setDriveStates} />
               </div>
 
               {/* Config + Run */}

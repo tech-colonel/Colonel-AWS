@@ -13,6 +13,7 @@
    ────────────────────────────────────────────────────────────────────────────── */
 
 const drive = require('./driveService');
+const { extractState } = require('./gstStates');
 
 const FOLDER_MIME = 'application/vnd.google-apps.folder';
 
@@ -203,4 +204,50 @@ async function preview(url, slots) {
   return { ...resolved, files: files.map((f) => ({ fileId: f.fileId, name: f.name })) };
 }
 
-module.exports = { parseAnyId, extOf, scanFolder, scoreFileForSlot, route, resolveAmbiguous, preview };
+/** Best type (gstr2b | purchase | debit) for a file among the 3 multistate slots. */
+function _typeOf(file, slots) {
+  let best = 0; let bestKey = null;
+  for (const s of slots) {
+    const sc = scoreFileForSlot(file, s);
+    if (sc > best) { best = sc; bestKey = s.key; }
+  }
+  return best > 0 ? bestKey : null;
+}
+
+/**
+ * Multi-state grouping: from ONE folder with every state's files, group them into
+ * per-state {gstr2b, purchase, debit} using the GSTIN state code / state name in
+ * each filename (see gstStates.extractState). Files whose type or state can't be
+ * determined go to `unassigned`.
+ *
+ * @returns {{ states: Array, unassigned: Array, files: Array }}
+ *   states[] = { code, label, gstr2b:[{fileId,name}], purchase:[...], debit:[...] }
+ */
+function routeMultiState(files, slots) {
+  const byState = new Map(); // code -> { code, label, gstr2b:[], purchase:[], debit:[] }
+  const unassigned = [];
+
+  const ensure = (code, label) => {
+    if (!byState.has(code)) byState.set(code, { code, label: label || code, gstr2b: [], purchase: [], debit: [] });
+    return byState.get(code);
+  };
+
+  for (const f of files) {
+    const type = _typeOf(f, slots);
+    const st = extractState(f.name);
+    if (!type || !st) { unassigned.push({ fileId: f.fileId, name: f.name, type: type || null, state: st ? st.code : null }); continue; }
+    ensure(st.code, st.label)[type].push({ fileId: f.fileId, name: f.name });
+  }
+
+  // Stable order by state code.
+  const states = [...byState.values()].sort((a, b) => a.code.localeCompare(b.code));
+  return { states, unassigned, files: files.map((f) => ({ fileId: f.fileId, name: f.name })) };
+}
+
+/** End-to-end multi-state preview from a folder link. */
+async function previewMultiState(url, slots) {
+  const files = await scanFolder(url);
+  return routeMultiState(files, slots);
+}
+
+module.exports = { parseAnyId, extOf, scanFolder, scoreFileForSlot, route, resolveAmbiguous, preview, routeMultiState, previewMultiState };

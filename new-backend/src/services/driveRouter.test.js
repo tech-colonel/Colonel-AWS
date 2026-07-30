@@ -86,3 +86,34 @@ test('agentSlots.isSupported gates unknown agents', () => {
   assert.equal(agentSlots.isSupported('not_a_real_agent'), false);
   assert.equal(agentSlots.get('not_a_real_agent'), null);
 });
+
+const { extractState } = require('./gstStates');
+
+test('extractState reads GSTIN state code, name, and bare code', () => {
+  assert.equal(extractState('EINV_07ABGCS4796R1Z8_2025-26.xlsx').code, '07'); // Delhi via GSTIN
+  assert.equal(extractState('Purchase Register - Maharashtra.xlsx').code, '27'); // via name
+  assert.equal(extractState('Debit Note KA.xlsx').code, '29'); // Karnataka alias
+  assert.equal(extractState('random_file.xlsx'), null);
+});
+
+test('routeMultiState groups a mixed folder by state', () => {
+  const slots = agentSlots.get('gstr_2b_books_multistate');
+  const files = [
+    f('EINV_07ABGCS4796R1Z8_2025-26.xlsx'),     // gstr2b, Delhi 07
+    f('Purchase Register Delhi.xlsx'),           // purchase, Delhi 07
+    f('EINV_27ABGCS4796R1Z8_2025-26.xlsx'),      // gstr2b, Maharashtra 27
+    f('Purchase Maharashtra.xlsx'),              // purchase, Maharashtra 27
+    f('Debit Note Maharashtra.xlsx'),            // debit, Maharashtra 27
+  ];
+  const r = router.routeMultiState(files, slots);
+  assert.equal(r.states.length, 2);
+  const delhi = r.states.find((s) => s.code === '07');
+  const mh = r.states.find((s) => s.code === '27');
+  assert.equal(delhi.gstr2b.length, 1);
+  assert.equal(delhi.purchase.length, 1);
+  assert.equal(delhi.debit.length, 0);
+  assert.equal(mh.gstr2b.length, 1);
+  assert.equal(mh.purchase.length, 1);
+  assert.equal(mh.debit.length, 1);
+  assert.equal(r.unassigned.length, 0);
+});

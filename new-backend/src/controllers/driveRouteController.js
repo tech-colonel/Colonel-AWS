@@ -26,6 +26,18 @@ async function routeDriveFiles(req, res) {
       return res.status(422).json({ error: `Drive input is not available for "${agentType}" yet.` });
     }
 
+    // Multi-state: group ONE folder's files per state (GSTIN code / state name).
+    if (agentType === 'gstr_2b_books_multistate') {
+      const ms = await driveRouter.previewMultiState(folderUrl, slots);
+      return res.json({
+        multistate: true,
+        states: ms.states,
+        unassigned: ms.unassigned,
+        files: ms.files,
+        serviceAccountEmail: driveService.serviceAccountEmail ? driveService.serviceAccountEmail() : null,
+      });
+    }
+
     const result = await driveRouter.preview(folderUrl, slots);
     // Return slot metadata the UI needs to render the editable mapping table.
     const slotMeta = slots.map((s) => ({ key: s.key, label: s.label, required: !!s.required, multiple: !!s.multiple }));

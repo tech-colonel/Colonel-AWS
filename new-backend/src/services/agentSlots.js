@@ -32,6 +32,13 @@ const SLOTS = {
     { key: 'purchase', label: 'Purchase Register', required: true, match: { keywords: ['purchase register', 'purchase', 'pr'], extensions: XLS } },
     { key: 'debit', label: 'Debit Note Register', required: true, match: { keywords: ['debit note', 'debit', 'dn'], extensions: XLS } },
   ],
+  // Multi-state uses per-state grouping (see driveRouter.routeMultiState), but the
+  // per-file TYPE detection reuses these three slots.
+  gstr_2b_books_multistate: [
+    { key: 'gstr2b', label: 'GSTR-2B File', required: true, match: { keywords: ['gstr-2b', 'gstr2b', 'gstr 2b', 'einv', 'e-invoice', '2b'], extensions: XLS } },
+    { key: 'purchase', label: 'Purchase Register', required: true, match: { keywords: ['purchase register', 'purchase', 'pr'], extensions: XLS } },
+    { key: 'debit', label: 'Debit Note Register', required: false, match: { keywords: ['debit note', 'debit note register', 'debit', 'dn'], extensions: XLS } },
+  ],
   gstr_3b_vs_2b: [
     { key: 'gstr3b', label: 'GSTR-3B Working File', required: true, match: { keywords: ['gstr-3b', 'gstr3b', 'gstr 3b', '3b'], extensions: XLS } },
     { key: 'gstr2b_3b', label: 'GSTR-2B File', required: true, match: { keywords: ['gstr-2b', 'gstr2b', 'gstr 2b', '2b'], extensions: XLS } },
