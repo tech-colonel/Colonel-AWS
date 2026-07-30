@@ -14,6 +14,7 @@ import { sidebarFor } from '../lib/adminNav';
 import { RECO_AGENT_SPECS, specByType } from '../lib/recoAgentSpecs';
 import ToolResultDashboard from '../components/reco/ToolResultDashboard';
 import BrandLogo from '../components/BrandLogos';
+import DriveOrUpload from '../components/DriveOrUpload';
 
 /* Tolerant accessors for live + persisted + nested-multistate row shapes. */
 const rget = (r, ...paths) => {
@@ -759,6 +760,7 @@ function AgentSetup({ onResult }) {
   // single-state: {key:file}. multistate: array of {gstr2b,purchase,debit}
   const [files, setFiles] = useState({});
   const [states, setStates] = useState([{ gstr2b: null, purchase: null, debit: null }]);
+  const [driveFiles, setDriveFiles] = useState(null); // { slotKey:[{fileId,name}] } once confirmed (single-state only)
 
   useEffect(() => {
     (async () => {
@@ -772,7 +774,7 @@ function AgentSetup({ onResult }) {
   }, []);
 
   const pickAgent = (t) => {
-    setRecoType(t); setFiles({});
+    setRecoType(t); setFiles({}); setDriveFiles(null);
     setStates([{ gstr2b: null, purchase: null, debit: null }]);
   };
 
@@ -793,6 +795,9 @@ function AgentSetup({ onResult }) {
         if (s.debit) fd.append('debit', s.debit);
         else fd.append('debit', new Blob([]), 'empty.xlsx');
       }
+    } else if (driveFiles && Object.keys(driveFiles).length > 0) {
+      // Files come from Google Drive — backend downloads them via the service account.
+      fd.append('drive', JSON.stringify(driveFiles));
     } else {
       const missing = spec.files.filter((f) => f.required && !files[f.key]);
       if (missing.length) { toast.error(`Upload: ${missing.map((f) => f.label).join(', ')}`); return; }
@@ -865,11 +870,16 @@ function AgentSetup({ onResult }) {
           </button>
         </>
       ) : (
-        spec.files.map((f) => (
-          <FileSlot key={f.key} label={f.label} hint={f.hint} accept={f.accept} required={f.required}
-            file={files[f.key]}
-            onPick={(file) => setFiles((prev) => ({ ...prev, [f.key]: file }))} />
-        ))
+        <DriveOrUpload
+          slots={spec.files.map((f) => ({ key: f.key, label: f.label, required: f.required, multiple: f.multiple }))}
+          agentType={recoType}
+          onDriveConfirmed={setDriveFiles}
+          uploadNode={spec.files.map((f) => (
+            <FileSlot key={f.key} label={f.label} hint={f.hint} accept={f.accept} required={f.required}
+              file={files[f.key]}
+              onPick={(file) => setFiles((prev) => ({ ...prev, [f.key]: file }))} />
+          ))}
+        />
       )}
 
       <div className="cai-tol">
