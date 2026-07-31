@@ -38,6 +38,7 @@ import AgentDispatch         from './pages/accountant/AgentDispatch';
 import RecoWorkspace         from './pages/accountant/RecoWorkspace';
 import RecoMultiStateWorkspace from './pages/accountant/RecoMultiStateWorkspace';
 import PdfBankExtractorWorkspace from './pages/accountant/PdfBankExtractorWorkspace';
+import CreditCardWorkspace from './pages/accountant/CreditCardWorkspace';
 import RecoJobDashboard      from './pages/accountant/RecoJobDashboard';
 import ReceivableDashboard   from './pages/accountant/ReceivableDashboard';
 import ComplianceTracker     from './pages/accountant/ComplianceTracker';
@@ -261,6 +262,16 @@ function App() {
             element={
               <ProtectedRoute allowedRoles={['accountant', 'admin']}>
                 <PdfBankExtractorWorkspace />
+              </ProtectedRoute>
+            }
+          />
+
+          {/* ── Credit Card Booking — statement → Tally entries ──────────── */}
+          <Route
+            path="/brands/:brandId/credit-card"
+            element={
+              <ProtectedRoute allowedRoles={['accountant', 'admin']}>
+                <CreditCardWorkspace />
               </ProtectedRoute>
             }
           />

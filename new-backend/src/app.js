@@ -28,6 +28,7 @@ const userRoutes            = require('./routes/userRoutes');
 const agentRoutes           = require('./routes/agentRoutes');
 // ── Reco suite ───────────────────────────────────────────────────────────────
 const recoRoutes            = require('./routes/recoRoutes');
+const creditCardRoutes      = require('./routes/creditCardRoutes');
 const dashboardRoutes       = require('./routes/dashboardRoutes');
 const bankCorrectionsRoutes = require('./routes/bankCorrectionsRoutes');
 const taskRoutes            = require('./routes/taskRoutes');
@@ -64,6 +65,7 @@ app.use('/api',           agentRoutes);
 app.use('/api',           recoRoutes);
 app.use('/api',           dashboardRoutes);
 app.use('/api/bank-reco', bankCorrectionsRoutes);
+app.use('/api/credit-card', creditCardRoutes);
 app.use('/api',           taskRoutes);
 app.use('/api',           gstr3bRoutes);
 app.use('/api',           salesRoutes);

@@ -13,6 +13,14 @@
 
 export const RECO_AGENT_SPECS = [
   {
+    reco_type: 'credit_card_booking',
+    name: 'Credit Card Booking',
+    files: [
+      { key: 'card_statement', label: 'Credit Card Statement', hint: '.pdf / .xlsx / .xls',
+        required: true, accept: '.pdf,.xlsx,.xls' },
+    ],
+  },
+  {
     reco_type: 'gstr_2b_books',
     name: 'GSTR-2B vs Books',
     files: [
