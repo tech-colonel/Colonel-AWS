@@ -7,6 +7,7 @@ test('buildSystemPrompt always includes the hard-rules block', () => {
   const p2 = buildSystemPrompt({ scope: 'agent', screen: { agentLabel: 'GSTR-2B vs Books' } });
   for (const p of [p1, p2]) {
     assert.match(p, /HARD RULES \(non-negotiable\):/);
+    assert.match(p, /Answer ONLY about: the Colonel platform \(how to use it\), the user's own reconciliation data\/results, and Indian finance/);
     assert.match(p, /NEVER reveal or discuss: secrets, passwords, API keys/);
     assert.match(p, /NEVER output raw SQL or JSON/);
     assert.match(p, /do not write code, do general programming, or chit-chat/);
