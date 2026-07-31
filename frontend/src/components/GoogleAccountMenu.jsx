@@ -141,15 +141,20 @@ export default function GoogleAccountMenu({ user }) {
         <div style={{ fontSize: 12, color: 'var(--text-muted)', padding: '6px 8px' }}>Loading…</div>
       ) : (
         <>
-          {/* Central / work account */}
+          {/* Central / work account — shared by the firm, connected for everyone. */}
           {centralConnected ? (
-            <AccountRow
-              logo={logo}
-              email={central.email || 'team@colonel.co.in'}
-              tag="Work"
-              active={activeId === 'central'}
-              onSelect={() => setActive('central')}
-            />
+            <>
+              <AccountRow
+                logo={logo}
+                email={central.email || 'team@colonel.co.in'}
+                tag="Work"
+                active={activeId === 'central'}
+                onSelect={() => setActive('central')}
+              />
+              <div style={{ fontSize: 11, color: 'var(--text-muted)', padding: '0 8px 4px 30px' }}>
+                Connected · shared by your firm
+              </div>
+            </>
           ) : (
             canManageCentral && (
               <button
@@ -188,28 +193,27 @@ export default function GoogleAccountMenu({ user }) {
             </div>
           )}
 
-          {/* Sign in with work mail (personal connect) */}
-          <button
-            type="button"
-            disabled={busy}
-            onClick={() => doConnect('personal')}
-            className="w-full flex items-center justify-center gap-2 rounded-lg px-3 py-2 transition-opacity"
-            style={{
-              marginTop: 6, background: ACCENT, color: '#fff',
-              fontSize: 13, fontWeight: 700, border: 'none',
-              cursor: busy ? 'default' : 'pointer', opacity: busy ? 0.6 : 1,
-            }}
-          >
-            <span
+          {/* Optional: connect your OWN Google account. Small, secondary link — the firm's
+             central account above already covers Drive/Mail. Hidden once you've connected one. */}
+          {personal.length === 0 && (
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => doConnect('personal')}
+              className="w-full flex items-center justify-center gap-2 rounded-lg px-3 py-2 transition-colors"
               style={{
-                width: 18, height: 18, borderRadius: 4, background: '#fff',
-                display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0,
+                marginTop: 6, background: 'transparent', color: ACCENT,
+                fontSize: 12.5, fontWeight: 600,
+                border: `1px solid ${busy ? '#E2E8F0' : '#DBEAFE'}`,
+                cursor: busy ? 'default' : 'pointer', opacity: busy ? 0.6 : 1,
               }}
+              onMouseEnter={(e) => { if (!busy) e.currentTarget.style.background = '#F8FAFC'; }}
+              onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent'; }}
             >
               <GoogleLogo logo={logo} size={14} />
-            </span>
-            Sign in with your work mail
-          </button>
+              Connect your own Google account (optional)
+            </button>
+          )}
         </>
       )}
     </div>

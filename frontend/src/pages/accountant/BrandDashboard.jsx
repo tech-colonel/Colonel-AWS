@@ -16,6 +16,7 @@ import api from '../../lib/api';
 import { toast } from 'sonner';
 import { sidebarFor } from '../../lib/adminNav';
 import { useAuth } from '../../context/AuthContext';
+import { fetchAccounts } from '../../lib/googleAccount';
 
 const RECO_ROUTE_MAP = {
   'gstr_2b_books':            'gstr_2b_books',
@@ -117,6 +118,7 @@ const BrandDashboard = () => {
   const { user } = useAuth();
 
   const [brand, setBrand] = useState(null);
+  const [showGoogleNudge, setShowGoogleNudge] = useState(false);
   const [myBrands, setMyBrands] = useState([]);
   const [agents, setAgents] = useState([]);
   const [summary, setSummary] = useState(null);
@@ -158,6 +160,16 @@ const BrandDashboard = () => {
   // Remember this brand so global pages (Meetings/Tasks/…) can still link back
   // to its Dashboard/Agents in the sidebar.
   useEffect(() => { if (brandId) { try { localStorage.setItem('lastBrandId', brandId); } catch (_) {} } }, [brandId]);
+
+  // Nudge to connect the user's OWN Google account when they have none (the firm's central
+  // team@ account is separate + already shared). Clicking the banner opens the profile popover.
+  useEffect(() => {
+    let alive = true;
+    fetchAccounts()
+      .then((a) => { if (alive) setShowGoogleNudge(!!a?.configured && (Array.isArray(a?.personal) ? a.personal.length : 0) === 0); })
+      .catch(() => {});
+    return () => { alive = false; };
+  }, []);
 
   const sidebarItems = sidebarFor([
     { path: `/brands/${brandId}/dashboard`, label: 'Dashboard', icon: LayoutDashboard, testId: 'nav-dashboard' },
@@ -488,6 +500,28 @@ const BrandDashboard = () => {
             </div>
           </div>
         </div>
+
+        {/* ── Nudge: connect your own Google account (firm's team@ is separate + already shared) ── */}
+        {showGoogleNudge && (
+          <div
+            role="button"
+            tabIndex={0}
+            data-testid="connect-google-nudge"
+            onClick={() => window.dispatchEvent(new Event('colonel:open-profile'))}
+            onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); window.dispatchEvent(new Event('colonel:open-profile')); } }}
+            className="glass-card"
+            style={{ marginBottom: 16, padding: '12px 16px', display: 'flex', alignItems: 'center', gap: 12, cursor: 'pointer', border: '1px solid #DBEAFE', background: 'linear-gradient(120deg,#EFF6FF 0%,#FFFFFF 70%)' }}
+          >
+            <span style={{ fontSize: 18, flexShrink: 0 }}>🔗</span>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontSize: 13.5, fontWeight: 700, color: 'var(--text-heading)' }}>Connect your Google account</div>
+              <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+                So you can open outputs in Google Sheets &amp; Drive. Your firm's <strong>team@colonel.co.in</strong> is already connected — this adds your own.
+              </div>
+            </div>
+            <span style={{ fontSize: 12.5, fontWeight: 700, color: '#0748EE', flexShrink: 0 }}>Connect →</span>
+          </div>
+        )}
 
         {/* ── Tabs + quick pills ─────────────────────────────────────────── */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 16 }}>

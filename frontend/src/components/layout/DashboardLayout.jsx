@@ -77,6 +77,14 @@ const Sidebar = ({ items, isOpen, setIsOpen }) => {
     return () => document.removeEventListener('mousedown', fn);
   }, [menuOpen]);
 
+  // Let other pages (e.g. the dashboard "connect your Google account" nudge) open this
+  // profile popover so the user can connect from here.
+  React.useEffect(() => {
+    const open = () => setMenuOpen(true);
+    window.addEventListener('colonel:open-profile', open);
+    return () => window.removeEventListener('colonel:open-profile', open);
+  }, []);
+
   const activeBrandId = (location.pathname.match(/\/brands\/([^/]+)/) || [])[1];
 
   return (
