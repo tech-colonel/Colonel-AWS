@@ -21,16 +21,20 @@ Runs on our existing **GenSpark → Claude** integration (chat is already on `cl
 - **Shared, per‑user history**: the floating widget and the `/chat` sidebar use the **same** existing conversation store, so previous chats show in both. Already per‑user‑private (see History).
 - **Data‑only + refuse code**: it answers about the user's data / app / finance domain; it must **not** write code or do general‑purpose tasks (canned refusal, no LLM call where possible).
 - **HARD RULE — the assistant NEVER processes files/reconciliations itself via the LLM.** If the user says "process this Drive link / file", it dispatches to **our reco engine** (our code). If **no agent is selected**, it must **ask the user to select the agent** and NOT run anything through the model. (This protects accuracy + avoids wasting GenSpark tokens on work our engine does.)
-- Finance knowledge = **model‑first, web‑search‑on‑demand**; do **not** preload a finance knowledge DB (stale + token cost).
-- **Minimal GenSpark tokens** is a first‑class constraint everywhere (cheap pre‑gate, screen‑scoped injection, capped samples, no LLM for engine work).
+- Finance knowledge = **model‑first, with web search in v1** — triggered when the question needs **current/latest** info **or** the user **explicitly** asks to search. Do **not** preload a finance knowledge DB (stale + token cost).
+- **DB tool scope:** reco data only — `reco_jobs` + the per‑run `*_results` tables. **Zoho tables are excluded.** When the assistant is opened **from an agent screen, queries are scoped to that agent's data/results** (and the current run if present).
+- **New chat by default:** opening the assistant starts a **fresh conversation** every time (so users don't accidentally pile onto one thread). Selecting a **previous chat** from history continues it — but loads **compacted context** (a short digest of that chat), not the full transcript, to save tokens.
+- **Minimal GenSpark tokens** is a first‑class constraint everywhere (cheap pre‑gate, screen‑scoped injection, capped samples, compacted history, no LLM for engine work).
 - **Answers are well‑formatted** — concise, markdown (headings/lists/tables where it helps), numbers first.
 - Helical Insight's **code is not used** (AGPL + Java); we adopt only its *methods* (below). AI‑generated ad‑hoc charts/dashboards = **Phase 2**, out of scope now.
 
 ## History (reuse — already built)
 - Existing store: `conversations` model `{ id, user_id (owner = privacy boundary), title, model, messages:[{role,content}] }`, CRUD at `GET/POST/PATCH/DELETE /api/conversations` + streaming persist via `/api/chat`.
 - **Per‑user isolation is already enforced**: the controller scopes every query to `where user_id = req.user.id`; admins do not bypass. No other user can see another's chats.
-- The floating `AskColonelAI` widget **reuses these endpoints** — same conversation list + messages as the `/chat` page, so history is consistent in both places. New assistant turns persist to the same conversation.
-- Verdict: **useful, reuse as‑is.** No new history schema needed.
+- The floating `AskColonelAI` widget **reuses these endpoints** — same conversation list + messages as the `/chat` page, so history is consistent in both places.
+- **Default = new chat:** each time the assistant opens it creates/uses a fresh conversation; the previous‑chats list is one tap away.
+- **Compacted context on resume:** when the user selects a previous chat, we send the model a **short digest** of that conversation (a running summary, or the last N turns summarized) instead of the full message array — keeps continuity while minimizing tokens. The full transcript still displays in the UI; only what's sent to the model is compacted.
+- Verdict: **useful, reuse as‑is** (add only the compaction step). No new history schema needed.
 
 ## Architecture — one router, five buckets
 Every user message is classified (cheapest gate first) and routed to exactly one bucket:
@@ -67,16 +71,17 @@ The "here is the Drive link, please process the file" flow. **The LLM never does
 ### Bucket 2 — Your data (read‑only DB access)
 Adopts Helical's staged NL→SQL + sqlglot guard, on our stack:
 - **Read‑only DB role** (`colonel_ai_ro` or reuse `colonel_app` with a read‑only, RLS‑scoped session) — SELECT only, `statement_timeout`, `default_transaction_read_only=on`.
-- **Curated catalog** (semantic layer): hand‑written descriptions of the queryable tables/columns + **business metrics** ("matched rate", "issues = rows where remark ≠ matched") + **synonyms**. Start with the analytics‑safe set: `reco_jobs` and the per‑run `*_results` tables. NOT the whole schema.
+- **Curated catalog** (semantic layer): hand‑written descriptions of the queryable tables/columns + **business metrics** ("matched rate", "issues = rows where remark ≠ matched") + **synonyms**. Scope = **`reco_jobs` + the per‑run `*_results` tables only**. **Zoho tables excluded.** NOT the whole schema.
+- **Screen scoping:** when opened from an agent screen, the catalog/queries are **restricted to that agent's data/results** (and the current job if present) — so "why are there so many issues?" answers about *this* run, and off‑screen data isn't pulled.
 - **Staged generation** (lightweight version of `SqlFlowGraph`): (a) pick relevant tables/columns from the catalog for this question, (b) generate a single SELECT with the catalog + few‑shot examples.
 - **Guard (sqlglot‑style):** parse the generated SQL; **reject unless it is one read‑only `SELECT`** referencing only catalog tables; force a `LIMIT`. (Node: `node-sql-parser`, or a tiny Python validator reusing sqlglot — TBD in plan.)
 - **Scope:** always filtered by the current **brand_id** via RLS (`app.brand_id`), matching the app's existing RLS. Admin may cross‑brand only if their role allows.
 - **Answer:** run the SELECT, take a **capped sample** (≤50 rows, Helical's cap) + counts, feed to the LLM to phrase the answer. Show the numbers; optionally reveal the SQL on request.
 
-### Bucket 3 — Finance knowledge (GST / TDS / Tax)
+### Bucket 3 — Finance knowledge (GST / TDS / Tax) — **web search in v1**
 - **Model‑first:** Claude answers fundamentals directly (no fetch).
-- **Web search only when the question needs current/latest** info (rate change, latest notification, due dates). A `web_search` tool the model may call; results summarized with source links.
-- **Provider (OPEN DECISION):** GenSpark API may expose a search tool (key on hand) — else Tavily/Serper/Bing. Confirm before wiring; the bucket works model‑only until search is added.
+- **Web search when needed OR on request:** the `web_search` tool fires when the question needs **current/latest** info (rate change, latest notification, due dates) **or** the user **explicitly** says to search. Results summarized with **source links**.
+- **Provider:** prefer a purpose‑built LLM search API (**Tavily** or Serper) for reliability + clean citations; check whether GenSpark exposes a search tool first (key on hand). Behind an env flag; if unset, bucket degrades to model‑only. (Small implementation detail — decided in the plan.)
 
 ### Bucket 4 — Off‑scope
 - Code‑writing, general programming, unrelated chit‑chat → **short canned refusal**. Obvious cases caught by the pre‑gate (regex/keywords) with **no LLM call**; borderline cases refused by the router.
@@ -116,7 +121,7 @@ Adopts Helical's staged NL→SQL + sqlglot guard, on our stack:
 
 ## Frontend design (additive)
 - `frontend/src/components/AskColonelAI.jsx` — floating "✨ Ask Colonel AI" button + slide‑over panel, mounted app‑wide (in `App.js` or a layout wrapper) so it appears on every screen. Reuses the chat message UI where practical.
-- **History**: uses the existing `/api/conversations` list + messages — the panel shows previous chats (same as the `/chat` sidebar). Same conversation continues whether opened from the sidebar or the floating button.
+- **History**: uses the existing `/api/conversations` list + messages — the panel shows previous chats (same as the `/chat` sidebar). **Opens a new chat by default**; a "Previous chats" list lets the user resume one (which sends **compacted context** to the model). Same store whether opened from the sidebar or the floating button.
 - Passes screen context (from `react-router` location + current agent/brand + last result if present).
 - Renders suggested‑prompt chips from the backend (or the static map).
 - **Run‑agent affordances**: when a run happens via the assistant, render the result inline with **Download Excel** + **Open in Google Sheets** (reuse existing components); if no agent is selected, render **agent‑select chips** instead of processing.
