@@ -6,6 +6,7 @@ import {
 import api from '../../lib/api';
 import { toast } from 'sonner';
 import { sidebarFor } from '../../lib/adminNav';
+import { useAuth } from '../../context/AuthContext';
 import BrandLogo from '../../components/BrandLogos';
 import ComposioMarketplace from './ComposioMarketplace';
 import CentralAccountPanel from '../../components/CentralAccountPanel';
@@ -274,6 +275,8 @@ function StatCard({ label, value, color, bg }) {
    ════════════════════════════════════════════════════════════════════════════ */
 const IntegrationsPage = () => {
   // Admin → admin shell; accountant (on /integrations) → their own sidebar.
+  const { user } = useAuth();
+  const isAdmin = user?.role === 'admin';
   const sidebarItems = sidebarFor([]);
   const [connectors, setConnectors] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -438,8 +441,9 @@ const IntegrationsPage = () => {
           </div>
         )}
 
-        {/* Central Google account — team@ health + per-brand Drive folder mapping */}
-        <CentralAccountPanel />
+        {/* Central Google account — firm-level admin config (team@ health + per-brand Drive
+           folder mapping + service-account email). Hidden from accountants/users. */}
+        {isAdmin && <CentralAccountPanel />}
 
         {/* Composio marketplace — 1000+ connectable apps (additive, self-contained) */}
         <ComposioMarketplace />
