@@ -15,6 +15,13 @@ import api, { API_URL } from '../../lib/api';
 // SSE status stream point at localhost on the live build → the live progress
 // counter never connected (mixed-content/blocked). Using the shared base fixes it.
 
+// ─── Maintenance mode ───────────────────────────────────────────────────────
+// Temporarily pause the Invoice Process RUN trigger (the n8n webhook). Viewing,
+// editing and approving already-extracted invoices stays fully usable. Flip
+// INVOICE_MAINTENANCE back to false to re-enable processing.
+const INVOICE_MAINTENANCE = true;
+const INVOICE_MAINTENANCE_MSG = 'Invoice Process is under maintenance. Please feel free to use the other tools — this agent will be back shortly.';
+
 const T_BLUE = '#2563EB';
 const T_BLUE_BG = '#EFF6FF';
 const T_BORDER = '#E5E7EB';
@@ -574,6 +581,11 @@ const InvoiceAgentWorkspace = ({ agent }) => {
   const reviewIssues = getReviewIssues(selectedInvoice);
 
   const handleProcessInvoices = async () => {
+    // Maintenance mode: never fire the n8n webhook; just tell the user.
+    if (INVOICE_MAINTENANCE) {
+      toast.info(INVOICE_MAINTENANCE_MSG);
+      return;
+    }
     startedRef.current = true;
     setIsTriggering(true);
     setIsProcessing(true);
@@ -699,6 +711,15 @@ const InvoiceAgentWorkspace = ({ agent }) => {
       <ProcessingBanner status={processingStatus} count={processedCount} done={processedCount} total={totalToProcess} review={processingSummary?.review || 0} invalid={processingSummary?.invalid || 0} onDismiss={dismissBanner} />
 
       <div className="rounded-xl border bg-white shadow-[0_1px_3px_0_rgba(0,0,0,0.05)] overflow-hidden" style={{ borderColor: T_BORDER }}>
+        {INVOICE_MAINTENANCE && (
+          <div className="px-6 py-3 flex items-center gap-3 border-b" style={{ background: '#FFF7ED', borderColor: '#FED7AA', color: '#9A3412' }}>
+            <span style={{ fontSize: 18, lineHeight: 1 }}>🛠️</span>
+            <div>
+              <div className="text-sm font-bold">Invoice Process is under maintenance</div>
+              <div className="text-xs" style={{ opacity: 0.85 }}>Processing is paused right now. Please feel free to use the other tools — this agent will be back shortly.</div>
+            </div>
+          </div>
+        )}
         <div className="px-6 py-5 flex flex-col xl:flex-row xl:items-center xl:justify-between gap-4">
           <div className="flex items-center gap-5">
             <div className="w-14 h-14 rounded-xl flex items-center justify-center shadow-inner" style={{ background: T_BLUE_BG, color: T_BLUE }}>
@@ -764,13 +785,20 @@ const InvoiceAgentWorkspace = ({ agent }) => {
                 onClick={handleProcessInvoices}
                 disabled={isProcessing || processingStatus === 'processing'}
                 className="process-btn inline-flex items-center gap-2 rounded-lg px-5 py-2 text-sm font-bold text-white transition-all disabled:opacity-60 hover:brightness-110 active:scale-95"
-                style={{ background: T_BLUE, boxShadow: '0 4px 12px rgba(37,99,235,0.2)' }}
+                style={{
+                  background: INVOICE_MAINTENANCE ? '#9CA3AF' : T_BLUE,
+                  boxShadow: INVOICE_MAINTENANCE ? 'none' : '0 4px 12px rgba(37,99,235,0.2)',
+                  cursor: INVOICE_MAINTENANCE ? 'not-allowed' : undefined,
+                }}
+                title={INVOICE_MAINTENANCE ? INVOICE_MAINTENANCE_MSG : undefined}
                 data-testid="process-invoices-button"
               >
                 {(isProcessing || processingStatus === 'processing') ? (
                   <>
                     <span className="spinner" /> Processing...
                   </>
+                ) : INVOICE_MAINTENANCE ? (
+                  <>🛠️ Under maintenance</>
                 ) : (
                   <>▶ Process Invoices</>
                 )}
