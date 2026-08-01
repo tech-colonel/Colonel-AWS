@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { useLocation } from 'react-router-dom';
-import { Sparkles, Send, X, MessageSquarePlus, Loader2, History, ChevronLeft } from 'lucide-react';
+import { useLocation, useNavigate } from 'react-router-dom';
+import { Sparkles, Send, X, MessageSquarePlus, Loader2, History, ChevronLeft, Maximize2, FileSpreadsheet } from 'lucide-react';
+import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from 'recharts';
 import { toast } from 'sonner';
 import api, { API_URL } from '../lib/api';
 import { useAuth } from '../context/AuthContext';
@@ -75,8 +76,65 @@ function deriveScreen(pathname) {
   return screen; // global scope (Colonel AI page / any other screen)
 }
 
+/* Renders a usage-report payload (from the backend `report` SSE event):
+   a bar chart + a table + an "Open in Google Sheets" export button. */
+function ReportCard({ report }) {
+  const [exporting, setExporting] = useState(false);
+  const data = report?.chart?.data || [];
+  const cols = report?.columns || [];
+  const rows = report?.rows || [];
+
+  const openSheet = async () => {
+    setExporting(true);
+    try {
+      const { data: r } = await api.post('/api/ai/report/sheet', { reportKey: report.key });
+      if (r?.url) window.open(r.url, '_blank', 'noopener');
+      else toast.error('Could not open the sheet.');
+    } catch (e) {
+      toast.error(e?.response?.data?.error || 'Could not export to Google Sheets.');
+    } finally { setExporting(false); }
+  };
+
+  return (
+    <div className="cai-report">
+      <div className="cai-report-title">{report.title}</div>
+      {data.length > 0 && (
+        <div className="cai-chart">
+          <ResponsiveContainer width="100%" height={Math.min(40 + data.length * 26, 260)}>
+            <BarChart data={data} layout="vertical" margin={{ left: 8, right: 12, top: 4, bottom: 4 }}>
+              <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="hsl(var(--border))" />
+              <XAxis type="number" tick={{ fontSize: 10 }} allowDecimals={false} />
+              <YAxis type="category" dataKey="label" width={110} tick={{ fontSize: 10 }} />
+              <Tooltip cursor={{ fill: 'var(--cai-accent-soft)' }} />
+              <Bar dataKey="runs" fill="#6d28d9" radius={[0, 4, 4, 0]} />
+            </BarChart>
+          </ResponsiveContainer>
+        </div>
+      )}
+      {rows.length > 0 && (
+        <div className="cai-table-wrap">
+          <table className="cai-table">
+            <thead><tr>{cols.map((c) => <th key={c.key}>{c.label}</th>)}</tr></thead>
+            <tbody>
+              {rows.slice(0, 15).map((r, i) => (
+                <tr key={i}>{cols.map((c) => <td key={c.key}>{r[c.key] ?? ''}</td>)}</tr>
+              ))}
+            </tbody>
+          </table>
+          {rows.length > 15 && <div className="cai-more">+{rows.length - 15} more — open the sheet for all</div>}
+        </div>
+      )}
+      <button className="cai-sheet-btn" onClick={openSheet} disabled={exporting}>
+        {exporting ? <Loader2 className="cai-spin" size={14} /> : <FileSpreadsheet size={14} />}
+        Open in Google Sheets
+      </button>
+    </div>
+  );
+}
+
 export default function AskColonelAI() {
   const location = useLocation();
+  const navigate = useNavigate();
   const { user } = useAuth();
 
   const [open, setOpen] = useState(false);
@@ -146,6 +204,8 @@ export default function AskColonelAI() {
     } catch (_) { /* history is best-effort; continue with the answer */ }
 
     let acc = '';
+    let report = null;
+    let choices = null;
     try {
       const resp = await fetch(`${API_URL}/api/ai/ask`, {
         method: 'POST',
@@ -177,6 +237,8 @@ export default function AskColonelAI() {
           let p = {};
           try { p = JSON.parse(dl); } catch { continue; }
           if (ev === 'delta') { acc += p.text || ''; setStreamText(acc); }
+          else if (ev === 'report') { report = p; }
+          else if (ev === 'choices') { choices = p.options || null; }
           else if (ev === 'error') { throw new Error(p.error || 'Colonel AI failed'); }
           else if (ev === 'done') { acc = p.text || acc; }
         }
@@ -186,8 +248,8 @@ export default function AskColonelAI() {
     } finally {
       setStreaming(false);
       setStreamText('');
-      if (acc) {
-        setMessages((prev) => [...prev, { role: 'assistant', content: acc }]);
+      if (acc || report || choices) {
+        setMessages((prev) => [...prev, { role: 'assistant', content: acc, report, choices }]);
         loadConvos(); // backend persisted the assistant turn; refresh titles
       }
     }
@@ -216,6 +278,9 @@ export default function AskColonelAI() {
           <div className="cai-head">
             <div className="cai-title"><Sparkles size={16} /> Colonel AI</div>
             <div className="cai-head-actions">
+              <button className="cai-icon" title="Open in Colonel AI" onClick={() => { setOpen(false); navigate('/chat'); }}>
+                <Maximize2 size={16} />
+              </button>
               <button className="cai-icon" title="Previous chats" onClick={() => setShowHistory((v) => !v)}>
                 <History size={16} />
               </button>
@@ -256,7 +321,19 @@ export default function AskColonelAI() {
                 {messages.map((m, i) => (
                   <div key={i} className={`cai-msg cai-${m.role}`}>
                     {m.role === 'assistant'
-                      ? <div className="cai-bubble cai-md" dangerouslySetInnerHTML={{ __html: renderMarkdown(m.content) }} />
+                      ? (
+                        <div className="cai-assistant-wrap">
+                          {m.content && <div className="cai-bubble cai-md" dangerouslySetInnerHTML={{ __html: renderMarkdown(m.content) }} />}
+                          {m.report && <ReportCard report={m.report} />}
+                          {m.choices && (
+                            <div className="cai-choices">
+                              {m.choices.map((o, ci) => (
+                                <button key={ci} className="cai-chip" disabled={streaming} onClick={() => send(o.prompt)}>{o.label}</button>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      )
                       : <div className="cai-bubble">{m.content}</div>}
                   </div>
                 ))}
@@ -356,4 +433,18 @@ const CSS = `
 .cai-md .cai-pre{background:hsl(var(--muted));padding:10px;border-radius:8px;overflow-x:auto;margin:6px 0;font-size:12px;}
 .cai-md a{color:var(--cai-accent);}
 .cai-md strong{font-weight:700;}
+.cai-assistant-wrap{display:flex;flex-direction:column;gap:8px;max-width:100%;}
+.cai-report{border:1px solid hsl(var(--border));border-radius:12px;padding:10px;background:hsl(var(--card));}
+.cai-report-title{font-weight:700;font-size:13px;margin-bottom:6px;}
+.cai-chart{width:100%;margin-bottom:8px;}
+.cai-table-wrap{max-height:200px;overflow:auto;border:1px solid hsl(var(--border));border-radius:8px;}
+.cai-table{width:100%;border-collapse:collapse;font-size:12px;}
+.cai-table th{text-align:left;padding:6px 8px;background:hsl(var(--muted));position:sticky;top:0;font-weight:600;}
+.cai-table td{padding:5px 8px;border-top:1px solid hsl(var(--border));white-space:nowrap;}
+.cai-more{font-size:11px;color:hsl(var(--muted-foreground));padding:6px 8px;}
+.cai-sheet-btn{margin-top:8px;display:inline-flex;align-items:center;gap:6px;padding:8px 12px;border:none;
+  border-radius:9px;background:var(--cai-grad);color:#fff;cursor:pointer;font-size:12px;font-weight:600;}
+.cai-sheet-btn:disabled{opacity:.6;cursor:not-allowed;}
+.cai-choices{display:flex;flex-wrap:wrap;gap:8px;}
+.cai-choices .cai-chip{flex:0 0 auto;}
 `;

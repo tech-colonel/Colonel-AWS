@@ -111,13 +111,40 @@ async function ask(req, res) {
   const rep = detectReport(userText);
   if (rep) {
     const isAdmin = req.user?.role === 'admin';
-    const { key, note } = scopeReportKey(rep.key, isAdmin);
-    res.writeHead(200, SSE_HEADERS);
-    if (typeof res.flushHeaders === 'function') res.flushHeaders();
     const send = (event, data) => {
       res.write(`event: ${event}\n`);
       res.write(`data: ${JSON.stringify(data)}\n\n`);
     };
+
+    // A broad "who uses which tools on which brands" ask explodes into one row
+    // per user×tool×brand (users repeat) — confusing. Ask HOW to group it first,
+    // then show a clean grouped summary from the follow-up.
+    if (rep.key === 'who_uses_what') {
+      res.writeHead(200, SSE_HEADERS);
+      if (typeof res.flushHeaders === 'function') res.flushHeaders();
+      const text = isAdmin
+        ? 'How would you like the usage summary grouped?'
+        : 'Here’s your own usage — how would you like it grouped?';
+      const options = isAdmin
+        ? [
+            { label: 'Brand-wise', prompt: 'brand-wise usage report' },
+            { label: 'User-wise', prompt: 'usage report by user' },
+            { label: 'Tool-wise', prompt: 'which tools are most used' },
+          ]
+        : [
+            { label: 'Brand-wise', prompt: 'my usage by brand' },
+            { label: 'Tool-wise', prompt: 'my usage report' },
+          ];
+      send('choices', { options });
+      send('done', { text, model: 'report' });
+      res.end();
+      persistAssistant(conversationId, req.user.id, text, 'report');
+      return;
+    }
+
+    const { key, note } = scopeReportKey(rep.key, isAdmin);
+    res.writeHead(200, SSE_HEADERS);
+    if (typeof res.flushHeaders === 'function') res.flushHeaders();
     try {
       const report = await buildReport(key, { userId: req.user.id, isAdmin });
       const text = (note ? `${note}\n\n` : '') + report.summary;

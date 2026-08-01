@@ -79,13 +79,24 @@ async function scanFacts(scopeUserId) {
   return facts;
 }
 
-// Resolve created_by UUIDs → display names.
+// Resolve created_by UUIDs → display names. When two accounts share a display
+// name, disambiguate by appending the email so a user never appears "twice".
 async function userNameMap(ids) {
   const uniq = [...new Set(ids.filter(Boolean))];
   if (!uniq.length) return {};
   const users = await User.findAll({ where: { id: uniq }, attributes: ['id', 'name', 'email'] });
+  const nameCount = {};
+  for (const u of users) {
+    const n = (u.name || '').trim();
+    if (n) nameCount[n] = (nameCount[n] || 0) + 1;
+  }
   const map = {};
-  for (const u of users) map[u.id] = u.name || u.email || 'Unknown';
+  for (const u of users) {
+    const n = (u.name || '').trim();
+    if (!n) map[u.id] = u.email || 'Unknown';
+    else if (nameCount[n] > 1 && u.email) map[u.id] = `${n} (${u.email})`;
+    else map[u.id] = n;
+  }
   return map;
 }
 
