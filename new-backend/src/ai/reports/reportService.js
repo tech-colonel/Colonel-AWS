@@ -129,15 +129,38 @@ async function buildReport(key, ctx) {
     : '';
 
   if (key === 'usage_by_brand') {
-    const m = sumBy(facts, (f) => f.brandName);
-    const rows = Object.entries(m).map(([brand, v]) => ({ brand, runs: v.runs, rows: v.rows }))
-      .sort((a, b) => b.runs - a.runs);
+    // Brand-wise WITH the users active on each brand (aggregated over tools, so
+    // a user appears once per brand — no confusing per-tool repetition).
+    const names = await userNameMap(facts.map((f) => f.userId));
+    const bu = {};       // brand → user → {runs, rows}
+    const brandTot = {}; // brand → total runs
+    const brandUsers = {}; // brand → Set(userId)
+    for (const f of facts) {
+      const uName = names[f.userId] || 'Unknown';
+      bu[f.brandName] = bu[f.brandName] || {};
+      bu[f.brandName][uName] = bu[f.brandName][uName] || { runs: 0, rows: 0 };
+      bu[f.brandName][uName].runs += f.runs;
+      bu[f.brandName][uName].rows += f.rows;
+      brandTot[f.brandName] = (brandTot[f.brandName] || 0) + f.runs;
+      (brandUsers[f.brandName] = brandUsers[f.brandName] || new Set()).add(f.userId);
+    }
+    // Rows: brand → its users, brands ordered by total runs, users by runs.
+    const brandsSorted = Object.keys(bu).sort((a, b) => (brandTot[b] || 0) - (brandTot[a] || 0));
+    const rows = [];
+    for (const brand of brandsSorted) {
+      const users = Object.entries(bu[brand]).sort((a, b) => b[1].runs - a[1].runs);
+      for (const [user, v] of users) rows.push({ brand, user, runs: v.runs, rows: v.rows });
+    }
+    const totalUsers = new Set(facts.map((f) => f.userId)).size;
     return {
-      key, title: isAdmin ? 'Usage by brand' : 'Your usage by brand',
-      summary: emptyNote || `${grand} run(s) across ${rows.length} brand(s). Top: ${rows.slice(0, 3).map((r) => `${r.brand} (${r.runs})`).join(', ')}.`,
-      columns: [{ key: 'brand', label: 'Brand' }, { key: 'runs', label: 'Runs' }, { key: 'rows', label: 'Rows' }],
+      key, title: isAdmin ? 'Usage by brand (with users)' : 'Your usage by brand',
+      summary: emptyNote || `${grand} run(s) across ${brandsSorted.length} brand(s)${isAdmin ? ` by ${totalUsers} user(s)` : ''}. Top: ${brandsSorted.slice(0, 3).map((b) => `${b} (${brandTot[b]})`).join(', ')}.`,
+      columns: [
+        { key: 'brand', label: 'Brand' }, { key: 'user', label: 'User' },
+        { key: 'runs', label: 'Runs' }, { key: 'rows', label: 'Rows' },
+      ],
       rows,
-      chart: { type: 'bar', xKey: 'brand', yKey: 'runs', data: rows.slice(0, 12).map((r) => ({ label: r.brand, runs: r.runs })) },
+      chart: { type: 'bar', xKey: 'brand', yKey: 'runs', data: brandsSorted.slice(0, 12).map((b) => ({ label: b, runs: brandTot[b] })) },
     };
   }
 
