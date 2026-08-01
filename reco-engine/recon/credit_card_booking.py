@@ -1148,7 +1148,25 @@ def _ocr_once(content: bytes, password: str = ""):
     return None
 
 
-def extract_from_pdf(content: bytes, password: str = "") -> dict:
+def _pdf_text(pdf_bytes: bytes, password: str = "") -> str:
+    """All text of an (already OCR'd) PDF — used only to read the summary block."""
+    import pdfplumber
+    try:
+        kw = {"password": password} if password else {}
+        parts = []
+        with pdfplumber.open(io.BytesIO(pdf_bytes), **kw) as pdf:
+            for pg in pdf.pages:
+                parts.append(pg.extract_text() or "")
+                try:
+                    pg.flush_cache()
+                except Exception:
+                    pass
+        return "\n".join(parts)
+    except Exception:
+        return ""
+
+
+def extract_from_pdf(content: bytes, password: str = "", _work: bytes = None) -> dict:
     """Parse a card statement PDF by delegating to the PDF → Bank Statement engine.
 
     Called READ-ONLY: this adds no behaviour to that agent and changes none of it.
@@ -1163,7 +1181,9 @@ def extract_from_pdf(content: bytes, password: str = "") -> dict:
     # and tell the extractor not to repeat it. Two OCR calls per statement would
     # otherwise be billed for every scanned upload.
     work = content
-    if not _has_text_layer(content, password):
+    if _work is not None:
+        work = _work
+    elif not _has_text_layer(content, password):
         ocr_bytes = _ocr_once(content, password)
         if ocr_bytes:
             work = ocr_bytes
@@ -1556,7 +1576,9 @@ def run(content: bytes, filename: str = "", password: str = "", coa=None,
     touches the database itself, exactly as the other reco agents work.
     """
     is_pdf = str(filename or "").lower().endswith(".pdf") or content[:4] == b"%PDF"
-    data = extract_from_pdf(content, password) if is_pdf else extract_from_excel(content)
+    # Dual-OCR on the PDF path: no single engine reads these statements well
+    # enough on its own (see extract_from_pdf_dual).
+    data = extract_from_pdf_dual(content, password) if is_pdf else extract_from_excel(content)
     if data.get("error"):
         return {"error": data["error"]}
     rows = data.get("rows") or []
@@ -1851,7 +1873,7 @@ def _finish_lines(rows):
     }
 
 
-def _merge_extractions(col_rows, line_rows):
+def _merge_extractions(col_rows, line_rows, force_base=False):
     """Combine the column-geometry and line-based extractions of one statement.
 
     They fail in opposite directions on OCR'd card statements:
@@ -1876,7 +1898,9 @@ def _merge_extractions(col_rows, line_rows):
     if not line_rows:
         return col_rows
 
-    if amount_completeness(line_rows) >= amount_completeness(col_rows):
+    if force_base:
+        base, other = col_rows, line_rows
+    elif amount_completeness(line_rows) >= amount_completeness(col_rows):
         base, other = line_rows, col_rows
     else:
         base, other = col_rows, line_rows
@@ -1911,6 +1935,30 @@ def _merge_extractions(col_rows, line_rows):
             recovered += 1
     if recovered:
         logger.info("Card: recovered %d amount(s) lost by the primary extraction", recovered)
+
+    # Reference-number repair first. Across two OCR engines the amounts rarely
+    # agree to the paisa, so a date+amount join finds almost nothing — on Feb-26
+    # it repaired 0 of 53 unreadable merchants. The ref survives OCR far better
+    # and identifies the transaction outright.
+    by_ref = {}
+    for r in other:
+        ref = _ref_of(r.get("narration"))
+        if ref and _narration_quality([r]) > 0 and not _is_garbled(r.get("narration") or ""):
+            by_ref.setdefault(ref, r)
+
+    ref_fixed = 0
+    for row in base:
+        cur = row.get("narration") or ""
+        if not (_is_garbled(cur) or _narration_quality([row]) == 0):
+            continue
+        ref = _ref_of(cur)
+        donor = by_ref.get(ref) if ref else None
+        if donor:
+            row["narration"] = donor["narration"]
+            row.setdefault("cells", {})["narration"] = donor["narration"]
+            ref_fixed += 1
+    if ref_fixed:
+        logger.info("Card: repaired %d narration(s) by reference number", ref_fixed)
 
     upgraded = 0
     for row in base:
@@ -2207,4 +2255,150 @@ def _union_extractions(col_rows, line_rows):
     logger.info("Card: union of extractions — column %d + line %d -> %d unique "
                 "transactions (%d had no reference number)",
                 len(col_rows), len(line_rows), len(out), len(unkeyed))
+    return out
+
+
+# ── Dual-OCR extraction ─────────────────────────────────────────────────────
+# The two OCR engines fail in opposite directions on a flattened-vector card
+# statement, measured on Feb-26 (102 transactions, 11,78,855.58 of purchases):
+#
+#     iLovePDF    53 rows,  2 unmapped  — loses half the rows, reads merchants
+#     Tesseract   99 rows, 29 unmapped  — finds the rows, mangles merchants
+#
+# Neither is a subset of the other and neither is good enough alone: rows the
+# first drops are money missing from the books, and merchants the second mangles
+# are manual work every month, since garbled text is barred from the learned
+# directory and so never accumulates.
+#
+# So run both and join. The reference number is the key — printed on every row,
+# unique per transaction, and made of characters that survive OCR far better
+# than a merchant name or a date.
+def extract_from_pdf_dual(content: bytes, password: str = "") -> dict:
+    """Extract using every available OCR engine, then merge on reference number."""
+    if _has_text_layer(content, password):
+        return extract_from_pdf(content, password)          # no OCR needed
+
+    variants = []
+    for name, data in _ocr_variants(content, password):
+        try:
+            got = extract_from_pdf(content, password, _work=data)
+        except Exception as e:
+            logger.warning("Card: %s variant failed to parse: %s: %s",
+                           name, type(e).__name__, str(e)[:140])
+            continue
+        if got.get("error") or not got.get("rows"):
+            continue
+        got["_ocr_bytes"] = data
+        dr = round(sum(r["amount"] or 0 for r in got["rows"] if r.get("side") != "Cr"), 2)
+        logger.info("Card: %s -> %d rows, debits %.2f, %d readable merchants",
+                    name, len(got["rows"]), dr, _narration_quality(got["rows"]))
+        variants.append((name, got))
+
+    if not variants:
+        return {"columns": [], "rows": [], "error":
+                "The statement could not be read by any OCR engine."}
+    if len(variants) == 1:
+        return variants[0][1]
+
+    # Base = the variant that best reproduces the statement's own purchases
+    # total, because a missing ROW cannot be repaired from the other engine —
+    # only a bad narration can.
+    stated = None
+    for _n, v in variants:
+        stated = parse_statement_totals(v.get("statement_text") or "").get("stated_debits")
+        if stated:
+            break
+
+    def _dr(v):
+        return round(sum(r["amount"] or 0 for r in v["rows"] if r.get("side") != "Cr"), 2)
+
+    # Re-decide each variant's column-vs-line parse against the SHARED stated
+    # total. A variant cannot always read the summary box itself — Tesseract
+    # jumbles it — so on its own it kept a column parse that inflated Feb-26 to
+    # 15,56,497 against a true 11,78,856, purely because it had no yardstick.
+    # One engine reading the total is enough to correct the other's choice.
+    if stated:
+        for i, (name, v) in enumerate(list(variants)):
+            if abs(_dr(v) - stated) <= 2.0:
+                continue
+            try:
+                alt = parse_card_lines(v["_ocr_bytes"], password) if v.get("_ocr_bytes") else None
+            except Exception:
+                alt = None
+            if not alt or not alt.get("rows"):
+                continue
+            alt_dr = round(sum(r["amount"] or 0 for r in alt["rows"] if r.get("side") != "Cr"), 2)
+            if abs(alt_dr - stated) < abs(_dr(v) - stated):
+                logger.info("Card: %s line parse is closer to the statement "
+                            "(%.2f vs %.2f, statement %.2f) — switching",
+                            name, alt_dr, _dr(v), stated)
+                nv = dict(v)
+                nv["rows"] = _strip_statement_chrome(alt["rows"])
+                nv["columns"] = alt.get("columns") or v.get("columns")
+                variants[i] = (name, nv)
+
+    if stated:
+        base_name, base = min(variants, key=lambda nv: abs(_dr(nv[1]) - stated))
+    else:
+        base_name, base = max(variants, key=lambda nv: len(nv[1]["rows"]))
+
+    # UPGRADE-ONLY across engines: take the row set and the amounts from ONE
+    # engine and only repair narrations from the other. Adding rows across
+    # engines was tried and inflated Feb-26 to 15,50,795 against a true
+    # 11,78,856 — 37 of the rows carry no readable reference number, so the join
+    # cannot tell a genuine second transaction from the same one seen twice, and
+    # every merge double-counts. A wrong total is worse than a bad narration:
+    # the narration costs a reviewer one correction, the total corrupts books.
+    merged = base["rows"]
+    for name, v in variants:
+        if name == base_name:
+            continue
+        merged = _merge_extractions(merged, v["rows"], force_base=True)
+    merged = _strip_statement_chrome(merged)
+
+    logger.info("Card: dual-OCR merge — base %s (%d rows) + %d other variant(s) "
+                "-> %d rows, debits %.2f",
+                base_name, len(base["rows"]), len(variants) - 1, len(merged),
+                round(sum(r["amount"] or 0 for r in merged if r.get("side") != "Cr"), 2))
+
+    out = dict(base)
+    out["rows"] = merged
+    out["extract_mode"] = f"dual-ocr({base_name})"
+    # Carry the summary block from whichever engine could read it. The base is
+    # chosen for its ROWS; if that engine also garbled the summary box we would
+    # otherwise lose the completeness check entirely and report "unverifiable"
+    # on a statement another engine read perfectly well.
+    if not parse_statement_totals(out.get("statement_text") or "").get("total_amount_due"):
+        for _n, v in variants:
+            txt = v.get("statement_text") or ""
+            if parse_statement_totals(txt).get("total_amount_due"):
+                out["statement_text"] = txt
+                break
+    return out
+
+
+def _ocr_variants(content: bytes, password: str = ""):
+    """[(engine, ocr'd pdf bytes)] from every engine that is usable here."""
+    if len(content) > _MAX_OCR_BYTES:
+        logger.warning("Card PDF too large to OCR (%.1f MB)", len(content) / 1e6)
+        return []
+
+    out = []
+    try:
+        from recon import tesseract_ocr
+        if tesseract_ocr.available():
+            data = tesseract_ocr.ocr_pdf(content, password=password)
+            if data:
+                out.append(("tesseract", data))
+    except Exception as e:
+        logger.warning("Tesseract variant unavailable: %s: %s", type(e).__name__, str(e)[:140])
+
+    try:
+        from recon import ilovepdf_ocr
+        data = ilovepdf_ocr.ocr_pdf(content, filename="card-statement.pdf")
+        if data:
+            out.append(("ilovepdf", data))
+    except Exception as e:
+        logger.warning("iLovePDF variant unavailable: %s: %s", type(e).__name__, str(e)[:140])
+
     return out
