@@ -18,6 +18,7 @@ const SECRET_PATTERNS = [
   /\benv(ironment)? var(iable)?s?\b/i,
   /\bpassword\b/i,
   /\bpasswd\b/i,
+  /\bpwd\b/i,
   /\bdb password\b/i,
   /\bconnection string\b/i,
   /\b(database|db) url\b/i,
@@ -25,6 +26,7 @@ const SECRET_PATTERNS = [
   /\bsecret( key)?\b/i,
   /\btoken\b/i,
   /\bcredential(s)?\b/i,
+  /\bcreds\b/i,
   /\bservice account\b/i,
   /\bprivate key\b/i,
   /\bjwt\b/i,
@@ -96,17 +98,24 @@ const FINANCE_PATTERNS = [
 
 /**
  * Cheap security/scope pre-gate. Runs BEFORE any LLM call.
+ * The message is normalized so that underscores/hyphens are treated as
+ * spaces before matching — this closes the env-var-name bypass class
+ * (DATABASE_URL, JWT_SECRET, *_API_KEY, DB_PASSWORD, PRIVATE_KEY, api-key,
+ * …) where `\b` would not break on `_`, letting a real secret ask slip
+ * through untouched. Normalizing only merges separators to spaces, so any
+ * legitimate space-delimited match is preserved (false-positive-safe bias,
+ * which is the correct bias for a security fence).
  * @param {string} message - raw user message.
  * @returns {{refuse:true, category:'secrets'|'code', text:string}|null}
  */
 function preGate(message) {
-  const msg = String(message || '');
+  const norm = String(message || '').replace(/[_-]+/g, ' ');
 
-  if (SECRET_PATTERNS.some((re) => re.test(msg))) {
+  if (SECRET_PATTERNS.some((re) => re.test(norm))) {
     return { refuse: true, category: 'secrets', text: REFUSALS.secrets };
   }
 
-  if (CODE_PATTERNS.some((re) => re.test(msg))) {
+  if (CODE_PATTERNS.some((re) => re.test(norm))) {
     return { refuse: true, category: 'code', text: REFUSALS.code };
   }
 
