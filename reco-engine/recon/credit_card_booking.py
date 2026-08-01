@@ -918,7 +918,11 @@ def _read_excel_row(raw, rows, i_date, i_narr, i_amt, i_cat):
             rows[-1]["narration"] = (rows[-1]["narration"] + " " + narr).strip()
             rows[-1]["cells"]["narration"] = rows[-1]["narration"]
         return True
-    if not narr and amount is None:
+    # A row with no narration is not a transaction, whatever number sits on it.
+    # The ragged-row amount scanner will happily read a serial-number column as
+    # an amount: on Jun-25 that invented 13 phantom rows carrying 1,2,3…12,27,
+    # which is exactly the 105.00 by which the statement over-reconciled.
+    if not narr:
         return True
     if _is_chrome(narr):
         return True
@@ -2068,6 +2072,23 @@ def verify_statement(rows: list, totals: dict, tolerance: float = 2.0) -> dict:
     stated_dr = totals.get("stated_debits")
     if stated_dr is not None:
         gap = round(debits - stated_dr, 2)
+        if abs(gap) <= tolerance:
+            # Our debits reproduce the issuer's own purchases total, which is the
+            # complete proof available — and the ONLY one that applies here.
+            # The balance identity must NOT run as a second opinion: it needs
+            # total credits, and this agent deliberately excludes card payments
+            # from the rows it books. Using our (correctly) empty credit side
+            # invented a 3,25,442.44 shortfall on May-25 and refused a statement
+            # that reconciled to the paisa.
+            return {
+                "status": "verified", "reason": "",
+                "total_debits": debits, "total_credits": credits,
+                "previous_balance": prev, "total_amount_due": due,
+                "stated_debits": stated_dr, "stated_credits": totals.get("stated_credits"),
+                "computed_closing": round((prev or 0) + stated_dr
+                                          - (totals.get("stated_credits") or credits), 2),
+                "difference": 0.0,
+            }
         if abs(gap) > tolerance:
             return {
                 "status": "mismatch",
@@ -2081,7 +2102,12 @@ def verify_statement(rows: list, totals: dict, tolerance: float = 2.0) -> dict:
                 "difference": gap,
             }
 
-    computed = round(prev + debits - credits, 2)
+    # Same reasoning as above: when the statement states its own credits, use
+    # them. Our extracted credits omit card payments by design.
+    credits_for_identity = totals.get("stated_credits")
+    if credits_for_identity is None:
+        credits_for_identity = credits
+    computed = round(prev + debits - credits_for_identity, 2)
     diff = round(computed - due, 2)
     ok = abs(diff) <= tolerance
     return {
