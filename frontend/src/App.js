@@ -46,6 +46,7 @@ import StatutoryRedirect     from './pages/accountant/StatutoryRedirect';
 
 // ── Colonel AI (Round 3) ──────────────────────────────────────────────────────
 import ColonelChat           from './pages/ColonelChat';
+import AskColonelAI          from './components/AskColonelAI';
 import './App.css';
 
 function App() {
@@ -328,6 +329,8 @@ function App() {
             }
           />
         </Routes>
+        {/* Floating assistant — self-hides on public routes / when signed out. */}
+        <AskColonelAI />
       </BrowserRouter>
     </AuthProvider>
   );
