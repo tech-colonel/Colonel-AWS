@@ -938,6 +938,126 @@ async function amazonB2CProcessor(
       }
     });
 
+    // ==================================
+    // STEP 11: CREATE X2BETA-SHIPPING WORKING SHEET (EXCELJS)
+    // Same 108-column X2Beta template as "x2beta working" above, but sourced
+    // from the shipping-charge amounts — mirrors how "amazon-b2c-shipping-
+    // tally-ready" is derived from "amazon-b2c-tally-ready". No Stock Item /
+    // Quantity / Rate / Unit / Godown: freight is a ledger-only line, matching
+    // the shipping tally-ready sheet's own column set (no stock movement).
+    // ==================================
+    const x2betaShippingSheet = workbook.addWorksheet('x2beta-shipping');
+
+    const x2betaShippingColumns = [
+      { header: 'Vch. Date* ', get: () => x2betaVchDate },
+      { header: 'Vch. Type*', get: r => `${Number(r['Final Taxable Shipping Value'] || 0) < 0 ? 'CN-' : ''}Sales-${getSellerStateAbbr(r['Seller Gstin']) || ''}` },
+      { header: 'Vch. No.*', get: r => r['Final Invoice No.'] || '' },
+      { header: 'Ref. No.', get: r => r['Final Invoice No.'] || '' },
+      { header: 'Ref. Date', get: () => x2betaVchDate },
+      { header: 'Is CN?', get: r => (Number(r['Final Taxable Shipping Value'] || 0) < 0 ? 'Yes' : null) },
+      { header: 'Is Vch?', get: () => null },
+      { header: 'Party Ledger*', get: r => r['Ship To State Tally Ledger'] || '' },
+      { header: 'Sales Ledger*', get: r => `Sales Amazon-${getSellerStateAbbr(r['Seller Gstin']) || ''} ${Math.round(getRowGstRate(r) * 10000) / 100}%` },
+      { header: 'Stock Item', get: () => null },
+      { header: 'Description', get: () => null },
+      { header: 'Godown', get: () => null },
+      { header: 'Quantity', get: () => null },
+      { header: 'Rate', get: () => null },
+      { header: 'Unit', get: () => null },
+      { header: 'Discount', get: () => null },
+      { header: 'Amount*', get: r => Number(r['Final Taxable Shipping Value'] || 0) },
+      { header: 'Discount', get: () => null }
+    ];
+
+    uniqueRates.forEach(r => {
+      const ratePercent = Math.round(r * 10000) / 100;
+      const halfRatePercent = Math.round((ratePercent / 2) * 100) / 100;
+      sortedStateCodes.forEach(sc => {
+        x2betaShippingColumns.push({
+          header: `Output IGST ${ratePercent}%-${sc}`,
+          get: row => (getRowGstRate(row) === r && getSellerStateAbbr(row['Seller Gstin']) === sc) ? Number(row['Final Shipping IGST Tax'] || 0) : 0
+        });
+        x2betaShippingColumns.push({
+          header: `Output CGST ${halfRatePercent}%-${sc}`,
+          get: row => (getRowGstRate(row) === r && getSellerStateAbbr(row['Seller Gstin']) === sc) ? Number(row['Final Shipping CGST Tax'] || 0) : 0
+        });
+        x2betaShippingColumns.push({
+          header: `Output SGST ${halfRatePercent}%-${sc}`,
+          get: row => (getRowGstRate(row) === r && getSellerStateAbbr(row['Seller Gstin']) === sc) ? Number(row['Final Shipping SGST Tax'] || 0) : 0
+        });
+      });
+    });
+
+    x2betaShippingColumns.push(
+      { header: null, get: () => null },
+      { header: null, get: () => null },
+      { header: 'Narration', get: () => `B2C-Shipping-${formMonth || ''}` },
+      { header: 'Taxability', get: () => null },
+      { header: 'GST Nature', get: () => null },
+      { header: 'GST Rate', get: r => Math.round(getRowGstRate(r) * 10000) / 100 },
+      { header: 'Cess', get: () => null },
+      { header: 'RCM?', get: () => null },
+      // Freight doesn't share the stock item's HSN, and the report carries no
+      // shipping-specific HSN/SAC — left blank rather than reusing the item's code.
+      { header: 'HSN', get: () => null },
+      { header: 'HSN Desc', get: () => null },
+      { header: 'Supply Type', get: () => null },
+      { header: 'Cost Category', get: () => null },
+      { header: 'Cost Centre', get: () => null },
+      { header: 'Name', get: () => null }, { header: 'Address 1', get: () => null }, { header: 'Address 2', get: () => null },
+      { header: 'State', get: r => r[toStateCol] || '' }, { header: 'Country', get: () => 'India' }, { header: 'PIN Code', get: () => null },
+      { header: 'Place of Supply', get: () => null }, { header: 'GST Type', get: () => null }, { header: 'GSTIN', get: () => null },
+      { header: 'Name', get: () => null }, { header: 'Address 1', get: () => null }, { header: 'Address 2', get: () => null },
+      { header: 'State', get: r => r[toStateCol] || '' }, { header: 'Country', get: () => 'India' }, { header: 'PIN Code', get: () => null },
+      { header: 'Place', get: () => null }, { header: 'GSTIN', get: () => null },
+      { header: 'Name', get: () => null }, { header: 'Address 1', get: () => null }, { header: 'Address 2', get: () => null },
+      { header: 'State', get: r => r[toStateCol] || '' }, { header: 'Country', get: () => 'India' }, { header: 'PIN Code', get: () => null },
+      { header: 'Place', get: () => null }, { header: 'GSTIN', get: () => null },
+      { header: 'DN No.', get: () => null }, { header: 'DN Date', get: () => null }, { header: 'Doc. No.', get: () => null },
+      { header: 'Dis. Through', get: () => null }, { header: 'Destination', get: () => null }, { header: 'Carrier Name', get: () => null },
+      { header: 'LR No.', get: () => null }, { header: 'LR Date', get: () => null }, { header: 'Order No.', get: () => null },
+      { header: 'Order Date', get: () => null }, { header: 'Term of Delivery', get: () => null }, { header: 'Terms of Paymemt', get: () => null },
+      { header: 'Other Ref.', get: () => null }, { header: 'Place of Receipt', get: () => null }, { header: 'Vessel/Flight No.', get: () => null },
+      { header: 'Port of Loading', get: () => null }, { header: 'Port of Discharge', get: () => null }, { header: 'Country to', get: () => null },
+      { header: 'Shipping Bill No.', get: () => null }, { header: 'Date', get: () => null }, { header: 'Port Code', get: () => null },
+      { header: 'e-Way Bill No', get: () => null }, { header: 'Date', get: () => null }, { header: 'Cons. e-Way Bill No.', get: () => null },
+      { header: 'Date', get: () => null }, { header: 'Sub Type', get: () => null }, { header: 'Doc. Type', get: () => null },
+      { header: 'Distance (KM)', get: () => null }, { header: 'Transporter Name', get: () => null }, { header: 'Transporter ID', get: () => null },
+      { header: 'Transport Mode', get: () => null }, { header: 'Doc No.', get: () => null }, { header: 'Date', get: () => null },
+      { header: 'Vehicle No.', get: () => null }, { header: 'Vehicle Type', get: () => null }, { header: 'Status', get: () => null },
+      { header: 'Note Reason', get: () => null }, { header: 'Orig. Inv. No.', get: () => null }, { header: 'Orig. Inv. Date', get: () => null }
+    );
+
+    const x2betaShippingHeaders = x2betaShippingColumns.map(c => c.header);
+    x2betaShippingSheet.addRow(x2betaShippingHeaders);
+    filteredRows.forEach(row => {
+      x2betaShippingSheet.addRow(x2betaShippingColumns.map(c => c.get(row)));
+    });
+    x2betaShippingSheet.getColumn(1).numFmt = 'dd/mm/yyyy';
+    x2betaShippingSheet.getColumn(5).numFmt = 'dd/mm/yyyy';
+
+    // ==================================
+    // VALIDATION: x2beta-shipping sheet totals must reconcile with the pivot totals
+    // ==================================
+    const x2betaShippingOutputCols = x2betaShippingColumns.filter(c => typeof c.header === 'string' && c.header.startsWith('Output '));
+    const sumX2betaShippingOutput = prefix => filteredRows.reduce((acc, row) => {
+      return acc + x2betaShippingOutputCols
+        .filter(c => c.header.startsWith(prefix))
+        .reduce((rowAcc, c) => rowAcc + Number(c.get(row) || 0), 0);
+    }, 0);
+
+    const shippingReconciliationChecks = [
+      ['Amount* (shipping taxable value)', filteredRows.reduce((acc, r) => acc + Number(r['Final Taxable Shipping Value'] || 0), 0), sumPivot('Final Taxable Shipping Value')],
+      ['Shipping IGST', sumX2betaShippingOutput('Output IGST'), sumPivot('Final Shipping IGST Tax')],
+      ['Shipping CGST', sumX2betaShippingOutput('Output CGST'), sumPivot('Final Shipping CGST Tax')],
+      ['Shipping SGST', sumX2betaShippingOutput('Output SGST'), sumPivot('Final Shipping SGST Tax')]
+    ];
+    shippingReconciliationChecks.forEach(([label, x2betaTotal, mainTotal]) => {
+      if (Math.abs(x2betaTotal - mainTotal) > RECONCILIATION_TOLERANCE) {
+        console.warn(`[Amazon B2C] x2beta-shipping sheet ${label} mismatch: x2beta=${x2betaTotal.toFixed(2)}, main=${mainTotal.toFixed(2)}`);
+      }
+    });
+
     // ================================
     // RETURN STRUCTURE EXPECTED BY CONTROLLER
     // ================================
