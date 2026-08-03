@@ -864,7 +864,7 @@ async function amazonB2CProcessor(
       { header: 'Party Ledger*', get: r => r['Ship To State Tally Ledger'] || '' },
       { header: 'Sales Ledger*', get: r => `Sales Amazon-${getSellerStateAbbr(r['Seller Gstin']) || ''} ${Math.round(getRowGstRate(r) * 10000) / 100}%` },
       { header: 'Stock Item', get: r => r['FG'] || r['Item Description'] || '' },
-      { header: 'Description', get: () => null },
+      { header: 'Description', get: r => r['FG'] || r['Item Description'] || '' },
       { header: 'Godown', get: r => r['Ship From State'] || '' },
       { header: 'Quantity', get: r => (r[transactionColumn] === 'Refund' ? Math.abs(Number(r[quantityColumn] || 0)) : Number(r[quantityColumn] || 0)) },
       {
