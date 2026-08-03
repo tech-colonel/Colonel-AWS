@@ -34,7 +34,10 @@ const processInvoice = async (req, res, next) => {
     const webhookUrl =
       process.env[`${brand.name.toLowerCase()}_invoice_url`] ||
       process.env[`${brand.name.toUpperCase()}_invoice_url`] ||
-      process.env[`${brand.name}_invoice_url`];
+      process.env[`${brand.name}_invoice_url`] ||
+      // dotenv can't load .env keys containing spaces, so also try a
+      // space→underscore variant (e.g. "Shumee Playroom" → "Shumee_Playroom_invoice_url")
+      process.env[`${brand.name.replace(/\s+/g, '_')}_invoice_url`];
 
     if (!webhookUrl) {
       return res.status(400).json({
@@ -160,6 +163,8 @@ const getSheetUrl = async (req, res, next) => {
       process.env[`${brand.name.toLowerCase()}_invoice_sheet`] ||
       process.env[`${brand.name.toUpperCase()}_invoice_sheet`] ||
       process.env[`${brand.name}_invoice_sheet`] ||
+      // space→underscore variant (dotenv can't load keys with spaces)
+      process.env[`${brand.name.replace(/\s+/g, '_')}_invoice_sheet`] ||
       null;
 
     res.json({ sheetUrl });
