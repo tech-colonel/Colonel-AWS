@@ -238,7 +238,7 @@ const ProcessingBanner = ({ status, count, done = 0, total = 0, review = 0, inva
         </div>
         <div className="invoice-processing-banner__body" style={{ flex: 1 }}>
           <p className="invoice-processing-banner__title">
-            {hasProgress ? `Saving invoices — ${done} of ${total} done` : 'Invoices are being processed'}
+            {hasProgress ? `Processing ${done} of ${total} invoices` : 'Sending invoices…'}
           </p>
           <p className="invoice-processing-banner__sub">
             {hasProgress

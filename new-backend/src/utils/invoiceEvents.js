@@ -96,11 +96,14 @@ const clearTimer = (key) => {
 // True when the current state belongs to a finished/other run and the next tick
 // should start a fresh one: no state, not processing, a run already "full"
 // (done >= total), or the previous run already signalled done.
+// A run continues as long as it is live and processing. We deliberately do NOT
+// start fresh just because done >= total: n8n feeds once per LINE ITEM while
+// total is the number of INVOICES (files), so a run legitimately keeps receiving
+// feeds after done reaches total — resetting there corrupted the count.
 const shouldStartFresh = (st) =>
-  !st || st.status !== 'processing' || st.done === undefined || st.doneRequested === true ||
-  (st.total > 0 && (st.done || 0) >= st.total);
+  !st || st.status !== 'processing' || st.done === undefined || st.doneRequested === true;
 
-const freshState = () => ({ status: 'processing', done: 0, total: 0, approved: 0, review: 0, invalid: 0, doneRequested: false, timestamp: new Date() });
+const freshState = () => ({ status: 'processing', invoices: new Map(), done: 0, total: 0, approved: 0, review: 0, invalid: 0, doneRequested: false, timestamp: new Date() });
 
 /** n8n's 'start' ping. n8n runs this leaf node LAST (not first), so it must NEVER
  *  reset or create a run — that would wipe the ticks. The real total comes from the
@@ -116,15 +119,34 @@ const startRun = (brandId, agentId, total = 0) => {
   // else: no live/mid run → do nothing (batch_total on feeds drives the counter)
 };
 
-/** One invoice (or a small batch) just landed — accumulate and push live progress.
- *  `total` = the batch size n8n sends on every feed call, so the very first feed
- *  gives us the correct "of N" denominator without depending on the start ping. */
-const feedTick = (brandId, agentId, { approved = 0, review = 0, invalid = 0, total = 0 } = {}) => {
+// Status precedence when the SAME invoice shows up across multiple line-item feeds.
+const INV_STATUS_RANK = { 'Approved': 0, 'Needs Review': 1, 'Invalid': 2 };
+const INV_RANK_STATUS = ['Approved', 'Needs Review', 'Invalid'];
+
+/** One feed call (a batch of line-item rows) just landed. We count DISTINCT
+ *  INVOICES — by invoice_number, falling back to the Drive file link — not rows,
+ *  because n8n loops per line item and a single invoice can arrive across several
+ *  feed calls. `total` = the batch_total n8n sends = number of invoices in the run,
+ *  so the "of N" denominator is correct from the very first feed. */
+const feedTick = (brandId, agentId, { items = [], total = 0 } = {}) => {
   const key = getKey(brandId, agentId);
   let st = processingState.get(key);
   if (shouldStartFresh(st)) st = freshState();
-  st.approved += approved; st.review += review; st.invalid += invalid;
-  st.done += approved + review + invalid;
+  if (!st.invoices) st.invoices = new Map();
+  for (const it of (items || [])) {
+    const inv = String(it.invoice_number || '').trim()
+      || String(it.invoice_link || '').trim()
+      || `__row_${st.invoices.size}`;
+    const rank = INV_STATUS_RANK[it.status] ?? 1;
+    const prevRank = st.invoices.has(inv) ? INV_STATUS_RANK[st.invoices.get(inv)] : -1;
+    if (rank > prevRank) st.invoices.set(inv, INV_RANK_STATUS[rank]); // keep the worst status seen
+  }
+  let approved = 0, review = 0, invalid = 0;
+  for (const s of st.invoices.values()) {
+    if (s === 'Approved') approved++; else if (s === 'Needs Review') review++; else invalid++;
+  }
+  st.approved = approved; st.review = review; st.invalid = invalid;
+  st.done = st.invoices.size;                       // distinct invoices seen so far
   st.total = Math.max(st.total || 0, total || 0, st.done);
   st.timestamp = new Date();
   processingState.set(key, st);

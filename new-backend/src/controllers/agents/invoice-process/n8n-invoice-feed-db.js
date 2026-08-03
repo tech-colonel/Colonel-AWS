@@ -258,7 +258,14 @@ const feedInvoicesFromN8n = async (req, res, next) => {
             (Array.isArray(req.body) ? (req.body[0] && req.body[0].batch_total)
                 : (req.body.processed_invoices && req.body.processed_invoices[0] && req.body.processed_invoices[0].batch_total))
         ) || 0;
-        feedTick(resolvedBrandId, resolvedAgentId, { approved: approvedCount, review: reviewCount, invalid: corruptedResult.length, total: batchTotal });
+        // Feed live progress by DISTINCT invoice (not line-item rows). n8n loops per
+        // line item, so one invoice can span several feed calls — dedupe by
+        // invoice_number (fallback: Drive file link) so "X of N" counts invoices.
+        const feedItems = [
+            ...finalData.map((r) => ({ invoice_number: r.invoice_number, invoice_link: r.invoice_link, status: r.status })),
+            ...corruptedRows.map((r) => ({ invoice_number: r.invoice_number, invoice_link: r.invoice_link, status: 'Invalid' })),
+        ];
+        feedTick(resolvedBrandId, resolvedAgentId, { items: feedItems, total: batchTotal });
         clearExecution(resolvedBrandId, resolvedAgentId);
 
         console.log(`[n8n feed] ✅ Fed. +Approved: ${approvedCount}, +Needs Review: ${reviewCount}, +Invalid: ${corruptedResult.length}`);
