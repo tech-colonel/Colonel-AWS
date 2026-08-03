@@ -775,6 +775,49 @@ async function amazonB2CProcessor(
     }
 
     // ==================================
+    // STEP 9.5: CREATE GSTR1 WORKING SHEET (EXCELJS)
+    // Same grouping as the GSTR HSN sheet above, but state-wise: the Quantity
+    // column is replaced with Ship To State (added to the group key too, so
+    // rows for the same HSN/rate but different destination states don't get
+    // merged). Uses the raw Ship To State column (shipToStateCol), not the
+    // Bill-preferring toStateCol — B2B uses Bill To State instead.
+    // ==================================
+    const gstr1Sheet = workbook.addWorksheet('gstr1-working');
+    const gstr1Map = {};
+    filteredRows.forEach((row) => {
+      const sellerGstin = String(row['Seller Gstin'] || '').trim();
+      const hsn = String(row['Hsn/sac'] || '').trim();
+      const totalRate = Number(row['Cgst Rate'] || 0) + Number(row['Sgst Rate'] || 0) + Number(row['Igst Rate'] || 0);
+      const normalizedRate = Number(totalRate.toFixed(2));
+      const shipToState = String(row[shipToStateCol] || '').trim();
+      const key = `${sellerGstin}|${hsn}|${normalizedRate}|${shipToState}`;
+      if (!gstr1Map[key]) {
+        gstr1Map[key] = {
+          'Seller Gstin': sellerGstin,
+          'Hsn/sac': hsn,
+          'Rate': normalizedRate,
+          'Ship To State': shipToState,
+          'Final Taxable Sales Value': 0,
+          'Final CGST Tax': 0,
+          'Final SGST Tax': 0,
+          'Final IGST Tax': 0
+        };
+      }
+      gstr1Map[key]['Final Taxable Sales Value'] += Number(row['Final Taxable Sales Value'] || 0);
+      gstr1Map[key]['Final CGST Tax'] += Number(row['Final CGST Tax'] || 0);
+      gstr1Map[key]['Final SGST Tax'] += Number(row['Final SGST Tax'] || 0);
+      gstr1Map[key]['Final IGST Tax'] += Number(row['Final IGST Tax'] || 0);
+    });
+    const gstr1Data = Object.values(gstr1Map);
+    if (gstr1Data.length > 0) {
+      const gstr1Headers = ['Seller Gstin', 'Hsn/sac', 'Rate', 'Ship To State', 'Final Taxable Sales Value', 'Final CGST Tax', 'Final SGST Tax', 'Final IGST Tax'];
+      gstr1Sheet.addRow(gstr1Headers);
+      gstr1Data.forEach(row => {
+        gstr1Sheet.addRow(gstr1Headers.map(h => row[h]));
+      });
+    }
+
+    // ==================================
     // STEP 10: CREATE X2BETA WORKING SHEET (EXCELJS)
     // Matches the real Tally "X2Beta" e-invoice import template (verified against the
     // accountant's own "Excel to tally" reference sheet, 108 columns).
