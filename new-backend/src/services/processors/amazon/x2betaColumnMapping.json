@@ -1,0 +1,45 @@
+{
+  "_meta": {
+    "sheet_name": "x2beta working",
+    "purpose": "Documents the real Tally 'X2Beta' e-invoice import template columns and how amazonB2BProcessor.js / amazonB2CProcessor.js derive each one. Verified against the accountant's own reference file ('Amazon B2B& B2C & STR Sales Working-April 2026.xlsx', sheet 'Excel to tally', 108 columns) — row-by-row math confirmed against real sample rows.",
+    "superseded_note": "An earlier version of this doc described a different, incorrect 76-column layout based on a garbled paste. That version was wrong and has been fully replaced.",
+    "source_of_truth": "The actual code in amazonB2BProcessor.js / amazonB2CProcessor.js (STEP 10) is authoritative; this file is a companion explanation, kept in sync manually.",
+    "known_gaps": [
+      "The Name/Address/State/Country/PIN/Place of Supply/GST Type/GSTIN ledger-master block (3 repeated blocks, ~25 columns) is left blank in both processors. It doesn't correlate with Seller Gstin, buyer GSTIN, or any per-row field checked against the reference file — user confirmed leaving it blank pending a real source.",
+      "B2C's Vch No/Ref No reuse the existing 'Final Invoice No.' field rather than the reference file's own AMZ-{ShipToStateCode}-{rank} series, since that needs a per-Ship-To-State short code the Ledger Master upload doesn't currently store. User confirmed this tradeoff.",
+      "'Unit' is hardcoded to 'Pcs' — Amazon MTR reports carry no UOM column, and the reference file uses 'Pcs' for every row."
+    ],
+    "separately_flagged_bug": "amazonB2BProcessor.js classifies intra/inter-state (for Final CGST/SGST/IGST Tax) using Bill From/To State instead of Ship From/To State, unlike B2C which already uses Ship state. This silently zeroes tax on rows where Bill state differs from Ship state. Confirmed via the reference file. User asked to leave this for a separate task — the x2beta sheet's own Party Ledger/Vch No use Ship-state-based classification (correct), but the underlying Final CGST/SGST/IGST Tax values it displays still come from the existing (Bill-based) computation."
+  },
+  "columns": [
+    { "index": 0, "header": "Vch. Date* ", "derivation": "Last calendar day of the reco month, as a real Date object (not string)." },
+    { "index": 1, "header": "Vch. Type*", "derivation": "`{CN- if credit note}Sales-{sellerStateAbbr}`, e.g. 'CN-Sales-KA'. Credit note = Final Taxable Sales Value < 0. sellerStateAbbr = 2-letter state code derived from the Seller Gstin's own state prefix." },
+    { "index": 2, "header": "Vch. No.*", "derivation": "B2B: `AMZ-{Intra|Inter}-{CN- if credit note}{stateRank}`, where isIntra is based on Ship From/To State (not Bill) and stateRank is the alphabetical rank (1,2,3...) of the seller's state among all seller states seen this run. B2C: reuses the existing 'Final Invoice No.' field as-is (see known_gaps)." },
+    { "index": 3, "header": "Ref. No.", "derivation": "Same value as Vch. No.*" },
+    { "index": 4, "header": "Ref. Date", "derivation": "Same value as Vch. Date*" },
+    { "index": 5, "header": "Is CN?", "derivation": "'Yes' if credit note, else blank." },
+    { "index": 6, "header": "Is Vch?", "derivation": "Always blank — confirmed always null across every row in the reference file." },
+    { "index": 7, "header": "Party Ledger*", "derivation": "B2B: `Amazon B2B {Intra|Inter}-State (Debtor)-{sellerStateAbbr}` (isIntra via Ship From/To State). B2C: the config-driven 'Ship To State Tally Ledger' field as-is (e.g. 'Amazon Pay Andaman & Nicobar Islands'), no fixed suffix." },
+    { "index": 8, "header": "Sales Ledger*", "derivation": "`Sales Amazon-{sellerStateAbbr} {gstRatePercent}%`, e.g. 'Sales Amazon-KA 5%'." },
+    { "index": 9, "header": "Stock Item", "derivation": "FG code from the SKU->FG master lookup; falls back to raw Item Description when unmapped." },
+    { "index": 10, "header": "Description", "derivation": "Always blank." },
+    { "index": 11, "header": "Godown", "derivation": "Raw 'Ship From State' value, as-is." },
+    { "index": 12, "header": "Quantity", "derivation": "Original (un-flipped) quantity — positive even for Refund rows." },
+    { "index": 13, "header": "Rate", "derivation": "abs(Final Taxable Sales Value) / quantity — ALWAYS POSITIVE. Sign lives only in Amount*, not Rate." },
+    { "index": 14, "header": "Unit", "derivation": "Fixed 'Pcs' (see known_gaps)." },
+    { "index": 15, "header": "Discount", "derivation": "Always blank." },
+    { "index": 16, "header": "Amount*", "derivation": "Signed Final Taxable Sales Value (excludes shipping — shipping is a separate voucher via the existing amazon-*-shipping-tally-ready sheet)." },
+    { "index": 17, "header": "Discount", "derivation": "Duplicate header, always blank." },
+    { "index": "18+", "header": "Output IGST/CGST/SGST {rate}%-{stateAbbr} (dynamic)", "derivation": "One triplet per (GST rate, seller-state) combination actually present in this run's data, states sorted alphabetically. Correctly recomputes the GST rate as Cgst Rate + Sgst Rate + Igst Rate per row (NOT the pre-existing row-level 'Final Tax rate' field, which is wrong for intra-state rows — see _meta)." },
+    { "header": "(2 blank columns)", "derivation": "Always blank, matches reference file structure." },
+    { "header": "Narration", "derivation": "B2B: 'Amz-B2B-{month}'. B2C: 'B2C-{month}' (no 'Amz-' prefix — confirmed different between the two)." },
+    { "header": "Taxability, GST Nature, Cess, RCM?, HSN Desc, Supply Type, Cost Category, Cost Centre", "derivation": "Always blank (matches reference; user chose not to populate these)." },
+    { "header": "GST Rate", "derivation": "(Cgst Rate + Sgst Rate + Igst Rate) * 100, e.g. 5. Populated per user's request even though the reference file itself leaves this blank." },
+    { "header": "HSN", "derivation": "Raw 'Hsn/sac' column. Populated per user's request." },
+    { "header": "Name/Address 1/Address 2/State/Country/PIN Code/Place of Supply/GST Type/GSTIN (block 1, 9 cols)", "derivation": "Always blank — source unconfirmed, see known_gaps." },
+    { "header": "Name/Address 1/Address 2/State/Country/PIN Code/Place/GSTIN (block 2, 8 cols)", "derivation": "Always blank — same reason." },
+    { "header": "Name/Address 1/Address 2/State/Country/PIN Code/Place/GSTIN (block 3, 8 cols)", "derivation": "Always blank — same reason." },
+    { "header": "DN No. through Orig. Inv. Date (dispatch / e-way-bill / transport fields, ~39 cols)", "derivation": "Always blank — confirmed always null in every row of the reference file; not used by this business." }
+  ],
+  "reconciliation_check": "After building the sheet, both processors sum Amount*/Output IGST/Output CGST/Output SGST across all rows and compare against the pivot sheet's Final Taxable Sales Value / Final IGST Tax / Final CGST Tax / Final SGST Tax sums, warning via console.warn if they differ by more than 0.01. This caught a real bug during development (see _meta.separately_flagged_bug) — a mismatch does not necessarily mean the x2beta sheet is wrong; it can also mean the underlying shared computation is wrong, since both sides ultimately read from the same 'Final ...' fields."
+}

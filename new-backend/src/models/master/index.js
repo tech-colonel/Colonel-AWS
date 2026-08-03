@@ -139,7 +139,8 @@ const AgentWorkflow = masterSequelize.define('AgentWorkflow', {
   description:    { type: DataTypes.TEXT },
   sample_columns: { type: DataTypes.JSONB, defaultValue: [] },
   columns:        { type: DataTypes.JSONB, defaultValue: [] },
-  sheets:         { type: DataTypes.JSONB, defaultValue: [] }
+  sheets:         { type: DataTypes.JSONB, defaultValue: [] },
+  file_inputs:    { type: DataTypes.JSONB, defaultValue: [] }
 }, {
   tableName: 'agent_workflows',
   freezeTableName: true
