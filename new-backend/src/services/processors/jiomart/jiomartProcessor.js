@@ -166,6 +166,42 @@ async function jiomartProcessor(
     'GSTR HSN'
   );
 
+  /* -------------------------
+     STEP 8 GSTR HSN BY SELLER GSTIN
+  -------------------------- */
+
+  const hsnBySellerMap = {};
+  working.forEach(r => {
+    const sellerGstin = String(r['Seller GSTIN'] || '').trim();
+    const hsn = String(r['HSN Code'] || '').trim();
+    const rate = num(r['Final GST Rate']);
+    const key = `${sellerGstin}|${hsn}|${rate}`;
+    if (!hsnBySellerMap[key]) {
+      hsnBySellerMap[key] = {
+        'Seller Gstin': sellerGstin,
+        'Hsn/sac': hsn,
+        'Rate': rate,
+        'Quantity': 0,
+        'Final Taxable Sales Value': 0,
+        'Final CGST Tax': 0,
+        'Final SGST Tax': 0,
+        'Final IGST Tax': 0
+      };
+    }
+    hsnBySellerMap[key]['Quantity'] += num(r['Item Quantity']);
+    hsnBySellerMap[key]['Final Taxable Sales Value'] += num(r['Taxable Value (Final Invoice Amount -Taxes)']);
+    hsnBySellerMap[key]['Final CGST Tax'] += num(r['CGST Amount']);
+    hsnBySellerMap[key]['Final SGST Tax'] += num(r['SGST Amount (Or UTGST as applicable)']);
+    hsnBySellerMap[key]['Final IGST Tax'] += num(r['IGST Amount']);
+  });
+  const gstrHsnBySellerGstin = Object.values(hsnBySellerMap);
+
+  XLSX.utils.book_append_sheet(
+    wb,
+    XLSX.utils.json_to_sheet(gstrHsnBySellerGstin),
+    'jiomart-gstr-hsn'
+  );
+
   return {
 
     outputWorkbook: wb,
@@ -173,6 +209,7 @@ async function jiomartProcessor(
     workingSheetData: working,
     gstrB2C: gstrB2C,
     gstrHSN: gstrHSN,
+    gstrHsnBySellerGstin: gstrHsnBySellerGstin,
     uniqueProductIds: []
 
   };

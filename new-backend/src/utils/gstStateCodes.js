@@ -51,7 +51,26 @@ function getStateCodeFromName(stateName) {
   return STATE_NAME_TO_CODE[key] || null;
 }
 
+// 2-digit GST jurisdiction code -> short state abbreviation (e.g. for GSTIN-derived Tally column suffixes)
+const GST_STATE_ABBR = {
+  "01": "JK", "02": "HP", "03": "PB", "04": "CG", "05": "UK",
+  "06": "HR", "07": "DL", "08": "RJ", "09": "UP", "10": "BR",
+  "11": "SK", "12": "AR", "13": "NL", "14": "MN", "15": "MZ",
+  "16": "TR", "17": "MG", "18": "AS", "19": "WB", "20": "JH",
+  "21": "OR", "22": "CH", "23": "MP", "24": "GJ", "26": "DN",
+  "27": "MH", "29": "KA", "30": "GA", "31": "LD", "32": "KL",
+  "33": "TN", "34": "PY", "35": "AN", "36": "TS", "37": "AP",
+  "38": "LA", "97": "OT", "99": "OC"
+};
+
+function getStateAbbr(code) {
+  if (!code) return null;
+  return GST_STATE_ABBR[String(code).trim()] || null;
+}
+
 module.exports = {
   GST_STATE_CODES,
-  getStateCodeFromName
+  getStateCodeFromName,
+  GST_STATE_ABBR,
+  getStateAbbr
 };

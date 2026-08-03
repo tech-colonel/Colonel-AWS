@@ -1,6 +1,6 @@
 const XLSX = require('xlsx-js-style');
 const ExcelJS = require('exceljs');
-const { getStateCodeFromName } = require('../../../utils/gstStateCodes');
+const { getStateCodeFromName, getStateAbbr } = require('../../../utils/gstStateCodes');
 
 async function amazonB2CProcessor(
   rawFileBuffer,
@@ -642,20 +642,31 @@ async function amazonB2CProcessor(
     const lastDate = getLastDateOfMonth(date);
     const uniqueRates = [...new Set(pivotData.map(row => Number(row['Final Tax rate'] || 0)))].filter(rate => rate > 0);
 
+    function getSellerStateAbbr(gstin) {
+      const code = String(gstin || '').trim().substring(0, 2);
+      return getStateAbbr(code) || code;
+    }
+    const uniqueStateCodes = [...new Set(pivotData.map(row => getSellerStateAbbr(row['Seller Gstin'])))].filter(Boolean);
+
     const tallyRows = pivotData.map(row => {
       const quantity = Number(row['Quantity'] || 0);
       const taxableValue = Number(row['Final Taxable Sales Value'] || 0);
       const rate = Number(row['Final Tax rate'] || 0);
       const ratePerPiece = quantity !== 0 ? taxableValue / quantity : 0;
+      const invoiceNo = row['Final Invoice No.'] || '';
+      const isCreditNote = taxableValue < 0;
+      const vchNo = isCreditNote ? `${invoiceNo}-cn` : invoiceNo;
+      const rowStateAbbr = getSellerStateAbbr(row['Seller Gstin']);
 
       const baseRow = {
         'Vch Date': lastDate,
-        'Vch Type': row['Seller Gstin'] || '',
-        'Vch No.': row['Final Invoice No.'] || '',
-        'Ref No.': row['Final Invoice No.'] || '',
+        'Seller GSTIN': row['Seller Gstin'] || '',
+        'Vch Type': isCreditNote ? 'Credit Note' : 'Sales',
+        'Vch No.': vchNo,
+        'Ref No.': vchNo,
         'Ref Date': lastDate,
         'Party Ledger': row['Ship To State Tally Ledger'] || '',
-        'Sales Ledger': 'Amazon Pay Ledger',
+        'Sales Ledger': 'Sales Amazon',
         'Stock Item': row['FG'] || '',
         'Quantity': quantity,
         'Rate': rate,
@@ -665,9 +676,11 @@ async function amazonB2CProcessor(
 
       uniqueRates.forEach(r => {
         const halfRate = r / 2;
-        baseRow[`CGST ${halfRate}`] = (rate === r) ? Number(row['Final CGST Tax'] || 0) : 0;
-        baseRow[`SGST ${halfRate}`] = (rate === r) ? Number(row['Final SGST Tax'] || 0) : 0;
-        baseRow[`IGST ${r}`] = (rate === r) ? Number(row['Final IGST Tax'] || 0) : 0;
+        uniqueStateCodes.forEach(sc => {
+          baseRow[`Output CGST ${halfRate} ${sc}`] = (rate === r && rowStateAbbr === sc) ? Number(row['Final CGST Tax'] || 0) : 0;
+          baseRow[`Output SGST ${halfRate} ${sc}`] = (rate === r && rowStateAbbr === sc) ? Number(row['Final SGST Tax'] || 0) : 0;
+          baseRow[`Output IGST ${r} ${sc}`] = (rate === r && rowStateAbbr === sc) ? Number(row['Final IGST Tax'] || 0) : 0;
+        });
       });
       return baseRow;
     });
@@ -687,23 +700,30 @@ async function amazonB2CProcessor(
     const shippingTallyRows = pivotData.map(row => {
       const shippingValue = Number(row['Final Taxable Shipping Value'] || 0);
       const rate = Number(row['Final Tax rate'] || 0);
+      const invoiceNo = row['Final Invoice No.'] || '';
+      const isCreditNote = shippingValue < 0;
+      const vchNo = isCreditNote ? `${invoiceNo}-cn` : invoiceNo;
+      const rowStateAbbr = getSellerStateAbbr(row['Seller Gstin']);
       const shippingRow = {
         'Vch Date': lastDate,
-        'Vch Type': row['Seller Gstin'] || '',
-        'Vch No.': row['Final Invoice No.'] || '',
-        'Ref No.': row['Final Invoice No.'] || '',
+        'Seller GSTIN': row['Seller Gstin'] || '',
+        'Vch Type': isCreditNote ? 'Credit Note' : 'Sales',
+        'Vch No.': vchNo,
+        'Ref No.': vchNo,
         'Ref Date': lastDate,
         'Party Ledger': row['Ship To State Tally Ledger'] || '',
-        'Sales Ledger': 'Amazon Pay Ledger',
+        'Sales Ledger': 'Sales Amazon',
         'Rate': rate,
         'Amount': shippingValue
       };
 
       uniqueRates.forEach(r => {
         const halfRate = Number((r / 2).toFixed(4));
-        shippingRow[`CGST ${halfRate}`] = (rate === r) ? Number(row['Final Shipping CGST Tax'] || 0) : 0;
-        shippingRow[`SGST ${halfRate}`] = (rate === r) ? Number(row['Final Shipping SGST Tax'] || 0) : 0;
-        shippingRow[`IGST ${r}`] = (rate === r) ? Number(row['Final Shipping IGST Tax'] || 0) : 0;
+        uniqueStateCodes.forEach(sc => {
+          shippingRow[`Output CGST ${halfRate} ${sc}`] = (rate === r && rowStateAbbr === sc) ? Number(row['Final Shipping CGST Tax'] || 0) : 0;
+          shippingRow[`Output SGST ${halfRate} ${sc}`] = (rate === r && rowStateAbbr === sc) ? Number(row['Final Shipping SGST Tax'] || 0) : 0;
+          shippingRow[`Output IGST ${r} ${sc}`] = (rate === r && rowStateAbbr === sc) ? Number(row['Final Shipping IGST Tax'] || 0) : 0;
+        });
       });
       return shippingRow;
     });
@@ -754,13 +774,181 @@ async function amazonB2CProcessor(
       });
     }
 
+    // ==================================
+    // STEP 10: CREATE X2BETA WORKING SHEET (EXCELJS)
+    // Matches the real Tally "X2Beta" e-invoice import template (verified against the
+    // accountant's own "Excel to tally" reference sheet, 108 columns).
+    // ==================================
+    const x2betaSheet = workbook.addWorksheet('x2beta working');
+
+    function getLastDateObjX2beta() {
+      let dYear, dMonth;
+      if (formMonth && formYear) {
+        dYear = parseInt(formYear);
+        dMonth = parseInt(monthMapping[formMonth] || formMonth);
+      } else {
+        const dateObj = new Date(date);
+        dYear = dateObj.getFullYear();
+        dMonth = dateObj.getMonth() + 1;
+      }
+      return new Date(dYear, dMonth, 0);
+    }
+    const x2betaVchDate = getLastDateObjX2beta();
+
+    // The row-level 'Final Tax rate' field (set earlier as cgstRate + igstRate, deliberately
+    // skipping sgstRate) is only correct for inter-state rows; for intra-state rows it's half
+    // the true rate. pivotData's own 'Final Tax rate' sums all three correctly — recompute the
+    // same way here instead of trusting the row-level field.
+    const getRowGstRate = row => Number(row['Cgst Rate'] || 0) + Number(row['Sgst Rate'] || 0) + Number(row['Igst Rate'] || 0);
+
+    // State-rank: alphabetical position (1-indexed) of a seller-state-abbr among all seller
+    // states seen this run (matches the reference file's alphabetical HR/KA/MH/UP convention).
+    const sortedStateCodes = [...uniqueStateCodes].sort();
+
+    const x2betaColumns = [
+      { header: 'Vch. Date* ', get: () => x2betaVchDate },
+      { header: 'Vch. Type*', get: r => `${Number(r['Final Taxable Sales Value'] || 0) < 0 ? 'CN-' : ''}Sales-${getSellerStateAbbr(r['Seller Gstin']) || ''}` },
+      // Vch No/Ref No reuse the existing Final Invoice No. as-is (per user decision) rather than
+      // the reference file's own AMZ-{ShipToStateCode}-{rank} series, which needs a per-state
+      // short-code lookup the Ledger Master upload doesn't currently carry.
+      { header: 'Vch. No.*', get: r => r['Final Invoice No.'] || '' },
+      { header: 'Ref. No.', get: r => r['Final Invoice No.'] || '' },
+      { header: 'Ref. Date', get: () => x2betaVchDate },
+      { header: 'Is CN?', get: r => (Number(r['Final Taxable Sales Value'] || 0) < 0 ? 'Yes' : null) },
+      { header: 'Is Vch?', get: () => null },
+      // Party Ledger is fully config-driven for B2C (Ship To State Tally Ledger, from the
+      // Ledger Master upload) — no fixed "Amazon B2C Intra/Inter-State" text, unlike B2B.
+      { header: 'Party Ledger*', get: r => r['Ship To State Tally Ledger'] || '' },
+      { header: 'Sales Ledger*', get: r => `Sales Amazon-${getSellerStateAbbr(r['Seller Gstin']) || ''} ${Math.round(getRowGstRate(r) * 10000) / 100}%` },
+      { header: 'Stock Item', get: r => r['FG'] || r['Item Description'] || '' },
+      { header: 'Description', get: () => null },
+      { header: 'Godown', get: r => r['Ship From State'] || '' },
+      { header: 'Quantity', get: r => (r[transactionColumn] === 'Refund' ? Math.abs(Number(r[quantityColumn] || 0)) : Number(r[quantityColumn] || 0)) },
+      {
+        // Unit rate is always positive — sign lives in Amount*, not Rate.
+        header: 'Rate',
+        get: r => {
+          const qty = r[transactionColumn] === 'Refund' ? Math.abs(Number(r[quantityColumn] || 0)) : Number(r[quantityColumn] || 0);
+          return qty !== 0 ? Math.abs(Number(r['Final Taxable Sales Value'] || 0) / qty) : 0;
+        }
+      },
+      // 'Pcs' is a fixed default — Amazon MTR reports carry no unit-of-measure column, and every
+      // row in the accountant's reference file uses 'Pcs'. Revisit if a brand ever needs another UOM.
+      { header: 'Unit', get: () => 'Pcs' },
+      { header: 'Discount', get: () => null },
+      { header: 'Amount*', get: r => Number(r['Final Taxable Sales Value'] || 0) },
+      { header: 'Discount', get: () => null }
+    ];
+
+    // Dynamic Output IGST/CGST/SGST columns — one triplet per (rate, seller-state) combination
+    // actually present in this run's data, states sorted alphabetically (matches the reference
+    // file's fixed HR/KA/MH/UP column order).
+    uniqueRates.forEach(r => {
+      const ratePercent = Math.round(r * 10000) / 100;
+      const halfRatePercent = Math.round((ratePercent / 2) * 100) / 100;
+      sortedStateCodes.forEach(sc => {
+        x2betaColumns.push({
+          header: `Output IGST ${ratePercent}%-${sc}`,
+          get: row => (getRowGstRate(row) === r && getSellerStateAbbr(row['Seller Gstin']) === sc) ? Number(row['Final IGST Tax'] || 0) : 0
+        });
+        x2betaColumns.push({
+          header: `Output CGST ${halfRatePercent}%-${sc}`,
+          get: row => (getRowGstRate(row) === r && getSellerStateAbbr(row['Seller Gstin']) === sc) ? Number(row['Final CGST Tax'] || 0) : 0
+        });
+        x2betaColumns.push({
+          header: `Output SGST ${halfRatePercent}%-${sc}`,
+          get: row => (getRowGstRate(row) === r && getSellerStateAbbr(row['Seller Gstin']) === sc) ? Number(row['Final SGST Tax'] || 0) : 0
+        });
+      });
+    });
+
+    x2betaColumns.push(
+      { header: null, get: () => null },
+      { header: null, get: () => null },
+      // Confirmed different from B2B's "Amz-B2B-{month}" — B2C narration has no "Amz-" prefix.
+      { header: 'Narration', get: () => `B2C-${formMonth || ''}` },
+      { header: 'Taxability', get: () => null },
+      { header: 'GST Nature', get: () => null },
+      { header: 'GST Rate', get: r => Math.round(getRowGstRate(r) * 10000) / 100 },
+      { header: 'Cess', get: () => null },
+      { header: 'RCM?', get: () => null },
+      { header: 'HSN', get: r => r['Hsn/sac'] || '' },
+      { header: 'HSN Desc', get: () => null },
+      { header: 'Supply Type', get: () => null },
+      { header: 'Cost Category', get: () => null },
+      { header: 'Cost Centre', get: () => null },
+      // Party/Consignee/Buyer ledger-master block (Name/Address/PIN/GSTIN still blank pending a
+      // confirmed master-data source). State/Country are now populated per user request:
+      // State = the row's destination state (Bill To State, falling back to Ship To State),
+      // Country = fixed 'India' (this business only operates domestically).
+      { header: 'Name', get: () => null }, { header: 'Address 1', get: () => null }, { header: 'Address 2', get: () => null },
+      { header: 'State', get: r => r[toStateCol] || '' }, { header: 'Country', get: () => 'India' }, { header: 'PIN Code', get: () => null },
+      { header: 'Place of Supply', get: () => null }, { header: 'GST Type', get: () => null }, { header: 'GSTIN', get: () => null },
+      { header: 'Name', get: () => null }, { header: 'Address 1', get: () => null }, { header: 'Address 2', get: () => null },
+      { header: 'State', get: r => r[toStateCol] || '' }, { header: 'Country', get: () => 'India' }, { header: 'PIN Code', get: () => null },
+      { header: 'Place', get: () => null }, { header: 'GSTIN', get: () => null },
+      { header: 'Name', get: () => null }, { header: 'Address 1', get: () => null }, { header: 'Address 2', get: () => null },
+      { header: 'State', get: r => r[toStateCol] || '' }, { header: 'Country', get: () => 'India' }, { header: 'PIN Code', get: () => null },
+      { header: 'Place', get: () => null }, { header: 'GSTIN', get: () => null },
+      // Dispatch / e-way-bill / transport fields — always blank in the reference file, not used by this business.
+      { header: 'DN No.', get: () => null }, { header: 'DN Date', get: () => null }, { header: 'Doc. No.', get: () => null },
+      { header: 'Dis. Through', get: () => null }, { header: 'Destination', get: () => null }, { header: 'Carrier Name', get: () => null },
+      { header: 'LR No.', get: () => null }, { header: 'LR Date', get: () => null }, { header: 'Order No.', get: () => null },
+      { header: 'Order Date', get: () => null }, { header: 'Term of Delivery', get: () => null }, { header: 'Terms of Paymemt', get: () => null },
+      { header: 'Other Ref.', get: () => null }, { header: 'Place of Receipt', get: () => null }, { header: 'Vessel/Flight No.', get: () => null },
+      { header: 'Port of Loading', get: () => null }, { header: 'Port of Discharge', get: () => null }, { header: 'Country to', get: () => null },
+      { header: 'Shipping Bill No.', get: () => null }, { header: 'Date', get: () => null }, { header: 'Port Code', get: () => null },
+      { header: 'e-Way Bill No', get: () => null }, { header: 'Date', get: () => null }, { header: 'Cons. e-Way Bill No.', get: () => null },
+      { header: 'Date', get: () => null }, { header: 'Sub Type', get: () => null }, { header: 'Doc. Type', get: () => null },
+      { header: 'Distance (KM)', get: () => null }, { header: 'Transporter Name', get: () => null }, { header: 'Transporter ID', get: () => null },
+      { header: 'Transport Mode', get: () => null }, { header: 'Doc No.', get: () => null }, { header: 'Date', get: () => null },
+      { header: 'Vehicle No.', get: () => null }, { header: 'Vehicle Type', get: () => null }, { header: 'Status', get: () => null },
+      { header: 'Note Reason', get: () => null }, { header: 'Orig. Inv. No.', get: () => null }, { header: 'Orig. Inv. Date', get: () => null }
+    );
+
+    const x2betaHeaders = x2betaColumns.map(c => c.header);
+    x2betaSheet.addRow(x2betaHeaders);
+    filteredRows.forEach(row => {
+      x2betaSheet.addRow(x2betaColumns.map(c => c.get(row)));
+    });
+    x2betaSheet.getColumn(1).numFmt = 'dd/mm/yyyy';
+    x2betaSheet.getColumn(5).numFmt = 'dd/mm/yyyy';
+
+    // ==================================
+    // VALIDATION: x2beta sheet totals must reconcile with the pivot/tally-ready totals
+    // ==================================
+    const x2betaOutputCols = x2betaColumns.filter(c => typeof c.header === 'string' && c.header.startsWith('Output '));
+    const sumX2betaOutput = prefix => filteredRows.reduce((acc, row) => {
+      return acc + x2betaOutputCols
+        .filter(c => c.header.startsWith(prefix))
+        .reduce((rowAcc, c) => rowAcc + Number(c.get(row) || 0), 0);
+    }, 0);
+    const sumPivot = key => pivotData.reduce((acc, r) => acc + Number(r[key] || 0), 0);
+
+    const reconciliationChecks = [
+      ['Amount* (taxable value)', filteredRows.reduce((acc, r) => acc + Number(r['Final Taxable Sales Value'] || 0), 0), sumPivot('Final Taxable Sales Value')],
+      ['IGST', sumX2betaOutput('Output IGST'), sumPivot('Final IGST Tax')],
+      ['CGST', sumX2betaOutput('Output CGST'), sumPivot('Final CGST Tax')],
+      ['SGST', sumX2betaOutput('Output SGST'), sumPivot('Final SGST Tax')]
+    ];
+    const RECONCILIATION_TOLERANCE = 0.01;
+    reconciliationChecks.forEach(([label, x2betaTotal, mainTotal]) => {
+      if (Math.abs(x2betaTotal - mainTotal) > RECONCILIATION_TOLERANCE) {
+        console.warn(`[Amazon B2C] x2beta working sheet ${label} mismatch: x2beta=${x2betaTotal.toFixed(2)}, main=${mainTotal.toFixed(2)}`);
+      }
+    });
+
     // ================================
     // RETURN STRUCTURE EXPECTED BY CONTROLLER
     // ================================
     return {
       workbook,               // ExcelJS with all sheets
       process1Json: filteredRows,
-      pivotData: pivotData
+      pivotData: pivotData,
+      x2betaData: {
+        headers: x2betaHeaders,
+        rows: filteredRows.map(row => x2betaColumns.map(c => c.get(row)))
+      }
     };
 
   } catch (error) {
