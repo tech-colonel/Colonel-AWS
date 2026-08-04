@@ -1,4 +1,5 @@
 const XLSX = require('xlsx-js-style');
+const { getStateCodeFromName, getStateAbbr } = require('../../../utils/gstStateCodes');
 
 function safeNumber(value) {
   if (value === null || value === undefined || value === '') return 0;
@@ -238,7 +239,132 @@ async function creadProcessor(
   const afterPivotSheet = buildAfterPivotSheet(pivotData);
   XLSX.utils.book_append_sheet(outputWorkbook, afterPivotSheet, '4. After Pivot');
 
+  // Sheet 6: X2Beta working — same 108-column Tally e-invoice import template
+  // used by the other marketplace processors.
+  const x2betaSheet = buildX2betaSheet(workingData, month, year, sellingState);
+  XLSX.utils.book_append_sheet(outputWorkbook, x2betaSheet, 'x2beta working');
+
   return { outputWorkbook, workingData, pivotData };
+}
+
+// ============================================================
+// X2BETA WORKING SHEET
+// Same 108-column Tally "X2Beta" e-invoice import template used by the
+// other marketplace processors. Cread is a single-GSTIN business (one
+// `sellingState`, not a multi-seller-GSTIN model like Amazon/Flipkart), and
+// its ledger master already resolves a real Party Ledger + Invoice No. per
+// shipping state (see ledgerMap above) — reused directly here rather than
+// synthesized. Returns/cancellations are already excluded upstream
+// (INCLUDED_STATUSES), so there are no negative/CN rows to handle.
+// ============================================================
+function buildX2betaSheet(workingData, month, year, sellingState) {
+  const monthNum = MONTH_NUM[safeString(month).toLowerCase()];
+  const yearNum = parseInt(year, 10);
+  const fallbackVchDate = (monthNum && !isNaN(yearNum)) ? new Date(yearNum, Number(monthNum), 0) : new Date();
+
+  function rowVchDate(row) {
+    const d = row['Order Date'] instanceof Date ? row['Order Date'] : new Date(row['Order Date']);
+    if (!isNaN(d?.getTime?.())) return d;
+    return fallbackVchDate;
+  }
+
+  function rowRate(row) {
+    const taxable = safeNumber(row['Taxable Amount']);
+    const totalTax = safeNumber(row['CGST ']) + safeNumber(row['SGST']) + safeNumber(row['IGST']);
+    return taxable > 0 ? snapGstRate(totalTax / taxable) : 0;
+  }
+
+  const sellerCode = getStateCodeFromName(sellingState);
+  const sellerStateAbbr = (sellerCode && getStateAbbr(sellerCode)) || safeString(sellingState);
+
+  const uniqueRates = [...new Set(workingData.map(r => Math.round(rowRate(r) * 100)))].filter(r => r > 0).map(r => r / 100);
+
+  const x2betaColumns = [
+    { header: 'Vch. Date* ', get: r => rowVchDate(r) },
+    { header: 'Vch. Type*', get: () => `Sales-${sellerStateAbbr}` },
+    { header: 'Vch. No.*', get: r => r['Invoice No.'] || '' },
+    { header: 'Ref. No.', get: r => r['Invoice No.'] || '' },
+    { header: 'Ref. Date', get: r => rowVchDate(r) },
+    { header: 'Is CN?', get: () => null },
+    { header: 'Is Vch?', get: () => null },
+    { header: 'Party Ledger*', get: r => r['Party Name'] || '' },
+    { header: 'Sales Ledger*', get: r => `Sales Cread-${sellerStateAbbr} ${Math.round(rowRate(r) * 10000) / 100}%` },
+    { header: 'Stock Item', get: r => r['Final SKU'] || '' },
+    { header: 'Description', get: () => null },
+    { header: 'Godown', get: () => sellingState || '' },
+    { header: 'Quantity', get: r => Number(r['Suborder Quantity'] || 0) },
+    {
+      header: 'Rate',
+      get: r => {
+        const qty = Number(r['Suborder Quantity'] || 0);
+        return qty !== 0 ? Math.abs(Number(r['Taxable Amount'] || 0) / qty) : 0;
+      }
+    },
+    { header: 'Unit', get: () => 'Pcs' },
+    { header: 'Discount', get: () => null },
+    { header: 'Amount*', get: r => Number(r['Taxable Amount'] || 0) },
+    { header: 'Discount', get: () => null }
+  ];
+
+  uniqueRates.forEach(rate => {
+    const ratePercent = Math.round(rate * 10000) / 100;
+    const halfRatePercent = Math.round((ratePercent / 2) * 100) / 100;
+    x2betaColumns.push({
+      header: `Output IGST ${ratePercent}%-${sellerStateAbbr}`,
+      get: row => (Math.round(rowRate(row) * 100) === Math.round(rate * 100)) ? Number(row['IGST'] || 0) : 0
+    });
+    x2betaColumns.push({
+      header: `Output CGST ${halfRatePercent}%-${sellerStateAbbr}`,
+      get: row => (Math.round(rowRate(row) * 100) === Math.round(rate * 100)) ? Number(row['CGST '] || 0) : 0
+    });
+    x2betaColumns.push({
+      header: `Output SGST ${halfRatePercent}%-${sellerStateAbbr}`,
+      get: row => (Math.round(rowRate(row) * 100) === Math.round(rate * 100)) ? Number(row['SGST'] || 0) : 0
+    });
+  });
+
+  x2betaColumns.push(
+    { header: null, get: () => null },
+    { header: null, get: () => null },
+    { header: 'Narration', get: () => `Cread-${month || ''}-${year || ''}` },
+    { header: 'Taxability', get: () => null },
+    { header: 'GST Nature', get: () => null },
+    { header: 'GST Rate', get: r => Math.round(rowRate(r) * 10000) / 100 },
+    { header: 'Cess', get: () => null },
+    { header: 'RCM?', get: () => null },
+    // Cread's source report carries no HSN column — left blank rather than fabricated.
+    { header: 'HSN', get: () => null },
+    { header: 'HSN Desc', get: () => null },
+    { header: 'Supply Type', get: () => null },
+    { header: 'Cost Category', get: () => null },
+    { header: 'Cost Centre', get: () => null },
+    { header: 'Name', get: () => null }, { header: 'Address 1', get: () => null }, { header: 'Address 2', get: () => null },
+    { header: 'State', get: r => r['Shipping States'] || '' }, { header: 'Country', get: () => 'India' }, { header: 'PIN Code', get: r => r['Shipping Zip Code'] || null },
+    { header: 'Place of Supply', get: r => r['Shipping States'] || '' }, { header: 'GST Type', get: () => null }, { header: 'GSTIN', get: () => null },
+    { header: 'Name', get: () => null }, { header: 'Address 1', get: () => null }, { header: 'Address 2', get: () => null },
+    { header: 'State', get: r => r['Shipping States'] || '' }, { header: 'Country', get: () => 'India' }, { header: 'PIN Code', get: r => r['Shipping Zip Code'] || null },
+    { header: 'Place', get: () => null }, { header: 'GSTIN', get: () => null },
+    { header: 'Name', get: () => null }, { header: 'Address 1', get: () => null }, { header: 'Address 2', get: () => null },
+    { header: 'State', get: r => r['Shipping States'] || '' }, { header: 'Country', get: () => 'India' }, { header: 'PIN Code', get: r => r['Shipping Zip Code'] || null },
+    { header: 'Place', get: () => null }, { header: 'GSTIN', get: () => null },
+    { header: 'DN No.', get: () => null }, { header: 'DN Date', get: () => null }, { header: 'Doc. No.', get: () => null },
+    { header: 'Dis. Through', get: () => null }, { header: 'Destination', get: () => null }, { header: 'Carrier Name', get: () => null },
+    { header: 'LR No.', get: () => null }, { header: 'LR Date', get: () => null }, { header: 'Order No.', get: r => r['Reference Code'] || null },
+    { header: 'Order Date', get: () => null }, { header: 'Term of Delivery', get: () => null }, { header: 'Terms of Paymemt', get: () => null },
+    { header: 'Other Ref.', get: () => null }, { header: 'Place of Receipt', get: () => null }, { header: 'Vessel/Flight No.', get: () => null },
+    { header: 'Port of Loading', get: () => null }, { header: 'Port of Discharge', get: () => null }, { header: 'Country to', get: () => null },
+    { header: 'Shipping Bill No.', get: () => null }, { header: 'Date', get: () => null }, { header: 'Port Code', get: () => null },
+    { header: 'e-Way Bill No', get: () => null }, { header: 'Date', get: () => null }, { header: 'Cons. e-Way Bill No.', get: () => null },
+    { header: 'Date', get: () => null }, { header: 'Sub Type', get: () => null }, { header: 'Doc. Type', get: () => null },
+    { header: 'Distance (KM)', get: () => null }, { header: 'Transporter Name', get: () => null }, { header: 'Transporter ID', get: () => null },
+    { header: 'Transport Mode', get: () => null }, { header: 'Doc No.', get: () => null }, { header: 'Date', get: () => null },
+    { header: 'Vehicle No.', get: () => null }, { header: 'Vehicle Type', get: () => null }, { header: 'Status', get: () => null },
+    { header: 'Note Reason', get: () => null }, { header: 'Orig. Inv. No.', get: () => null }, { header: 'Orig. Inv. Date', get: () => null }
+  );
+
+  const headers = x2betaColumns.map(c => c.header);
+  const aoa = [headers, ...workingData.map(row => x2betaColumns.map(c => c.get(row)))];
+  return XLSX.utils.aoa_to_sheet(aoa);
 }
 
 function buildWorkingSheet(workingData) {

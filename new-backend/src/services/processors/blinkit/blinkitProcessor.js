@@ -1,4 +1,5 @@
 const XLSX = require('xlsx-js-style');
+const { getStateCodeFromName, getStateAbbr } = require('../../../utils/gstStateCodes');
 
 /**
  * Safe number conversion
@@ -235,6 +236,11 @@ async function blinkitProcessor(
   const hsnReportSheet = XLSX.utils.json_to_sheet(hsnReportData);
   XLSX.utils.book_append_sheet(outputWorkbook, hsnReportSheet, 'HSN');
 
+  // Sheet 4: X2Beta working — same 108-column Tally e-invoice import
+  // template used by the other marketplace processors.
+  const x2betaSheet = buildX2betaSheet(salesReportData, date);
+  XLSX.utils.book_append_sheet(outputWorkbook, x2betaSheet, 'x2beta working');
+
   // Extract unique SKUs and states for database storage
   const uniqueSKUs = new Set();
   const uniqueStates = new Set();
@@ -260,6 +266,134 @@ async function blinkitProcessor(
     uniqueSKUs: Array.from(uniqueSKUs),
     uniqueStates: Array.from(uniqueStates)
   };
+}
+
+// ============================================================
+// X2BETA WORKING SHEET
+// Same 108-column Tally "X2Beta" e-invoice import template used by the
+// other marketplace processors. Blinkit's processor has no ledger master,
+// no seller-state parameter, and no per-row invoice number/HSN-independent
+// identifier at all — unlike every other channel, `stateConfigData` is
+// accepted but never used upstream. The IGST/CGST/SGST split is already
+// computed per row directly from the source file's own tax columns, so it
+// is reused as-is (no seller-state comparison needed to derive it). Party
+// Ledger, Vch No. and the Output-column state dimension are all
+// synthesized from Customer State (the only per-row location field that
+// exists), grouped by month so each state gets one shared voucher number
+// across its line items — the same self-contained-numbering approach
+// Amazon B2B uses when no external invoice-number master is available.
+// ============================================================
+function buildX2betaSheet(salesReportData, date) {
+  let vchDate;
+  let monthPad = '';
+  if (date) {
+    const parsed = new Date(date);
+    if (!isNaN(parsed.getTime())) {
+      vchDate = new Date(parsed.getFullYear(), parsed.getMonth() + 1, 0);
+      monthPad = String(parsed.getMonth() + 1).padStart(2, '0');
+    }
+  }
+  if (!vchDate) vchDate = new Date();
+
+  function rowStateAbbr(row) {
+    const state = row['Customer State'] || '';
+    const code = getStateCodeFromName(state);
+    return (code && getStateAbbr(code)) || safeString(state).toUpperCase();
+  }
+
+  function rowRate(row) {
+    return safeNumber(row['GST Rate']);
+  }
+
+  const uniqueRates = [...new Set(salesReportData.map(r => rowRate(r)))].filter(r => r > 0);
+  const sortedStateCodes = [...new Set(salesReportData.map(r => rowStateAbbr(r)))].filter(Boolean).sort();
+
+  const x2betaColumns = [
+    { header: 'Vch. Date* ', get: () => vchDate },
+    { header: 'Vch. Type*', get: r => `Sales-${rowStateAbbr(r)}` },
+    { header: 'Vch. No.*', get: r => `BLK-${rowStateAbbr(r)}-${monthPad}` },
+    { header: 'Ref. No.', get: r => `BLK-${rowStateAbbr(r)}-${monthPad}` },
+    { header: 'Ref. Date', get: () => vchDate },
+    { header: 'Is CN?', get: () => null },
+    { header: 'Is Vch?', get: () => null },
+    { header: 'Party Ledger*', get: r => `Blinkit Debtor-${rowStateAbbr(r)}` },
+    { header: 'Sales Ledger*', get: r => `Sales Blinkit-${rowStateAbbr(r)} ${rowRate(r)}%` },
+    { header: 'Stock Item', get: r => r['FG'] || '' },
+    { header: 'Description', get: () => null },
+    { header: 'Godown', get: () => null },
+    { header: 'Quantity', get: r => safeNumber(r['Quantity']) },
+    {
+      header: 'Rate',
+      get: r => {
+        const qty = safeNumber(r['Quantity']);
+        return qty !== 0 ? Math.abs(safeNumber(r['Taxable value']) / qty) : 0;
+      }
+    },
+    { header: 'Unit', get: () => 'Pcs' },
+    { header: 'Discount', get: () => null },
+    { header: 'Amount*', get: r => safeNumber(r['Taxable value']) },
+    { header: 'Discount', get: () => null }
+  ];
+
+  uniqueRates.forEach(rate => {
+    const halfRate = Math.round((rate / 2) * 100) / 100;
+    sortedStateCodes.forEach(sc => {
+      x2betaColumns.push({
+        header: `Output IGST ${rate}%-${sc}`,
+        get: row => (rowRate(row) === rate && rowStateAbbr(row) === sc) ? safeNumber(row['IGST Value']) : 0
+      });
+      x2betaColumns.push({
+        header: `Output CGST ${halfRate}%-${sc}`,
+        get: row => (rowRate(row) === rate && rowStateAbbr(row) === sc) ? safeNumber(row['CGST Value']) : 0
+      });
+      x2betaColumns.push({
+        header: `Output SGST ${halfRate}%-${sc}`,
+        get: row => (rowRate(row) === rate && rowStateAbbr(row) === sc) ? safeNumber(row['SGST Value']) : 0
+      });
+    });
+  });
+
+  x2betaColumns.push(
+    { header: null, get: () => null },
+    { header: null, get: () => null },
+    { header: 'Narration', get: () => `Blinkit-${date || ''}` },
+    { header: 'Taxability', get: () => null },
+    { header: 'GST Nature', get: () => null },
+    { header: 'GST Rate', get: r => rowRate(r) },
+    { header: 'Cess', get: () => null },
+    { header: 'RCM?', get: () => null },
+    { header: 'HSN', get: r => r['HSN Code'] || '' },
+    { header: 'HSN Desc', get: () => null },
+    { header: 'Supply Type', get: () => null },
+    { header: 'Cost Category', get: () => null },
+    { header: 'Cost Centre', get: () => null },
+    { header: 'Name', get: () => null }, { header: 'Address 1', get: () => null }, { header: 'Address 2', get: () => null },
+    { header: 'State', get: r => r['Customer State'] || '' }, { header: 'Country', get: () => 'India' }, { header: 'PIN Code', get: () => null },
+    { header: 'Place of Supply', get: r => r['Customer State'] || '' }, { header: 'GST Type', get: () => null }, { header: 'GSTIN', get: () => null },
+    { header: 'Name', get: () => null }, { header: 'Address 1', get: () => null }, { header: 'Address 2', get: () => null },
+    { header: 'State', get: r => r['Customer State'] || '' }, { header: 'Country', get: () => 'India' }, { header: 'PIN Code', get: () => null },
+    { header: 'Place', get: () => null }, { header: 'GSTIN', get: () => null },
+    { header: 'Name', get: () => null }, { header: 'Address 1', get: () => null }, { header: 'Address 2', get: () => null },
+    { header: 'State', get: r => r['Customer State'] || '' }, { header: 'Country', get: () => 'India' }, { header: 'PIN Code', get: () => null },
+    { header: 'Place', get: () => null }, { header: 'GSTIN', get: () => null },
+    { header: 'DN No.', get: () => null }, { header: 'DN Date', get: () => null }, { header: 'Doc. No.', get: () => null },
+    { header: 'Dis. Through', get: () => null }, { header: 'Destination', get: () => null }, { header: 'Carrier Name', get: () => null },
+    { header: 'LR No.', get: () => null }, { header: 'LR Date', get: () => null }, { header: 'Order No.', get: () => null },
+    { header: 'Order Date', get: () => null }, { header: 'Term of Delivery', get: () => null }, { header: 'Terms of Paymemt', get: () => null },
+    { header: 'Other Ref.', get: () => null }, { header: 'Place of Receipt', get: () => null }, { header: 'Vessel/Flight No.', get: () => null },
+    { header: 'Port of Loading', get: () => null }, { header: 'Port of Discharge', get: () => null }, { header: 'Country to', get: () => null },
+    { header: 'Shipping Bill No.', get: () => null }, { header: 'Date', get: () => null }, { header: 'Port Code', get: () => null },
+    { header: 'e-Way Bill No', get: () => null }, { header: 'Date', get: () => null }, { header: 'Cons. e-Way Bill No.', get: () => null },
+    { header: 'Date', get: () => null }, { header: 'Sub Type', get: () => null }, { header: 'Doc. Type', get: () => null },
+    { header: 'Distance (KM)', get: () => null }, { header: 'Transporter Name', get: () => null }, { header: 'Transporter ID', get: () => null },
+    { header: 'Transport Mode', get: () => null }, { header: 'Doc No.', get: () => null }, { header: 'Date', get: () => null },
+    { header: 'Vehicle No.', get: () => null }, { header: 'Vehicle Type', get: () => null }, { header: 'Status', get: () => null },
+    { header: 'Note Reason', get: () => null }, { header: 'Orig. Inv. No.', get: () => null }, { header: 'Orig. Inv. Date', get: () => null }
+  );
+
+  const headers = x2betaColumns.map(c => c.header);
+  const aoa = [headers, ...salesReportData.map(row => x2betaColumns.map(c => c.get(row)))];
+  return XLSX.utils.aoa_to_sheet(aoa);
 }
 
 module.exports = {

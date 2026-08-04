@@ -1,5 +1,6 @@
 'use strict';
 const XLSX = require('xlsx-js-style');
+const { getStateCodeFromName, getStateAbbr } = require('../../../utils/gstStateCodes');
 
 function safeNum(v) {
   if (v === null || v === undefined || v === '') return 0;
@@ -201,6 +202,144 @@ function computeSummary(processedRows) {
 
 const VALUE_KEYS = ['totalSupplyTaxableAmount', 'taxAmountForIGST', 'taxAmountForCGST', 'taxAmountForSGST'];
 
+const MONTH_NUMS = {
+  january: 1, february: 2, march: 3, april: 4, may: 5, june: 6,
+  july: 7, august: 8, september: 9, october: 10, november: 11, december: 12,
+};
+
+function getSellerStateAbbr(gstin) {
+  const code = String(gstin || '').trim().substring(0, 2);
+  return getStateAbbr(code) || code;
+}
+
+function getBuyerStateAbbr(stateName) {
+  const code = getStateCodeFromName(stateName);
+  return (code && getStateAbbr(code)) || String(stateName || '').trim();
+}
+
+// ============================================================
+// X2BETA WORKING SHEET
+// Same 108-column Tally "X2Beta" e-invoice import template used by the
+// other marketplace processors. Built directly from processedRows (one row
+// per line item, already sign-flipped for returns by processVendorSheet)
+// since Limeroad's source report already carries its own invoiceId/
+// invoiceDate/GSTIN per row — no separate ledger-master/invoice-numbering
+// scheme is needed the way Amazon/Flipkart/Myntra require one.
+//
+// Output IGST/CGST/SGST columns are keyed by the *vendor's* (seller's)
+// state, matching the seller-state-keyed Output-column convention used by
+// every other channel's x2beta sheet; the buyer's customerState is used
+// for the State/Place of Supply columns, mirroring Amazon's Ship-To-State
+// convention. totalSupplyTaxableAmount/taxAmountFor{IGST,CGST,SGST} are the
+// combined (item + shipping + COD) taxable value and tax split — Limeroad's
+// report never separates shipping into its own taxable line, so (per the
+// same rule applied to the other channels lacking a real shipping split)
+// there is no separate x2beta-shipping sheet for Limeroad.
+// ============================================================
+function buildX2betaSheet(processedRows, monthName, yearStr) {
+  const monthNum = MONTH_NUMS[String(monthName || '').trim().toLowerCase()] || null;
+  const year = parseInt(yearStr, 10);
+  const fallbackVchDate = (monthNum && !isNaN(year)) ? new Date(year, monthNum, 0) : new Date();
+
+  function rowVchDate(row) {
+    if (row.invoiceDate) {
+      const d = new Date(row.invoiceDate);
+      if (!isNaN(d.getTime())) return d;
+    }
+    return fallbackVchDate;
+  }
+
+  const uniqueRates = [...new Set(processedRows.map(r => Number(r.totalGSTRate || 0)))].filter(r => r > 0);
+  const sortedStateCodes = [...new Set(processedRows.map(r => getSellerStateAbbr(r.GSTIN)))].filter(Boolean).sort();
+
+  const x2betaColumns = [
+    { header: 'Vch. Date* ', get: r => rowVchDate(r) },
+    { header: 'Vch. Type*', get: r => `${Number(r.totalSupplyTaxableAmount || 0) < 0 ? 'CN-' : ''}Sales-${getSellerStateAbbr(r.GSTIN) || ''}` },
+    { header: 'Vch. No.*', get: r => r.invoiceId || '' },
+    { header: 'Ref. No.', get: r => r.invoiceId || '' },
+    { header: 'Ref. Date', get: r => rowVchDate(r) },
+    { header: 'Is CN?', get: r => (Number(r.totalSupplyTaxableAmount || 0) < 0 ? 'Yes' : null) },
+    { header: 'Is Vch?', get: () => null },
+    { header: 'Party Ledger*', get: r => `Limeroad Debtor-${getSellerStateAbbr(r.GSTIN) || ''}` },
+    { header: 'Sales Ledger*', get: r => `Sales Limeroad-${getSellerStateAbbr(r.GSTIN) || ''} ${Number(r.totalGSTRate || 0)}%` },
+    { header: 'Stock Item', get: r => r.productDescription || '' },
+    { header: 'Description', get: r => r.productDescription || '' },
+    { header: 'Godown', get: r => r.vendorState || '' },
+    { header: 'Quantity', get: r => Number(r.quantity || 0) },
+    {
+      header: 'Rate',
+      get: r => {
+        const qty = Number(r.quantity || 0);
+        return qty !== 0 ? Math.abs(Number(r.totalSupplyTaxableAmount || 0) / qty) : 0;
+      }
+    },
+    { header: 'Unit', get: () => 'Pcs' },
+    { header: 'Discount', get: () => null },
+    { header: 'Amount*', get: r => Number(r.totalSupplyTaxableAmount || 0) },
+    { header: 'Discount', get: () => null }
+  ];
+
+  uniqueRates.forEach(rate => {
+    const halfRate = Math.round((rate / 2) * 100) / 100;
+    sortedStateCodes.forEach(sc => {
+      x2betaColumns.push({
+        header: `Output IGST ${rate}%-${sc}`,
+        get: row => (Number(row.totalGSTRate || 0) === rate && getSellerStateAbbr(row.GSTIN) === sc) ? Number(row.taxAmountForIGST || 0) : 0
+      });
+      x2betaColumns.push({
+        header: `Output CGST ${halfRate}%-${sc}`,
+        get: row => (Number(row.totalGSTRate || 0) === rate && getSellerStateAbbr(row.GSTIN) === sc) ? Number(row.taxAmountForCGST || 0) : 0
+      });
+      x2betaColumns.push({
+        header: `Output SGST ${halfRate}%-${sc}`,
+        get: row => (Number(row.totalGSTRate || 0) === rate && getSellerStateAbbr(row.GSTIN) === sc) ? Number(row.taxAmountForSGST || 0) : 0
+      });
+    });
+  });
+
+  x2betaColumns.push(
+    { header: null, get: () => null },
+    { header: null, get: () => null },
+    { header: 'Narration', get: () => `Limeroad-${monthName || ''}-${yearStr || ''}` },
+    { header: 'Taxability', get: () => null },
+    { header: 'GST Nature', get: () => null },
+    { header: 'GST Rate', get: r => Number(r.totalGSTRate || 0) },
+    { header: 'Cess', get: r => Number(r.cessAmount || 0) || null },
+    { header: 'RCM?', get: () => null },
+    { header: 'HSN', get: r => r.hsnCode || '' },
+    { header: 'HSN Desc', get: () => null },
+    { header: 'Supply Type', get: () => null },
+    { header: 'Cost Category', get: () => null },
+    { header: 'Cost Centre', get: () => null },
+    { header: 'Name', get: () => null }, { header: 'Address 1', get: () => null }, { header: 'Address 2', get: () => null },
+    { header: 'State', get: r => r.customerState || '' }, { header: 'Country', get: () => 'India' }, { header: 'PIN Code', get: r => r.customerPincode || null },
+    { header: 'Place of Supply', get: r => r.customerState || '' }, { header: 'GST Type', get: () => null }, { header: 'GSTIN', get: () => null },
+    { header: 'Name', get: () => null }, { header: 'Address 1', get: () => null }, { header: 'Address 2', get: () => null },
+    { header: 'State', get: r => r.customerState || '' }, { header: 'Country', get: () => 'India' }, { header: 'PIN Code', get: r => r.customerPincode || null },
+    { header: 'Place', get: () => null }, { header: 'GSTIN', get: () => null },
+    { header: 'Name', get: () => null }, { header: 'Address 1', get: () => null }, { header: 'Address 2', get: () => null },
+    { header: 'State', get: r => r.customerState || '' }, { header: 'Country', get: () => 'India' }, { header: 'PIN Code', get: r => r.customerPincode || null },
+    { header: 'Place', get: () => null }, { header: 'GSTIN', get: () => null },
+    { header: 'DN No.', get: () => null }, { header: 'DN Date', get: () => null }, { header: 'Doc. No.', get: () => null },
+    { header: 'Dis. Through', get: () => null }, { header: 'Destination', get: () => null }, { header: 'Carrier Name', get: () => null },
+    { header: 'LR No.', get: () => null }, { header: 'LR Date', get: () => null }, { header: 'Order No.', get: r => r.orderId || null },
+    { header: 'Order Date', get: () => null }, { header: 'Term of Delivery', get: () => null }, { header: 'Terms of Paymemt', get: () => null },
+    { header: 'Other Ref.', get: () => null }, { header: 'Place of Receipt', get: () => null }, { header: 'Vessel/Flight No.', get: () => null },
+    { header: 'Port of Loading', get: () => null }, { header: 'Port of Discharge', get: () => null }, { header: 'Country to', get: () => null },
+    { header: 'Shipping Bill No.', get: () => null }, { header: 'Date', get: () => null }, { header: 'Port Code', get: () => null },
+    { header: 'e-Way Bill No', get: () => null }, { header: 'Date', get: () => null }, { header: 'Cons. e-Way Bill No.', get: () => null },
+    { header: 'Date', get: () => null }, { header: 'Sub Type', get: () => null }, { header: 'Doc. Type', get: () => null },
+    { header: 'Distance (KM)', get: () => null }, { header: 'Transporter Name', get: () => null }, { header: 'Transporter ID', get: () => null },
+    { header: 'Transport Mode', get: () => null }, { header: 'Doc No.', get: () => null }, { header: 'Date', get: () => null },
+    { header: 'Vehicle No.', get: () => null }, { header: 'Vehicle Type', get: () => null }, { header: 'Status', get: () => null },
+    { header: 'Note Reason', get: () => null }, { header: 'Orig. Inv. No.', get: () => null }, { header: 'Orig. Inv. Date', get: () => null }
+  );
+
+  const headers = x2betaColumns.map(c => c.header);
+  const aoa = [headers, ...processedRows.map(row => x2betaColumns.map(c => c.get(row)))];
+  return XLSX.utils.aoa_to_sheet(aoa);
+}
+
 function limeroadProcessor(fileBuffer, monthName, yearStr) {
   const { sheetNames, sheets } = parseBuffer(fileBuffer);
 
@@ -231,6 +370,9 @@ function limeroadProcessor(fileBuffer, monthName, yearStr) {
 
   const vendorSheet = buildVendorSheet(processedRows);
   XLSX.utils.book_append_sheet(wb, vendorSheet, vendorSheetName);
+
+  const x2betaSheet = buildX2betaSheet(processedRows, monthName, yearStr);
+  XLSX.utils.book_append_sheet(wb, x2betaSheet, 'x2beta working');
 
   if (tcsRows.length > 0) {
     const tcsSheet = buildTcsSheet(tcsRows);

@@ -1,4 +1,5 @@
 const XLSX = require('xlsx-js-style');
+const { getStateCodeFromName, getStateAbbr } = require('../../../utils/gstStateCodes');
 
 function safeNumber(value) {
   if (value === null || value === undefined || value === '') return 0;
@@ -185,7 +186,123 @@ async function mirrowProcessor(
   XLSX.utils.book_append_sheet(outputWorkbook, XLSX.utils.json_to_sheet(workingData), 'Working');
   XLSX.utils.book_append_sheet(outputWorkbook, XLSX.utils.json_to_sheet(pivotData), 'Pivot');
 
+  // X2Beta working — same 108-column Tally e-invoice import template used by
+  // the other marketplace processors.
+  const x2betaSheet = buildX2betaSheet(workingData, month, year, sellingState);
+  XLSX.utils.book_append_sheet(outputWorkbook, x2betaSheet, 'x2beta working');
+
   return { outputWorkbook, workingData, pivotData };
+}
+
+// ============================================================
+// X2BETA WORKING SHEET
+// Same 108-column Tally "X2Beta" e-invoice import template used by the
+// other marketplace processors. Mirrow is a single-GSTIN business (one
+// `sellingState`), and its ledger master already resolves a real Tally
+// Ledger + Invoice Number per shipping state/city — reused directly here.
+// No return/CN handling exists upstream, so none is added here either.
+// ============================================================
+function buildX2betaSheet(workingData, month, year, sellingState) {
+  const monthNum = MONTH_NUM[safeString(month).toLowerCase()];
+  const yearNum = parseInt(year, 10);
+  const fallbackVchDate = (monthNum && !isNaN(yearNum)) ? new Date(yearNum, Number(monthNum), 0) : new Date();
+
+  function rowVchDate(row) {
+    const d = new Date(row['Date']);
+    if (!isNaN(d.getTime())) return d;
+    return fallbackVchDate;
+  }
+
+  const sellerCode = getStateCodeFromName(sellingState);
+  const sellerStateAbbr = (sellerCode && getStateAbbr(sellerCode)) || safeString(sellingState);
+
+  const uniqueRates = [...new Set(workingData.map(r => Number(r['GST Rate'] || 0)))].filter(r => r > 0);
+
+  const x2betaColumns = [
+    { header: 'Vch. Date* ', get: r => rowVchDate(r) },
+    { header: 'Vch. Type*', get: () => `Sales-${sellerStateAbbr}` },
+    { header: 'Vch. No.*', get: r => r['Invoice Number'] || '' },
+    { header: 'Ref. No.', get: r => r['Invoice Number'] || '' },
+    { header: 'Ref. Date', get: r => rowVchDate(r) },
+    { header: 'Is CN?', get: () => null },
+    { header: 'Is Vch?', get: () => null },
+    { header: 'Party Ledger*', get: r => r['Tally Ledger'] || '' },
+    { header: 'Sales Ledger*', get: r => `Sales Mirrow-${sellerStateAbbr} ${Number(r['GST Rate'] || 0)}%` },
+    { header: 'Stock Item', get: r => r['FG'] || r['Product Name'] || '' },
+    { header: 'Description', get: r => r['Product Name'] || '' },
+    { header: 'Godown', get: r => r['State'] || '' },
+    { header: 'Quantity', get: r => Number(r['Quantity'] || 0) },
+    {
+      header: 'Rate',
+      get: r => {
+        const qty = Number(r['Quantity'] || 0);
+        return qty !== 0 ? Math.abs(Number(r['Taxable Value'] || 0) / qty) : 0;
+      }
+    },
+    { header: 'Unit', get: () => 'Pcs' },
+    { header: 'Discount', get: () => null },
+    { header: 'Amount*', get: r => Number(r['Taxable Value'] || 0) },
+    { header: 'Discount', get: () => null }
+  ];
+
+  uniqueRates.forEach(rate => {
+    const halfRate = Math.round((rate / 2) * 100) / 100;
+    x2betaColumns.push({
+      header: `Output IGST ${rate}%-${sellerStateAbbr}`,
+      get: row => (Number(row['GST Rate'] || 0) === rate) ? Number(row['IGST'] || 0) : 0
+    });
+    x2betaColumns.push({
+      header: `Output CGST ${halfRate}%-${sellerStateAbbr}`,
+      get: row => (Number(row['GST Rate'] || 0) === rate) ? Number(row['CGST'] || 0) : 0
+    });
+    x2betaColumns.push({
+      header: `Output SGST ${halfRate}%-${sellerStateAbbr}`,
+      get: row => (Number(row['GST Rate'] || 0) === rate) ? Number(row['SGST'] || 0) : 0
+    });
+  });
+
+  x2betaColumns.push(
+    { header: null, get: () => null },
+    { header: null, get: () => null },
+    { header: 'Narration', get: () => `Mirrow-${month || ''}-${year || ''}` },
+    { header: 'Taxability', get: () => null },
+    { header: 'GST Nature', get: () => null },
+    { header: 'GST Rate', get: r => Number(r['GST Rate'] || 0) },
+    { header: 'Cess', get: () => null },
+    { header: 'RCM?', get: () => null },
+    // Mirrow's source report carries no HSN column — left blank rather than fabricated.
+    { header: 'HSN', get: () => null },
+    { header: 'HSN Desc', get: () => null },
+    { header: 'Supply Type', get: () => null },
+    { header: 'Cost Category', get: () => null },
+    { header: 'Cost Centre', get: () => null },
+    { header: 'Name', get: () => null }, { header: 'Address 1', get: () => null }, { header: 'Address 2', get: () => null },
+    { header: 'State', get: r => r['State'] || '' }, { header: 'Country', get: () => 'India' }, { header: 'PIN Code', get: () => null },
+    { header: 'Place of Supply', get: r => r['State'] || '' }, { header: 'GST Type', get: () => null }, { header: 'GSTIN', get: () => null },
+    { header: 'Name', get: () => null }, { header: 'Address 1', get: () => null }, { header: 'Address 2', get: () => null },
+    { header: 'State', get: r => r['State'] || '' }, { header: 'Country', get: () => 'India' }, { header: 'PIN Code', get: () => null },
+    { header: 'Place', get: () => null }, { header: 'GSTIN', get: () => null },
+    { header: 'Name', get: () => null }, { header: 'Address 1', get: () => null }, { header: 'Address 2', get: () => null },
+    { header: 'State', get: r => r['State'] || '' }, { header: 'Country', get: () => 'India' }, { header: 'PIN Code', get: () => null },
+    { header: 'Place', get: () => null }, { header: 'GSTIN', get: () => null },
+    { header: 'DN No.', get: () => null }, { header: 'DN Date', get: () => null }, { header: 'Doc. No.', get: () => null },
+    { header: 'Dis. Through', get: () => null }, { header: 'Destination', get: () => null }, { header: 'Carrier Name', get: () => null },
+    { header: 'LR No.', get: () => null }, { header: 'LR Date', get: () => null }, { header: 'Order No.', get: r => r['Order ID'] || null },
+    { header: 'Order Date', get: () => null }, { header: 'Term of Delivery', get: () => null }, { header: 'Terms of Paymemt', get: () => null },
+    { header: 'Other Ref.', get: () => null }, { header: 'Place of Receipt', get: () => null }, { header: 'Vessel/Flight No.', get: () => null },
+    { header: 'Port of Loading', get: () => null }, { header: 'Port of Discharge', get: () => null }, { header: 'Country to', get: () => null },
+    { header: 'Shipping Bill No.', get: () => null }, { header: 'Date', get: () => null }, { header: 'Port Code', get: () => null },
+    { header: 'e-Way Bill No', get: () => null }, { header: 'Date', get: () => null }, { header: 'Cons. e-Way Bill No.', get: () => null },
+    { header: 'Date', get: () => null }, { header: 'Sub Type', get: () => null }, { header: 'Doc. Type', get: () => null },
+    { header: 'Distance (KM)', get: () => null }, { header: 'Transporter Name', get: () => null }, { header: 'Transporter ID', get: () => null },
+    { header: 'Transport Mode', get: () => null }, { header: 'Doc No.', get: () => null }, { header: 'Date', get: () => null },
+    { header: 'Vehicle No.', get: () => null }, { header: 'Vehicle Type', get: () => null }, { header: 'Status', get: () => null },
+    { header: 'Note Reason', get: () => null }, { header: 'Orig. Inv. No.', get: () => null }, { header: 'Orig. Inv. Date', get: () => null }
+  );
+
+  const headers = x2betaColumns.map(c => c.header);
+  const aoa = [headers, ...workingData.map(row => x2betaColumns.map(c => c.get(row)))];
+  return XLSX.utils.aoa_to_sheet(aoa);
 }
 
 module.exports = { mirrowProcessor };
