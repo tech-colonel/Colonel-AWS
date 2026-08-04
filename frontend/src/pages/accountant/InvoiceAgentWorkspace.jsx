@@ -30,6 +30,7 @@ const INVOICE_LIVE_BRAND_IDS = [
   '6419fcf0-b961-4f48-a726-15c111bda75d', // Dichika
   '0515b238-265f-4273-8ccb-c16b77039e7f', // Biglilpeople
   'bbd59c4f-c164-42bd-90b8-0325cbb4e1b6', // M Brands
+  '1db31f67-8d3f-4037-ba49-57406731ff38', // Zyden
 ];
 const INVOICE_SHUMEE_TOYS_ID = '91c1a721-4b1d-46de-9cd1-361e179c878e';
 const INVOICE_DRIVE_FOLDER_URL = 'https://drive.google.com/drive/folders/1hsv4GVpNiG6eIS2j8OybkaqNzaNOWi-C';
