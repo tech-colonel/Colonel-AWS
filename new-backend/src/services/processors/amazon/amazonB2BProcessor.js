@@ -951,7 +951,7 @@ async function amazonB2BProcessor(
       // Country = fixed 'India' (this business only operates domestically).
       { header: 'Name', get: () => null }, { header: 'Address 1', get: () => null }, { header: 'Address 2', get: () => null },
       { header: 'State', get: r => r[toStateCol] || '' }, { header: 'Country', get: () => 'India' }, { header: 'PIN Code', get: () => null },
-      { header: 'Place of Supply', get: () => null }, { header: 'GST Type', get: () => null }, { header: 'GSTIN', get: () => null },
+      { header: 'Place of Supply', get: r => r[toStateCol] || '' }, { header: 'GST Type', get: () => null }, { header: 'GSTIN', get: () => null },
       { header: 'Name', get: () => null }, { header: 'Address 1', get: () => null }, { header: 'Address 2', get: () => null },
       { header: 'State', get: r => r[toStateCol] || '' }, { header: 'Country', get: () => 'India' }, { header: 'PIN Code', get: () => null },
       { header: 'Place', get: () => null }, { header: 'GSTIN', get: () => null },
@@ -1091,7 +1091,7 @@ async function amazonB2BProcessor(
       { header: 'Cost Centre', get: () => null },
       { header: 'Name', get: () => null }, { header: 'Address 1', get: () => null }, { header: 'Address 2', get: () => null },
       { header: 'State', get: r => r[toStateCol] || '' }, { header: 'Country', get: () => 'India' }, { header: 'PIN Code', get: () => null },
-      { header: 'Place of Supply', get: () => null }, { header: 'GST Type', get: () => null }, { header: 'GSTIN', get: () => null },
+      { header: 'Place of Supply', get: r => r[toStateCol] || '' }, { header: 'GST Type', get: () => null }, { header: 'GSTIN', get: () => null },
       { header: 'Name', get: () => null }, { header: 'Address 1', get: () => null }, { header: 'Address 2', get: () => null },
       { header: 'State', get: r => r[toStateCol] || '' }, { header: 'Country', get: () => 'India' }, { header: 'PIN Code', get: () => null },
       { header: 'Place', get: () => null }, { header: 'GSTIN', get: () => null },
