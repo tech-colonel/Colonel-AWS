@@ -226,6 +226,36 @@ const updateInvoice = async (req, res, next) => {
   }
 };
 
+// ─── DELETE /api/brands/:brandId/agents/:agentId/invoices/:invoiceId ─────────
+const deleteInvoice = async (req, res, next) => {
+  try {
+    const { brandId, agentId, invoiceId } = req.params;
+
+    const brand = await Brand.findByPk(brandId);
+    const agent = await Agent.findByPk(agentId);
+
+    if (!brand || !agent) {
+      return res.status(404).json({ error: 'Brand or Agent not found' });
+    }
+
+    const brandDb = getBrandConnection(brand.db_name);
+    const tableName = agent.name.replace(/[^a-zA-Z0-9]/g, '_').toLowerCase();
+    const InvoiceModel = getDynamicModel(brandDb, tableName, agent.columns);
+
+    const invoice = await InvoiceModel.findByPk(invoiceId);
+    if (!invoice) {
+      return res.status(404).json({ error: 'Invoice not found' });
+    }
+
+    await invoice.destroy();
+
+    res.json({ success: true, message: 'Invoice deleted successfully' });
+
+  } catch (error) {
+    next(error);
+  }
+};
+
 // ─── POST /api/brands/:brandId/agents/:agentId/invoice/cancel ────────────────
 const cancelInvoice = async (req, res, next) => {
   try {
@@ -348,6 +378,7 @@ module.exports = {
   getInvoices,
   getSheetUrl,
   updateInvoice,
+  deleteInvoice,
   cancelInvoice,
   getRunHistory,
   retryRun,
