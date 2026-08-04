@@ -160,6 +160,11 @@ class ReconciliationHandler(BaseHTTPRequestHandler):
                 gstr1_df, gstr3b_df, gstr2b_df = read_octa_excel(octa_file)
                 tally_df = read_tally_sales_raw(tally_file)
                 cn_df = read_credit_note_raw(cn_file) if cn_file else None
+                # A separate Credit Note Register has to net off sales, otherwise Books
+                # stays overstated and every GSTR-1 credit note reads "Not in Books".
+                # The passthrough sheets below still show both files exactly as uploaded.
+                from recon.gstr_1_vs_books import merge_credit_notes
+                reco_df = merge_credit_notes(tally_df, cn_df)
 
                 # Step 0 (optional): GSTR-1 Pivot
                 pdf_monthly = None
@@ -169,9 +174,11 @@ class ReconciliationHandler(BaseHTTPRequestHandler):
                 # Steps 1–4: monthly comparison sections
                 gstr1_monthly   = aggregate_gstr1_monthly(gstr1_df)
                 gstr3b_monthly  = extract_gstr3b_monthly(gstr3b_df)
-                books_all       = aggregate_books_monthly(tally_df)
-                books_b2b       = aggregate_books_monthly(tally_df, category="B2B")
-                books_b2c       = aggregate_books_monthly(tally_df, category="B2C")
+                from recon.gstr_1_vs_books import _gstr1_b2b_invoice_set
+                _g1_b2b_invs    = _gstr1_b2b_invoice_set(gstr1_df)
+                books_all       = aggregate_books_monthly(reco_df)
+                books_b2b       = aggregate_books_monthly(reco_df, category="B2B", g1_b2b_invs=_g1_b2b_invs)
+                books_b2c       = aggregate_books_monthly(reco_df, category="B2C", g1_b2b_invs=_g1_b2b_invs)
 
                 # Filter GSTR-1 B2B/B2C monthly totals
                 import re as _re
@@ -212,10 +219,10 @@ class ReconciliationHandler(BaseHTTPRequestHandler):
                 }
 
                 # Step 5: B2B Reco
-                b2b_rows = reconcile_b2b_new(tally_df, gstr1_df, tolerance)
+                b2b_rows = reconcile_b2b_new(reco_df, gstr1_df, tolerance)
 
                 # Step 6: B2C Reco
-                b2c_rows = reconcile_b2c_new(tally_df, gstr1_df, tolerance)
+                b2c_rows = reconcile_b2c_new(reco_df, gstr1_df, tolerance)
 
                 # GSTR-1 Pivot (Step 0)
                 pivot_rows = None
@@ -274,6 +281,9 @@ class ReconciliationHandler(BaseHTTPRequestHandler):
                     "_b2c_reco_rows": b2c_rows,
                     "_pivot_rows": pivot_rows,
                     "_tally_cols": list(tally_df.columns),
+                    # Some OCTA exports are GSTR-1 only — flag it instead of
+                    # comparing GSTR-1 against a column of zeros.
+                    "_gstr3b_available": not gstr3b_df.empty,
                     # Raw DataFrames as records for passthrough sheets
                     "_raw_gstr1":  df_to_records(gstr1_df),
                     "_raw_gstr2b": df_to_records(gstr2b_df),
@@ -1276,12 +1286,21 @@ def build_gstr1_workbook(
         ("As per books B2C",          "books_b2c_vs_gstr1", "As per books B2C", "GSTR-1 B2C"),
     ]
 
+    gstr3b_available = p.get("_gstr3b_available", True)
+
     current_row = 1
     for section_title, section_key, left_label, right_label in _section_configs:
         rows = sections.get(section_key) or []
-        current_row = _write_gst_reco_section(
-            ws, current_row, section_title, left_label, right_label, rows, section_key
-        )
+        if section_key == "gstr1_vs_gstr3b" and not gstr3b_available:
+            current_row = _write_section_unavailable_note(
+                ws, current_row, section_title,
+                "GSTR-3B not provided — upload an OCTA report that includes the GSTR-3B "
+                "sheet to reconcile GSTR-1 against GSTR-3B.",
+            )
+        else:
+            current_row = _write_gst_reco_section(
+                ws, current_row, section_title, left_label, right_label, rows, section_key
+            )
         current_row += 3  # gap between sections
 
     _auto_col_width(ws, min_width=12, max_width=22)
@@ -1358,6 +1377,17 @@ def _header_border():
 
 def _data_border():
     return Border(left=_THIN, right=_THIN, top=_THIN, bottom=_THIN)
+
+
+def _write_section_unavailable_note(ws, start_row, title, message):
+    """Write a section heading plus a note, for a comparison we cannot run."""
+    title_cell = ws.cell(row=start_row, column=1, value=title)
+    _cell_style(title_cell, bold=True, bg=_NAVY, fg="FFFFFF", align="center")
+    start_row += 2
+
+    note = ws.cell(row=start_row, column=1, value=message)
+    _cell_style(note, bold=True, bg=_ORANGE_BG, fg=_ORANGE_FG, align="left")
+    return start_row + 1
 
 
 def _write_gst_reco_section(ws, start_row, title, left_label, right_label, rows, section_key):

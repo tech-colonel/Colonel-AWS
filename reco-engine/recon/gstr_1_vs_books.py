@@ -15,6 +15,15 @@ Input files:
   gstr1_octa   (required)  OCTA download with Final GSTR-1 + GSTR3B + GSTR2B sheets
   gstr1_pdf    (optional)  GST-portal GSTR-1 PDF  → enables Step 0
   credit_note  (optional)  Separate Credit Note Register .xlsx
+
+Both input files are accepted in raw or pre-worked form:
+  * Sales Register — a hand-worked register carries `Total Sales / Total IGST /
+    Total CGST / Total SGST` (plus Month, Catogary, States). A raw Tally export
+    carries ledger-wise columns instead, and a trailing "Grand Total" row; the
+    totals are derived from the ledgers and appended so they stay visible in the
+    output, the footer row is dropped, and category/state/rate are inferred.
+  * OCTA GSTR-1 — some exports fold B2CS rows into the GSTR-1 sheet, others split
+    them into a separate summary sheet; both are read.
 """
 
 from __future__ import annotations
@@ -57,6 +66,53 @@ _AMAZON_TALLY_KEYWORDS = (
 
 # Regex to detect Amazon consolidated invoice numbers (AMZ-INTER-04, AMZ-INTRA-01, etc.)
 _AMZ_INV_RE = re.compile(r"^AMZ[-_](INTER|INTRA)", re.IGNORECASE)
+
+# Standard GST state codes (used to line up Books states with GSTR-1 Place of Supply)
+_GST_STATE_CODES = {
+    "01": "Jammu And Kashmir", "02": "Himachal Pradesh", "03": "Punjab",
+    "04": "Chandigarh", "05": "Uttarakhand", "06": "Haryana", "07": "Delhi",
+    "08": "Rajasthan", "09": "Uttar Pradesh", "10": "Bihar", "11": "Sikkim",
+    "12": "Arunachal Pradesh", "13": "Nagaland", "14": "Manipur", "15": "Mizoram",
+    "16": "Tripura", "17": "Meghalaya", "18": "Assam", "19": "West Bengal",
+    "20": "Jharkhand", "21": "Odisha", "22": "Chhattisgarh", "23": "Madhya Pradesh",
+    "24": "Gujarat", "25": "Daman And Diu",
+    "26": "Dadra And Nagar Haveli And Daman And Diu", "27": "Maharashtra",
+    "28": "Andhra Pradesh", "29": "Karnataka", "30": "Goa", "31": "Lakshadweep",
+    "32": "Kerala", "33": "Tamil Nadu", "34": "Puducherry",
+    "35": "Andaman And Nicobar Islands", "36": "Telangana",
+    "37": "Andhra Pradesh", "38": "Ladakh", "97": "Other Territory",
+}
+
+# Standard notified GST rates — used to snap a derived rate onto a real slab
+_STD_GST_RATES = (0.0, 0.1, 0.25, 1.0, 1.5, 3.0, 5.0, 6.0, 7.5, 12.0, 18.0, 28.0)
+
+# "B2B" / "B2C" appearing as a standalone token in a Tally ledger/party name
+_B2X_TOKEN_RE = re.compile(r"(?<![a-z0-9])b2([bc])(?![a-z0-9])", re.IGNORECASE)
+
+# Tally Sales Register headers that are never a sales/tax ledger amount
+_TALLY_NON_LEDGER_HEADERS = {
+    "date", "month", "catogary", "category", "particulars", "buyer", "party",
+    "party name", "ledger name", "states", "state", "voucher type", "voucher no",
+    "voucher ref no", "ref no", "narration", "quantity", "qty", "value",
+    "gross total", "round off", "place of supply", "rate", "gst rate", "tax rate",
+    "hsn", "hsn code", "remark", "gstin", "gstin/uin", "buyer gstin", "gst no",
+    "invoice no", "doc no", "bill no", "invoice date", "voucher date",
+    "total sales", "total igst", "total cgst", "total sgst", "total cess",
+}
+
+# Footer / summary rows Tally appends to an export — never real transactions
+_TALLY_TOTAL_LABELS = {
+    "grand total", "total", "sub total", "subtotal", "sub-total",
+    "opening balance", "closing balance", "carried over", "brought forward",
+}
+
+# Derived Books total columns, in the exact names an accountant hand-adds
+_TALLY_DERIVED_COLS = {
+    "taxable": "Total Sales",
+    "igst":    "Total IGST",
+    "cgst":    "Total CGST",
+    "sgst":    "Total SGST",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -128,6 +184,144 @@ def _norm_inv(v) -> str:
     return re.sub(r"[^A-Z0-9]", "", str(v or "").upper())
 
 
+def _classify_tally_ledger(header) -> str | None:
+    """Classify a Sales Register column → 'taxable' | 'igst' | 'cgst' | 'sgst' | None."""
+    n = normalize_header(header)
+    if not n or n in _TALLY_NON_LEDGER_HEADERS:
+        return None
+    if re.fullmatch(r"col_?\d+", n):                 # unnamed placeholder column
+        return None
+    if "inward" in n or n.startswith("input"):       # purchase-side ledger parked in a sales register
+        return None
+    if "cess" in n:                                  # not aggregated by this agent
+        return None
+    if "igst" in n:
+        return "igst"
+    if "cgst" in n:
+        return "cgst"
+    if "sgst" in n:
+        return "sgst"
+    return "taxable"
+
+
+def _drop_tally_total_rows(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Remove Tally's own footer rows ("Grand Total", "Closing Balance", …).
+
+    A raw export ends with a Grand Total line carrying the sum of every ledger
+    column. Left in, it doubles the Books turnover. A hand-worked register has
+    already had it deleted, so this is a no-op there.
+    """
+    if df.empty:
+        return df
+
+    label_col = _find_col(df, ["Particulars", "Party Name", "Buyer", "Ledger Name"])
+    if label_col is None:
+        return df
+
+    labels = df[label_col].map(lambda v: re.sub(r"\s+", " ", str(v or "")).strip().lower())
+    is_total = labels.isin(_TALLY_TOTAL_LABELS)
+    if not is_total.any():
+        return df
+
+    logger.info("Tally: dropped %d footer/total row(s): %s", int(is_total.sum()),
+                ", ".join(sorted(set(labels[is_total]))))
+    return df[~is_total].reset_index(drop=True)
+
+
+def _derive_tally_totals(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Add the `Total Sales / Total IGST / Total CGST / Total SGST` columns when the
+    register does not already carry them.
+
+    A hand-worked register has these four columns; a raw Tally export instead has
+    ledger-wise columns (`Sales @18%`, `Interstate Sales @5%`, `OUTPUT IGST@18%`,
+    `Amazon B2C Sales`, …). Without them every Books amount reads as 0 and every
+    invoice reconciles as a difference. The derived columns are appended at the end
+    so they stay visible in the output Sales Register / B2B Reco sheets.
+
+    Columns that already exist are never touched — a pre-worked register is
+    returned byte-for-byte unchanged.
+    """
+    if df.empty:
+        return df
+
+    existing = {normalize_header(c) for c in df.columns}
+    missing = {kind: name for kind, name in _TALLY_DERIVED_COLS.items()
+               if normalize_header(name) not in existing}
+    if not missing:
+        return df
+
+    positions: dict[str, list[int]] = {k: [] for k in _TALLY_DERIVED_COLS}
+    for i, col in enumerate(df.columns):
+        kind = _classify_tally_ledger(col)
+        if kind:
+            positions[kind].append(i)
+
+    if not any(positions.values()):
+        logger.warning("Tally: no ledger columns recognised — Books totals stay 0")
+        return df
+
+    for kind, name in missing.items():
+        cols = positions[kind]
+        if cols:
+            columns = [[_f(v) for v in df.iloc[:, i].tolist()] for i in cols]
+            df[name] = [round_money(sum(vals)) for vals in zip(*columns)]
+        else:
+            df[name] = 0.0
+        logger.info("Tally: derived %r from %d ledger column(s): %s", name, len(cols),
+                    ", ".join(str(df.columns[i]) for i in cols[:6]) or "none")
+    return df
+
+
+def _category_from_text(text) -> str | None:
+    """Read an explicit B2B / B2C marker out of a Tally ledger or party name."""
+    m = _B2X_TOKEN_RE.search(str(text or ""))
+    if not m:
+        return None
+    return "B2B" if m.group(1).lower() == "b" else "B2C"
+
+
+def _state_from_row(row, state_col, gstin_col, part_col) -> str:
+    """
+    Resolve a Books row to a state name comparable with GSTR-1 Place of Supply.
+
+    Order: explicit States column → buyer GSTIN state code → a state code or name
+    embedded in the ledger name (e.g. "B2C Interstate-01-J&K", "BLINKIT B2C-GUJARAT").
+    """
+    if state_col:
+        raw = str(_col_val(row, state_col, "")).strip()
+        if raw:
+            return _extract_pos_state(raw)
+
+    if gstin_col:
+        gstin = re.sub(r"[^A-Z0-9]", "", str(_col_val(row, gstin_col, "")).upper())
+        if len(gstin) == 15 and gstin[:2] in _GST_STATE_CODES:
+            return _GST_STATE_CODES[gstin[:2]]
+
+    if part_col:
+        text = str(_col_val(row, part_col, ""))
+        m = re.search(r"(?<!\d)(\d{2})(?!\d)", text)
+        if m and m.group(1) in _GST_STATE_CODES:
+            return _GST_STATE_CODES[m.group(1)]
+        upper = text.upper()
+        for name in _GST_STATE_CODES.values():
+            if name.upper() in upper:
+                return name
+
+    return "Unknown"
+
+
+def _derive_rate(taxable, igst, cgst, sgst) -> float:
+    """Back out the GST rate from the amounts when the register has no Rate column."""
+    base = _f(taxable)
+    if not base:
+        return 0.0
+    pct = abs((_f(igst) + _f(cgst) + _f(sgst)) / base) * 100.0
+    nearest = min(_STD_GST_RATES, key=lambda r: abs(r - pct))
+    return nearest if abs(nearest - pct) <= 0.6 else round(pct, 2)
+
+
 def _is_amazon_tally_row(particulars: str, inv_no: str) -> bool:
     p = particulars.lower()
     if any(kw in p for kw in _AMAZON_TALLY_KEYWORDS):
@@ -149,6 +343,7 @@ def read_octa_excel(file_info: dict) -> tuple[pd.DataFrame, pd.DataFrame, pd.Dat
     gstr1_df = pd.DataFrame()
     gstr3b_df = pd.DataFrame()
     gstr2b_df = pd.DataFrame()
+    b2c_summary_df = pd.DataFrame()
 
     for sheet in wb.worksheets:
         rows = list(sheet.iter_rows(values_only=True))
@@ -162,6 +357,11 @@ def read_octa_excel(file_info: dict) -> tuple[pd.DataFrame, pd.DataFrame, pd.Dat
             nh = [normalize_header(v) for v in r if v]
             # GSTR-1 header: "doc no" + "customer gstin"
             if gstr1_df.empty and _has_cols(nh, ["doc no", "customer gstin"]):
+                header_row = i
+                break
+            # B2C summary header: "summary type" + "taxable value", no invoice-level "doc no"
+            if b2c_summary_df.empty and _has_cols(nh, ["summary type", "taxable value"]) \
+                    and not _has_cols(nh, ["doc no"]):
                 header_row = i
                 break
             # GSTR-2B header: "supplier gstin" + ("itc eligible" or "gstr1 filing period")
@@ -187,6 +387,15 @@ def read_octa_excel(file_info: dict) -> tuple[pd.DataFrame, pd.DataFrame, pd.Dat
             logger.info("OCTA GSTR-1 sheet detected: '%s' (%d rows)", sheet.title, len(gstr1_df))
             continue
 
+        # Detect a separate B2C summary sheet: "Summary Type" + "Taxable Value", no "Doc No".
+        # Some OCTA exports fold B2CS rows into the GSTR-1 sheet; others split them out here.
+        if b2c_summary_df.empty and _has_cols(norm_headers, ["summary type", "taxable value"]) \
+                and not _has_cols(norm_headers, ["doc no"]):
+            data_rows = [dict(zip(headers, r)) for r in rows[header_row + 1:]
+                         if any(v is not None and str(v).strip() for v in r)]
+            b2c_summary_df = _prepare_b2c_summary(pd.DataFrame(data_rows), sheet.title)
+            continue
+
         # Detect GSTR3B: has "Section" column and month columns
         if gstr3b_df.empty and any("section" in h for h in norm_headers):
             all_text = " ".join(str(v) for row in rows for v in row if v)
@@ -204,7 +413,53 @@ def read_octa_excel(file_info: dict) -> tuple[pd.DataFrame, pd.DataFrame, pd.Dat
             gstr2b_df = pd.DataFrame(data_rows)
             logger.info("OCTA GSTR-2B sheet detected: '%s' (%d rows)", sheet.title, len(gstr2b_df))
 
+    # Fold a split-out B2C summary sheet back into GSTR-1 so the B2C reco has data
+    if not b2c_summary_df.empty:
+        gstr1_df = (pd.concat([gstr1_df, b2c_summary_df], ignore_index=True)
+                    if not gstr1_df.empty else b2c_summary_df)
+
     return gstr1_df, gstr3b_df, gstr2b_df
+
+
+def _prepare_b2c_summary(df: pd.DataFrame, sheet_title: str) -> pd.DataFrame:
+    """
+    Keep the B2C rows of an OCTA summary sheet and map them onto the GSTR-1 schema.
+
+    Anything whose Summary Type mentions B2C counts (B2CS, "B2CS Sales",
+    amendments, …). Other summary types — TCS/e-commerce Section 52 disclosures,
+    exempt/nil schedules — are left out: they restate sales already reported
+    elsewhere and would double-count.
+    """
+    if df.empty:
+        return df
+
+    type_col = _find_col(df, ["Summary Type", "Type", "Doc Type"])
+    if type_col is None:
+        return pd.DataFrame()
+
+    is_b2c = df[type_col].astype(str).str.contains("b2c", case=False, na=False)
+    kept, dropped = df[is_b2c].copy(), df[~is_b2c]
+
+    if not dropped.empty:
+        logger.info("OCTA B2C summary '%s': skipped %d non-B2C row(s) — %s",
+                    sheet_title, len(dropped),
+                    ", ".join(sorted(dropped[type_col].astype(str).unique())[:6]))
+    if kept.empty:
+        return pd.DataFrame()
+
+    renames = {type_col: "Doc Type"}
+    taxable_col = _find_col(kept, ["Taxable Value", "Item Taxable Value"])
+    if taxable_col and normalize_header(taxable_col) != "item taxable value":
+        renames[taxable_col] = "Item Taxable Value"
+    kept = kept.rename(columns=renames)
+
+    # B2C rows carry no counterparty GSTIN — make that explicit for the B2B/B2C split
+    if _find_col(kept, ["Customer GSTIN", "GSTIN of Recipient"]) is None:
+        kept["Customer GSTIN"] = ""
+
+    logger.info("OCTA B2C summary '%s': merged %d B2C row(s) into GSTR-1",
+                sheet_title, len(kept))
+    return kept
 
 
 def _has_cols(norm_headers: list[str], required: list[str]) -> bool:
@@ -248,6 +503,7 @@ def read_tally_sales_raw(file_info: dict) -> pd.DataFrame:
     else:
         df = pd.read_csv(BytesIO(data), encoding="utf-8-sig")
 
+    df = _derive_tally_totals(_drop_tally_total_rows(df))
     logger.info("Tally Sales Register: %d rows, %d cols", len(df), len(df.columns))
     return df
 
@@ -255,6 +511,82 @@ def read_tally_sales_raw(file_info: dict) -> pd.DataFrame:
 def read_credit_note_raw(file_info: dict) -> pd.DataFrame:
     """Read Credit Note Register as raw DataFrame (same structure as Tally)."""
     return read_tally_sales_raw(file_info)
+
+
+# Amount columns to sign-flip alongside the ledger columns when folding in credit notes
+_CN_FLIP_EXTRA = {"gross total", "value"}
+
+
+def merge_credit_notes(tally_df: pd.DataFrame, cn_df: pd.DataFrame | None) -> pd.DataFrame:
+    """
+    Fold a separate Credit Note Register into the Sales Register for reconciliation.
+
+    Tally exports credit notes two ways:
+      * inside the Sales Register, already negative (`Credit Note` voucher types), or
+      * as a standalone Credit Note Register, where the amounts are positive.
+
+    GSTR-1 always reports credit notes as negatives, so a standalone register has to
+    be sign-flipped before it can net off sales — otherwise Books stays overstated by
+    the full credit-note value and every GSTR-1 credit note reads "Not in Books".
+
+    The direction is detected from the data, not assumed, and rows already present in
+    the Sales Register are skipped so nothing is counted twice.
+    """
+    if cn_df is None or cn_df.empty or tally_df.empty:
+        return tally_df
+
+    inv_col_t = _find_col(tally_df, ["Voucher No.", "Voucher No", "Invoice No", "Doc No", "Bill No"])
+    inv_col_c = _find_col(cn_df,    ["Voucher No.", "Voucher No", "Invoice No", "Doc No", "Bill No"])
+    vt_col    = _find_col(tally_df, ["Voucher Type"])
+
+    # Credit notes the Sales Register already carries — used to avoid double counting
+    embedded_invs: set[str] = set()
+    if vt_col:
+        for _, row in tally_df.iterrows():
+            if "credit note" in str(_col_val(row, vt_col, "")).lower():
+                norm = _norm_inv(_col_val(row, inv_col_t, "")) if inv_col_t else ""
+                if norm:
+                    embedded_invs.add(norm)
+    if embedded_invs:
+        logger.info("Credit notes: Sales Register already holds %d credit note(s)", len(embedded_invs))
+
+    # Detect the register's sign convention from its own amounts
+    ts_col = _find_col(cn_df, ["Total Sales", "Taxable Value", "Taxable Amount"])
+    values = [_f(v) for v in cn_df[ts_col]] if ts_col is not None else []
+    positives = sum(1 for v in values if v > 0)
+    negatives = sum(1 for v in values if v < 0)
+    sign = -1.0 if positives >= negatives else 1.0
+
+    amount_keys = {normalize_header(n) for n in _TALLY_DERIVED_COLS.values()} | _CN_FLIP_EXTRA
+    cn_cols = {normalize_header(c): c for c in cn_df.columns}
+
+    merged_rows: list[dict] = []
+    skipped = 0
+    for _, row in cn_df.iterrows():
+        norm = _norm_inv(_col_val(row, inv_col_c, "")) if inv_col_c else ""
+        if norm and norm in embedded_invs:
+            skipped += 1
+            continue
+        out: dict = {}
+        for col in tally_df.columns:
+            key = normalize_header(col)
+            src = cn_cols.get(key)
+            if src is None:
+                out[col] = None
+            elif key in amount_keys or _classify_tally_ledger(col):
+                out[col] = round_money(sign * _f(row[src]))
+            else:
+                out[col] = row[src]
+        merged_rows.append(out)
+
+    if not merged_rows:
+        logger.info("Credit notes: nothing to merge (%d already in the Sales Register)", skipped)
+        return tally_df
+
+    logger.info("Credit notes: merged %d row(s) with sign %+d%s",
+                len(merged_rows), int(sign),
+                f", skipped {skipped} already in the Sales Register" if skipped else "")
+    return pd.concat([tally_df, pd.DataFrame(merged_rows)], ignore_index=True)
 
 
 # ---------------------------------------------------------------------------
@@ -386,7 +718,8 @@ def aggregate_gstr1_monthly(gstr1_df: pd.DataFrame) -> dict[str, dict]:
 # Books monthly aggregator (from Tally Sales Register)
 # ---------------------------------------------------------------------------
 
-def aggregate_books_monthly(tally_df: pd.DataFrame, category: str | None = None) -> dict[str, dict]:
+def aggregate_books_monthly(tally_df: pd.DataFrame, category: str | None = None,
+                            g1_b2b_invs: set | None = None) -> dict[str, dict]:
     """
     Aggregate Tally by month.
     category: None=all rows, 'B2B'=only B2B rows, 'B2C'=only B2C rows.
@@ -394,9 +727,13 @@ def aggregate_books_monthly(tally_df: pd.DataFrame, category: str | None = None)
     if tally_df.empty:
         return {}
 
+    inv_col     = _find_col(tally_df, ["Voucher No.", "Voucher No", "Invoice No", "Doc No", "Bill No"])
+    ref_col     = _find_col(tally_df, ["Voucher Ref. No.", "Voucher Ref No", "Ref No"])
+    inv_cols    = tuple(c for c in (inv_col, ref_col) if c)
     month_col   = _find_col(tally_df, ["Month", "Mth"])
     date_col    = _find_col(tally_df, ["Date", "Invoice Date", "Voucher Date"])
     cat_col     = _find_col(tally_df, ["Category", "Catogary", "Cat", "Type"])
+    part_col    = _find_col(tally_df, ["Particulars", "Party Name", "Buyer", "Ledger Name"])
     gstin_col   = _find_col(tally_df, ["GSTIN", "GSTIN/UIN", "Buyer GSTIN", "GST No"])
     taxable_col = _find_col(tally_df, ["Total Sales", "Taxable Value", "Taxable Amount", "Net Amount"])
     igst_col    = _find_col(tally_df, ["Total IGST", "IGST", "Integrated Tax"])
@@ -421,7 +758,7 @@ def aggregate_books_monthly(tally_df: pd.DataFrame, category: str | None = None)
 
         # Category filter
         if category is not None:
-            row_cat = _infer_category(row, cat_col, gstin_col)
+            row_cat = _infer_category(row, cat_col, gstin_col, part_col, inv_cols, g1_b2b_invs)
             if row_cat != category:
                 continue
 
@@ -430,7 +767,30 @@ def aggregate_books_monthly(tally_df: pd.DataFrame, category: str | None = None)
     return dict(result)
 
 
-def _infer_category(row, cat_col: str | None, gstin_col: str | None) -> str:
+def _gstr1_b2b_invoice_set(gstr1_df: pd.DataFrame) -> set[str]:
+    """Normalised invoice numbers that GSTR-1 reported against a customer GSTIN."""
+    if gstr1_df is None or gstr1_df.empty:
+        return set()
+
+    inv_col   = _find_col(gstr1_df, ["Doc No", "Invoice Number", "Invoice No"])
+    gstin_col = _find_col(gstr1_df, ["Customer GSTIN", "GSTIN of Recipient", "Buyer GSTIN"])
+    if inv_col is None:
+        return set()
+
+    invoices: set[str] = set()
+    for _, row in gstr1_df.iterrows():
+        gstin = str(_col_val(row, gstin_col, "")).strip()
+        if not gstin or gstin.upper() in ("N/A", "NA"):
+            continue
+        norm = _norm_inv(_col_val(row, inv_col, ""))
+        if norm:
+            invoices.add(norm)
+    return invoices
+
+
+def _infer_category(row, cat_col: str | None, gstin_col: str | None,
+                    part_col: str | None = None,
+                    inv_cols: tuple = (), g1_b2b_invs: set | None = None) -> str:
     """Return 'B2B' or 'B2C' for a Tally row."""
     if cat_col:
         cat = str(_col_val(row, cat_col, "")).strip().upper()
@@ -438,6 +798,21 @@ def _infer_category(row, cat_col: str | None, gstin_col: str | None) -> str:
             return "B2B"
         if "B2C" in cat:
             return "B2C"
+    # GSTR-1 is the filed authority. An invoice reported there against a customer
+    # GSTIN is B2B in the books too, even when the Tally row carries no GSTIN —
+    # common for marketplace party ledgers (KiranaKart/Zepto, Blinkit, …).
+    if g1_b2b_invs:
+        for col in inv_cols:
+            norm = _norm_inv(_col_val(row, col, ""))
+            if norm and norm in g1_b2b_invs:
+                return "B2B"
+    # An explicit marker in the ledger name beats GSTIN presence: B2C bucket ledgers
+    # ("B2C-(KAR TO KAR)") carry the seller's own GSTIN, and Amazon B2B consolidated
+    # rows carry none at all.
+    if part_col:
+        cat = _category_from_text(_col_val(row, part_col, ""))
+        if cat:
+            return cat
     # Fall back to GSTIN presence
     if gstin_col:
         gstin = str(_col_val(row, gstin_col, "")).strip()
@@ -562,6 +937,9 @@ def reconcile_b2b_new(
             if norm:
                 gstr1_by_inv[norm].append(len(gstr1_rows) - 1)
 
+    g1_b2b_invs = _gstr1_b2b_invoice_set(gstr1_df)
+    inv_cols = tuple(c for c in (inv_col, ref_col) if c)
+
     matched_gstr1: set[int] = set()
     result_rows: list[dict] = []
 
@@ -580,7 +958,7 @@ def reconcile_b2b_new(
             continue
 
         # Check category
-        row_cat = _infer_category(tally_row, cat_col, gstin_col)
+        row_cat = _infer_category(tally_row, cat_col, gstin_col, part_col, inv_cols, g1_b2b_invs)
         if row_cat != "B2B":
             continue  # B2C rows handled separately
 
@@ -731,6 +1109,7 @@ def reconcile_b2c_new(
     """State + rate annual aggregation: GSTR-1 B2C vs Books B2C."""
     # Books B2C aggregation
     cat_col     = _find_col(tally_df, ["Category", "Catogary"])
+    part_col    = _find_col(tally_df, ["Particulars", "Party Name", "Buyer", "Ledger Name"])
     gstin_col   = _find_col(tally_df, ["GSTIN", "GSTIN/UIN"])
     state_col   = _find_col(tally_df, ["States", "Place of Supply", "State"])
     rate_col    = _find_col(tally_df, ["Rate", "Tax Rate", "GST Rate"])
@@ -739,10 +1118,15 @@ def reconcile_b2c_new(
     cgst_col    = _find_col(tally_df, ["Total CGST", "CGST"])
     sgst_col    = _find_col(tally_df, ["Total SGST", "SGST"])
 
+    inv_col     = _find_col(tally_df, ["Voucher No.", "Voucher No", "Invoice No", "Doc No", "Bill No"])
+    ref_col     = _find_col(tally_df, ["Voucher Ref. No.", "Voucher Ref No", "Ref No"])
+    inv_cols    = tuple(c for c in (inv_col, ref_col) if c)
+    g1_b2b_invs = _gstr1_b2b_invoice_set(gstr1_df)
+
     books_agg: dict[tuple, dict] = defaultdict(_zero_amounts)
 
     for _, row in tally_df.iterrows():
-        cat = _infer_category(row, cat_col, gstin_col)
+        cat = _infer_category(row, cat_col, gstin_col, part_col, inv_cols, g1_b2b_invs)
         if cat != "B2C":
             continue
         taxable = _f(_col_val(row, taxable_col, 0))
@@ -751,8 +1135,12 @@ def reconcile_b2c_new(
         sgst_v  = _f(_col_val(row, sgst_col, 0))
         if taxable == 0 and igst_v == 0 and cgst_v == 0 and sgst_v == 0:
             continue
-        state = str(_col_val(row, state_col, "")).strip().title() or "Unknown"
-        rate  = _f(_col_val(row, rate_col, 0))
+        # A raw register has no States/Rate column — fall back to the GSTIN state code,
+        # the ledger name, and the rate implied by the amounts.
+        state = _state_from_row(row, state_col, gstin_col, part_col)
+        rate  = _f(_col_val(row, rate_col, 0)) if rate_col else 0.0
+        if not rate:
+            rate = _derive_rate(taxable, igst_v, cgst_v, sgst_v)
         key   = (state, rate)
         _add_amounts(books_agg[key], taxable=taxable, igst=igst_v, cgst=cgst_v, sgst=sgst_v)
 
@@ -773,14 +1161,17 @@ def reconcile_b2c_new(
             if gstin and len(re.sub(r"[^A-Z0-9]", "", gstin.upper())) == 15:
                 continue  # B2B row — skip
             state = _extract_pos_state(str(_col_val(row, g1_state_col, "")).strip())
+            g_taxable = _f(_col_val(row, g1_taxable_col, 0))
+            g_igst    = _f(_col_val(row, g1_igst_col, 0))
+            g_cgst    = _f(_col_val(row, g1_cgst_col, 0))
+            g_sgst    = _f(_col_val(row, g1_sgst_col, 0))
             rate  = _f(_col_val(row, g1_rate_col, 0))
+            if not rate:
+                rate = _derive_rate(g_taxable, g_igst, g_cgst, g_sgst)
             key   = (state, rate)
             _add_amounts(
                 gstr1_agg[key],
-                taxable=_f(_col_val(row, g1_taxable_col, 0)),
-                igst=_f(_col_val(row, g1_igst_col, 0)),
-                cgst=_f(_col_val(row, g1_cgst_col, 0)),
-                sgst=_f(_col_val(row, g1_sgst_col, 0)),
+                taxable=g_taxable, igst=g_igst, cgst=g_cgst, sgst=g_sgst,
             )
 
     all_keys = sorted(set(books_agg) | set(gstr1_agg), key=lambda k: (k[0], k[1]))
@@ -809,11 +1200,18 @@ def reconcile_b2c_new(
 
 
 def _extract_pos_state(pos: str) -> str:
-    """Strip state code prefix like '07-Delhi' → 'Delhi'."""
+    """
+    Strip a state code prefix like '07-Delhi' → 'Delhi'.
+
+    When the code is a known GST state code the canonical name is used, so that
+    Books states derived from a GSTIN spell out identically to GSTR-1's Place of
+    Supply and the two sides actually group together.
+    """
     if "-" in pos:
         parts = pos.split("-", 1)
-        if parts[0].strip().isdigit():
-            return parts[1].strip().title()
+        code = parts[0].strip()
+        if code.isdigit():
+            return _GST_STATE_CODES.get(code.zfill(2), parts[1].strip().title())
     return pos.strip().title()
 
 

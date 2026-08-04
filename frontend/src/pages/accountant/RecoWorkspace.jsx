@@ -505,7 +505,7 @@ const RecoWorkspace = ({ agentTypeProp } = {}) => {
   // Generic "From Drive" input (non-Zepto agents): confirmed selection, or null.
   // When present, the run uses these Drive files instead of manual uploads.
   const [driveFiles, setDriveFiles] = useState(null); // { slotKey: [{fileId,name}] } once confirmed
-  const [tolerance, setTolerance] = useState('1.0');
+  const [tolerance, setTolerance] = useState('10');
   const [running, setRunning] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(null);
   const [phase, setPhase] = useState(null); // 'uploading' | 'reconciling' | 'preparing' | null
