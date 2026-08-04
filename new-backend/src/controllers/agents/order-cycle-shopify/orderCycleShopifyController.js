@@ -423,7 +423,7 @@ const getReportData = async (req, res, next) => {
         // Aggregation accumulators
         let grossSales = 0, totalReturns = 0, netSales = 0;
         let cancelledCount = 0, rtoCount = 0, cancelledAmount = 0;
-        let reconciledCount = 0, pendingCount = 0, overpaidCount = 0;
+        let reconciledCount = 0, pendingCount = 0, overpaidCount = 0, advanceCount = 0;
 
         const providers = {
             'Ekart COD':     { type: 'COD',     amount: 0, orders: 0, matched: 0, settledAmount: 0, settledOrders: 0, unsettledAmount: 0, unsettledOrders: 0, color: '#10b981' },
@@ -466,6 +466,7 @@ const getReportData = async (req, res, next) => {
             if (isReconciled)                             reconciledCount++;
             else if (status === 'PENDING RECEIVABLE')     pendingCount++;
             else if (status === 'OVERPAID / INVESTIGATE') overpaidCount++;
+            else if (status === 'ADVANCE')                advanceCount++;
 
             // Provider amounts
             addProvider('Ekart COD',     toNum(row.ekart_cod_amount),        isReconciled);
@@ -529,6 +530,7 @@ const getReportData = async (req, res, next) => {
                 reconciled: reconciledCount,
                 pending: pendingCount,
                 overpaid: overpaidCount,
+                advance: advanceCount,
                 rto: rtoCount,
                 cancelled: cancelledCount,
                 matchPct,
@@ -561,15 +563,17 @@ const getReportData = async (req, res, next) => {
  * Build the Sequelize WHERE clause shared by getTransactions and downloadTransactions
  * from the tab/sub/search query params.
  * tab: matched|mismatched|unsettled|all|sales
- * sub (mismatched only): less|more|return|notreturn
+ * sub (mismatched only): less|more|return|notreturn|advance
  *   - less/more    → PENDING RECEIVABLE / OVERPAID split (by amount direction)
  *   - return       → mismatched orders whose sale_order_number also matches a Return GST record
  *                     (i.e. this order's row was joined to a return — return_amount > 0)
  *   - notreturn    → mismatched orders with no matching return record
+ *   - advance      → sold (Tally GST) AND returned (Return GST) AND still has a courier/gateway
+ *                     settlement against it — reconciliation_status === 'ADVANCE'
  */
 function buildTransactionsWhere(decodedFilename, tab, sub, search) {
     const { Op } = require('sequelize');
-    const SETTLED = ['RECONCILED', 'PENDING RECEIVABLE', 'OVERPAID / INVESTIGATE'];
+    const SETTLED = ['RECONCILED', 'PENDING RECEIVABLE', 'OVERPAID / INVESTIGATE', 'ADVANCE'];
     const MISMATCHED = ['PENDING RECEIVABLE', 'OVERPAID / INVESTIGATE'];
 
     let where;
@@ -603,6 +607,7 @@ function buildTransactionsWhere(decodedFilename, tab, sub, search) {
                 ],
             }];
         }
+        if (tab === 'mismatched' && sub === 'advance') where.reconciliation_status = 'ADVANCE';
         // tab === 'all' | 'sales' → no status filter
     }
 
@@ -679,6 +684,7 @@ function statusLabelOf(row) {
     if (s === 'RECONCILED')         return 'RECONCILED';
     if (s === 'PENDING RECEIVABLE') return 'PENDING';
     if (s.startsWith('OVERPAID'))   return 'OVERPAID';
+    if (s === 'ADVANCE')            return 'ADVANCE';
     if (ds === 'RTO')               return 'RTO';
     if (ds === 'CANCELLED')         return 'CANCELLED';
     return 'UNSETTLED';
@@ -785,17 +791,19 @@ const downloadTransactions = async (req, res, next) => {
         const where = buildTransactionsWhere(decodedFilename, 'all', null, search);
         const rows  = await Model.findAll({ where, raw: true, order: [['id', 'ASC']] });
 
-        const SETTLED = ['RECONCILED', 'PENDING RECEIVABLE', 'OVERPAID / INVESTIGATE'];
+        const SETTLED = ['RECONCILED', 'PENDING RECEIVABLE', 'OVERPAID / INVESTIGATE', 'ADVANCE'];
         const matchedRows    = rows.filter(r => (r.reconciliation_status || '').toUpperCase().trim() === 'RECONCILED');
         const mismatchedRows = rows.filter(r => {
             const s = (r.reconciliation_status || '').toUpperCase().trim();
             return s === 'PENDING RECEIVABLE' || s.startsWith('OVERPAID');
         });
+        const advanceRows    = rows.filter(r => (r.reconciliation_status || '').toUpperCase().trim() === 'ADVANCE');
         const unsettledRows  = rows.filter(r => !SETTLED.includes((r.reconciliation_status || '').toUpperCase().trim()));
 
         const workbook = new ExcelJS.Workbook();
         addSheet(workbook, 'Matched',       '10B981', NORMAL_COLUMNS, matchedRows,    normalRowValues);
         addSheet(workbook, 'Mismatched',    'F59E0B', NORMAL_COLUMNS, mismatchedRows, normalRowValues);
+        addSheet(workbook, 'Advance',       '6366F1', NORMAL_COLUMNS, advanceRows,    normalRowValues);
         addSheet(workbook, 'Unsettled',     '94A3B8', NORMAL_COLUMNS, unsettledRows,  normalRowValues);
         addSheet(workbook, 'All Orders',    '3B82F6', NORMAL_COLUMNS, rows,           normalRowValues);
         addSheet(workbook, 'Sales Report',  '7C3AED', SALES_COLUMNS,  rows,           salesRowValues);
