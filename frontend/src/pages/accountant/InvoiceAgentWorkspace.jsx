@@ -19,8 +19,21 @@ import api, { API_URL } from '../../lib/api';
 // Temporarily pause the Invoice Process RUN trigger (the n8n webhook). Viewing,
 // editing and approving already-extracted invoices stays fully usable. Flip
 // INVOICE_MAINTENANCE back to false to re-enable processing.
-const INVOICE_MAINTENANCE = true;
+const INVOICE_MAINTENANCE_ENABLED = true;
+const INVOICE_LIVE_BRAND_IDS = [
+  '546976a5-6ca5-42d1-8b7d-2c6379ffa221', // Koparo
+  '759fd169-8a39-4351-a58a-f59cb71c7f25', // Nestroots
+  '91b89bb0-fb8c-477e-824d-a3136e6cbce6', // Shumee Playroom
+  'dd0107f5-f36a-4244-b7e0-c298a65d4e6a', // Urban Plant
+  'a882ea99-5650-40be-9b6b-c28d99db131a', // Stroom
+  'b6993834-0d8b-474e-910d-939c64e606e2', // Plenaire
+  '6419fcf0-b961-4f48-a726-15c111bda75d', // Dichika
+  '0515b238-265f-4273-8ccb-c16b77039e7f', // Biglilpeople
+];
+const INVOICE_SHUMEE_TOYS_ID = '91c1a721-4b1d-46de-9cd1-361e179c878e';
+const INVOICE_DRIVE_FOLDER_URL = 'https://drive.google.com/drive/folders/1hsv4GVpNiG6eIS2j8OybkaqNzaNOWi-C';
 const INVOICE_MAINTENANCE_MSG = 'Invoice Process is under maintenance. Please feel free to use the other tools — this agent will be back shortly.';
+const INVOICE_TOYS_MSG = 'Go to Shumee Playroom for invoice processing';
 
 const T_BLUE = '#2563EB';
 const T_BLUE_BG = '#EFF6FF';
@@ -296,6 +309,15 @@ const ProcessingBanner = ({ status, count, done = 0, total = 0, review = 0, inva
 
 const InvoiceAgentWorkspace = ({ agent }) => {
   const { brandId, agentId } = useParams();
+  // Per-brand maintenance: LIVE only for allowlisted brand IDs. Shumee Toys is
+  // routed to Shumee Playroom instead of the generic maintenance copy.
+  const isShumeeToys = brandId === INVOICE_SHUMEE_TOYS_ID;
+  const INVOICE_MAINTENANCE = INVOICE_MAINTENANCE_ENABLED && !INVOICE_LIVE_BRAND_IDS.includes(brandId);
+  const INVOICE_MAINTENANCE_TITLE = isShumeeToys ? INVOICE_TOYS_MSG : 'Invoice Process is under maintenance';
+  const INVOICE_MAINTENANCE_SUB = isShumeeToys
+    ? 'Invoices for Shumee are processed under the Shumee Playroom brand — open Shumee Playroom to process invoices.'
+    : 'Processing is paused right now. Please feel free to use the other tools — this agent will be back shortly.';
+  const INVOICE_MAINTENANCE_TOAST = isShumeeToys ? INVOICE_TOYS_MSG : INVOICE_MAINTENANCE_MSG;
   const [isTriggering, setIsTriggering] = useState(false);
   const [invoices, setInvoices] = useState([]);
   const [invoicesLoading, setInvoicesLoading] = useState(true);
@@ -583,7 +605,7 @@ const InvoiceAgentWorkspace = ({ agent }) => {
   const handleProcessInvoices = async () => {
     // Maintenance mode: never fire the n8n webhook; just tell the user.
     if (INVOICE_MAINTENANCE) {
-      toast.info(INVOICE_MAINTENANCE_MSG);
+      toast.info(INVOICE_MAINTENANCE_TOAST);
       return;
     }
     startedRef.current = true;
@@ -715,8 +737,8 @@ const InvoiceAgentWorkspace = ({ agent }) => {
           <div className="px-6 py-3 flex items-center gap-3 border-b" style={{ background: '#FFF7ED', borderColor: '#FED7AA', color: '#9A3412' }}>
             <span style={{ fontSize: 18, lineHeight: 1 }}>🛠️</span>
             <div>
-              <div className="text-sm font-bold">Invoice Process is under maintenance</div>
-              <div className="text-xs" style={{ opacity: 0.85 }}>Processing is paused right now. Please feel free to use the other tools — this agent will be back shortly.</div>
+              <div className="text-sm font-bold">{INVOICE_MAINTENANCE_TITLE}</div>
+              <div className="text-xs" style={{ opacity: 0.85 }}>{INVOICE_MAINTENANCE_SUB}</div>
             </div>
           </div>
         )}
@@ -750,6 +772,13 @@ const InvoiceAgentWorkspace = ({ agent }) => {
                   <Sheet className="w-4 h-4" /> Invoice Sheet
                 </button>
               )}
+              <button
+                onClick={() => window.open(INVOICE_DRIVE_FOLDER_URL, '_blank')}
+                className="inline-flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-semibold transition-all hover:bg-blue-50"
+                style={{ border: `1px solid ${T_BORDER}`, color: T_TEXT_SECONDARY }}
+              >
+                <Sheet className="w-4 h-4" /> Google Drive Folder
+              </button>
               <button
                 onClick={fetchInvoices}
                 disabled={invoicesLoading || isProcessing}
@@ -790,7 +819,7 @@ const InvoiceAgentWorkspace = ({ agent }) => {
                   boxShadow: INVOICE_MAINTENANCE ? 'none' : '0 4px 12px rgba(37,99,235,0.2)',
                   cursor: INVOICE_MAINTENANCE ? 'not-allowed' : undefined,
                 }}
-                title={INVOICE_MAINTENANCE ? INVOICE_MAINTENANCE_MSG : undefined}
+                title={INVOICE_MAINTENANCE ? INVOICE_MAINTENANCE_TOAST : undefined}
                 data-testid="process-invoices-button"
               >
                 {(isProcessing || processingStatus === 'processing') ? (
