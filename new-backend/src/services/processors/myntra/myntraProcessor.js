@@ -1,4 +1,5 @@
 const XLSX = require('xlsx-js-style');
+const { getStateAbbr } = require('../../../utils/gstStateCodes');
 
 /**
  * Safe number conversion
@@ -1172,7 +1173,133 @@ async function myntraProcessor(fileBuffers, skuData, stateConfigData, brandName,
   XLSX.utils.book_append_sheet(outputWorkbook, shippingtallyReadySheet, 'shipping tally ready');
   console.log(`✓ Added shipping tally ready sheet with ${shippingtallyReadyResult.data.length} rows and formulas`);
 
+  // ============================================================
+  // STEP 2.6: CREATE X2BETA WORKING + X2BETA-SHIPPING SHEETS
+  // Same 108-column Tally "X2Beta" e-invoice import template used by the
+  // Amazon B2B/B2C and Flipkart processors. Built from pivotData (same
+  // aggregation already used by "tally ready" above) so the numbers stay
+  // consistent with that sheet: amounts are not sign-flipped for RT/RTO
+  // (matching "tally ready"'s existing behaviour), and HSN is left blank
+  // since Myntra's source reports carry no HSN column.
+  // ============================================================
+  console.log('Step 2.6: Create x2beta working / x2beta-shipping sheets');
 
+  function getSellerStateAbbr(gstin) {
+    const code = String(gstin || '').trim().substring(0, 2);
+    return getStateAbbr(code) || code;
+  }
+
+  const x2betaVchDate = lastDateOfMonth || new Date();
+  const x2betaUniqueRates = [...new Set(pivotData.map(r => Number(r.rate || 0)))].filter(r => r > 0);
+  const x2betaSortedStateCodes = [...new Set(pivotData.map(r => getSellerStateAbbr(r.seller_gstin)))].filter(Boolean).sort();
+
+  function buildX2betaColumns({ isShipping }) {
+    const cols = [
+      { header: 'Vch. Date* ', get: () => x2betaVchDate },
+      { header: 'Vch. Type*', get: r => `Sales-${getSellerStateAbbr(r.seller_gstin) || ''}` },
+      { header: 'Vch. No.*', get: r => r.final_invoice_no || '' },
+      { header: 'Ref. No.', get: r => r.final_invoice_no || '' },
+      { header: 'Ref. Date', get: () => x2betaVchDate },
+      { header: 'Is CN?', get: () => null },
+      { header: 'Is Vch?', get: () => null },
+      { header: 'Party Ledger*', get: r => r.tally_ledgers || '' },
+      { header: 'Sales Ledger*', get: r => `Sales Myntra-${getSellerStateAbbr(r.seller_gstin) || ''}${isShipping ? ' Shipping' : ''} ${Number(r.rate || 0)}%` },
+      { header: 'Stock Item', get: r => (isShipping ? null : (r.fg || '')) },
+      { header: 'Description', get: () => null },
+      { header: 'Godown', get: () => null },
+      { header: 'Quantity', get: r => (isShipping ? null : Number(r.sum_of_quantity || 0)) },
+      {
+        header: 'Rate',
+        get: r => {
+          if (isShipping) return null;
+          const qty = Number(r.sum_of_quantity || 0);
+          return qty !== 0 ? Math.abs(Number(r.sum_of_base_value || 0) / qty) : 0;
+        }
+      },
+      { header: 'Unit', get: () => (isShipping ? null : 'Pcs') },
+      { header: 'Discount', get: () => null },
+      { header: 'Amount*', get: r => Number(r.sum_of_base_value || 0) },
+      { header: 'Discount', get: () => null }
+    ];
+
+    // Dynamic Output IGST/CGST/SGST columns — one triplet per (rate, seller-state)
+    // combination present in this run's data, mirroring the Amazon/Flipkart layout.
+    // Myntra's pivot never separated shipping tax from sales tax (the existing
+    // "shipping tally ready" sheet reuses the same sum_of_*_amount fields), so the
+    // shipping sheet's Output columns intentionally mirror the sales ones here too.
+    x2betaUniqueRates.forEach(rate => {
+      const halfRate = Math.round((rate / 2) * 100) / 100;
+      x2betaSortedStateCodes.forEach(sc => {
+        cols.push({
+          header: `Output IGST ${rate}%-${sc}`,
+          get: row => (Number(row.rate || 0) === rate && getSellerStateAbbr(row.seller_gstin) === sc) ? Number(row.sum_of_igst_amount || 0) : 0
+        });
+        cols.push({
+          header: `Output CGST ${halfRate}%-${sc}`,
+          get: row => (Number(row.rate || 0) === rate && getSellerStateAbbr(row.seller_gstin) === sc) ? Number(row.sum_of_cgst_amount || 0) : 0
+        });
+        cols.push({
+          header: `Output SGST ${halfRate}%-${sc}`,
+          get: row => (Number(row.rate || 0) === rate && getSellerStateAbbr(row.seller_gstin) === sc) ? Number(row.sum_of_sgst_amount || 0) : 0
+        });
+      });
+    });
+
+    cols.push(
+      { header: null, get: () => null },
+      { header: null, get: () => null },
+      { header: 'Narration', get: () => `Myntra-${isShipping ? 'Shipping-' : ''}${date || ''}` },
+      { header: 'Taxability', get: () => null },
+      { header: 'GST Nature', get: () => null },
+      { header: 'GST Rate', get: r => Number(r.rate || 0) },
+      { header: 'Cess', get: () => null },
+      { header: 'RCM?', get: () => null },
+      // Myntra's source reports carry no HSN column — left blank rather than fabricated.
+      { header: 'HSN', get: () => null },
+      { header: 'HSN Desc', get: () => null },
+      { header: 'Supply Type', get: () => null },
+      { header: 'Cost Category', get: () => null },
+      { header: 'Cost Centre', get: () => null },
+      { header: 'Name', get: () => null }, { header: 'Address 1', get: () => null }, { header: 'Address 2', get: () => null },
+      { header: 'State', get: r => r.tally_ledgers || '' }, { header: 'Country', get: () => 'India' }, { header: 'PIN Code', get: () => null },
+      { header: 'Place of Supply', get: r => r.tally_ledgers || '' }, { header: 'GST Type', get: () => null }, { header: 'GSTIN', get: () => null },
+      { header: 'Name', get: () => null }, { header: 'Address 1', get: () => null }, { header: 'Address 2', get: () => null },
+      { header: 'State', get: r => r.tally_ledgers || '' }, { header: 'Country', get: () => 'India' }, { header: 'PIN Code', get: () => null },
+      { header: 'Place', get: () => null }, { header: 'GSTIN', get: () => null },
+      { header: 'Name', get: () => null }, { header: 'Address 1', get: () => null }, { header: 'Address 2', get: () => null },
+      { header: 'State', get: r => r.tally_ledgers || '' }, { header: 'Country', get: () => 'India' }, { header: 'PIN Code', get: () => null },
+      { header: 'Place', get: () => null }, { header: 'GSTIN', get: () => null },
+      { header: 'DN No.', get: () => null }, { header: 'DN Date', get: () => null }, { header: 'Doc. No.', get: () => null },
+      { header: 'Dis. Through', get: () => null }, { header: 'Destination', get: () => null }, { header: 'Carrier Name', get: () => null },
+      { header: 'LR No.', get: () => null }, { header: 'LR Date', get: () => null }, { header: 'Order No.', get: () => null },
+      { header: 'Order Date', get: () => null }, { header: 'Term of Delivery', get: () => null }, { header: 'Terms of Paymemt', get: () => null },
+      { header: 'Other Ref.', get: () => null }, { header: 'Place of Receipt', get: () => null }, { header: 'Vessel/Flight No.', get: () => null },
+      { header: 'Port of Loading', get: () => null }, { header: 'Port of Discharge', get: () => null }, { header: 'Country to', get: () => null },
+      { header: 'Shipping Bill No.', get: () => null }, { header: 'Date', get: () => null }, { header: 'Port Code', get: () => null },
+      { header: 'e-Way Bill No', get: () => null }, { header: 'Date', get: () => null }, { header: 'Cons. e-Way Bill No.', get: () => null },
+      { header: 'Date', get: () => null }, { header: 'Sub Type', get: () => null }, { header: 'Doc. Type', get: () => null },
+      { header: 'Distance (KM)', get: () => null }, { header: 'Transporter Name', get: () => null }, { header: 'Transporter ID', get: () => null },
+      { header: 'Transport Mode', get: () => null }, { header: 'Doc No.', get: () => null }, { header: 'Date', get: () => null },
+      { header: 'Vehicle No.', get: () => null }, { header: 'Vehicle Type', get: () => null }, { header: 'Status', get: () => null },
+      { header: 'Note Reason', get: () => null }, { header: 'Orig. Inv. No.', get: () => null }, { header: 'Orig. Inv. Date', get: () => null }
+    );
+
+    return cols;
+  }
+
+  const x2betaColumns = buildX2betaColumns({ isShipping: false });
+  const x2betaHeaders = x2betaColumns.map(c => c.header);
+  const x2betaSheetData = [x2betaHeaders, ...pivotData.map(row => x2betaColumns.map(c => c.get(row)))];
+  const x2betaSheet = XLSX.utils.aoa_to_sheet(x2betaSheetData);
+  XLSX.utils.book_append_sheet(outputWorkbook, x2betaSheet, 'x2beta working');
+  console.log(`✓ Added x2beta working sheet with ${pivotData.length} rows`);
+
+  const x2betaShippingColumns = buildX2betaColumns({ isShipping: true });
+  const x2betaShippingHeaders = x2betaShippingColumns.map(c => c.header);
+  const x2betaShippingSheetData = [x2betaShippingHeaders, ...pivotData.map(row => x2betaShippingColumns.map(c => c.get(row)))];
+  const x2betaShippingSheet = XLSX.utils.aoa_to_sheet(x2betaShippingSheetData);
+  XLSX.utils.book_append_sheet(outputWorkbook, x2betaShippingSheet, 'x2beta-shipping');
+  console.log(`✓ Added x2beta-shipping sheet with ${pivotData.length} rows`);
 
 
 

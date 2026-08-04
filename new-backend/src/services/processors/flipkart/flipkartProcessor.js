@@ -1424,7 +1424,7 @@ async function flipkartProcessor(rawFileBuffer, skuData, stateConfigData, brandN
     // pending a confirmed master-data source, matching the Amazon sheet).
     { header: 'Name', get: () => null }, { header: 'Address 1', get: () => null }, { header: 'Address 2', get: () => null },
     { header: 'State', get: r => r.customer_delivery_state || '' }, { header: 'Country', get: () => 'India' }, { header: 'PIN Code', get: () => null },
-    { header: 'Place of Supply', get: () => null }, { header: 'GST Type', get: () => null }, { header: 'GSTIN', get: () => null },
+    { header: 'Place of Supply', get: r => r.customer_delivery_state || '' }, { header: 'GST Type', get: () => null }, { header: 'GSTIN', get: () => null },
     { header: 'Name', get: () => null }, { header: 'Address 1', get: () => null }, { header: 'Address 2', get: () => null },
     { header: 'State', get: r => r.customer_delivery_state || '' }, { header: 'Country', get: () => 'India' }, { header: 'PIN Code', get: () => null },
     { header: 'Place', get: () => null }, { header: 'GSTIN', get: () => null },
@@ -1474,6 +1474,124 @@ async function flipkartProcessor(rawFileBuffer, skuData, stateConfigData, brandN
   x2betaReconciliationChecks.forEach(([label, x2betaTotal, mainTotal]) => {
     if (Math.abs(x2betaTotal - mainTotal) > X2BETA_RECONCILIATION_TOLERANCE) {
       console.warn(`[Flipkart] x2beta working sheet ${label} mismatch: x2beta=${x2betaTotal.toFixed(2)}, main=${mainTotal.toFixed(2)}`);
+    }
+  });
+
+  // ============================================================
+  // STEP 4.58: CREATE X2BETA-SHIPPING WORKING SHEET
+  // Same 108-column X2Beta template as "x2beta working" above, but sourced
+  // from the shipping-charge amounts — mirrors how "shipping tally ready" is
+  // derived from "tally ready" and how the Amazon B2B/B2C processors build
+  // their "x2beta-shipping" sheet. No Stock Item / Quantity / Rate / Unit /
+  // Godown: freight is a ledger-only line, no stock movement.
+  // ============================================================
+  console.log('Step 4.58: Create x2beta-shipping sheet');
+
+  const x2betaShippingColumns = [
+    { header: 'Vch. Date* ', get: () => x2betaVchDate },
+    { header: 'Vch. Type*', get: r => `${Number(r.final_shipping_taxable_value || 0) < 0 ? 'CN-' : ''}Sales-${getSellerStateAbbr(r.seller_gstin) || ''}` },
+    { header: 'Vch. No.*', get: r => r.final_invoice_no || '' },
+    { header: 'Ref. No.', get: r => r.final_invoice_no || '' },
+    { header: 'Ref. Date', get: () => x2betaVchDate },
+    { header: 'Is CN?', get: r => (Number(r.final_shipping_taxable_value || 0) < 0 ? 'Yes' : null) },
+    { header: 'Is Vch?', get: () => null },
+    { header: 'Party Ledger*', get: r => r.tally_ledgers || '' },
+    { header: 'Sales Ledger*', get: r => `Sales Flipkart-${getSellerStateAbbr(r.seller_gstin) || ''} ${Number(r.final_gst_rate || 0)}%` },
+    { header: 'Stock Item', get: () => null },
+    { header: 'Description', get: () => null },
+    { header: 'Godown', get: () => null },
+    { header: 'Quantity', get: () => null },
+    { header: 'Rate', get: () => null },
+    { header: 'Unit', get: () => null },
+    { header: 'Discount', get: () => null },
+    { header: 'Amount*', get: r => Number(r.final_shipping_taxable_value || 0) },
+    { header: 'Discount', get: () => null }
+  ];
+
+  x2betaUniqueRates.forEach(rate => {
+    const halfRate = Math.round((rate / 2) * 100) / 100;
+    x2betaSortedStateCodes.forEach(sc => {
+      x2betaShippingColumns.push({
+        header: `Output IGST ${rate}%-${sc}`,
+        get: row => (Number(row.final_gst_rate || 0) === rate && getSellerStateAbbr(row.seller_gstin) === sc) ? Number(row.final_igst_shipping || 0) : 0
+      });
+      x2betaShippingColumns.push({
+        header: `Output CGST ${halfRate}%-${sc}`,
+        get: row => (Number(row.final_gst_rate || 0) === rate && getSellerStateAbbr(row.seller_gstin) === sc) ? Number(row.final_cgst_shipping || 0) : 0
+      });
+      x2betaShippingColumns.push({
+        header: `Output SGST ${halfRate}%-${sc}`,
+        get: row => (Number(row.final_gst_rate || 0) === rate && getSellerStateAbbr(row.seller_gstin) === sc) ? Number(row.final_sgst_shipping || 0) : 0
+      });
+    });
+  });
+
+  x2betaShippingColumns.push(
+    { header: null, get: () => null },
+    { header: null, get: () => null },
+    { header: 'Narration', get: () => `Flipkart-Shipping-${date || ''}` },
+    { header: 'Taxability', get: () => null },
+    { header: 'GST Nature', get: () => null },
+    { header: 'GST Rate', get: r => Number(r.final_gst_rate || 0) },
+    { header: 'Cess', get: () => null },
+    { header: 'RCM?', get: () => null },
+    // Freight doesn't share the stock item's HSN, and the report carries no
+    // shipping-specific HSN/SAC — left blank rather than reusing the item's code.
+    { header: 'HSN', get: () => null },
+    { header: 'HSN Desc', get: () => null },
+    { header: 'Supply Type', get: () => null },
+    { header: 'Cost Category', get: () => null },
+    { header: 'Cost Centre', get: () => null },
+    { header: 'Name', get: () => null }, { header: 'Address 1', get: () => null }, { header: 'Address 2', get: () => null },
+    { header: 'State', get: r => r.customer_delivery_state || '' }, { header: 'Country', get: () => 'India' }, { header: 'PIN Code', get: () => null },
+    { header: 'Place of Supply', get: r => r.customer_delivery_state || '' }, { header: 'GST Type', get: () => null }, { header: 'GSTIN', get: () => null },
+    { header: 'Name', get: () => null }, { header: 'Address 1', get: () => null }, { header: 'Address 2', get: () => null },
+    { header: 'State', get: r => r.customer_delivery_state || '' }, { header: 'Country', get: () => 'India' }, { header: 'PIN Code', get: () => null },
+    { header: 'Place', get: () => null }, { header: 'GSTIN', get: () => null },
+    { header: 'Name', get: () => null }, { header: 'Address 1', get: () => null }, { header: 'Address 2', get: () => null },
+    { header: 'State', get: r => r.customer_delivery_state || '' }, { header: 'Country', get: () => 'India' }, { header: 'PIN Code', get: () => null },
+    { header: 'Place', get: () => null }, { header: 'GSTIN', get: () => null },
+    // Dispatch / e-way-bill / transport fields — always blank, not used by this business.
+    { header: 'DN No.', get: () => null }, { header: 'DN Date', get: () => null }, { header: 'Doc. No.', get: () => null },
+    { header: 'Dis. Through', get: () => null }, { header: 'Destination', get: () => null }, { header: 'Carrier Name', get: () => null },
+    { header: 'LR No.', get: () => null }, { header: 'LR Date', get: () => null }, { header: 'Order No.', get: () => null },
+    { header: 'Order Date', get: () => null }, { header: 'Term of Delivery', get: () => null }, { header: 'Terms of Paymemt', get: () => null },
+    { header: 'Other Ref.', get: () => null }, { header: 'Place of Receipt', get: () => null }, { header: 'Vessel/Flight No.', get: () => null },
+    { header: 'Port of Loading', get: () => null }, { header: 'Port of Discharge', get: () => null }, { header: 'Country to', get: () => null },
+    { header: 'Shipping Bill No.', get: () => null }, { header: 'Date', get: () => null }, { header: 'Port Code', get: () => null },
+    { header: 'e-Way Bill No', get: () => null }, { header: 'Date', get: () => null }, { header: 'Cons. e-Way Bill No.', get: () => null },
+    { header: 'Date', get: () => null }, { header: 'Sub Type', get: () => null }, { header: 'Doc. Type', get: () => null },
+    { header: 'Distance (KM)', get: () => null }, { header: 'Transporter Name', get: () => null }, { header: 'Transporter ID', get: () => null },
+    { header: 'Transport Mode', get: () => null }, { header: 'Doc No.', get: () => null }, { header: 'Date', get: () => null },
+    { header: 'Vehicle No.', get: () => null }, { header: 'Vehicle Type', get: () => null }, { header: 'Status', get: () => null },
+    { header: 'Note Reason', get: () => null }, { header: 'Orig. Inv. No.', get: () => null }, { header: 'Orig. Inv. Date', get: () => null }
+  );
+
+  const x2betaShippingHeaders = x2betaShippingColumns.map(c => c.header);
+  const x2betaShippingSheetData = [x2betaShippingHeaders, ...workingFileData.map(row => x2betaShippingColumns.map(c => c.get(row)))];
+  const x2betaShippingSheet = XLSX.utils.aoa_to_sheet(x2betaShippingSheetData);
+  XLSX.utils.book_append_sheet(outputWorkbook, x2betaShippingSheet, 'x2beta-shipping');
+  console.log(`✓ Added x2beta-shipping sheet with ${workingFileData.length} rows`);
+
+  // ==================================
+  // VALIDATION: x2beta-shipping sheet totals must reconcile with the pivot totals
+  // ==================================
+  const x2betaShippingOutputCols = x2betaShippingColumns.filter(c => typeof c.header === 'string' && c.header.startsWith('Output '));
+  const sumX2betaShippingOutput = prefix => workingFileData.reduce((acc, row) => {
+    return acc + x2betaShippingOutputCols
+      .filter(c => c.header.startsWith(prefix))
+      .reduce((rowAcc, c) => rowAcc + Number(c.get(row) || 0), 0);
+  }, 0);
+
+  const x2betaShippingReconciliationChecks = [
+    ['Amount* (shipping taxable value)', workingFileData.reduce((acc, r) => acc + Number(r.final_shipping_taxable_value || 0), 0), sumPivot('sum_of_final_shipping_taxable_value')],
+    ['Shipping IGST', sumX2betaShippingOutput('Output IGST'), sumPivot('sum_of_final_igst_shipping')],
+    ['Shipping CGST', sumX2betaShippingOutput('Output CGST'), sumPivot('sum_of_final_cgst_shipping')],
+    ['Shipping SGST', sumX2betaShippingOutput('Output SGST'), sumPivot('sum_of_final_sgst_shipping')]
+  ];
+  x2betaShippingReconciliationChecks.forEach(([label, x2betaTotal, mainTotal]) => {
+    if (Math.abs(x2betaTotal - mainTotal) > X2BETA_RECONCILIATION_TOLERANCE) {
+      console.warn(`[Flipkart] x2beta-shipping sheet ${label} mismatch: x2beta=${x2betaTotal.toFixed(2)}, main=${mainTotal.toFixed(2)}`);
     }
   });
 

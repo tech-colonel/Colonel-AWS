@@ -202,7 +202,7 @@ function TxDrillRow({ row }) {
     const totalSettled = toNum(row.total_settlement_received);
     const bal = toNum(row.balance_amount_receivable);
     const courierName = ekAmt > 0 ? 'Ekart' : delAmt > 0 ? 'Delhivery' : xpAmt > 0 ? 'Xpressbees' : 'Courier';
-    const gatewayName = snAmt > 0 ? 'Snapmint' : bhAmt > 0 ? 'BharatX' : rzAmt > 0 ? 'Razorpay' : 'Gateway';
+    const gatewayName = snAmt !== 0 ? 'Snapmint' : bhAmt !== 0 ? 'BharatX' : rzAmt !== 0 ? 'Razorpay' : 'Gateway';
     const srcSection = (dot, label, file, children) => (
         <div className="bg-white border border-slate-200 rounded-lg overflow-hidden">
             <div className="flex items-center gap-1.5 px-3 py-2 border-b border-slate-100" style={{ background: `${dot}12` }}>
@@ -239,16 +239,16 @@ function TxDrillRow({ row }) {
                             {ekAmt === 0 && delAmt === 0 && xpAmt === 0 && kvRow('Amount', '— No record found')}
                         </>)}
                         {srcSection('#7c3aed', gatewayName, `${gatewayName} settlement report`, <>
-                            {snAmt > 0 && <>{kvRow('Join Key (Order No.)', row.sale_order_number)}{kvRow('Settlement Date', formatDate(row.snapmint_settlement_date))}{kvRow('Settlement Value', fmtFull(snAmt))}</>}
-                            {bhAmt > 0 && <>{kvRow('Join Key (Order ID)', row.sale_order_number)}{kvRow('Settlement Date', formatDate(row.bharatx_settlement_timestamp))}{kvRow('Ledger Amount', fmtFull(bhAmt))}</>}
-                            {rzAmt > 0 && <>{kvRow('receipt → SO', row.sale_order_number)}{kvRow('Settlement Date', formatDate(row.razorpay_settlement_date))}{kvRow('Amount', fmtFull(rzAmt))}</>}
+                            {snAmt !== 0 && <>{kvRow('Join Key (Order No.)', row.sale_order_number)}{kvRow('Settlement Date', formatDate(row.snapmint_settlement_date))}{kvRow('Settlement Value', fmtFull(snAmt))}</>}
+                            {bhAmt !== 0 && <>{kvRow('Join Key (Order ID)', row.sale_order_number)}{kvRow('Settlement Date', formatDate(row.bharatx_settlement_timestamp))}{kvRow('Ledger Amount', fmtFull(bhAmt))}</>}
+                            {rzAmt !== 0 && <>{kvRow('receipt → SO', row.sale_order_number)}{kvRow('Settlement Date', formatDate(row.razorpay_settlement_date))}{kvRow('Amount', fmtFull(rzAmt))}</>}
                             {snAmt === 0 && bhAmt === 0 && rzAmt === 0 && kvRow('Settlement', '— No record found')}
                         </>)}
                     </div>
                     <div className="flex flex-wrap gap-4 items-center bg-white border border-slate-200 rounded-lg px-4 py-2.5 text-xs">
                         <div><span className="text-slate-400">Net Order Value: </span><span className="font-semibold">{fmtFull(row.net_amount)}</span></div>
                         <div className="text-slate-200">·</div>
-                        <div><span className="text-slate-400">Total Settlement: </span><span className="font-semibold">{totalSettled > 0 ? fmtFull(totalSettled) : '—'}</span></div>
+                        <div><span className="text-slate-400">Total Settlement: </span><span className="font-semibold">{totalSettled !== 0 ? fmtFull(totalSettled) : '—'}</span></div>
                         <div className="text-slate-200">·</div>
                         <div>
                             <span className="text-slate-400">Balance: </span>
@@ -311,10 +311,10 @@ function TransactionSheet({ brandId, agentId, filename, reconciliation }) {
 
     // Tab counts from parent reconciliation (already loaded, no extra fetch)
     const rc = reconciliation || {};
-    const unsettledCount = Math.max(0, (rc.total || 0) - (rc.reconciled || 0) - (rc.pending || 0) - (rc.overpaid || 0));
+    const unsettledCount = Math.max(0, (rc.total || 0) - (rc.reconciled || 0) - (rc.pending || 0) - (rc.overpaid || 0) - (rc.advance || 0));
     const tabs = [
         { key: 'matched',    label: 'Matched',     count: rc.reconciled },
-        { key: 'mismatched', label: 'Mismatched',  count: (rc.pending || 0) + (rc.overpaid || 0) },
+        { key: 'mismatched', label: 'Mismatched',  count: (rc.pending || 0) + (rc.overpaid || 0) + (rc.advance || 0) },
         { key: 'unsettled',  label: 'Unsettled',   count: unsettledCount },
         { key: 'all',        label: 'All Orders',  count: rc.total },
         { key: 'sales',      label: 'Sales Report', count: null },
@@ -353,6 +353,7 @@ function TransactionSheet({ brandId, agentId, filename, reconciliation }) {
         if (s === 'RECONCILED')         return <span className="px-1.5 py-0.5 rounded-full text-[9px] font-bold bg-emerald-50 text-emerald-700">RECONCILED</span>;
         if (s === 'PENDING RECEIVABLE') return <span className="px-1.5 py-0.5 rounded-full text-[9px] font-bold bg-amber-50 text-amber-700">PENDING</span>;
         if (s.startsWith('OVERPAID'))   return <span className="px-1.5 py-0.5 rounded-full text-[9px] font-bold bg-purple-50 text-purple-700">OVERPAID</span>;
+        if (s === 'ADVANCE')            return <span className="px-1.5 py-0.5 rounded-full text-[9px] font-bold bg-indigo-50 text-indigo-700">ADVANCE</span>;
         if (ds === 'RTO')               return <span className="px-1.5 py-0.5 rounded-full text-[9px] font-bold bg-red-50 text-red-700">RTO</span>;
         if (ds === 'CANCELLED')         return <span className="px-1.5 py-0.5 rounded-full text-[9px] font-bold bg-slate-100 text-slate-500">CANCELLED</span>;
         return <span className="px-1.5 py-0.5 rounded-full text-[9px] font-bold bg-slate-100 text-slate-400">UNSETTLED</span>;
@@ -366,9 +367,9 @@ function TransactionSheet({ brandId, agentId, filename, reconciliation }) {
     }
 
     function gatewayOf(row) {
-        if (toNum(row.snapmint_settlement_value) > 0) return 'Snapmint';
-        if (toNum(row.bharatx_ledger_amount) > 0)     return 'BharatX';
-        if (toNum(row.razorpay_settlement_amount) > 0) return 'Razorpay';
+        if (toNum(row.snapmint_settlement_value) !== 0) return 'Snapmint';
+        if (toNum(row.bharatx_ledger_amount) !== 0)     return 'BharatX';
+        if (toNum(row.razorpay_settlement_amount) !== 0) return 'Razorpay';
         return '—';
     }
 
@@ -397,7 +398,7 @@ function TransactionSheet({ brandId, agentId, filename, reconciliation }) {
                     <button
                         onClick={handleDownloadSheet}
                         disabled={downloading}
-                        title="Download the full Transaction Sheet as Excel (Matched, Mismatched, Unsettled, All Orders & Sales Report sheets)"
+                        title="Download the full Transaction Sheet as Excel (Matched, Mismatched, Advance, Unsettled, All Orders & Sales Report sheets)"
                         className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold border border-slate-200 rounded-lg bg-white hover:bg-slate-50 text-slate-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap"
                     >
                         {downloading
@@ -432,6 +433,7 @@ function TransactionSheet({ brandId, agentId, filename, reconciliation }) {
                         { key: 'more',      label: 'More Received',      cls: 'bg-purple-50 border-purple-300 text-purple-700' },
                         { key: 'return',    label: 'MismatchedReturn',   cls: 'bg-rose-50 border-rose-300 text-rose-700' },
                         { key: 'notreturn', label: 'MismatchedNotReturn', cls: 'bg-sky-50 border-sky-300 text-sky-700' },
+                        { key: 'advance',   label: 'Advance',            cls: 'bg-indigo-50 border-indigo-300 text-indigo-700' },
                     ].map(({ key, label, cls }) => (
                         <button key={key} onClick={() => switchSub(key)}
                             className={`px-3 py-1.5 text-xs rounded-lg border font-semibold transition-colors
@@ -694,7 +696,7 @@ function ReconciliationView({ file, brandId, agentId, onBack, onDownload }) {
                             <div className="flex gap-5 mt-3">
                                 <div>
                                     <p className="text-[10px] text-slate-400">Mismatched</p>
-                                    <p className="text-sm font-bold text-orange-600">{(reconciliation.pending + reconciliation.overpaid).toLocaleString()}</p>
+                                    <p className="text-sm font-bold text-orange-600">{(reconciliation.pending + reconciliation.overpaid + (reconciliation.advance || 0)).toLocaleString()}</p>
                                 </div>
                                 <div>
                                     <p className="text-[10px] text-slate-400">RTO</p>
@@ -882,12 +884,13 @@ function ReconciliationView({ file, brandId, agentId, onBack, onDownload }) {
             </div>
 
             {/* ── Status Breakdown Cards ── */}
-            <div className="grid grid-cols-4 gap-3">
+            <div className="grid grid-cols-5 gap-3">
                 {[
-                    { label: 'Reconciled',    value: reconciliation.reconciled, color: 'text-emerald-600', bg: 'bg-emerald-50', border: 'border-emerald-100', icon: CheckCircle2 },
-                    { label: 'Pending',       value: reconciliation.pending,    color: 'text-amber-600',   bg: 'bg-amber-50',   border: 'border-amber-100',   icon: TrendingUp },
-                    { label: 'Overpaid',      value: reconciliation.overpaid,   color: 'text-purple-600',  bg: 'bg-purple-50',  border: 'border-purple-100',  icon: TrendingDown },
-                    { label: 'RTO',           value: reconciliation.rto,        color: 'text-red-600',     bg: 'bg-red-50',     border: 'border-red-100',     icon: XCircle },
+                    { label: 'Reconciled',    value: reconciliation.reconciled,    color: 'text-emerald-600', bg: 'bg-emerald-50', border: 'border-emerald-100', icon: CheckCircle2 },
+                    { label: 'Pending',       value: reconciliation.pending,       color: 'text-amber-600',   bg: 'bg-amber-50',   border: 'border-amber-100',   icon: TrendingUp },
+                    { label: 'Overpaid',      value: reconciliation.overpaid,      color: 'text-purple-600',  bg: 'bg-purple-50',  border: 'border-purple-100',  icon: TrendingDown },
+                    { label: 'Advance',       value: reconciliation.advance || 0,  color: 'text-indigo-600',  bg: 'bg-indigo-50',  border: 'border-indigo-100',  icon: AlertCircle },
+                    { label: 'RTO',           value: reconciliation.rto,           color: 'text-red-600',     bg: 'bg-red-50',     border: 'border-red-100',     icon: XCircle },
                 ].map(({ label, value, color, bg, border, icon: Icon }) => (
                     <div key={label} className={`${bg} border ${border} rounded-xl p-4`}>
                         <div className="flex items-center gap-2 mb-1">

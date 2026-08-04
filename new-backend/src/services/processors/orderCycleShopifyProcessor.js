@@ -748,10 +748,21 @@ async function orderCycleShopifyProcessor(
     // rounding noise tops out at ₹0.50, and the smallest genuine gap starts at ₹1.62.
     const RECONCILIATION_TOLERANCE = 1;
     for (const row of masterRows) {
+        const hasSettlement =
+            row.ekart_cod_amount !== 0 || row.delhivery_cod_amount !== 0 || row.xpressbees_net_payment !== 0 ||
+            row.snapmint_settlement_amount !== 0 || row.bharatx_settlement_amount !== 0 || row.razorpay_settlement_amount !== 0;
+
         if (row.delivery_status === 'RTO') {
             row.reconciliation_status = 'RTO';
         } else if (row.delivery_status === 'CANCELLED') {
             row.reconciliation_status = 'CANCELLED';
+        } else if (row.return_amount > 0 && hasSettlement) {
+            // Sold (Tally GST) then returned (Return GST), yet a courier or gateway still
+            // shows money moving against this order — that cash isn't "still receivable" on
+            // a live sale (there is no live sale, it was returned), it's an advance that
+            // needs its own recovery/investigation track instead of being read as ordinary
+            // pending/overpaid.
+            row.reconciliation_status = 'ADVANCE';
         } else if (Math.abs(row.balance_amount_receivable) <= RECONCILIATION_TOLERANCE) {
             row.reconciliation_status = 'RECONCILED';
         } else if (row.balance_amount_receivable > 0) {
@@ -844,6 +855,7 @@ async function orderCycleShopifyProcessor(
     validations.push({ check: 'RTO Orders', value: masterRows.filter(r => r.reconciliation_status === 'RTO').length, status: 'INFO' });
     validations.push({ check: 'Reconciled Orders', value: masterRows.filter(r => r.reconciliation_status === 'RECONCILED').length, status: 'INFO' });
     validations.push({ check: 'Pending Receivable', value: masterRows.filter(r => r.reconciliation_status === 'PENDING RECEIVABLE').length, status: 'INFO' });
+    validations.push({ check: 'Advance (Returned but Settled)', value: masterRows.filter(r => r.reconciliation_status === 'ADVANCE').length, status: 'INFO' });
     validations.push({ check: 'Total Output Rows', value: masterRows.length, status: 'INFO' });
 
     // ── Build Output Workbook ─────────────────────────────────────────────────

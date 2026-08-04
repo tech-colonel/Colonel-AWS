@@ -1,6 +1,7 @@
 // shopifyProcessor.js
 const ExcelJS = require('exceljs');
 const { Readable } = require('stream');
+const { getStateCodeFromName, getStateAbbr } = require('../../../utils/gstStateCodes');
 
 /**
  * Normalize SKU
@@ -390,6 +391,10 @@ const shopifyProcessor = async (
             });
         }
 
+        // 4. X2Beta working — same 108-column Tally e-invoice import template
+        // used by the other marketplace processors.
+        buildX2betaSheet(outputWorkbook, workingSheetData, month, year);
+
         console.log('=== SHOPIFY PROCESSOR COMPLETE ===');
 
         return {
@@ -402,6 +407,130 @@ const shopifyProcessor = async (
         throw error;
     }
 };
+
+// ============================================================
+// X2BETA WORKING SHEET
+// Same 108-column Tally "X2Beta" e-invoice import template used by the
+// other marketplace processors. Built from workingSheetData (one row per
+// line item, already carrying a resolved Tally Ledger / Sales Ledger /
+// Invoice Number from the ledger master, keyed by "Billing region" — the
+// same field the rest of this processor already uses as its state
+// dimension for ledger lookup and the intra/inter-state GST split).
+// Shopify's report has no per-row date beyond a "Day" field and no HSN
+// column, so both are handled with a best-effort fallback.
+// ============================================================
+function buildX2betaSheet(outputWorkbook, workingSheetData, month, year) {
+    function rowVchDate(row) {
+        const day = Number(row['Day']);
+        if (month && year && day >= 1 && day <= 31) {
+            const d = new Date(year, month - 1, day);
+            if (!isNaN(d.getTime())) return d;
+        }
+        if (month && year) return new Date(year, month, 0);
+        return new Date();
+    }
+
+    function sellerStateAbbr(row) {
+        const billingRegion = row['Billing region'] || '';
+        const code = getStateCodeFromName(billingRegion);
+        return (code && getStateAbbr(code)) || normalizeState(billingRegion).toUpperCase();
+    }
+
+    const uniqueRates = [...new Set(workingSheetData.map(r => Number(r['gst rate'] || 0)))].filter(r => r > 0);
+    const sortedStateCodes = [...new Set(workingSheetData.map(r => sellerStateAbbr(r)))].filter(Boolean).sort();
+
+    const x2betaColumns = [
+        { header: 'Vch. Date* ', get: r => rowVchDate(r) },
+        { header: 'Vch. Type*', get: r => `Sales-${sellerStateAbbr(r)}` },
+        { header: 'Vch. No.*', get: r => r['Invoice Number'] || '' },
+        { header: 'Ref. No.', get: r => r['Invoice Number'] || '' },
+        { header: 'Ref. Date', get: r => rowVchDate(r) },
+        { header: 'Is CN?', get: () => null },
+        { header: 'Is Vch?', get: () => null },
+        { header: 'Party Ledger*', get: r => r['Tally Ledger'] || '' },
+        { header: 'Sales Ledger*', get: r => r['Sales ledger'] || '' },
+        { header: 'Stock Item', get: r => r['FG'] || '' },
+        { header: 'Description', get: r => r['Product title'] || r['Product Title'] || '' },
+        { header: 'Godown', get: r => r['shipping states'] || r['Shipping states'] || '' },
+        { header: 'Quantity', get: r => Number(r['Final Qty'] || 0) },
+        {
+            header: 'Rate',
+            get: r => {
+                const qty = Number(r['Final Qty'] || 0);
+                return qty !== 0 ? Math.abs(Number(r['taxable value'] || 0) / qty) : 0;
+            }
+        },
+        { header: 'Unit', get: () => 'Pcs' },
+        { header: 'Discount', get: () => null },
+        { header: 'Amount*', get: r => Number(r['taxable value'] || 0) },
+        { header: 'Discount', get: () => null }
+    ];
+
+    uniqueRates.forEach(rate => {
+        const halfRate = Math.round((rate / 2) * 100) / 100;
+        sortedStateCodes.forEach(sc => {
+            x2betaColumns.push({
+                header: `Output IGST ${rate}%-${sc}`,
+                get: row => (Number(row['gst rate'] || 0) === rate && sellerStateAbbr(row) === sc) ? Number(row['igst'] || 0) : 0
+            });
+            x2betaColumns.push({
+                header: `Output CGST ${halfRate}%-${sc}`,
+                get: row => (Number(row['gst rate'] || 0) === rate && sellerStateAbbr(row) === sc) ? Number(row['cgst'] || 0) : 0
+            });
+            x2betaColumns.push({
+                header: `Output SGST ${halfRate}%-${sc}`,
+                get: row => (Number(row['gst rate'] || 0) === rate && sellerStateAbbr(row) === sc) ? Number(row['sgst'] || 0) : 0
+            });
+        });
+    });
+
+    x2betaColumns.push(
+        { header: null, get: () => null },
+        { header: null, get: () => null },
+        { header: 'Narration', get: () => `Shopify-${month || ''}-${year || ''}` },
+        { header: 'Taxability', get: () => null },
+        { header: 'GST Nature', get: () => null },
+        { header: 'GST Rate', get: r => Number(r['gst rate'] || 0) },
+        { header: 'Cess', get: () => null },
+        { header: 'RCM?', get: () => null },
+        // Shopify's source report carries no HSN column — left blank rather than fabricated.
+        { header: 'HSN', get: () => null },
+        { header: 'HSN Desc', get: () => null },
+        { header: 'Supply Type', get: () => null },
+        { header: 'Cost Category', get: () => null },
+        { header: 'Cost Centre', get: () => null },
+        { header: 'Name', get: () => null }, { header: 'Address 1', get: () => null }, { header: 'Address 2', get: () => null },
+        { header: 'State', get: r => r['shipping states'] || r['Shipping states'] || '' }, { header: 'Country', get: () => 'India' }, { header: 'PIN Code', get: () => null },
+        { header: 'Place of Supply', get: r => r['shipping states'] || r['Shipping states'] || '' }, { header: 'GST Type', get: () => null }, { header: 'GSTIN', get: () => null },
+        { header: 'Name', get: () => null }, { header: 'Address 1', get: () => null }, { header: 'Address 2', get: () => null },
+        { header: 'State', get: r => r['shipping states'] || r['Shipping states'] || '' }, { header: 'Country', get: () => 'India' }, { header: 'PIN Code', get: () => null },
+        { header: 'Place', get: () => null }, { header: 'GSTIN', get: () => null },
+        { header: 'Name', get: () => null }, { header: 'Address 1', get: () => null }, { header: 'Address 2', get: () => null },
+        { header: 'State', get: r => r['shipping states'] || r['Shipping states'] || '' }, { header: 'Country', get: () => 'India' }, { header: 'PIN Code', get: () => null },
+        { header: 'Place', get: () => null }, { header: 'GSTIN', get: () => null },
+        { header: 'DN No.', get: () => null }, { header: 'DN Date', get: () => null }, { header: 'Doc. No.', get: () => null },
+        { header: 'Dis. Through', get: () => null }, { header: 'Destination', get: () => null }, { header: 'Carrier Name', get: () => null },
+        { header: 'LR No.', get: () => null }, { header: 'LR Date', get: () => null }, { header: 'Order No.', get: r => r['Order ID'] || null },
+        { header: 'Order Date', get: () => null }, { header: 'Term of Delivery', get: () => null }, { header: 'Terms of Paymemt', get: () => null },
+        { header: 'Other Ref.', get: () => null }, { header: 'Place of Receipt', get: () => null }, { header: 'Vessel/Flight No.', get: () => null },
+        { header: 'Port of Loading', get: () => null }, { header: 'Port of Discharge', get: () => null }, { header: 'Country to', get: () => null },
+        { header: 'Shipping Bill No.', get: () => null }, { header: 'Date', get: () => null }, { header: 'Port Code', get: () => null },
+        { header: 'e-Way Bill No', get: () => null }, { header: 'Date', get: () => null }, { header: 'Cons. e-Way Bill No.', get: () => null },
+        { header: 'Date', get: () => null }, { header: 'Sub Type', get: () => null }, { header: 'Doc. Type', get: () => null },
+        { header: 'Distance (KM)', get: () => null }, { header: 'Transporter Name', get: () => null }, { header: 'Transporter ID', get: () => null },
+        { header: 'Transport Mode', get: () => null }, { header: 'Doc No.', get: () => null }, { header: 'Date', get: () => null },
+        { header: 'Vehicle No.', get: () => null }, { header: 'Vehicle Type', get: () => null }, { header: 'Status', get: () => null },
+        { header: 'Note Reason', get: () => null }, { header: 'Orig. Inv. No.', get: () => null }, { header: 'Orig. Inv. Date', get: () => null }
+    );
+
+    const x2betaSheet = outputWorkbook.addWorksheet('x2beta working');
+    x2betaSheet.addRow(x2betaColumns.map(c => c.header));
+    workingSheetData.forEach(row => {
+        x2betaSheet.addRow(x2betaColumns.map(c => c.get(row)));
+    });
+    x2betaSheet.getColumn(1).numFmt = 'dd/mm/yyyy';
+    x2betaSheet.getColumn(5).numFmt = 'dd/mm/yyyy';
+}
 
 module.exports = {
     shopifyProcessor
