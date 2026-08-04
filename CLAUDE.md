@@ -14,9 +14,10 @@
 > | SSH | `ssh -i ~/.ssh/colonel2-key.pem ubuntu@13.127.171.66` | — |
 > | CLI profile | `colonel2` | — |
 >
-> **Latest rollback AMI:** **`ami-0a41e4da9e52b6db9`** (`colonel-prod-2-pre-node24-20260728-030609`,
-> taken `--no-reboot`) — the box as it stood on Node 20, before the 2026-07-28 upgrade to Node 24.
-> DB dumps live in `~/backups/` on the box. Full rollback table in `../../AWS2.md`.
+> **Latest AMI (rollback):** **`ami-07e1584aec7fd0db9`** (`colonel-prod-2-invoice-8brands-20260804`,
+> `--no-reboot`, 2026-08-04) — full live box: 8 brands live on Invoice Process + sales/GSTR-1 backend +
+> the proper frontend build. Older Node-20 rollback: `ami-0a41e4da9e52b6db9`. DB dumps in `~/backups/`.
+> Full rollback table in `../../AWS2.md`.
 >
 > **Serving path:** nginx (`:80/:443`) → backend `:8001` → `reco-engine` `:8765`; unified DB
 > `colonel_agent_accountant`. **App root on the box is `/opt/colonel` and is NOT a git checkout** —
@@ -24,6 +25,15 @@
 > checksum-compare against the box first; never rsync a whole directory (a wholesale sync has
 > already nearly reverted two production-only fixes). **ngrok is retired.** Never operate the old
 > account without asking.
+
+> **Live frontend bundle (2026-08-04):** the live frontend is now a **proper build from `main`** —
+> bundle **`main.ac6852e3.js`** (9 brands live incl. **Zyden**; delete-invoice route active) — **NOT**
+> hot-patched anymore. All Invoice Process per-brand
+> maintenance / Shumee-Toys message / Google-Drive-Folder button / "Processing X of N" wording now
+> live in `frontend/src/pages/accountant/InvoiceAgentWorkspace.jsx` **source**, so a rebuild reproduces
+> the live UI (no more white-off). ⚠️ The hash **changes on every frontend deploy** — get the current
+> one with `curl -s https://agent.accountant/ | grep -o 'main\.[a-f0-9]*\.js'`. Deploy = build from
+> `main` → `rsync -az --delete frontend/build/` to `/opt/colonel/frontend/build/` (backup `build/` first).
 
 > **Lean index — detail lives in the focused docs.** Open the one that matches your task; each is
 > self-contained. Full human walkthrough is in **[README.md](README.md)**.
