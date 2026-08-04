@@ -105,18 +105,33 @@ const shouldStartFresh = (st) =>
 
 const freshState = () => ({ status: 'processing', invoices: new Map(), done: 0, total: 0, approved: 0, review: 0, invalid: 0, doneRequested: false, timestamp: new Date() });
 
-/** n8n's 'start' ping. n8n runs this leaf node LAST (not first), so it must NEVER
- *  reset or create a run — that would wipe the ticks. The real total comes from the
- *  batch_total on each feed call. Here we only RAISE the total of a live, mid-run. */
+/** n8n's 'start' ping — fires EARLY (right after the file list) announcing a real run
+ *  of `total` invoices. Two safe jobs:
+ *   1) If a run was just triggered but no feeds have landed yet (markProcessing set
+ *      status:processing with no `done`), or the previous run finished, ESTABLISH this
+ *      run with the known total and HOLD the self-heal window open (IDLE_MS, re-armed by
+ *      each feed). Without this, a slow first extraction (AI can take >45s) trips the
+ *      NOACTIVITY "no new invoices" clear before the first feed arrives.
+ *   2) If feeds have already started (a live mid-run), only RAISE the total — never
+ *      reset (which would wipe the ticks). shouldStartFresh guards make this correct
+ *      whether the ping lands before or after the first feed. */
 const startRun = (brandId, agentId, total = 0) => {
   const key = getKey(brandId, agentId);
   const st = processingState.get(key);
-  if (st && st.status === 'processing' && st.done !== undefined && !shouldStartFresh(st)) {
+  if (total > 0 && shouldStartFresh(st)) {
+    const fresh = freshState();
+    fresh.total = total;
+    processingState.set(key, fresh);
+    pushEvent(brandId, agentId, { status: 'progress', done: 0, total });
+    armTimer(brandId, agentId, IDLE_MS);
+    return;
+  }
+  if (st && st.status === 'processing' && st.done !== undefined) {
     st.total = Math.max(st.total || 0, total || 0, st.done);
     processingState.set(key, st);
     pushEvent(brandId, agentId, { status: 'progress', done: st.done, total: st.total });
+    armTimer(brandId, agentId, IDLE_MS);
   }
-  // else: no live/mid run → do nothing (batch_total on feeds drives the counter)
 };
 
 // Status precedence when the SAME invoice shows up across multiple line-item feeds.
