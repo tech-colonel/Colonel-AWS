@@ -925,6 +925,38 @@ def test_summary_and_consolidate_and_detail_columns():
     print("test_summary_and_consolidate_and_detail_columns OK")
 
 
+def test_grn_from_payment_track_and_wafers_dropped():
+    # GRN falls back to the Payment track's own GRN column when the monthly
+    # GRN_List CSVs have no match (they only cover Apr-Jun). And a non-date note
+    # like "Wafers" in the Delivery Date column must NOT surface as a POD Date.
+    import datetime
+    invd = _xlsx({"Invoice Details": [
+        ["t"],
+        ["invoice_number","reference_number","customer_name","date","bcy_total","tax_amount",
+         "amount_without_tax","place_of_supply","gst_no","billing_state","shipping_state"],
+        ["INV26-27/000558","SO1","ZEPTO BLR","2026-06-30",1000,0,1000,"KA","29AAICK4821A1Z5","KA","KA"],
+        ["INV26-27/000543","SO2","ZEPTO FBD","2026-06-29",2000,0,2000,"HR","06AAICK4821A1Z5","HR","HR"],
+    ]})
+    pay = _xlsx({"Zepto Payment track": [
+        ["Zepto Payment track PO Number","Invoice Number","Cities","QTY","Delivery Date","Courier","LRN","GRN"],
+        ["P4801183","INV26-27/000558","BLR",6718,"2026-07-07","Delhivery","286591390","GrnCode51517893"],
+        ["P4689855","INV26-27/000543","FBD",2150,"Wafers","Wafers","","GrnCodeWAF"],  # Wafers note, empty LRN, has GRN
+    ]})
+    grn = b"GRN ID,PO ID,Created On,Status\r\n"   # empty GRN_List -> forces the Payment-track fallback
+    cn = _xlsx({"Credit Note Details": [["t"], ["invoice_number","bcy_total"]]})
+    files = {"zepto_payment": _file(pay), "grn_list": [_file(grn)],
+             "invoice_details": _file(invd), "payment_advice": [], "credit_note": _file(cn)}
+    res = reconcile_zepto(files, today=datetime.date(2026, 8, 5))
+    by = {r["invoice_number"]: r for r in res}
+    a, b = by["INV26-27/000558"], by["INV26-27/000543"]
+    assert a["grn_no"] == "GrnCode51517893"   # from Payment track (GRN_List empty)
+    assert a["pod_date"] == "2026-07-07" and a["pod_no"] == "286591390"
+    assert b["grn_no"] == "GrnCodeWAF"        # GRN captured despite Wafers/empty LRN
+    assert b["pod_date"] == ""                 # "Wafers" is not a date -> dropped
+    assert b["pod_no"] == ""                   # LRN empty
+    print("test_grn_from_payment_track_and_wafers_dropped OK")
+
+
 if __name__ == "__main__":
     test_normalizers_and_dn_transform()
     test_norm_inv_does_not_strip_trailing_slash()
@@ -965,4 +997,5 @@ if __name__ == "__main__":
     test_payment_date_and_advice_no_from_pdf()
     test_dynamic_header_wording_variants()
     test_summary_and_consolidate_and_detail_columns()
+    test_grn_from_payment_track_and_wafers_dropped()
     print("ALL TESTS PASSED")

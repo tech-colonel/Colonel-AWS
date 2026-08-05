@@ -617,6 +617,25 @@ def _fmt_lrn_date(v: Any) -> str:
     return "" if s.lower() in ("nan", "nat", "none") else s
 
 
+# A value that actually looks like a date: DD/MM/YYYY, YYYY-MM-DD, "02 Jul 2026",
+# etc. Used to keep NON-date notes (e.g. the word "Wafers" typed into the Payment
+# track's Delivery Date column) OUT of the POD Date column.
+_DATE_LIKE_RE = re.compile(r"^\d{1,4}[/-]\d{1,2}[/-]\d{1,4}$|^\d{1,2}[ /-][A-Za-z]{3,9}[ /-]\d{2,4}$")
+
+
+def _fmt_date_strict(v: Any) -> str:
+    """Like `_fmt_lrn_date` but returns "" for anything that isn't a real date —
+    a Timestamp is formatted, a date-shaped string is kept, and free text
+    ("Wafers", a courier name, a note) is dropped rather than surfaced as a date."""
+    if v is not None and hasattr(v, "strftime"):
+        try:
+            return v.strftime("%Y-%m-%d")
+        except Exception:
+            pass
+    s = _fmt_lrn_date(v)
+    return s if _DATE_LIKE_RE.match(s) else ""
+
+
 def parse_lrn(datas: list[bytes]) -> dict[str, dict]:
     """Build {norm_inv: {"pod_no": <LRN/AWB>, "pod_date": <delivered date str>}}
     (first-win per invoice) from one or more LRN/POD tracking sheets.
@@ -661,10 +680,12 @@ def parse_lrn(datas: list[bytes]) -> dict[str, dict]:
 
 
 def parse_payment_track_pod(data: bytes) -> dict[str, dict]:
-    """POD from the Zepto Payment track sheet: POD No <- `LRN` column, POD Date
-    <- `Delivery Date` column, keyed by invoice number with any trailing slash
-    stripped (first row that carries an LRN wins per invoice). This is the
-    primary POD source; the Drips LRN sheet (`parse_lrn`) is the fallback."""
+    """Per invoice, from the Zepto Payment track sheet: POD No <- `LRN`, POD Date
+    <- `Delivery Date` (real dates only), and GRN No <- `GRN` column, keyed by
+    invoice number with any trailing slash stripped. This is the primary POD
+    source (Drips LRN sheet = fallback) AND the GRN fallback (the monthly
+    GRN_List CSVs only cover Apr-Jun, but the Payment track carries a GrnCode for
+    every row, incl. July)."""
     try:
         grid = _read_sheet(data, "Zepto Payment track")
     except Exception:
@@ -687,14 +708,17 @@ def parse_payment_track_pod(data: bytes) -> dict[str, dict]:
         # LRN cell was blank. First non-empty value per field wins per invoice.
         # LRN is kept verbatim (courier words like Porter/Booked/Self stay as-is).
         lrn = _get(r, ["LRN"])
-        pod_date = _fmt_lrn_date(_raw_get(r, ["Delivery Date"]))
-        if not lrn and not pod_date:
+        pod_date = _fmt_date_strict(_raw_get(r, ["Delivery Date"]))   # real dates only ("Wafers" -> "")
+        grn = _get(r, ["GRN", "GRN No", "GRN Code"])
+        if not lrn and not pod_date and not grn:
             continue
-        cur = out.setdefault(inv, {"pod_no": "", "pod_date": ""})
+        cur = out.setdefault(inv, {"pod_no": "", "pod_date": "", "grn_no": ""})
         if lrn and not cur["pod_no"]:
             cur["pod_no"] = lrn
         if pod_date and not cur["pod_date"]:
             cur["pod_date"] = pod_date
+        if grn and not cur["grn_no"]:
+            cur["grn_no"] = grn
     return out
 
 
@@ -818,6 +842,14 @@ def reconcile_zepto(files: dict, today=None) -> list[dict]:
         if po and po in grn:
             row["grn_no"] = grn[po]["grn_id"]
             row["grn_date"] = grn[po]["created_on"]
+        # Fallback: the Payment track carries its own GRN column, which covers
+        # rows the monthly GRN_List CSVs (Apr-Jun only) don't — e.g. July
+        # deliveries. Use it when the GRN_List gave no match. (GRN Date stays
+        # blank here: the Payment track has no separate GRN timestamp.)
+        if not row["grn_no"]:
+            pt = pod_track.get(inv.rstrip("/"))
+            if pt and pt.get("grn_no"):
+                row["grn_no"] = pt["grn_no"]
 
         for f in ("date","sales_order_no","name","place_of_supply","gstin","billing_state","shipping_state"):
             row[f] = det[f]
