@@ -315,7 +315,7 @@ export default function ZeptoReceivablesDashboard({ result }) {
           </span>
         </div>
         {tickets.length ? (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 10, maxHeight: 520, overflowY: 'auto', paddingRight: 4 }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
             {tickets.map((t) => <TicketCard key={t.id} t={t} />)}
           </div>
         ) : (
