@@ -395,6 +395,7 @@ def test_universe_includes_invoice_with_no_po_mapping_at_all():
     row = res[0]
     assert row["invoice_number"] == "INV26-27/000500"
     assert row["po"] == ""
+    assert "Missing PO" in row["remark"]   # no PO -> flagged in Remark
     assert row["invoice_not_in_ledger"] == ""                   # v1 flag no longer set
     assert round(row["total_invoice_amt"], 2) == 1000.0
     assert row["status"] in ("Paid", "Not Paid")
@@ -955,6 +956,9 @@ def test_grn_from_payment_track_and_wafers_dropped():
     assert b["grn_no"] == "GrnCodeWAF"        # GRN captured despite Wafers/empty LRN
     assert b["pod_date"] == ""                 # "Wafers" is not a date -> dropped
     assert b["pod_no"] == ""                   # LRN empty
+    # Remark column spells out the gaps.
+    assert a["remark"] == ""                    # PO + GRN + POD all present
+    assert b["remark"] == "Missing POD"         # only the LRN/POD is missing
     print("test_grn_from_payment_track_and_wafers_dropped OK")
 
 

@@ -758,7 +758,7 @@ COLUMN_KEYS = [
     "pending_amount","payment_received_incl_tds","payment_received_excl_tds","tds",
     "debit_note_issued","dn_status","credit_note_issued","credit_note_no",
     "gross_outstanding","net_outstanding","status","due_date","due_status","grn_no","grn_date",
-    "invoice_not_in_ledger","pod_no","pod_date","payment_date",
+    "invoice_not_in_ledger","pod_no","pod_date","payment_date","remark",
 ]
 
 
@@ -924,6 +924,17 @@ def reconcile_zepto(files: dict, today=None) -> list[dict]:
         due = _due_date(inv_dt)
         row["due_date"] = due.isoformat() if due else ""
         row["due_status"] = _due_status(due, row["status"] == "Paid", today)
+
+        # Remark: fulfilment-data gaps for this invoice, spelled out (so it's
+        # obvious what to chase / fix — and Numbers-safe vs. cell colours).
+        flags = []
+        if not row["po"]:
+            flags.append("Missing PO")
+        elif not row["grn_no"]:
+            flags.append("Missing GRN")
+        if not row["pod_no"]:
+            flags.append("Missing POD")
+        row["remark"] = "; ".join(flags)
         results.append(row)
 
     out = _RecoRows(results)
@@ -949,13 +960,13 @@ def summarize_zepto(results: list[dict]) -> dict:
 # these shifted columns in Task 3. "Credit Note No" was inserted after
 # "Credit Note Issued" in the 5-column task, shifting everything after it
 # one letter to the right (U..AC -> V..AD).
-_LETTERS = ["A","B","C","D","E","F","G","H","I","J","K","L","M","N","O","P","Q","R","S","T","U","V","W","X","Y","Z","AA","AB","AC","AD","AE","AF"]
+_LETTERS = ["A","B","C","D","E","F","G","H","I","J","K","L","M","N","O","P","Q","R","S","T","U","V","W","X","Y","Z","AA","AB","AC","AD","AE","AF","AG"]
 _HEADERS = ["PO","Date","Invoice_number","Sales Order No.","Name","Total Invoice Amt","Tax",
     "Invoice Amt (Excl. Tax)","Place of Supply","GSTIN","Billing State","shipping_state",
     "Pending Amount","Payment Received (Including TDS)","Payment Received (Excluding TDS)","TDS",
     "Debit Note Issued","DN Status","Credit Note Issued","Credit Note No",
     "Gross Outstanding Amt","Net Outstanding Amt","Status","Due Date","Due Status","GRN No.","GRN Date",
-    "Invoice Not Available in Zepto Ledger","POD No","POD Date","Payment Date"]
+    "Invoice Not Available in Zepto Ledger","POD No","POD Date","Payment Date","Remark"]
 
 # Column KEY -> spreadsheet letter, derived from COLUMN_KEYS order so formulas,
 # conditional-format ranges, group headers and hyperlinks all stay correct even
@@ -980,7 +991,7 @@ _COLUMN_WIDTHS = {
     "tds": 11, "debit_note_issued": 14, "dn_status": 16,
     "credit_note_issued": 14, "credit_note_no": 16, "gross_outstanding": 15, "net_outstanding": 15,
     "status": 12, "due_date": 12, "due_status": 12, "grn_no": 14, "grn_date": 12, "invoice_not_in_ledger": 16,
-    "pod_no": 12, "pod_date": 12, "payment_date": 12,
+    "pod_no": 12, "pod_date": 12, "payment_date": 12, "remark": 30,
 }
 
 # Debit Note display format: value stays NEGATIVE (so `Net = M-O-T-Q` is
@@ -1293,6 +1304,7 @@ def build_zepto_workbook(results: list[dict], payload: dict | None = None):
         ("Aging (Invoice Date + 30d)", "due_date", "due_status"),
         ("From Zepto Dashboard", "grn_no", "invoice_not_in_ledger"),
         ("From Courier (Delhivery)", "pod_no", "payment_date"),
+        ("Remarks", "remark", "remark"),
     ]
     groups = [(label, _KEYCOL[a], _KEYCOL[b]) for label, a, b in group_keys]
     for label, c1, c2 in groups:
@@ -1368,6 +1380,11 @@ def build_zepto_workbook(results: list[dict], payload: dict | None = None):
                 c.fill = PatternFill("solid", fgColor=_NOTPAID_FILL_HEX)
                 c.font = Font(color=_NOTPAID_FONT_HEX, bold=True)
                 c.alignment = Alignment(horizontal="center")
+            # Remark: amber highlight + bold text when there's a gap to chase.
+            if key == "remark" and val:
+                c.fill = PatternFill("solid", fgColor="FFF2CC")
+                c.font = Font(color="7F6000", bold=True)
+                c.alignment = Alignment(horizontal="left", wrap_text=True)
 
     last_row = len(results) + 2   # last data row (header is row 2, data starts row 3)
 
