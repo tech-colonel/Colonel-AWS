@@ -709,6 +709,24 @@ def parse_lrn(datas: list[bytes]) -> dict[str, dict]:
     return out
 
 
+def _is_real_grn(v: Any) -> bool:
+    """True only for an actual GRN code. Rejects blanks and non-GRN notes that
+    show up in the source GRN column — the accountant's own "Missing GRN" text,
+    spreadsheet errors (#ERROR!/#REF!), and N/A placeholders — so those get
+    flagged as missing rather than treated as a real GRN."""
+    s = str(v or "").strip()
+    if not s:
+        return False
+    low = s.lower()
+    if low in ("n/a", "na", "-", "--", "nil", "none", "null"):
+        return False
+    if low.startswith("#"):            # #ERROR! / #REF!
+        return False
+    if "missing" in low:               # "Missing GRN" note
+        return False
+    return True
+
+
 def parse_payment_track_pod(data: bytes) -> dict[str, dict]:
     """Per invoice, from the Zepto Payment track sheet: POD No <- `LRN`, POD Date
     <- `Delivery Date` (real dates only), and GRN No <- `GRN` column, keyed by
@@ -740,6 +758,8 @@ def parse_payment_track_pod(data: bytes) -> dict[str, dict]:
         lrn = _get(r, ["LRN"])
         pod_date = _fmt_date_strict(_raw_get(r, ["Delivery Date"]))   # real dates only ("Wafers" -> "")
         grn = _get(r, ["GRN", "GRN No", "GRN Code"])
+        if not _is_real_grn(grn):     # blank / "Missing GRN" note / #ERROR! -> treat as no GRN
+            grn = ""
         if not lrn and not pod_date and not grn:
             continue
         cur = out.setdefault(inv, {"pod_no": "", "pod_date": "", "grn_no": ""})
@@ -869,7 +889,7 @@ def reconcile_zepto(files: dict, today=None) -> list[dict]:
         # GRN list. The GRN No./Date columns stay gated on the GRN list.
         po = inv_to_po.get(inv.rstrip("/"), "")
         row["po"] = po
-        if po and po in grn:
+        if po and po in grn and _is_real_grn(grn[po]["grn_id"]):
             row["grn_no"] = grn[po]["grn_id"]
             row["grn_date"] = _grn_date_only(grn[po]["created_on"])   # date only, no time
         # Fallback: the Payment track carries its own GRN column, which covers

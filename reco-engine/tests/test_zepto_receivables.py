@@ -938,11 +938,13 @@ def test_grn_from_payment_track_and_wafers_dropped():
          "amount_without_tax","place_of_supply","gst_no","billing_state","shipping_state"],
         ["INV26-27/000558","SO1","ZEPTO BLR","2026-06-30",1000,0,1000,"KA","29AAICK4821A1Z5","KA","KA"],
         ["INV26-27/000543","SO2","ZEPTO FBD","2026-06-29",2000,0,2000,"HR","06AAICK4821A1Z5","HR","HR"],
+        ["INV26-27/000600","SO3","ZEPTO MUM","2026-07-08",500,0,500,"MH","27AAICK4821A1Z5","MH","MH"],
     ]})
     pay = _xlsx({"Zepto Payment track": [
         ["Zepto Payment track PO Number","Invoice Number","Cities","QTY","Delivery Date","Courier","LRN","GRN"],
         ["P4801183","INV26-27/000558","BLR",6718,"2026-07-07","Delhivery","286591390","GrnCode51517893"],
         ["P4689855","INV26-27/000543","FBD",2150,"Wafers","Wafers","","GrnCodeWAF"],  # Wafers note, empty LRN, has GRN
+        ["P4700000","INV26-27/000600","MUM",100,"2026-07-08","DP","286599999","Missing GRN"],  # GRN column = the note, not a code
     ]})
     grn = b"GRN ID,PO ID,Created On,Status\r\n"   # empty GRN_List -> forces the Payment-track fallback
     cn = _xlsx({"Credit Note Details": [["t"], ["invoice_number","bcy_total"]]})
@@ -956,6 +958,10 @@ def test_grn_from_payment_track_and_wafers_dropped():
     assert b["grn_no"] == "GrnCodeWAF"        # GRN captured despite Wafers/empty LRN
     assert b["pod_date"] == ""                 # "Wafers" is not a date -> dropped
     assert b["pod_no"] == ""                   # LRN empty
+    # A source GRN column holding the note "Missing GRN" (not a code) counts as
+    # NO grn -> flagged, not silently accepted.
+    d = by["INV26-27/000600"]
+    assert d["grn_no"] == "" and d["remark"] == "Missing GRN"
     # Remark column spells out the gaps.
     assert a["remark"] == ""                    # PO + GRN + POD all present
     assert b["remark"] == "Missing POD"         # only the LRN/POD is missing
