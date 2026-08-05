@@ -259,7 +259,7 @@ def test_reconcile_end_to_end():
     assert a["name"] == "ZEPTO PUNE"
     assert a["po"] == "P100"                              # GRN-matched -> po filled
     assert a["grn_no"] == "GrnCode99"                     # PO's GRN in GRN pool -> grn_no filled
-    assert a["grn_date"] == "4/2/2026"                    # ... and grn_date filled
+    assert a["grn_date"] == "2026-04-02"                  # ... and grn_date filled (date-only, normalized)
     assert round(a["total_invoice_amt"], 2) == 56685.0
     assert round(a["pending_amount"], 2) == 56685.0
     assert round(a["payment_received_incl_tds"], 2) == 0.0    # no PDFs -> 0
@@ -297,14 +297,14 @@ def test_workbook_has_live_formulas():
     assert ws["A3"].value == "P100"                    # po (col A)
     assert ws["C3"].value == "INV26-27/000007"          # invoice_number (col C)
     assert ws["F3"].value == 56685.0                    # total_invoice_amt (col F)
-    assert ws["U2"].value == "Credit Note No"                                          # new header
+    assert ws["T2"].value == "Credit Note No"                                          # header (shifted by DN-status merge)
     assert ws["M3"].value == "=F3"                                                     # pending_amount
-    assert ws["V3"].value == "=M3-O3"                                                  # gross = Pending - Pay(excl TDS)  (#00004)
-    assert ws["W3"].value == "=M3-O3-T3-Q3"                                            # net = Gross - CreditNote - DebitNote (#00004)
-    assert ws["X3"].value == '=IF(W3<=10,"Paid","Not Paid")'                            # status (net-only)
+    assert ws["U3"].value == "=M3-O3"                                                  # gross = Pending - Pay(excl TDS)  (#00004)
+    assert ws["V3"].value == "=M3-O3-S3-Q3"                                            # net = Gross - CreditNote(S) - DebitNote(Q) (#00004)
+    assert ws["W3"].value == '=IF(V3<=10,"Paid","Not Paid")'                            # status (net-only, col W -> net col V)
     # No #REF!/formula-error leakage -- the 4 live formula strings above are
     # the exact, complete set and none of them reference a shifted-away cell.
-    for cell_ref in ("M3", "V3", "W3", "X3"):
+    for cell_ref in ("M3", "U3", "V3", "W3"):
         assert "REF" not in str(ws[cell_ref].value)
     print("test_workbook_has_live_formulas OK")
 
@@ -371,7 +371,7 @@ def test_status_column_has_conditional_formatting():
     # Status column (formula-driven cell -> CF is the only way to color it).
     cf_ranges = [str(rng) for rng in ws.conditional_formatting]
     assert len(cf_ranges) >= 1
-    assert any("X3" in rng for rng in cf_ranges)   # Status is now col X
+    assert any("W3" in rng for rng in cf_ranges)   # Status is col W after the DN-status merge
     print("test_status_column_has_conditional_formatting OK")
 
 def test_universe_includes_invoice_with_no_po_mapping_at_all():
@@ -750,15 +750,16 @@ def test_due_date_and_status():
     assert by["INV-D"]["status"] == "Paid"
     assert by["INV-D"]["due_date"] == "2026-05-14" and by["INV-D"]["due_status"] == ""   # Paid -> blank status, date still shown
 
-    # Column placement: Due Date / Due Status sit right after Status (X), GRN shifts to AA.
+    # Column placement (after DN Accepted/Not-Accepted -> single DN Status merge):
+    # Status=W, Due Date=X, Due Status=Y, GRN No.=Z.
     from recon.zepto_receivables import build_zepto_workbook
     ws = build_zepto_workbook(res)["1. Invoice Tracker"]
-    assert ws["X2"].value == "Status"
-    assert ws["Y2"].value == "Due Date"
-    assert ws["Z2"].value == "Due Status"
-    assert ws["AA2"].value == "GRN No."
-    assert ws["AF2"].value == "Payment Date"
-    assert ws["X3"].value == '=IF(W3<=10,"Paid","Not Paid")'   # status = net-only
+    assert ws["W2"].value == "Status"
+    assert ws["X2"].value == "Due Date"
+    assert ws["Y2"].value == "Due Status"
+    assert ws["Z2"].value == "GRN No."
+    assert ws["AE2"].value == "Payment Date"   # last col (shifted left by the DN-status merge)
+    assert ws["W3"].value == '=IF(V3<=10,"Paid","Not Paid")'   # status col W, net col V
     print("test_due_date_and_status OK")
 
 
@@ -797,8 +798,8 @@ def test_detail_tabs_and_hyperlinks():
     ws = wb["1. Invoice Tracker"]
     assert ws["O3"].hyperlink and ws["O3"].hyperlink.location == "'Payments'!A3"
     assert ws["Q3"].hyperlink and ws["Q3"].hyperlink.location == "'Debit Notes'!A3"   # canon match despite missing INV
-    assert ws["T4"].hyperlink and ws["T4"].hyperlink.location == "'Credit Notes'!A3"
-    assert ws["U4"].hyperlink and ws["U4"].hyperlink.location == "'Credit Notes'!A3"
+    assert ws["S4"].hyperlink and ws["S4"].hyperlink.location == "'Credit Notes'!A3"  # credit_note_issued -> col S
+    assert ws["T4"].hyperlink and ws["T4"].hyperlink.location == "'Credit Notes'!A3"  # credit_note_no -> col T
     # a cell with no matching detail has no link
     assert ws["Q4"].hyperlink is None
     print("test_detail_tabs_and_hyperlinks OK")
@@ -957,6 +958,36 @@ def test_grn_from_payment_track_and_wafers_dropped():
     print("test_grn_from_payment_track_and_wafers_dropped OK")
 
 
+def test_dn_status_merge_missing_grn_and_tab_colors():
+    from recon.zepto_receivables import build_zepto_workbook, COLUMN_KEYS, _KEYCOL, _RecoRows
+    # DN Accepted / DN Not Accepted merged into one DN Status column.
+    assert "dn_status" in COLUMN_KEYS
+    assert "dn_accepted" not in COLUMN_KEYS and "dn_not_accepted" not in COLUMN_KEYS
+    def mk(inv, po, grn, status):
+        r = {k: "" for k in COLUMN_KEYS}
+        r.update({"invoice_number": inv, "po": po, "grn_no": grn, "total_invoice_amt": 1000.0,
+                  "net_outstanding": 0.0, "status": status})
+        return r
+    results = _RecoRows([mk("INV1", "P1", "", "Not Paid"),      # PO but no GRN -> Missing GRN
+                         mk("INV2", "P2", "GrnCode9", "Paid")])  # has GRN
+    wb = build_zepto_workbook(results)
+    ws = wb["1. Invoice Tracker"]
+    # header + dropdown on DN Status
+    assert ws[f"{_KEYCOL['dn_status']}2"].value == "DN Status"
+    assert any('"Accepted,Not Accepted"' in str(dv.formula1) for dv in ws.data_validations.dataValidation)
+    # Missing GRN cell (row 3 = INV1): red text label
+    g = ws[f"{_KEYCOL['grn_no']}3"]
+    assert g.value == "Missing GRN" and g.fill.fgColor.rgb.endswith("FFC7CE")
+    assert ws[f"{_KEYCOL['grn_no']}4"].value == "GrnCode9"   # INV2 keeps its GRN
+    # Status static fill (renders in Numbers): Not Paid red, Paid green
+    assert ws[f"{_KEYCOL['status']}3"].fill.fgColor.rgb.endswith("FFC7CE")   # Not Paid
+    assert ws[f"{_KEYCOL['status']}4"].fill.fgColor.rgb.endswith("C6EFCE")   # Paid
+    # tabs are colour-coded
+    assert ws.sheet_properties.tabColor is not None
+    assert wb["Summary"].sheet_properties.tabColor is not None
+    print("test_dn_status_merge_missing_grn_and_tab_colors OK")
+
+
 if __name__ == "__main__":
     test_normalizers_and_dn_transform()
     test_norm_inv_does_not_strip_trailing_slash()
@@ -998,4 +1029,5 @@ if __name__ == "__main__":
     test_dynamic_header_wording_variants()
     test_summary_and_consolidate_and_detail_columns()
     test_grn_from_payment_track_and_wafers_dropped()
+    test_dn_status_merge_missing_grn_and_tab_colors()
     print("ALL TESTS PASSED")

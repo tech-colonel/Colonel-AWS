@@ -270,6 +270,36 @@ def _parse_date(v: Any):
     return None
 
 
+_TIME_TOKEN_RE = re.compile(r"\b\d{1,2}:\d{2}(?::\d{2})?\s*(?:am|pm)?\b", re.IGNORECASE)
+
+
+def _grn_date_only(v: Any) -> str:
+    """GRN Date without the time-of-day. The GRN_List 'Created On' carries a
+    timestamp in mixed shapes ('4/14/2026 18:54', '10:22 pm 01 Jul 2026'); strip
+    the time and normalise to YYYY-MM-DD when parseable, else keep the date text."""
+    import datetime as _dt
+    if v is None:
+        return ""
+    if hasattr(v, "strftime"):
+        try:
+            return v.strftime("%Y-%m-%d")
+        except Exception:
+            pass
+    s = str(v).strip()
+    if not s or s.lower() in ("nan", "nat", "none"):
+        return ""
+    s2 = _TIME_TOKEN_RE.sub("", s).strip()
+    # Zepto's GRN_List uses US month-first slashes ("4/14/2026"), so try %m/%d
+    # BEFORE any day-first format; then the "01 Jul 2026" text shape.
+    for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%m-%d-%Y", "%Y/%m/%d",
+                "%d %b %Y", "%d %B %Y", "%b %d %Y", "%B %d %Y", "%d-%b-%Y", "%d-%B-%Y"):
+        try:
+            return _dt.datetime.strptime(s2, fmt).date().isoformat()
+        except ValueError:
+            continue
+    return s2 or s
+
+
 def _due_date(inv_date):
     """#00001: Due Date = invoice date + 30 calendar days."""
     import datetime as _dt
@@ -726,7 +756,7 @@ COLUMN_KEYS = [
     "po","date","invoice_number","sales_order_no","name","total_invoice_amt","tax",
     "invoice_amt_excl_tax","place_of_supply","gstin","billing_state","shipping_state",
     "pending_amount","payment_received_incl_tds","payment_received_excl_tds","tds",
-    "debit_note_issued","dn_accepted","dn_not_accepted","credit_note_issued","credit_note_no",
+    "debit_note_issued","dn_status","credit_note_issued","credit_note_no",
     "gross_outstanding","net_outstanding","status","due_date","due_status","grn_no","grn_date",
     "invoice_not_in_ledger","pod_no","pod_date","payment_date",
 ]
@@ -841,7 +871,7 @@ def reconcile_zepto(files: dict, today=None) -> list[dict]:
         row["po"] = po
         if po and po in grn:
             row["grn_no"] = grn[po]["grn_id"]
-            row["grn_date"] = grn[po]["created_on"]
+            row["grn_date"] = _grn_date_only(grn[po]["created_on"])   # date only, no time
         # Fallback: the Payment track carries its own GRN column, which covers
         # rows the monthly GRN_List CSVs (Apr-Jun only) don't — e.g. July
         # deliveries. Use it when the GRN_List gave no match. (GRN Date stays
@@ -923,9 +953,15 @@ _LETTERS = ["A","B","C","D","E","F","G","H","I","J","K","L","M","N","O","P","Q",
 _HEADERS = ["PO","Date","Invoice_number","Sales Order No.","Name","Total Invoice Amt","Tax",
     "Invoice Amt (Excl. Tax)","Place of Supply","GSTIN","Billing State","shipping_state",
     "Pending Amount","Payment Received (Including TDS)","Payment Received (Excluding TDS)","TDS",
-    "Debit Note Issued","DN Accepted","DN Not Accepted","Credit Note Issued","Credit Note No",
+    "Debit Note Issued","DN Status","Credit Note Issued","Credit Note No",
     "Gross Outstanding Amt","Net Outstanding Amt","Status","Due Date","Due Status","GRN No.","GRN Date",
     "Invoice Not Available in Zepto Ledger","POD No","POD Date","Payment Date"]
+
+# Column KEY -> spreadsheet letter, derived from COLUMN_KEYS order so formulas,
+# conditional-format ranges, group headers and hyperlinks all stay correct even
+# when columns are added/removed (e.g. the DN Accepted/Not-Accepted -> DN Status
+# merge). Always resolve letters through this, never hardcode.
+_KEYCOL = {k: _LETTERS[i] for i, k in enumerate(COLUMN_KEYS)}
 _FORMULA_COLS = {"pending_amount","gross_outstanding","net_outstanding","status"}
 _MONEY_KEYS = {"total_invoice_amt","tax","invoice_amt_excl_tax","pending_amount",
     "payment_received_incl_tds","payment_received_excl_tds","tds","debit_note_issued",
@@ -941,7 +977,7 @@ _COLUMN_WIDTHS = {
     "total_invoice_amt": 15, "tax": 12, "invoice_amt_excl_tax": 16,
     "place_of_supply": 12, "gstin": 18, "billing_state": 14, "shipping_state": 14,
     "pending_amount": 14, "payment_received_incl_tds": 16, "payment_received_excl_tds": 16,
-    "tds": 11, "debit_note_issued": 14, "dn_accepted": 12, "dn_not_accepted": 12,
+    "tds": 11, "debit_note_issued": 14, "dn_status": 16,
     "credit_note_issued": 14, "credit_note_no": 16, "gross_outstanding": 15, "net_outstanding": 15,
     "status": 12, "due_date": 12, "due_status": 12, "grn_no": 14, "grn_date": 12, "invoice_not_in_ledger": 16,
     "pod_no": 12, "pod_date": 12, "payment_date": 12,
@@ -1204,6 +1240,25 @@ def _build_detail_sheets(wb, results):
     return {"payments": pay_map, "debit_notes": dn_map, "credit_notes": cn_map}
 
 
+# Distinct, readable tab colours (main sheet darkest; detail tabs by family).
+_TAB_COLORS = {
+    "1. Invoice Tracker": "1F3864",            # deep navy
+    "Summary": "217346",                       # green
+    "Payments": "2E75B6",                      # blue
+    "Payment Advice Consolidate": "0F9ED5",    # cyan
+    "Debit Notes": "C55A11",                   # orange
+    "Credit Notes": "7030A0",                  # purple
+    "PMDD": "808080",                          # grey
+    "AP-AR & Manual Adj": "843C0C",            # brown
+}
+
+
+def _apply_tab_colors(wb) -> None:
+    for name, color in _TAB_COLORS.items():
+        if name in wb.sheetnames:
+            wb[name].sheet_properties.tabColor = color
+
+
 def build_zepto_workbook(results: list[dict], payload: dict | None = None):
     from openpyxl import Workbook
     from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
@@ -1228,10 +1283,18 @@ def build_zepto_workbook(results: list[dict], payload: dict | None = None):
     ws.append([""] * len(_HEADERS))
     # #00001/#00002: "Aging" group (Due Date + Due Status) inserted right after
     # the Computed block (Status = X); everything after it shifts +2 letters.
-    groups = [("From Tally","B","L"),("Payment Advice (Zepto Portal)","N","P"),
-              ("From Zepto Ledger / Payment Advice","Q","U"),("Computed","V","X"),
-              ("Aging (Invoice Date + 30d)","Y","Z"),
-              ("From Zepto Dashboard","AA","AC"),("From Courier (Delhivery)","AD","AF")]
+    # Group boundaries by KEY (resolved to letters via _KEYCOL) so they track any
+    # column move automatically.
+    group_keys = [
+        ("From Tally", "date", "shipping_state"),
+        ("Payment Advice (Zepto Portal)", "payment_received_incl_tds", "tds"),
+        ("From Zepto Ledger / Payment Advice", "debit_note_issued", "credit_note_no"),
+        ("Computed", "gross_outstanding", "status"),
+        ("Aging (Invoice Date + 30d)", "due_date", "due_status"),
+        ("From Zepto Dashboard", "grn_no", "invoice_not_in_ledger"),
+        ("From Courier (Delhivery)", "pod_no", "payment_date"),
+    ]
+    groups = [(label, _KEYCOL[a], _KEYCOL[b]) for label, a, b in group_keys]
     for label, c1, c2 in groups:
         ws.merge_cells(f"{c1}1:{c2}1")
         cell = ws[f"{c1}1"]; cell.value = label
@@ -1253,21 +1316,31 @@ def build_zepto_workbook(results: list[dict], payload: dict | None = None):
         r = idx + 3
         row_fill = zebra_fill if idx % 2 == 1 else None
         for col_i, key in enumerate(COLUMN_KEYS, start=1):
-            letter = _LETTERS[col_i - 1]
+            missing_grn = False
+            # All formula column-letters resolve through _KEYCOL so a column
+            # move (e.g. the DN Status merge) can never silently mis-point them.
             if key == "pending_amount":
-                val = f"=F{r}"
+                val = f"={_KEYCOL['total_invoice_amt']}{r}"
             elif key == "gross_outstanding":
                 # #00004: Pending - Payment Received (excl. TDS)
-                val = f"=M{r}-O{r}"
+                val = f"={_KEYCOL['pending_amount']}{r}-{_KEYCOL['payment_received_excl_tds']}{r}"
             elif key == "net_outstanding":
                 # #00004: Gross - Credit Note - Debit Note
-                val = f"=M{r}-O{r}-T{r}-Q{r}"
+                val = (f"={_KEYCOL['pending_amount']}{r}-{_KEYCOL['payment_received_excl_tds']}{r}"
+                       f"-{_KEYCOL['credit_note_issued']}{r}-{_KEYCOL['debit_note_issued']}{r}")
             elif key == "status":
                 if row.get("invoice_not_in_ledger"):
                     val = row.get("status", "")
                 else:
-                    # Status from NET OUTSTANDING (col W) only — Gross (V) ignored.
-                    val = f'=IF(W{r}<=10,"Paid","Not Paid")'
+                    # Status from NET OUTSTANDING only.
+                    val = f'=IF({_KEYCOL["net_outstanding"]}{r}<=10,"Paid","Not Paid")'
+            elif key == "grn_no":
+                val = row.get(key, "")
+                if not val and row.get("po"):
+                    # PO exists but neither the GRN_List CSVs nor the Payment
+                    # track carry a GrnCode -> flag it (red cell below).
+                    val = "Missing GRN"
+                    missing_grn = True
             else:
                 val = row.get(key, "")
                 if val == "" and key in _MONEY_KEYS:
@@ -1279,10 +1352,22 @@ def build_zepto_workbook(results: list[dict], payload: dict | None = None):
                 # displays without the minus sign.
                 c.number_format = _DN_DISPLAY_FMT if key == "debit_note_issued" else "#,##0.00"
                 c.alignment = Alignment(horizontal="right")
-            elif key == "status":
+            elif key in ("status", "dn_status"):
                 c.alignment = Alignment(horizontal="center")
             if row_fill is not None:
                 c.fill = row_fill
+            # Status gets a STATIC red/green fill + readable bold text so it shows
+            # even in Apple Numbers (which ignores the CF rules below). The cell
+            # itself holds the =IF(...) formula, so key off the COMPUTED status.
+            if key == "status" and row.get("status") in ("Paid", "Not Paid"):
+                paid = row.get("status") == "Paid"
+                c.fill = PatternFill("solid", fgColor=_PAID_FILL_HEX if paid else _NOTPAID_FILL_HEX)
+                c.font = Font(color=_PAID_FONT_HEX if paid else _NOTPAID_FONT_HEX, bold=True)
+            # Missing GRN: red cell + dark-red bold text, centered.
+            if missing_grn:
+                c.fill = PatternFill("solid", fgColor=_NOTPAID_FILL_HEX)
+                c.font = Font(color=_NOTPAID_FONT_HEX, bold=True)
+                c.alignment = Alignment(horizontal="center")
 
     last_row = len(results) + 2   # last data row (header is row 2, data starts row 3)
 
@@ -1290,22 +1375,29 @@ def build_zepto_workbook(results: list[dict], payload: dict | None = None):
     for col_i, key in enumerate(COLUMN_KEYS, start=1):
         ws.column_dimensions[_LETTERS[col_i - 1]].width = _COLUMN_WIDTHS.get(key, 16)
 
-    # Conditional formatting on the Status column (formula-driven cell, so
-    # color must be applied via CF rules rather than a static fill).
+    # Conditional formatting on the Status column (Excel honours these; Numbers
+    # falls back to the static fills written per-cell above). Same green/red
+    # treatment on the DN Status dropdown column.
     if last_row >= 3:
-        status_range = f"X3:X{last_row}"
-        paid_rule = CellIsRule(
-            operator="equal", formula=['"Paid"'],
-            fill=PatternFill("solid", fgColor=_PAID_FILL_HEX),
-            font=Font(color=_PAID_FONT_HEX, bold=True),
-        )
-        not_paid_rule = CellIsRule(
-            operator="equal", formula=['"Not Paid"'],
-            fill=PatternFill("solid", fgColor=_NOTPAID_FILL_HEX),
-            font=Font(color=_NOTPAID_FONT_HEX, bold=True),
-        )
-        ws.conditional_formatting.add(status_range, paid_rule)
-        ws.conditional_formatting.add(status_range, not_paid_rule)
+        def _cf(colkey, paid_val, notpaid_val):
+            rng = f"{_KEYCOL[colkey]}3:{_KEYCOL[colkey]}{last_row}"
+            ws.conditional_formatting.add(rng, CellIsRule(
+                operator="equal", formula=[f'"{paid_val}"'],
+                fill=PatternFill("solid", fgColor=_PAID_FILL_HEX),
+                font=Font(color=_PAID_FONT_HEX, bold=True)))
+            ws.conditional_formatting.add(rng, CellIsRule(
+                operator="equal", formula=[f'"{notpaid_val}"'],
+                fill=PatternFill("solid", fgColor=_NOTPAID_FILL_HEX),
+                font=Font(color=_NOTPAID_FONT_HEX, bold=True)))
+        _cf("status", "Paid", "Not Paid")
+        _cf("dn_status", "Accepted", "Not Accepted")
+
+        # DN Status: a dropdown (Accepted / Not Accepted) on every data cell.
+        from openpyxl.worksheet.datavalidation import DataValidation
+        dv = DataValidation(type="list", formula1='"Accepted,Not Accepted"', allow_blank=True)
+        dv.prompt = "Pick DN status"
+        ws.add_data_validation(dv)
+        dv.add(f"{_KEYCOL['dn_status']}3:{_KEYCOL['dn_status']}{last_row}")
 
     # Freeze header rows (1-2) + PO/Date/Invoice/Sales-Order columns (A-D)
     # so key identifiers stay visible when scrolling right/down.
@@ -1323,17 +1415,20 @@ def build_zepto_workbook(results: list[dict], payload: dict | None = None):
         cell.hyperlink = Hyperlink(ref=cell.coordinate, location=f"'{sheet_title}'!A{target_row}")
         cell.font = link_font   # tint to signal it's clickable (number format/alignment kept)
 
+    col = lambda k: COLUMN_KEYS.index(k) + 1   # 1-based column index for a key
     for idx, row in enumerate(results):
         r = idx + 3
         inv = _canon_inv(row.get("invoice_number", ""))
         if inv in maps["payments"]:
             tr = maps["payments"][inv]
-            _link(r, 14, "Payments", tr)      # N  Payment Received (Incl TDS)
-            _link(r, 15, "Payments", tr)      # O  Payment Received (Excl TDS)
+            _link(r, col("payment_received_incl_tds"), "Payments", tr)
+            _link(r, col("payment_received_excl_tds"), "Payments", tr)
         if inv in maps["debit_notes"]:
-            _link(r, 17, "Debit Notes", maps["debit_notes"][inv])   # Q  Debit Note Issued
+            _link(r, col("debit_note_issued"), "Debit Notes", maps["debit_notes"][inv])
         if inv in maps["credit_notes"]:
             tr = maps["credit_notes"][inv]
-            _link(r, 20, "Credit Notes", tr)  # T  Credit Note Issued
-            _link(r, 21, "Credit Notes", tr)  # U  Credit Note No
+            _link(r, col("credit_note_issued"), "Credit Notes", tr)
+            _link(r, col("credit_note_no"), "Credit Notes", tr)
+
+    _apply_tab_colors(wb)
     return wb
