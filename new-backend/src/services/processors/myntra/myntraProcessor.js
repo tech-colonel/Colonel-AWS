@@ -1182,7 +1182,7 @@ async function myntraProcessor(fileBuffers, skuData, stateConfigData, brandName,
   // (matching "tally ready"'s existing behaviour), and HSN is left blank
   // since Myntra's source reports carry no HSN column.
   // ============================================================
-  console.log('Step 2.6: Create x2beta working / x2beta-shipping sheets');
+  console.log('Step 2.6: Create x2beta working sheet');
 
   function getSellerStateAbbr(gstin) {
     const code = String(gstin || '').trim().substring(0, 2);
@@ -1193,7 +1193,7 @@ async function myntraProcessor(fileBuffers, skuData, stateConfigData, brandName,
   const x2betaUniqueRates = [...new Set(pivotData.map(r => Number(r.rate || 0)))].filter(r => r > 0);
   const x2betaSortedStateCodes = [...new Set(pivotData.map(r => getSellerStateAbbr(r.seller_gstin)))].filter(Boolean).sort();
 
-  function buildX2betaColumns({ isShipping }) {
+  function buildX2betaColumns() {
     const cols = [
       { header: 'Vch. Date* ', get: () => x2betaVchDate },
       { header: 'Vch. Type*', get: r => `Sales-${getSellerStateAbbr(r.seller_gstin) || ''}` },
@@ -1203,20 +1203,19 @@ async function myntraProcessor(fileBuffers, skuData, stateConfigData, brandName,
       { header: 'Is CN?', get: () => null },
       { header: 'Is Vch?', get: () => null },
       { header: 'Party Ledger*', get: r => r.tally_ledgers || '' },
-      { header: 'Sales Ledger*', get: r => `Sales Myntra-${getSellerStateAbbr(r.seller_gstin) || ''}${isShipping ? ' Shipping' : ''} ${Number(r.rate || 0)}%` },
-      { header: 'Stock Item', get: r => (isShipping ? null : (r.fg || '')) },
+      { header: 'Sales Ledger*', get: r => `Sales Myntra-${getSellerStateAbbr(r.seller_gstin) || ''} ${Number(r.rate || 0)}%` },
+      { header: 'Stock Item', get: r => r.fg || '' },
       { header: 'Description', get: () => null },
       { header: 'Godown', get: () => null },
-      { header: 'Quantity', get: r => (isShipping ? null : Number(r.sum_of_quantity || 0)) },
+      { header: 'Quantity', get: r => Number(r.sum_of_quantity || 0) },
       {
         header: 'Rate',
         get: r => {
-          if (isShipping) return null;
           const qty = Number(r.sum_of_quantity || 0);
           return qty !== 0 ? Math.abs(Number(r.sum_of_base_value || 0) / qty) : 0;
         }
       },
-      { header: 'Unit', get: () => (isShipping ? null : 'Pcs') },
+      { header: 'Unit', get: () => 'Pcs' },
       { header: 'Discount', get: () => null },
       { header: 'Amount*', get: r => Number(r.sum_of_base_value || 0) },
       { header: 'Discount', get: () => null }
@@ -1224,9 +1223,6 @@ async function myntraProcessor(fileBuffers, skuData, stateConfigData, brandName,
 
     // Dynamic Output IGST/CGST/SGST columns — one triplet per (rate, seller-state)
     // combination present in this run's data, mirroring the Amazon/Flipkart layout.
-    // Myntra's pivot never separated shipping tax from sales tax (the existing
-    // "shipping tally ready" sheet reuses the same sum_of_*_amount fields), so the
-    // shipping sheet's Output columns intentionally mirror the sales ones here too.
     x2betaUniqueRates.forEach(rate => {
       const halfRate = Math.round((rate / 2) * 100) / 100;
       x2betaSortedStateCodes.forEach(sc => {
@@ -1248,7 +1244,7 @@ async function myntraProcessor(fileBuffers, skuData, stateConfigData, brandName,
     cols.push(
       { header: null, get: () => null },
       { header: null, get: () => null },
-      { header: 'Narration', get: () => `Myntra-${isShipping ? 'Shipping-' : ''}${date || ''}` },
+      { header: 'Narration', get: () => `Myntra-${date || ''}` },
       { header: 'Taxability', get: () => null },
       { header: 'GST Nature', get: () => null },
       { header: 'GST Rate', get: r => Number(r.rate || 0) },
@@ -1287,21 +1283,12 @@ async function myntraProcessor(fileBuffers, skuData, stateConfigData, brandName,
     return cols;
   }
 
-  const x2betaColumns = buildX2betaColumns({ isShipping: false });
+  const x2betaColumns = buildX2betaColumns();
   const x2betaHeaders = x2betaColumns.map(c => c.header);
   const x2betaSheetData = [x2betaHeaders, ...pivotData.map(row => x2betaColumns.map(c => c.get(row)))];
   const x2betaSheet = XLSX.utils.aoa_to_sheet(x2betaSheetData);
   XLSX.utils.book_append_sheet(outputWorkbook, x2betaSheet, 'x2beta working');
   console.log(`✓ Added x2beta working sheet with ${pivotData.length} rows`);
-
-  const x2betaShippingColumns = buildX2betaColumns({ isShipping: true });
-  const x2betaShippingHeaders = x2betaShippingColumns.map(c => c.header);
-  const x2betaShippingSheetData = [x2betaShippingHeaders, ...pivotData.map(row => x2betaShippingColumns.map(c => c.get(row)))];
-  const x2betaShippingSheet = XLSX.utils.aoa_to_sheet(x2betaShippingSheetData);
-  XLSX.utils.book_append_sheet(outputWorkbook, x2betaShippingSheet, 'x2beta-shipping');
-  console.log(`✓ Added x2beta-shipping sheet with ${pivotData.length} rows`);
-
-
 
   // 3. Shipped sheet (from Packed data)
   const shippedSheet = XLSX.utils.json_to_sheet(packedData);
