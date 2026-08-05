@@ -622,8 +622,8 @@ def test_build_zepto_workbook_fills_pmddn_summary_line():
     assert amt == -12345.67
     assert amt not in (None, "")
 
-    # Other manual lines must remain blank.
-    assert _find_summary_amount(ws, "Amount Received in Bank") in (None, "")
+    # Amount Received in Bank is auto (0 with no advices); other manual lines blank.
+    assert _find_summary_amount(ws, "Amount Received in Bank") == 0
     assert _find_summary_amount(ws, "Previous Year Marketing Exp. Invoices") in (None, "")
     assert _find_summary_amount(ws, "Debit Note Accepted") in (None, "")
     assert _find_summary_amount(ws, "Debit Note Not Accepted") in (None, "")
@@ -663,16 +663,18 @@ def test_build_zepto_workbook_has_summary_tab():
     ]
     wb = build_zepto_workbook(results)
 
-    # Tabs in order: main + Summary + the 5 split detail tabs (#00007), no stray "Sheet".
-    assert wb.sheetnames == ["1. Invoice Tracker", "Summary", "Payments",
+    # Tabs in order: main + Summary + Payments + Payment Advice Consolidate + the
+    # 4 other split detail tabs (#00007), no stray "Sheet".
+    assert wb.sheetnames == ["1. Invoice Tracker", "Summary", "Payments", "Payment Advice Consolidate",
                              "Debit Notes", "Credit Notes", "PMDD", "AP-AR & Manual Adj"]
 
     ws = wb["Summary"]
     total_sales = sum(r["total_invoice_amt"] for r in results)
     assert _find_summary_amount(ws, "Sales Including Tax") == total_sales
 
-    # Blank-for-manual line: label present, amount cell empty.
-    assert _find_summary_amount(ws, "Amount Received in Bank") in (None, "")
+    # Amount Received in Bank is auto = total of the Payment Advice Consolidate
+    # tab; with no payment-advice PDFs the consolidate is empty -> 0.
+    assert _find_summary_amount(ws, "Amount Received in Bank") == 0
     print("test_build_zepto_workbook_has_summary_tab OK")
 
 
@@ -781,7 +783,7 @@ def test_detail_tabs_and_hyperlinks():
         "ap_ar": [{"ref": "APAR-1", "amount": -23.45}],
     }
     wb = build_zepto_workbook(results)
-    assert wb.sheetnames == ["1. Invoice Tracker", "Summary", "Payments",
+    assert wb.sheetnames == ["1. Invoice Tracker", "Summary", "Payments", "Payment Advice Consolidate",
                              "Debit Notes", "Credit Notes", "PMDD", "AP-AR & Manual Adj"]
     # detail rows landed on each tab; the DN's malformed ref key ("26-27/000039/")
     # is resolved to its universe invoice so the tab reconciles with the main sheet.
@@ -828,6 +830,101 @@ def test_pod_from_payment_track():
     print("test_pod_from_payment_track OK")
 
 
+def test_pod_date_independent_of_lrn():
+    # POD No (from LRN) and POD Date (from Delivery Date) are captured
+    # INDEPENDENTLY: a row with a Delivery Date but an empty LRN must still yield
+    # a POD Date (the old `if lrn:` gate dropped it). Courier words in the LRN
+    # cell (Porter/Booked/Self) are kept verbatim in POD No.
+    from recon.zepto_receivables import parse_payment_track_pod
+    pay = _xlsx({"Zepto Payment track": [
+        ["Zepto Payment track PO Number","Invoice Number","Cities","QTY","Delivery Date","Courier","LRN","GRN"],
+        ["P1","INV26-27/000031","FBD",1,"2026-03-21","DP","","GrnA"],          # Delivery Date, empty LRN
+        ["P2","INV26-27/000147","BLR",1,"","DP","1846224940","GrnB"],          # LRN, no Delivery Date
+        ["P3","INV26-27/000045","MUM",1,"2026-04-15","Porter","Porter","GrnC"],# courier word kept as-is
+    ]})
+    pod = parse_payment_track_pod(pay)
+    assert pod["INV26-27/000031"]["pod_date"] == "2026-03-21"   # not dropped despite empty LRN
+    assert pod["INV26-27/000031"]["pod_no"] == ""
+    assert pod["INV26-27/000147"]["pod_no"] == "1846224940"
+    assert pod["INV26-27/000147"]["pod_date"] == ""
+    assert pod["INV26-27/000045"]["pod_no"] == "Porter"
+    assert pod["INV26-27/000045"]["pod_date"] == "2026-04-15"
+    print("test_pod_date_independent_of_lrn OK")
+
+
+def test_payment_date_and_advice_no_from_pdf():
+    # Each line item inherits its PDF's Payment Date + Payment Ref No (advice no),
+    # and every line lands in the consolidate list tagged with those header fields.
+    from recon.zepto_receivables import parse_payment_advice_pdf
+    details = {"payments": [], "debit_notes": [], "pmdd": [], "ap_ar": [], "credit_notes": [], "consolidate": []}
+    parse_payment_advice_pdf([_read_fixture_pdf()], details)
+    assert details["payments"], "expected payment line items"
+    p0 = details["payments"][0]
+    assert p0["payment_date"] == "07/04/2026"
+    assert p0["advice_no"] == "HSBCN52026040735815535"
+    assert len(details["consolidate"]) >= len(details["payments"])
+    assert all(c["advice_no"] == "HSBCN52026040735815535" for c in details["consolidate"])
+    assert all(c["payment_date"] == "07/04/2026" for c in details["consolidate"])
+    print("test_payment_date_and_advice_no_from_pdf OK")
+
+
+def test_dynamic_header_wording_variants():
+    # The header parsers must not hinge on one exact PDF layout.
+    from recon.zepto_receivables import _parse_payment_date, _HEADER_RE
+    assert _parse_payment_date("Payment Date 02/07/2026") == "02/07/2026"
+    assert _parse_payment_date("Payment Date: 2026-07-02") == "2026-07-02"
+    assert _parse_payment_date("Payment Date 02 Jul 2026") == "02 Jul 2026"
+    assert _parse_payment_date("Payment Posting Date 05/07/2026") == ""   # different field, must NOT match
+    for s, want in [("Payment Ref No. 20260702-R02L1", "20260702-R02L1"),
+                    ("Payment Reference No X99", "X99"),
+                    ("Payment Ref: ABC123", "ABC123")]:
+        m = _HEADER_RE["ref_no"].search(s)
+        assert m and m.group(1).strip() == want, (s, m and m.group(1))
+    print("test_dynamic_header_wording_variants OK")
+
+
+def test_summary_and_consolidate_and_detail_columns():
+    # Summary: DN shown positive & subtracted; Net Sales / Net Receivables /
+    # Net Receivables - 2; Amount Received in Bank = consolidate Payment Amt total.
+    # Detail tabs (Payments/Debit Notes/PMDD/AP-AR) carry Payment Date + Advice No.
+    from recon.zepto_receivables import build_zepto_workbook, COLUMN_KEYS, _RecoRows
+    row = {k: "" for k in COLUMN_KEYS}
+    row.update({"invoice_number": "INV1", "total_invoice_amt": 1000.0, "credit_note_issued": 100.0,
+                "debit_note_issued": -50.0, "tds": 10.0, "payment_received_incl_tds": 400.0,
+                "net_outstanding": 440.0, "status": "Not Paid"})
+    results = _RecoRows([row])
+    results.pmdn_adjustment = -200.0
+    results.details = {
+        "payments": [{"invoice": "INV1", "ref": "D1", "incl": 399.0, "excl": 400.0, "tds": 1.0,
+                      "payment_date": "02/07/2026", "advice_no": "ADV-1"}],
+        "debit_notes": [], "credit_notes": [],
+        "pmdd": [{"ref": "PMDDN-1", "amount": -100.0, "payment_date": "02/07/2026", "advice_no": "ADV-1"}],
+        "ap_ar": [{"ref": "APAR-1", "amount": -23.0, "payment_date": "02/07/2026", "advice_no": "ADV-1"}],
+        "consolidate": [
+            {"advice_no": "ADV-1", "payment_date": "02/07/2026", "type": "Invoice Payment",
+             "doc_no": "D1", "ref_doc": "INV1", "amount": 400.0, "tds": 1.0, "payment_amt": 399.0},
+            {"advice_no": "ADV-1", "payment_date": "02/07/2026", "type": "Credit Memo",
+             "doc_no": "C1", "ref_doc": "PMDDN-1", "amount": -100.0, "tds": 0.0, "payment_amt": -100.0},
+        ],
+    }
+    wb = build_zepto_workbook(results)
+    ws = wb["Summary"]
+    assert _find_summary_amount(ws, "Debit Note Issued") == 50.0            # positive
+    assert _find_summary_amount(ws, "Net Sales") == 840.0                   # 1000-100-50-10
+    assert _find_summary_amount(ws, "Net Receivables") == 440.0             # 840-400
+    assert _find_summary_amount(ws, "Amount Received in Bank") == 299.0     # 399 + (-100)
+    assert _find_summary_amount(ws, "Net Receivables - 2") == 240.0         # 440 + (-200)
+    # new detail columns
+    assert (wb["Payments"]["F2"].value, wb["Payments"]["G2"].value) == ("Payment Date", "Payment Advice No")
+    assert (wb["Payments"]["F3"].value, wb["Payments"]["G3"].value) == ("02/07/2026", "ADV-1")
+    assert (wb["Debit Notes"]["D2"].value, wb["Debit Notes"]["E2"].value) == ("Payment Date", "Payment Advice No")
+    assert wb["PMDD"]["C2"].value == "Payment Date"
+    assert wb["AP-AR & Manual Adj"]["C2"].value == "Payment Date"
+    con = wb["Payment Advice Consolidate"]
+    assert con["A2"].value == "Payment Advice No" and con["H2"].value == "Payment Amt"
+    print("test_summary_and_consolidate_and_detail_columns OK")
+
+
 if __name__ == "__main__":
     test_normalizers_and_dn_transform()
     test_norm_inv_does_not_strip_trailing_slash()
@@ -864,4 +961,8 @@ if __name__ == "__main__":
     test_due_date_and_status()
     test_detail_tabs_and_hyperlinks()
     test_pod_from_payment_track()
+    test_pod_date_independent_of_lrn()
+    test_payment_date_and_advice_no_from_pdf()
+    test_dynamic_header_wording_variants()
+    test_summary_and_consolidate_and_detail_columns()
     print("ALL TESTS PASSED")
