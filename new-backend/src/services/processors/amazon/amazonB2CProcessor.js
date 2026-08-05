@@ -854,7 +854,7 @@ async function amazonB2CProcessor(
       // Vch No/Ref No reuse the existing Final Invoice No. as-is (per user decision) rather than
       // the reference file's own AMZ-{ShipToStateCode}-{rank} series, which needs a per-state
       // short-code lookup the Ledger Master upload doesn't currently carry.
-      { header: 'Vch. No.*', get: r => r['Final Invoice No.'] || '' },
+      { header: 'Vch. No.*', get: r => `${Number(r['Final Taxable Sales Value'] || 0) < 0 ? 'CN-' : ''}${r['Final Invoice No.'] || ''}` },
       { header: 'Ref. No.', get: r => r['Final Invoice No.'] || '' },
       { header: 'Ref. Date', get: () => x2betaVchDate },
       { header: 'Is CN?', get: r => (Number(r['Final Taxable Sales Value'] || 0) < 0 ? 'Yes' : null) },
@@ -912,7 +912,7 @@ async function amazonB2CProcessor(
       { header: 'Narration', get: () => `B2C-${formMonth || ''}` },
       { header: 'Taxability', get: () => null },
       { header: 'GST Nature', get: () => null },
-      { header: 'GST Rate', get: r => Math.round(getRowGstRate(r) * 10000) / 100 },
+      { header: 'GST Rate', get: () => null },
       { header: 'Cess', get: () => null },
       { header: 'RCM?', get: () => null },
       { header: 'HSN', get: r => r['Hsn/sac'] || '' },
@@ -926,7 +926,7 @@ async function amazonB2CProcessor(
       // Country = fixed 'India' (this business only operates domestically).
       { header: 'Name', get: () => null }, { header: 'Address 1', get: () => null }, { header: 'Address 2', get: () => null },
       { header: 'State', get: r => r[toStateCol] || '' }, { header: 'Country', get: () => 'India' }, { header: 'PIN Code', get: () => null },
-      { header: 'Place of Supply', get: r => r[toStateCol] || '' }, { header: 'GST Type', get: () => null }, { header: 'GSTIN', get: () => null },
+      { header: 'Place of Supply', get: r => r[toStateCol] || '' }, { header: 'GST Type', get: () => 'Unregistered/Consumer' }, { header: 'GSTIN', get: () => null },
       { header: 'Name', get: () => null }, { header: 'Address 1', get: () => null }, { header: 'Address 2', get: () => null },
       { header: 'State', get: r => r[toStateCol] || '' }, { header: 'Country', get: () => 'India' }, { header: 'PIN Code', get: () => null },
       { header: 'Place', get: () => null }, { header: 'GSTIN', get: () => null },
@@ -994,7 +994,7 @@ async function amazonB2CProcessor(
     const x2betaShippingColumns = [
       { header: 'Vch. Date* ', get: () => x2betaVchDate },
       { header: 'Vch. Type*', get: r => `${Number(r['Final Taxable Shipping Value'] || 0) < 0 ? 'CN-' : ''}Sales-${getSellerStateAbbr(r['Seller Gstin']) || ''}` },
-      { header: 'Vch. No.*', get: r => r['Final Invoice No.'] || '' },
+      { header: 'Vch. No.*', get: r => `${Number(r['Final Taxable Shipping Value'] || 0) < 0 ? 'CN-' : ''}${r['Final Invoice No.'] || ''}` },
       { header: 'Ref. No.', get: r => r['Final Invoice No.'] || '' },
       { header: 'Ref. Date', get: () => x2betaVchDate },
       { header: 'Is CN?', get: r => (Number(r['Final Taxable Shipping Value'] || 0) < 0 ? 'Yes' : null) },
@@ -1037,7 +1037,7 @@ async function amazonB2CProcessor(
       { header: 'Narration', get: () => `B2C-Shipping-${formMonth || ''}` },
       { header: 'Taxability', get: () => null },
       { header: 'GST Nature', get: () => null },
-      { header: 'GST Rate', get: r => Math.round(getRowGstRate(r) * 10000) / 100 },
+      { header: 'GST Rate', get: () => null },
       { header: 'Cess', get: () => null },
       { header: 'RCM?', get: () => null },
       // Freight doesn't share the stock item's HSN, and the report carries no
@@ -1049,7 +1049,7 @@ async function amazonB2CProcessor(
       { header: 'Cost Centre', get: () => null },
       { header: 'Name', get: () => null }, { header: 'Address 1', get: () => null }, { header: 'Address 2', get: () => null },
       { header: 'State', get: r => r[toStateCol] || '' }, { header: 'Country', get: () => 'India' }, { header: 'PIN Code', get: () => null },
-      { header: 'Place of Supply', get: r => r[toStateCol] || '' }, { header: 'GST Type', get: () => null }, { header: 'GSTIN', get: () => null },
+      { header: 'Place of Supply', get: r => r[toStateCol] || '' }, { header: 'GST Type', get: () => 'Unregistered/Consumer' }, { header: 'GSTIN', get: () => null },
       { header: 'Name', get: () => null }, { header: 'Address 1', get: () => null }, { header: 'Address 2', get: () => null },
       { header: 'State', get: r => r[toStateCol] || '' }, { header: 'Country', get: () => 'India' }, { header: 'PIN Code', get: () => null },
       { header: 'Place', get: () => null }, { header: 'GSTIN', get: () => null },

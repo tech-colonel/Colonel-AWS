@@ -427,15 +427,38 @@ function amountsCorrespond(orderValue, invoiceAmount) {
 function assignGatewayCandidates(rowsForOrder, candidates, apply, gatewayName, issues) {
     if (!candidates || !candidates.length) return;
     const claimed = new Set();
+    const unresolved = [];
     for (const candidate of candidates) {
         const matches = rowsForOrder.filter(row => !claimed.has(row) && amountsCorrespond(candidate.order_value, row.sales_amount));
         if (matches.length === 1) {
             claimed.add(matches[0]);
             apply(matches[0], candidate);
         } else if (matches.length === 0) {
-            issues.push({ gateway: gatewayName, orderNo: rowsForOrder[0].sale_order_number, reason: 'no-amount-match', invoice: null });
+            unresolved.push(candidate);
         } else {
             matches.forEach(row => issues.push({ gateway: gatewayName, orderNo: row.sale_order_number, reason: 'ambiguous', invoice: row.invoice_number }));
+        }
+    }
+
+    // A single settlement can legitimately cover an order that was split across
+    // several invoices (e.g. partial shipment from two warehouses) — no single
+    // invoice's own amount will correspond to the payment, but the SUM of the
+    // order's still-unclaimed invoices will (verified case: order 266284, invoices
+    // 12090.10 + 1014.42 = 13104.52, matching one Razorpay payment exactly). Split
+    // the settlement across those invoices proportional to each one's own sales
+    // amount so the total attributed matches what was actually received, instead
+    // of leaving the whole order unmatched.
+    for (const candidate of unresolved) {
+        const unclaimedRows = rowsForOrder.filter(row => !claimed.has(row));
+        const total = unclaimedRows.reduce((sum, row) => sum + row.sales_amount, 0);
+        if (unclaimedRows.length > 1 && amountsCorrespond(candidate.order_value, total)) {
+            for (const row of unclaimedRows) {
+                claimed.add(row);
+                const share = total > 0 ? row.sales_amount / total : 1 / unclaimedRows.length;
+                apply(row, { settlement_date: candidate.settlement_date, settlement_amount: candidate.settlement_amount * share });
+            }
+        } else {
+            issues.push({ gateway: gatewayName, orderNo: rowsForOrder[0].sale_order_number, reason: 'no-amount-match', invoice: null });
         }
     }
 }
