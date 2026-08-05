@@ -64,10 +64,10 @@ const markProgress = (brandId, agentId, done = 0, total = 0) => {
 
 /** Mark processing as done and notify clients.
  *  processed = fully-approved rows, review = flagged "Needs Review", corrupted = "Invalid". */
-const markDone = (brandId, agentId, processed = 0, corrupted = 0, review = 0) => {
+const markDone = (brandId, agentId, processed = 0, corrupted = 0, review = 0, wrongBrand = 0, wrongBrandName = null) => {
   const key = getKey(brandId, agentId);
-  processingState.set(key, { status: 'done', processed, corrupted, review, count: processed + review, timestamp: new Date() });
-  pushEvent(brandId, agentId, { status: 'done', processed, corrupted, review, count: processed + review });
+  processingState.set(key, { status: 'done', processed, corrupted, review, wrongBrand, wrongBrandName, count: processed + review, timestamp: new Date() });
+  pushEvent(brandId, agentId, { status: 'done', processed, corrupted, review, wrongBrand, wrongBrandName, count: processed + review });
 };
 
 // ─── Cumulative run accumulation ───────────────────────────────────────────
@@ -103,7 +103,7 @@ const clearTimer = (key) => {
 const shouldStartFresh = (st) =>
   !st || st.status !== 'processing' || st.done === undefined || st.doneRequested === true;
 
-const freshState = () => ({ status: 'processing', invoices: new Map(), done: 0, total: 0, approved: 0, review: 0, invalid: 0, doneRequested: false, timestamp: new Date() });
+const freshState = () => ({ status: 'processing', invoices: new Map(), done: 0, total: 0, approved: 0, review: 0, invalid: 0, wrongBrand: 0, wrongBrandName: null, doneRequested: false, timestamp: new Date() });
 
 /** n8n's 'start' ping — fires EARLY (right after the file list) announcing a real run
  *  of `total` invoices. Two safe jobs:
@@ -135,15 +135,15 @@ const startRun = (brandId, agentId, total = 0) => {
 };
 
 // Status precedence when the SAME invoice shows up across multiple line-item feeds.
-const INV_STATUS_RANK = { 'Approved': 0, 'Needs Review': 1, 'Invalid': 2 };
-const INV_RANK_STATUS = ['Approved', 'Needs Review', 'Invalid'];
+const INV_STATUS_RANK = { 'Approved': 0, 'Needs Review': 1, 'Invalid': 2, 'Wrong Brand': 3 };
+const INV_RANK_STATUS = ['Approved', 'Needs Review', 'Invalid', 'Wrong Brand'];
 
 /** One feed call (a batch of line-item rows) just landed. We count DISTINCT
  *  INVOICES — by invoice_number, falling back to the Drive file link — not rows,
  *  because n8n loops per line item and a single invoice can arrive across several
  *  feed calls. `total` = the batch_total n8n sends = number of invoices in the run,
  *  so the "of N" denominator is correct from the very first feed. */
-const feedTick = (brandId, agentId, { items = [], total = 0 } = {}) => {
+const feedTick = (brandId, agentId, { items = [], total = 0, wrongBrandName = null } = {}) => {
   const key = getKey(brandId, agentId);
   let st = processingState.get(key);
   if (shouldStartFresh(st)) st = freshState();
@@ -156,16 +156,20 @@ const feedTick = (brandId, agentId, { items = [], total = 0 } = {}) => {
     const prevRank = st.invoices.has(inv) ? INV_STATUS_RANK[st.invoices.get(inv)] : -1;
     if (rank > prevRank) st.invoices.set(inv, INV_RANK_STATUS[rank]); // keep the worst status seen
   }
-  let approved = 0, review = 0, invalid = 0;
+  let approved = 0, review = 0, invalid = 0, wrong = 0;
   for (const s of st.invoices.values()) {
-    if (s === 'Approved') approved++; else if (s === 'Needs Review') review++; else invalid++;
+    if (s === 'Approved') approved++;
+    else if (s === 'Needs Review') review++;
+    else if (s === 'Wrong Brand') wrong++;
+    else invalid++;
   }
-  st.approved = approved; st.review = review; st.invalid = invalid;
+  st.approved = approved; st.review = review; st.invalid = invalid; st.wrongBrand = wrong;
+  if (wrongBrandName) st.wrongBrandName = wrongBrandName;
   st.done = st.invoices.size;                       // distinct invoices seen so far
   st.total = Math.max(st.total || 0, total || 0, st.done);
   st.timestamp = new Date();
   processingState.set(key, st);
-  pushEvent(brandId, agentId, { status: 'progress', done: st.done, total: st.total });
+  pushEvent(brandId, agentId, { status: 'progress', done: st.done, total: st.total, wrongBrand: st.wrongBrand || 0, wrongBrandName: st.wrongBrandName || null });
   armTimer(brandId, agentId, st.doneRequested ? SETTLE_MS : IDLE_MS);
 };
 
@@ -186,7 +190,7 @@ const finalizeRun = (brandId, agentId) => {
   clearTimer(key);
   const st = processingState.get(key);
   if (!st || st.status !== 'processing') return;
-  markDone(brandId, agentId, st.approved || 0, st.invalid || 0, st.review || 0);
+  markDone(brandId, agentId, st.approved || 0, st.invalid || 0, st.review || 0, st.wrongBrand || 0, st.wrongBrandName || null);
 };
 
 /** Hard-stop a run (Cancel) — clear the timer, reset to idle, tell clients to stop. */

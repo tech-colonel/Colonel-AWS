@@ -42,6 +42,66 @@ const parseDate = (dString) => {
     }
 };
 
+// ─── Brand PAN checkpoint (self-learning, cross-brand via master brands table) ──
+// On a PURCHASE invoice the buyer IS the brand, so buyer_gstin's PAN identifies the
+// brand. We keep a learned {PAN: count} map per brand on brands.known_pans (master
+// data → NOT RLS-scoped, unlike invoice_process). A PAN is OWNED by the brand that
+// holds a strong majority (>= DOMINANCE) of its occurrences and >= MIN_OWN absolute —
+// so a PAN has at most ONE owner (misfiled strays never win). Per incoming invoice:
+//   • PAN owned by THIS brand → save
+//   • PAN owned by ANOTHER brand → BLOCK (wrong brand — do not save here)
+//   • PAN owned by nobody → learn it; flag "Needs Review" for an established brand,
+//     stay silent while a brand-new brand is still bootstrapping its own PANs.
+const MIN_OWN = 3;         // absolute floor to be considered an owner
+const DOMINANCE = 0.8;     // owner must hold >= 80% of a PAN's occurrences
+const PAN_RE = /^[A-Z]{5}[0-9]{4}[A-Z]$/;
+const panOf = (gstin) => {
+    if (!gstin) return null;
+    const c = String(gstin).replace(/[^0-9A-Za-z]/g, '').toUpperCase();
+    if (c.length < 15) return null;
+    const p = c.substring(2, 12);
+    return PAN_RE.test(p) ? p : null;
+};
+let _panCache = { at: 0, owner: null, names: null };
+const PAN_CACHE_MS = 60000;
+const getPanOwners = async () => {
+    if (_panCache.owner && (Date.now() - _panCache.at) < PAN_CACHE_MS) return _panCache;
+    const [rows] = await Brand.sequelize.query('SELECT id, name, known_pans FROM brands');
+    const names = new Map();
+    const perPan = new Map(); // PAN -> Map(brandId -> count)
+    for (const r of rows) {
+        names.set(r.id, r.name);
+        const kp = r.known_pans || {};
+        for (const [pan, cnt] of Object.entries(kp)) {
+            const c = Number(cnt) || 0;
+            if (c <= 0) continue;
+            if (!perPan.has(pan)) perPan.set(pan, new Map());
+            perPan.get(pan).set(r.id, c);
+        }
+    }
+    const owner = new Map(); // PAN -> brandId (single dominant owner)
+    for (const [pan, brandCounts] of perPan) {
+        let total = 0, topId = null, topCnt = 0;
+        for (const [bid, c] of brandCounts) { total += c; if (c > topCnt) { topCnt = c; topId = bid; } }
+        if (topCnt >= MIN_OWN && total > 0 && (topCnt / total) >= DOMINANCE) owner.set(pan, topId);
+    }
+    _panCache = { at: Date.now(), owner, names };
+    return _panCache;
+};
+// Increment THIS brand's learned counts for the PANs it legitimately received.
+const learnPans = async (brandId, panCounts) => {
+    if (!panCounts || !Object.keys(panCounts).length) return;
+    try {
+        const [rows] = await Brand.sequelize.query('SELECT known_pans FROM brands WHERE id = :bid', { replacements: { bid: brandId } });
+        const kp = (rows && rows[0] && rows[0].known_pans) || {};
+        for (const [p, c] of Object.entries(panCounts)) kp[p] = (Number(kp[p]) || 0) + c;
+        await Brand.sequelize.query('UPDATE brands SET known_pans = CAST(:kp AS jsonb) WHERE id = :bid', { replacements: { kp: JSON.stringify(kp), bid: brandId } });
+        _panCache.at = 0; // invalidate so freshly-learned PANs count on the next run
+    } catch (e) {
+        console.warn('[n8n feed] learnPans failed (non-fatal):', e.message);
+    }
+};
+
 // ─── POST /api/n8n/invoice/feed ───────────────
 const feedInvoicesFromN8n = async (req, res, next) => {
     try {
@@ -205,7 +265,34 @@ const feedInvoicesFromN8n = async (req, res, next) => {
             }
         });
 
-        const finalData = validRows.map((row) => ({
+        // ─── Brand checkpoint: keep only invoices that belong to THIS brand ─────
+        // Reject invoices whose buyer PAN is positively owned by ANOTHER brand
+        // (wrong-brand run — e.g. Baynine files dropped into Stroom's folder).
+        const { owner: panOwner, names: brandNames } = await getPanOwners();
+        const brandEstablished = [...panOwner.values()].some((id) => id === resolvedBrandId);
+        const blockedRows = [];
+        const savableRows = [];
+        const learnCounts = {};
+        let wrongBrandName = null;
+        validRows.forEach((row) => {
+            const p = panOf(row.buyer_gstin);
+            const ownerId = p ? panOwner.get(p) : null;
+            if (ownerId && ownerId !== resolvedBrandId) {
+                wrongBrandName = brandNames.get(ownerId) || 'another brand';
+                blockedRows.push(row);
+                return;
+            }
+            if (p) learnCounts[p] = (learnCounts[p] || 0) + 1;   // own / unknown → learn
+            // Flag a stranger PAN ONLY for an established brand — a brand-new brand is
+            // still bootstrapping its own PANs, so don't nag its first batches.
+            row.__brandFlag = (brandEstablished && !ownerId) ? 'Needs Review' : null;
+            savableRows.push(row);
+        });
+        if (blockedRows.length) {
+            console.warn(`[n8n feed] 🛑 Blocked ${blockedRows.length} invoice(s) belonging to ${wrongBrandName}, not ${brand.name} (${resolvedBrandId})`);
+        }
+
+        const finalData = savableRows.map((row) => ({
             processed_on: new Date(),
             company: row.company || null,
             vendor_name_tally: row.vendor_name_tally || null,
@@ -236,8 +323,10 @@ const feedInvoicesFromN8n = async (req, res, next) => {
             invoice_link: row.Invoice_link || row.invoice_link || null,
             // Auto-approve fully-done invoices; only those still missing the Tally vendor
             // name + category (accountant hasn't updated the vendor master) need review.
-            // "N/A"/"Missing" placeholders count as missing.
-            status: (isMissingField(row.vendor_name_tally) && isMissingField(row.category)) ? 'Needs Review' : 'Approved'
+            // "N/A"/"Missing" placeholders count as missing. A stranger buyer-PAN on an
+            // established brand also forces review (row.__brandFlag).
+            status: row.__brandFlag
+                || ((isMissingField(row.vendor_name_tally) && isMissingField(row.category)) ? 'Needs Review' : 'Approved')
         }));
 
         // ─── Insert Data ───────────────────────────────────────────────
@@ -264,18 +353,28 @@ const feedInvoicesFromN8n = async (req, res, next) => {
         const feedItems = [
             ...finalData.map((r) => ({ invoice_number: r.invoice_number, invoice_link: r.invoice_link, status: r.status })),
             ...corruptedRows.map((r) => ({ invoice_number: r.invoice_number, invoice_link: r.invoice_link, status: 'Invalid' })),
+            // Blocked (wrong-brand) rows are NOT saved, but still count toward "of N" and
+            // surface in the run summary so the accountant sees they were skipped.
+            ...blockedRows.map((r) => ({ invoice_number: r.invoice_number, invoice_link: r.Invoice_link || r.invoice_link, status: 'Wrong Brand' })),
         ];
-        feedTick(resolvedBrandId, resolvedAgentId, { items: feedItems, total: batchTotal });
+        feedTick(resolvedBrandId, resolvedAgentId, { items: feedItems, total: batchTotal, wrongBrandName });
         clearExecution(resolvedBrandId, resolvedAgentId);
 
-        console.log(`[n8n feed] ✅ Fed. +Approved: ${approvedCount}, +Needs Review: ${reviewCount}, +Invalid: ${corruptedResult.length}`);
+        // Learn the buyer PANs this brand legitimately received (self-updating ownership).
+        await learnPans(resolvedBrandId, learnCounts);
+
+        console.log(`[n8n feed] ✅ Fed. +Approved: ${approvedCount}, +Needs Review: ${reviewCount}, +Invalid: ${corruptedResult.length}, 🛑 Blocked(wrong-brand): ${blockedRows.length}`);
 
         // ─── Response ──────────────────────────────────────────────────
         res.json({
             success: true,
-            message: 'Invoices stored successfully via n8n feed',
+            message: blockedRows.length
+                ? `Stored ${validResult.length}; blocked ${blockedRows.length} belonging to ${wrongBrandName}`
+                : 'Invoices stored successfully via n8n feed',
             count: validResult.length,
             corrupted: corruptedResult.length,
+            blocked: blockedRows.length,
+            wrongBrand: wrongBrandName || null,
             data: [...validResult, ...corruptedResult]
         });
 

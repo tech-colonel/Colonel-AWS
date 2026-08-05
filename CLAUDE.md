@@ -27,7 +27,7 @@
 > account without asking.
 
 > **Live frontend bundle (2026-08-04):** the live frontend is now a **proper build from `main`** —
-> bundle **`main.639260a5.js`** (10 brands live incl. **Nailinit**; delete-invoice route active) — **NOT**
+> bundle **`main.5a329a2d.js`** (11 brands live incl. **Nailinit**; delete-invoice route + brand-PAN checkpoint active) — **NOT**
 > hot-patched anymore. All Invoice Process per-brand
 > maintenance / Shumee-Toys message / Google-Drive-Folder button / "Processing X of N" wording now
 > live in `frontend/src/pages/accountant/InvoiceAgentWorkspace.jsx` **source**, so a rebuild reproduces

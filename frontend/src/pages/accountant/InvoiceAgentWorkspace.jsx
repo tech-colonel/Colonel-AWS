@@ -241,7 +241,7 @@ const FieldValue = ({ invoice, field, editing, editForm, onChange }) => {
 };
 
 // ─── Processing Status Banner ─────────────────────────────────────────────────
-const ProcessingBanner = ({ status, count, done = 0, total = 0, review = 0, invalid = 0, onDismiss }) => {
+const ProcessingBanner = ({ status, count, done = 0, total = 0, review = 0, invalid = 0, wrongBrand = 0, wrongBrandName = null, onDismiss }) => {
   if (status === 'idle') return null;
 
   if (status === 'processing') {
@@ -281,7 +281,7 @@ const ProcessingBanner = ({ status, count, done = 0, total = 0, review = 0, inva
         <div className="invoice-processing-banner__body" style={{ flex: 1 }}>
           <p className="invoice-processing-banner__title">
             {count === 0
-              ? 'No new invoices to process'
+              ? (wrongBrand > 0 ? (wrongBrand + ' invoice(s) skipped — wrong brand') : 'No new invoices to process')
               : review + invalid > 0
                 ? `Completed — ${count} processed, ${review + invalid} need attention`
                 : `Completed — all ${count} invoice${count !== 1 ? 's' : ''} approved!`}
@@ -299,6 +299,11 @@ const ProcessingBanner = ({ status, count, done = 0, total = 0, review = 0, inva
               <><strong>{count}</strong> invoice{count !== 1 ? 's' : ''} processed successfully and added to your invoice sheet.</>
             )}
           </p>
+          {wrongBrand > 0 && (
+            <p className="invoice-processing-banner__sub" style={{ marginTop: 6, color: '#991B1B', fontWeight: 600 }}>
+              🛑 {wrongBrand} invoice{wrongBrand !== 1 ? 's' : ''} skipped — {wrongBrandName ? ('they belong to ' + wrongBrandName + ', not this brand') : 'they belong to another brand'}. They were NOT saved here.
+            </p>
+          )}
         </div>
         <button className="invoice-processing-banner__close" onClick={onDismiss} aria-label="Dismiss">
           <X size={16} />
@@ -482,6 +487,8 @@ const InvoiceAgentWorkspace = ({ agent }) => {
                   const approvedVal = payload.processed || 0;   // fully approved
                   const reviewVal = payload.review || 0;        // flagged Needs Review
                   const invalidVal = payload.corrupted || 0;    // invalid / scanned
+                  const wrongBrandVal = payload.wrongBrand || 0;   // blocked — belong to another brand
+                  const wrongBrandNm = payload.wrongBrandName || null;
                   const totalVal = approvedVal + reviewVal + invalidVal;
                   const flagged = reviewVal + invalidVal;
                   setProcessedCount(totalVal);
@@ -491,7 +498,8 @@ const InvoiceAgentWorkspace = ({ agent }) => {
                   setIsProcessing(false);
                   setExecutionId(null);
                   startedRef.current = false;
-                  setProcessingSummary({ approved: approvedVal, review: reviewVal, invalid: invalidVal, total: totalVal });
+                  setProcessingSummary({ approved: approvedVal, review: reviewVal, invalid: invalidVal, total: totalVal, wrongBrand: wrongBrandVal, wrongBrandName: wrongBrandNm });
+                  if (wrongBrandVal > 0) toast.error(`${wrongBrandVal} invoice${wrongBrandVal !== 1 ? 's' : ''} skipped — ${wrongBrandNm ? `they belong to ${wrongBrandNm}` : 'they belong to another brand'}, not this brand. Not saved here.`);
 
                   // Notify — warn if anything needs attention
                   if (totalVal === 0) {
@@ -733,7 +741,7 @@ const InvoiceAgentWorkspace = ({ agent }) => {
 
   return (
     <div className="max-w-[1600px] space-y-6 animate-in fade-in duration-500">
-      <ProcessingBanner status={processingStatus} count={processedCount} done={processedCount} total={totalToProcess} review={processingSummary?.review || 0} invalid={processingSummary?.invalid || 0} onDismiss={dismissBanner} />
+      <ProcessingBanner status={processingStatus} count={processedCount} done={processedCount} total={totalToProcess} review={processingSummary?.review || 0} invalid={processingSummary?.invalid || 0} wrongBrand={processingSummary?.wrongBrand || 0} wrongBrandName={processingSummary?.wrongBrandName || null} onDismiss={dismissBanner} />
 
       <div className="rounded-xl border bg-white shadow-[0_1px_3px_0_rgba(0,0,0,0.05)] overflow-hidden" style={{ borderColor: T_BORDER }}>
         {INVOICE_MAINTENANCE && (
