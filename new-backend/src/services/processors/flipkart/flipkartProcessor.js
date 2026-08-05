@@ -1358,7 +1358,7 @@ async function flipkartProcessor(rawFileBuffer, skuData, stateConfigData, brandN
   const x2betaColumns = [
     { header: 'Vch. Date* ', get: () => x2betaVchDate },
     { header: 'Vch. Type*', get: r => `${Number(r.final_taxable_sales_value || 0) < 0 ? 'CN-' : ''}Sales-${getSellerStateAbbr(r.seller_gstin) || ''}` },
-    { header: 'Vch. No.*', get: r => r.final_invoice_no || '' },
+    { header: 'Vch. No.*', get: r => `${Number(r.final_taxable_sales_value || 0) < 0 ? 'CN-' : ''}${r.final_invoice_no || ''}` },
     { header: 'Ref. No.', get: r => r.final_invoice_no || '' },
     { header: 'Ref. Date', get: () => x2betaVchDate },
     { header: 'Is CN?', get: r => (Number(r.final_taxable_sales_value || 0) < 0 ? 'Yes' : null) },
@@ -1490,7 +1490,7 @@ async function flipkartProcessor(rawFileBuffer, skuData, stateConfigData, brandN
   const x2betaShippingColumns = [
     { header: 'Vch. Date* ', get: () => x2betaVchDate },
     { header: 'Vch. Type*', get: r => `${Number(r.final_shipping_taxable_value || 0) < 0 ? 'CN-' : ''}Sales-${getSellerStateAbbr(r.seller_gstin) || ''}` },
-    { header: 'Vch. No.*', get: r => r.final_invoice_no || '' },
+    { header: 'Vch. No.*', get: r => `${Number(r.final_shipping_taxable_value || 0) < 0 ? 'CN-' : ''}${r.final_invoice_no || ''}` },
     { header: 'Ref. No.', get: r => r.final_invoice_no || '' },
     { header: 'Ref. Date', get: () => x2betaVchDate },
     { header: 'Is CN?', get: r => (Number(r.final_shipping_taxable_value || 0) < 0 ? 'Yes' : null) },
