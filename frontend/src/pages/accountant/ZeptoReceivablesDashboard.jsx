@@ -162,8 +162,23 @@ function openTeamMail(subject, body) {
   // Opens a fresh Gmail compose (team account the user is signed into) with the
   // subject + body pre-filled. No personal recipient hard-coded — the user adds
   // the team / Zepto address before sending.
+  //
+  // Gmail's compose URL caps out around ~2 KB, so a long enumerated body (e.g.
+  // 200+ invoices) overflows it and Gmail returns HTTP 400. So we ALWAYS copy
+  // the complete subject+body to the clipboard, and put only a URL-safe slice
+  // (trimmed on a line boundary) in the compose — with a note to paste the rest.
+  const full = `Subject: ${subject}\n\n${body}`;
+  try { navigator.clipboard?.writeText(full)?.catch(() => {}); } catch (_) {}
+
+  const MAX = 1000;
+  let b = body;
+  if (b.length > MAX) {
+    const cut = b.slice(0, MAX);
+    b = cut.slice(0, Math.max(cut.lastIndexOf('\n'), 0)) +
+      '\n\n…(the full list is copied to your clipboard — press Cmd/Ctrl+V to paste it in)';
+  }
   const url = 'https://mail.google.com/mail/?view=cm&fs=1&su=' +
-    encodeURIComponent(subject) + '&body=' + encodeURIComponent(body);
+    encodeURIComponent(subject) + '&body=' + encodeURIComponent(b);
   window.open(url, '_blank', 'noopener');
 }
 
