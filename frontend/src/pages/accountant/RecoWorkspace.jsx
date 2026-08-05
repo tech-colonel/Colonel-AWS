@@ -2,7 +2,7 @@ import React, { useState, useRef, useEffect } from 'react';
 import { useParams, useNavigate, useLocation } from 'react-router-dom';
 import DashboardLayout from '../../components/layout/DashboardLayout';
 import Gstr1Dashboard from './Gstr1Dashboard';
-import ToolResultDashboard from '../../components/reco/ToolResultDashboard';
+import ToolResultDashboard, { FeedbackModal } from '../../components/reco/ToolResultDashboard';
 import ZeptoReceivablesDashboard from './ZeptoReceivablesDashboard';
 import {
   LayoutDashboard, Bot, ArrowLeft, Upload, Download,
@@ -514,6 +514,7 @@ const RecoWorkspace = ({ agentTypeProp } = {}) => {
   const [result, setResult] = useState(null);
   const [filter, setFilter] = useState('All');
   const [downloading, setDownloading] = useState(false);
+  const [zeptoFlagOpen, setZeptoFlagOpen] = useState(false);   // Zepto: Flag rows modal (lifted to the top action bar)
   const [showMonthly, setShowMonthly] = useState(true);
   const [ledgerStatus, setLedgerStatus] = useState(null);
 
@@ -2116,6 +2117,29 @@ const RecoWorkspace = ({ agentTypeProp } = {}) => {
                 {agentType === 'gstr_1_vs_books' && (
                   <OpenInSheetsButton jobId={result?.job_id} name={config.name} style={{ padding: '8px 14px', fontSize: 12 }} />
                 )}
+                {/* Zepto: Download / Google Sheets / Flag lifted up here next to View
+                    Analytics so they're not buried below the charts + tickets. */}
+                {agentType === 'zepto_receivables' && (
+                  <>
+                    <button onClick={handleDownload} disabled={downloading} style={{
+                      display: 'flex', alignItems: 'center', gap: 6, padding: '8px 14px',
+                      borderRadius: 8, fontSize: 12, fontWeight: 700,
+                      background: 'rgba(7,72,238,0.08)', border: '1px solid rgba(7,72,238,0.2)',
+                      color: '#0748EE', cursor: 'pointer', opacity: downloading ? 0.6 : 1, fontFamily: 'Barlow',
+                    }}>
+                      {downloading ? <Loader2 style={{ width: 13, height: 13 }} className="animate-spin" /> : <Download style={{ width: 13, height: 13 }} />}
+                      Download Excel
+                    </button>
+                    <OpenInSheetsButton jobId={result?.job_id} name={config.name} style={{ padding: '8px 14px', fontSize: 12 }} />
+                    <button onClick={() => setZeptoFlagOpen(true)} style={{
+                      display: 'flex', alignItems: 'center', gap: 6, padding: '8px 14px',
+                      borderRadius: 8, fontSize: 12, fontWeight: 700,
+                      background: '#fff', border: '1.5px solid #A3BFF8', color: '#0748EE', cursor: 'pointer', fontFamily: 'Barlow',
+                    }}>
+                      🚩 Flag rows / Send feedback
+                    </button>
+                  </>
+                )}
                 <button
                   onClick={() => navigate(`/brands/${effectiveBrandId || brandId}/reco/${agentType}/results/${result?.job_id}`)}
                   style={{
@@ -2182,7 +2206,18 @@ const RecoWorkspace = ({ agentTypeProp } = {}) => {
                 brandId={effectiveBrandId || brandId}
                 jobId={result?.job_id}
                 agentLabel={config?.name}
-                onSendFeedback={handleSendFeedback}
+                onSendFeedback={agentType === 'zepto_receivables' ? undefined : handleSendFeedback}
+              />
+            )}
+
+            {/* Zepto: the Flag button lives in the top bar; its modal renders here. */}
+            {agentType === 'zepto_receivables' && zeptoFlagOpen && (
+              <FeedbackModal
+                kind="generic"
+                rows={dashboardRows}
+                agentLabel={config?.name}
+                onClose={() => setZeptoFlagOpen(false)}
+                onSend={handleSendFeedback}
               />
             )}
           </div>
