@@ -3,6 +3,7 @@ import { useParams, useNavigate, useLocation } from 'react-router-dom';
 import DashboardLayout from '../../components/layout/DashboardLayout';
 import Gstr1Dashboard from './Gstr1Dashboard';
 import ToolResultDashboard from '../../components/reco/ToolResultDashboard';
+import ZeptoReceivablesDashboard from './ZeptoReceivablesDashboard';
 import {
   LayoutDashboard, Bot, ArrowLeft, Upload, Download,
   Play, CheckCircle2, XCircle, AlertTriangle, RotateCcw,
@@ -2150,6 +2151,14 @@ const RecoWorkspace = ({ agentTypeProp } = {}) => {
               <div className="glass-card" style={{ padding: 16 }}>
                 <Gstr1Dashboard result={result} />
               </div>
+            )}
+
+            {/* Zepto Receivables — charts (aging donut + data-gap bars) + Myntra-style
+                expandable issue tickets (overdue-to-collect / Missing PO / GRN / POD)
+                with real enumerated data + Copy / Download / Email-team. Sits above
+                the generic table below. */}
+            {agentType === 'zepto_receivables' && (
+              <ZeptoReceivablesDashboard result={result} />
             )}
 
             {/* Premium tool-output dashboard — KPIs, charts, status filters and
