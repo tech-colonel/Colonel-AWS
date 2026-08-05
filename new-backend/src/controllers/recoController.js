@@ -1033,6 +1033,19 @@ const runReco = async (req, res) => {
         headers: { ...form.getHeaders() }, timeout: 600000,
         maxContentLength: Infinity, maxBodyLength: Infinity,
       });
+      // Persist the output xlsx to RECO_OUTPUT_DIR (like every other agent) so
+      // Download + Open-in-Google-Sheets use a stable local file instead of
+      // re-fetching from the engine's volatile in-memory job store (which is
+      // empty after any engine restart → open-in-sheets was failing for zepto).
+      try {
+        const jid = pyResp.data?.job_id;
+        if (jid) {
+          const xr = await axios.get(`${PYTHON_RECO_URL}/api/jobs/${jid}/export.xlsx`,
+            { responseType: 'arraybuffer', timeout: 120000 });
+          fs.mkdirSync(RECO_OUTPUT_DIR, { recursive: true });
+          fs.writeFileSync(path.join(RECO_OUTPUT_DIR, `${jid}.xlsx`), Buffer.from(xr.data));
+        }
+      } catch (e) { console.warn('[RECO] zepto persist xlsx failed:', e.message); }
       return res.json(pyResp.data);   // { job_id, summary, counts, results }
     }
 
