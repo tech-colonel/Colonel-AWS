@@ -998,6 +998,44 @@ def test_dn_status_merge_missing_grn_and_tab_colors():
     print("test_dn_status_merge_missing_grn_and_tab_colors OK")
 
 
+def test_multi_month_accumulation():
+    # The vendor ships only the new month each time, but a prior-month invoice's
+    # GRN/PO/POD can land in a later file — so Invoice Details, Credit Notes and
+    # the Zepto Payment track must ACCUMULATE across every file in the folder.
+    import datetime
+    def _invd(inv, name, date, amt):
+        return _xlsx({"Invoice Details": [["t"],
+            ["invoice_number","reference_number","customer_name","date","bcy_total","tax_amount",
+             "amount_without_tax","place_of_supply","gst_no","billing_state","shipping_state"],
+            [inv,"SO",name,date,amt,0,amt,"MH","27AAICK4821A1Z5","MH","MH"]]})
+    invd_apr = _invd("INV26-27/000010","ZEPTO A","2026-06-30",1000)   # prior month
+    invd_jul = _invd("INV26-27/000050","ZEPTO B","2026-07-15",2000)   # new month
+    pay_old = _xlsx({"Zepto Payment track": [
+        ["Zepto Payment track PO Number","Invoice Number","Cities","QTY","Delivery Date","Courier","LRN","GRN"],
+        ["P10","INV26-27/000010","MH",1,"2026-06-20","DP","LRN10",""]]})          # June: no GRN yet
+    pay_new = _xlsx({"Zepto Payment track": [
+        ["Zepto Payment track PO Number","Invoice Number","Cities","QTY","Delivery Date","Courier","LRN","GRN"],
+        ["P10","INV26-27/000010","MH",1,"2026-06-20","DP","LRN10","GrnCode10"],   # July: GRN filled in
+        ["P50","INV26-27/000050","KA",1,"2026-07-10","DP","LRN50","GrnCode50"]]})
+    grn = b"GRN ID,PO ID,Created On,Status\r\n"
+    cn1 = _xlsx({"Credit Note Details": [["t"],["invoice_number","bcy_total"],["INV26-27/000010",100]]})
+    cn2 = _xlsx({"Credit Note Details": [["t"],["invoice_number","bcy_total"],["INV26-27/000010",50],["INV26-27/000050",25]]})
+    files = {"invoice_details": [_file(invd_apr), _file(invd_jul)],
+             "zepto_payment": [_file(pay_new), _file(pay_old)],   # newest-first
+             "grn_list": [_file(grn)], "payment_advice": [],
+             "credit_note": [_file(cn1), _file(cn2)]}
+    res = reconcile_zepto(files, today=datetime.date(2026, 8, 6))
+    by = {r["invoice_number"]: r for r in res}
+    assert set(by) == {"INV26-27/000010", "INV26-27/000050"}       # both months present
+    assert by["INV26-27/000010"]["po"] == "P10"
+    assert by["INV26-27/000010"]["grn_no"] == "GrnCode10"           # GRN from the newer payment file
+    assert by["INV26-27/000010"]["pod_no"] == "LRN10"
+    assert by["INV26-27/000050"]["po"] == "P50" and by["INV26-27/000050"]["grn_no"] == "GrnCode50"
+    assert round(by["INV26-27/000010"]["credit_note_issued"], 2) == 150.0   # summed across both CN files
+    assert round(by["INV26-27/000050"]["credit_note_issued"], 2) == 25.0
+    print("test_multi_month_accumulation OK")
+
+
 if __name__ == "__main__":
     test_normalizers_and_dn_transform()
     test_norm_inv_does_not_strip_trailing_slash()
@@ -1040,4 +1078,5 @@ if __name__ == "__main__":
     test_summary_and_consolidate_and_detail_columns()
     test_grn_from_payment_track_and_wafers_dropped()
     test_dn_status_merge_missing_grn_and_tab_colors()
+    test_multi_month_accumulation()
     print("ALL TESTS PASSED")

@@ -849,6 +849,64 @@ def _dn_fallback_remap(debit_notes: dict[str, float], invoice_universe: set[str]
     return out
 
 
+def _merge_invoice_details(datas: list[bytes]) -> dict[str, dict]:
+    """Union invoice-details across every month's file (April-June + July + Aug…).
+    The vendor ships only the new month each time, but a prior-month invoice can
+    still get its PO/GRN later — so we accumulate ALL files. Each invoice lives in
+    exactly one file; first occurrence wins if one ever repeats."""
+    out: dict[str, dict] = {}
+    for b in datas:
+        try:
+            part = parse_invoice_details(b)
+        except Exception:
+            continue
+        for inv, fields in part.items():
+            if inv not in out:
+                out[inv] = fields
+    return out
+
+
+def _merge_credit_notes(datas: list[bytes], details: dict | None = None) -> dict[str, dict]:
+    """Sum credit notes per invoice across every month's Credit Note file."""
+    out: dict[str, dict] = {}
+    for b in datas:
+        try:
+            part = parse_credit_notes(b, details)
+        except Exception:
+            continue
+        for inv, acc in part.items():
+            cur = out.setdefault(inv, {"amount": 0.0, "numbers": []})
+            cur["amount"] += acc.get("amount", 0.0)
+            for n in acc.get("numbers", []):
+                if n and n not in cur["numbers"]:
+                    cur["numbers"].append(n)
+    return out
+
+
+def _merge_payment_track(datas: list[bytes]):
+    """Zepto Payment track can arrive as old + new files; accumulate ALL so no
+    invoice's PO/POD/GRN is lost. First non-empty value wins per field — pass the
+    files newest-first (the backend does) so the latest data takes precedence.
+    Returns (payments_raw list for inv->PO, pod_track dict for POD/GRN)."""
+    payments_raw: list[dict] = []
+    pod_track: dict[str, dict] = {}
+    for b in datas:
+        try:
+            payments_raw += parse_zepto_payment(b)
+        except Exception:
+            pass
+        try:
+            part = parse_payment_track_pod(b)
+        except Exception:
+            part = {}
+        for inv, d in part.items():
+            cur = pod_track.setdefault(inv, {"pod_no": "", "pod_date": "", "grn_no": ""})
+            for k in ("pod_no", "pod_date", "grn_no"):
+                if d.get(k) and not cur[k]:
+                    cur[k] = d[k]
+    return payments_raw, pod_track
+
+
 def reconcile_zepto(files: dict, today=None) -> list[dict]:
     import datetime as _dt
     if today is None:
@@ -857,13 +915,17 @@ def reconcile_zepto(files: dict, today=None) -> list[dict]:
     # Notes / Credit Notes / PMDD / AP-AR). Additive — sums below are unchanged.
     details = {"payments": [], "debit_notes": [], "pmdd": [], "ap_ar": [], "credit_notes": [],
                "consolidate": []}
-    invoice_details = parse_invoice_details(_one(files, "invoice_details") or b"")
-    payments_raw = parse_zepto_payment(_one(files, "zepto_payment") or b"")
+    # Multi-month accumulation: Invoice Details, Credit Notes and the Zepto
+    # Payment track all accumulate across every file in the folder (prior months
+    # + new ones), since a prior-month invoice's PO/GRN/POD can land in a later
+    # file. Payment Advice already reads every PDF (incl. subfolders like
+    # "July 2026", picked up by the backend's recursive folder walk).
+    invoice_details = _merge_invoice_details(_many(files, "invoice_details"))
+    payments_raw, pod_track = _merge_payment_track(_many(files, "zepto_payment"))
     grn = parse_grn(_many(files, "grn_list"))
     pay_map, dn_map, pmdn_total = parse_payment_advice_pdf(_many(files, "payment_advice"), details)
-    cn_map = parse_credit_notes(_one(files, "credit_note") or b"", details)
+    cn_map = _merge_credit_notes(_many(files, "credit_note"), details)
     lrn_map = parse_lrn(_many(files, "lrn"))
-    pod_track = parse_payment_track_pod(_one(files, "zepto_payment") or b"")   # POD from Payment track LRN/Delivery Date
 
     dn_map = _dn_fallback_remap(dn_map, set(invoice_details.keys()))
 
