@@ -17,12 +17,21 @@ const PRIORITY = {
 const AGING_COLORS = { Overdue: '#DC2626', Due: '#D97706', 'Not Due': '#16A34A' };
 const GAP_COLORS = ['#DC2626', '#D97706', '#2563EB'];
 
-// Solid envelope — reads as a real mail icon on the (blue) Email-team button.
-const MailSolid = ({ size = 15, color = 'currentColor' }) => (
-  <svg width={size} height={size} viewBox="0 0 24 24" fill={color} aria-hidden="true">
-    <path d="M3.5 4h17A1.5 1.5 0 0 1 22 5.5v.35l-10 6.02L2 5.85V5.5A1.5 1.5 0 0 1 3.5 4Z" />
-    <path d="M22 8.18l-9.48 5.71a1 1 0 0 1-1.04 0L2 8.18V18.5A1.5 1.5 0 0 0 3.5 20h17a1.5 1.5 0 0 0 1.5-1.5V8.18Z" />
+// Real Gmail logo (opens a Gmail compose). Colourful envelope, so it sits on a
+// small white chip to read cleanly on the blue Email-team button.
+const GmailIcon = ({ size = 16 }) => (
+  <svg width={size} height={size} viewBox="0 0 48 48" aria-hidden="true">
+    <path fill="#4caf50" d="M45,16.2l-5,2.75l-5,4.75L35,40h7c1.657,0,3-1.343,3-3V16.2z" />
+    <path fill="#1e88e5" d="M3,16.2l3.614,1.71L13,23.7V40H6c-1.657,0-3-1.343-3-3V16.2z" />
+    <polygon fill="#e53935" points="35,11.2 24,19.45 13,11.2 12,17 13,23.7 24,31.95 35,23.7 36,17" />
+    <path fill="#c62828" d="M3,12.298V16.2l10,7.5V11.2L9.876,8.859C9.132,8.301,8.228,8,7.298,8h0C4.924,8,3,9.924,3,12.298z" />
+    <path fill="#fbc02d" d="M45,12.298V16.2l-10,7.5V11.2l3.124-2.341C38.868,8.301,39.772,8,40.702,8h0C43.076,8,45,9.924,45,12.298z" />
   </svg>
+);
+const GmailChip = () => (
+  <span style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', background: '#fff', borderRadius: 4, padding: 2 }}>
+    <GmailIcon size={14} />
+  </span>
 );
 
 // ── ticket builders (real, enumerated data — never just a count) ─────────────
@@ -270,7 +279,7 @@ function TicketCard({ t }) {
               <Download style={{ width: 14, height: 14 }} /> Download ({t.count})
             </button>
             <button style={{ ...btn, background: '#0748EE', color: '#fff', border: 'none' }} onClick={() => openTeamMail(t.subject, t.body)}>
-              <MailSolid size={15} color="#fff" /> Email team
+              <GmailChip /> Email team
             </button>
           </div>
         </div>
