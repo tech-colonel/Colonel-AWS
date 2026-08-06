@@ -2198,13 +2198,13 @@ const RecoWorkspace = ({ agentTypeProp } = {}) => {
                 rows={dashboardRows}
                 filter={filter}
                 setFilter={setFilter}
-                onDownload={handleDownload}
+                onDownload={agentType === 'zepto_receivables' ? undefined : handleDownload}
                 downloading={downloading}
                 isUniversal={isUniversal}
                 editedLedgers={editedLedgers}
                 setEditedLedgers={setEditedLedgers}
                 brandId={effectiveBrandId || brandId}
-                jobId={result?.job_id}
+                jobId={agentType === 'zepto_receivables' ? null : result?.job_id}
                 agentLabel={config?.name}
                 onSendFeedback={agentType === 'zepto_receivables' ? undefined : handleSendFeedback}
               />
