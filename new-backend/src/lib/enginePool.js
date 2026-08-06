@@ -98,6 +98,23 @@ async function exportFromEngines(jobId, axiosOpts = {}) {
   throw lastErr;
 }
 
+/**
+ * fetch() flavour of exportFromEngines, for callers that use the Fetch API
+ * rather than axios (gstr3bController). Returns the first ok Response; on 404
+ * tries the next engine; any non-404 response is returned as-is so the caller
+ * can surface the real status. Returns the last Response if none succeeded.
+ */
+async function fetchExportFromEngines(jobId) {
+  let last;
+  for (const base of enginesForJob(jobId)) {
+    const resp = await fetch(`${base}/api/jobs/${jobId}/export.xlsx`);
+    if (resp.ok) return resp;
+    last = resp;
+    if (resp.status !== 404) return resp;
+  }
+  return last;
+}
+
 /** Test-only: reset counters and the job map. */
 function _resetForTests() {
   for (const url of engines) inFlight.set(url, 0);
@@ -116,6 +133,7 @@ module.exports = {
   rememberJob,
   enginesForJob,
   exportFromEngines,
+  fetchExportFromEngines,
   _resetForTests,
   _inFlightSnapshot,
 };

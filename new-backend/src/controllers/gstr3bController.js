@@ -13,7 +13,10 @@ const mimeForName = (name) => {
   return 'application/octet-stream';
 };
 
-const PYTHON_URL = process.env.PYTHON_RECO_URL || 'http://localhost:8765';
+const enginePool = require('../lib/enginePool');
+// Kept for messages only — dispatch goes through enginePool so several engine
+// processes (one per CPU core; the GIL caps one process at one core) share load.
+const PYTHON_URL = enginePool.listEngines()[0];
 const OUTPUT_DIR = path.join(__dirname, '../../output/gstr3b');
 
 if (!fs.existsSync(OUTPUT_DIR)) fs.mkdirSync(OUTPUT_DIR, { recursive: true });
@@ -117,14 +120,21 @@ const upload = async (req, res) => {
       await tryAttachSavedVt(form, brandId);
     }
 
-    // Call Python engine
-    const pyRes = await fetch(`${PYTHON_URL}/api/reconcile`, { method: 'POST', body: form });
+    // Call Python engine (least-busy of the pool; slot released even on throw)
+    const engine = enginePool.acquireEngine();
+    let pyRes;
+    try {
+      pyRes = await fetch(`${engine}/api/reconcile`, { method: 'POST', body: form });
+    } finally {
+      enginePool.releaseEngine(engine);
+    }
     if (!pyRes.ok) {
       const errText = await pyRes.text();
       return res.status(pyRes.status).json({ error: errText || 'Python engine error' });
     }
 
     const data = await pyRes.json();
+    if (data && data.job_id) enginePool.rememberJob(data.job_id, engine);
     res.json(data);
 
     // Fire-and-forget: persist COA/VT, save run record
@@ -248,9 +258,9 @@ const persistAfterRun = async (data, brandId, coaFile, vtFile) => {
 const download = async (req, res) => {
   try {
     const { jobId } = req.params;
-    const pyRes = await fetch(`${PYTHON_URL}/api/jobs/${jobId}/export.xlsx`);
-    if (!pyRes.ok) {
-      return res.status(pyRes.status).json({ error: 'File not found on reco engine' });
+    const pyRes = await enginePool.fetchExportFromEngines(jobId);
+    if (!pyRes || !pyRes.ok) {
+      return res.status(pyRes ? pyRes.status : 502).json({ error: 'File not found on reco engine' });
     }
     const contentDisposition = pyRes.headers.get('content-disposition') || `attachment; filename="gstr3b_${jobId}.xlsx"`;
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
