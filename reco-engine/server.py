@@ -1938,9 +1938,22 @@ def _auto_col_width(ws, min_width=10, max_width=40):
         ws.column_dimensions[col_letter].width = min(max(max_len + 2, min_width), max_width)
 
 
+def resolve_port() -> int:
+    """Listen port for this engine instance.
+
+    Python's GIL caps one process at one CPU core for CPU-bound reconciliation,
+    so scaling means running several processes — each needs its own port.
+    RECO_PORT selects it; unset (or unparseable) keeps the historic 8765 so an
+    un-migrated deployment behaves exactly as before.
+    """
+    try:
+        return int(os.environ.get("RECO_PORT", "") or "8765")
+    except (TypeError, ValueError):
+        return 8765
+
+
 def main() -> None:
-    query = parse_qs(urlparse("?" + "port=8765").query)
-    port = int(query.get("port", ["8765"])[0])
+    port = resolve_port()
     server = ThreadingHTTPServer(("0.0.0.0", port), ReconciliationHandler)
     print(f"CA Reconciliation Tool running at http://127.0.0.1:{port}")
     _purge_old_exports()  # clean persisted exports older than a few days
