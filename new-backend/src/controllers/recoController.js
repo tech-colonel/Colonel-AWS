@@ -1067,7 +1067,7 @@ const runReco = async (req, res) => {
         if (!extractResp.data || !extractResp.data.job_id) {
           return res.status(400).json({ error: 'Could not read the PDF bank statement.', detail: extractResp.data && extractResp.data.validation });
         }
-        const xlsxResp = await axios.get(`${PYTHON_RECO_URL}/api/jobs/${extractResp.data.job_id}/export.xlsx`, { responseType: 'arraybuffer', timeout: 120000 });
+        const xlsxResp = await axios.get(`${PYTHON_RECO_URL}/api/jobs/${extractResp.data.job_id}/export.xlsx`, { responseType: 'arraybuffer', timeout: 200000 });
         bankPath = path.join(jobDir, 'converted_bank_statement.xlsx');
         await fs.promises.writeFile(bankPath, Buffer.from(xlsxResp.data));
         console.log(`[RECO-UNIVERSAL] PDF converted → ${extractResp.data.transaction_count || '?'} rows`);
@@ -1848,7 +1848,7 @@ const exportReco = async (req, res) => {
       `${PYTHON_RECO_URL}/api/jobs/${req.params.jobId}/export.xlsx`,
       // Normally instant (pre-built bytes). Generous timeout covers the fallback
       // path where the engine must rebuild a large workbook on demand.
-      { responseType: 'stream', timeout: 120000 }
+      { responseType: 'stream', timeout: 200000 }
     );
     response.data.pipe(res);
   } catch (err) {
@@ -1881,7 +1881,7 @@ const openInSheets = async (req, res) => {
       const tmp = path.join(RECO_TEMP_DIR, `sheets-${jobId}.xlsx`);
       const response = await axios.get(
         `${PYTHON_RECO_URL}/api/jobs/${jobId}/export.xlsx`,
-        { responseType: 'stream', timeout: 120000 }
+        { responseType: 'stream', timeout: 200000 }
       );
       await new Promise((resolve, reject) => {
         const w = fs.createWriteStream(tmp);
