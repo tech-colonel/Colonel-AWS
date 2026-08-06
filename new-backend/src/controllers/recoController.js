@@ -1019,8 +1019,34 @@ const runReco = async (req, res) => {
     // --- Zepto Receivables: fetch classified files from Drive folder, proxy to Python engine ---
     if (recoType === 'zepto_receivables') {
       const folderUrl = req.body.folder_url || req.body.folderLink;
-      if (!folderUrl) return res.status(400).json({ error: 'folder_url is required for Zepto Receivables' });
-      const grouped = await zeptoDrive.downloadClassified(folderUrl);   // { type: [{filename, buffer}] }
+      // Reviewed slots take precedence: `drive_assignments` = { slot: [{id,name}] }
+      // (the user-edited classification) + manually uploaded files (multipart,
+      // field name = slot). Falls back to scanning the whole folder_url.
+      let assignments = null;
+      try { assignments = req.body.drive_assignments ? JSON.parse(req.body.drive_assignments) : null; } catch (_) {}
+
+      let grouped;
+      if (assignments && Object.keys(assignments).length) {
+        grouped = {};
+        for (const [slot, items] of Object.entries(assignments)) {
+          for (const it of (items || [])) {
+            if (!it || !it.id) continue;
+            const buffer = await drive.downloadFile(it.id);
+            (grouped[slot] = grouped[slot] || []).push({ filename: it.name || String(it.id), buffer });
+          }
+        }
+      } else if (folderUrl) {
+        grouped = await zeptoDrive.downloadClassified(folderUrl);   // { type: [{filename, buffer}] }
+      } else {
+        return res.status(400).json({ error: 'Paste a Google Drive folder URL or upload files for Zepto Receivables' });
+      }
+      // Merge in manually uploaded files (field name = slot key).
+      for (const file of (req.files || [])) {
+        (grouped[file.fieldname] = grouped[file.fieldname] || []).push({ filename: file.originalname, buffer: file.buffer });
+      }
+      if (!Object.values(grouped).some(a => Array.isArray(a) && a.length)) {
+        return res.status(400).json({ error: 'No files to reconcile — add files to the slots first.' });
+      }
       const form = new FormData();
       form.append('reco_type', 'zepto_receivables');
       form.append('tolerance', String(req.body.tolerance || 100));
@@ -1993,8 +2019,8 @@ async function detectZeptoFiles(req, res) {
     const { counts, ignored, files } = await zeptoDrive.collectZeptoFiles(folderUrl);
     res.json({
       counts,
-      ignored: ignored.map(f => f.name),
-      files: files.map(f => ({ name: f.name, type: f.type })),
+      ignored: ignored.map(f => ({ id: f.id, name: f.name })),
+      files: files.map(f => ({ id: f.id, name: f.name, type: f.type })),
     });
   } catch (err) {
     res.status(500).json({ error: err.message || 'Failed to scan Drive folder' });

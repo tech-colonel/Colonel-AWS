@@ -18,6 +18,7 @@ import OtherBrandReset from '../../components/OtherBrandReset';
 import { DEMO_SAMPLES, urlToFile } from '../../lib/demoSamples';
 import { toast } from 'sonner';
 import GoogleDriveFolderInput from './GoogleDriveFolderInput';
+import ZeptoFilePicker from './ZeptoFilePicker';
 import DriveOrUpload from '../../components/DriveOrUpload';
 import OpenInSheetsButton from '../../components/OpenInSheetsButton';
 
@@ -515,6 +516,7 @@ const RecoWorkspace = ({ agentTypeProp } = {}) => {
   const [filter, setFilter] = useState('All');
   const [downloading, setDownloading] = useState(false);
   const [zeptoFlagOpen, setZeptoFlagOpen] = useState(false);   // Zepto: Flag rows modal (lifted to the top action bar)
+  const [zeptoPayload, setZeptoPayload] = useState({ assignments: {}, uploads: {}, driveUrl: '' });   // Zepto file-slot review
   const [showMonthly, setShowMonthly] = useState(true);
   const [ledgerStatus, setLedgerStatus] = useState(null);
 
@@ -695,6 +697,31 @@ const RecoWorkspace = ({ agentTypeProp } = {}) => {
   const handleFileChange = (key, fileOrArray) => setUploadedFiles(prev => ({ ...prev, [key]: fileOrArray }));
 
   const handleRun = async () => {
+    // Zepto Receivables: run exactly the reviewed slots (Drive files + manual uploads).
+    if (agentType === 'zepto_receivables') {
+      const { assignments = {}, uploads = {} } = zeptoPayload || {};
+      const hasDrive = Object.values(assignments).some((a) => a && a.length);
+      const hasUpload = Object.values(uploads).some((a) => a && a.length);
+      if (!hasDrive && !hasUpload) { toast.error('Add files to the slots — scan a Drive folder or upload'); return; }
+      setRunning(true); setResult(null); setEditedLedgers({}); setPhase('reconciling');
+      try {
+        const formData = new FormData();
+        formData.append('reco_type', agentType);
+        formData.append('brand_id', effectiveBrandId || brandId);
+        formData.append('drive_assignments', JSON.stringify(assignments));
+        for (const [slot, files] of Object.entries(uploads)) for (const f of files) formData.append(slot, f);
+        const { data } = await api.post('/api/reco/run', formData, {
+          headers: { 'Content-Type': 'multipart/form-data' }, timeout: 600000,
+        });
+        setPhase('done'); setResult(data); RESULT_MEMO.set(cacheKey, data);
+        try { sessionStorage.setItem(cacheKey, JSON.stringify(slimResultForCache(data))); } catch (_) {}
+        toast.success(`Reconciliation complete! ${data.results?.length || 0} records processed.`);
+      } catch (err) {
+        setPhase(null);
+        toast.error(err.response?.data?.error || 'Reconciliation failed');
+      } finally { setRunning(false); }
+      return;
+    }
     if (isDriveMode) {
       if (!driveUrl) { toast.error('Paste a Google Drive folder URL'); return; }
       setRunning(true); setResult(null); setEditedLedgers({});
@@ -1573,7 +1600,9 @@ const RecoWorkspace = ({ agentTypeProp } = {}) => {
                 {brandSelectorField}
 
                 {/* File slots */}
-                {isDriveMode ? (
+                {isDriveMode && agentType === 'zepto_receivables' ? (
+                  <ZeptoFilePicker onChange={setZeptoPayload} />
+                ) : isDriveMode ? (
                   <GoogleDriveFolderInput value={driveUrl} onChange={setDriveUrl} />
                 ) : (
                   <DriveOrUpload
