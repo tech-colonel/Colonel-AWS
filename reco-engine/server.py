@@ -55,7 +55,65 @@ from recon.gstr_3b_tally_entry import (
 )
 
 
-JOBS: dict[str, dict] = {}
+# Directory where pre-built export workbooks are persisted to disk so that a
+# reco-engine restart cannot lose an already-run job's download (in-memory JOBS
+# is wiped on restart). Best-effort only: any disk error is swallowed and the
+# in-memory fast path is unaffected. Override via RECO_OUTPUT_DIR env var.
+RECO_OUTPUT_DIR = os.environ.get("RECO_OUTPUT_DIR") or str(ROOT / "exports")
+try:
+    os.makedirs(RECO_OUTPUT_DIR, exist_ok=True)
+except Exception:
+    RECO_OUTPUT_DIR = ""
+
+
+def _export_path(job_id: str) -> str:
+    return os.path.join(RECO_OUTPUT_DIR, f"{job_id}.xlsx") if RECO_OUTPUT_DIR else ""
+
+
+def _purge_old_exports(max_age_days: int = 3) -> None:
+    """Delete persisted export files older than max_age_days (best-effort)."""
+    if not RECO_OUTPUT_DIR:
+        return
+    try:
+        import time
+        cutoff = time.time() - max_age_days * 86400
+        for name in os.listdir(RECO_OUTPUT_DIR):
+            if not name.endswith(".xlsx"):
+                continue
+            fp = os.path.join(RECO_OUTPUT_DIR, name)
+            try:
+                if os.path.getmtime(fp) < cutoff:
+                    os.remove(fp)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
+class _JobStore(dict):
+    """dict that also persists a job's pre-built xlsx bytes to disk on assign.
+
+    Every existing ``JOBS[job_id] = payload`` transparently writes the workbook
+    to ``RECO_OUTPUT_DIR/<job_id>.xlsx`` when ``_xlsx_bytes`` is present, so the
+    download survives an engine restart. Purely additive and best-effort: any
+    failure is ignored and never affects the in-memory reconciliation path.
+    """
+
+    def __setitem__(self, key, value):
+        super().__setitem__(key, value)
+        try:
+            if RECO_OUTPUT_DIR and isinstance(value, dict) and value.get("_xlsx_bytes"):
+                path = _export_path(key)
+                if path and not os.path.exists(path):
+                    tmp = path + ".part"
+                    with open(tmp, "wb") as f:
+                        f.write(value["_xlsx_bytes"])
+                    os.replace(tmp, path)
+        except Exception:
+            pass
+
+
+JOBS: dict[str, dict] = _JobStore()
 
 # Limit simultaneous reconciliation jobs to prevent OOM under heavy load.
 # Each job can hold large DataFrames in memory; 8 concurrent runs is safe
@@ -358,8 +416,28 @@ class ReconciliationHandler(BaseHTTPRequestHandler):
                     "_purchase_b64": base64.b64encode(purchase_bytes).decode("utf-8"),
                     "_debit_b64": base64.b64encode(debit_bytes).decode("utf-8"),
                 }
+                # Pre-build the workbook now (during the run) so the download is
+                # instant AND survives an engine restart — the _JobStore persists
+                # _xlsx_bytes to disk. Best-effort: on failure we fall back to the
+                # on-demand rebuild path in export_job (unchanged behavior).
+                try:
+                    from io import BytesIO as _BytesIO
+                    _wb = build_workbook(
+                        payload["results"], payload["summary"], payload["counts"],
+                        reco_type, pivot=payload.get("pivot"), payload=payload,
+                    )
+                    _buf = _BytesIO()
+                    _wb.save(_buf)
+                    payload["_xlsx_bytes"] = _buf.getvalue()
+                except Exception as _e:
+                    import logging as _log
+                    _log.getLogger(__name__).error("Pre-build gstr_2b_books workbook failed: %s", _e)
+                    payload["_xlsx_bytes"] = None
                 JOBS[job_id] = payload
-                self.write_json(payload)
+                # Exclude only the raw xlsx bytes from the JSON response (they are
+                # cached in JOBS/disk for download); response shape is otherwise
+                # identical to before.
+                self.write_json({k: v for k, v in payload.items() if k != "_xlsx_bytes"})
                 return
 
             # GSTR-2B vs Books — Multi-State (N files per input type)
@@ -431,6 +509,22 @@ class ReconciliationHandler(BaseHTTPRequestHandler):
                     # Stash MatchResult objects so export_job can rebuild Remark 3
                     "_results_obj":  results,
                 }
+                # Pre-build the (heavy) multi-state workbook now so the download is
+                # instant and survives an engine restart (persisted to disk via the
+                # _JobStore). Best-effort: on failure export_job rebuilds on demand.
+                try:
+                    from io import BytesIO as _BytesIO
+                    _wb = build_workbook(
+                        payload["results"], payload["summary"], payload["counts"],
+                        reco_type, pivot=payload.get("pivot"), payload=payload,
+                    )
+                    _buf = _BytesIO()
+                    _wb.save(_buf)
+                    payload["_xlsx_bytes"] = _buf.getvalue()
+                except Exception as _e:
+                    import logging as _log
+                    _log.getLogger(__name__).error("Pre-build multistate workbook failed: %s", _e)
+                    payload["_xlsx_bytes"] = None
                 JOBS[job_id] = payload
                 self.write_json({k: v for k, v in payload.items() if not k.startswith("_")})
                 return
@@ -781,13 +875,28 @@ class ReconciliationHandler(BaseHTTPRequestHandler):
 
     def export_job(self, job_id: str) -> None:
         payload = JOBS.get(job_id)
-        if not payload:
-            self.write_json({"error": "Job not found"}, 404)
-            return
-        # Use pre-built bytes when available (avoids timeout for large workbooks)
-        if payload.get("_xlsx_bytes"):
-            data = payload["_xlsx_bytes"]
-        else:
+        data = None
+        reco_type = "gst_2b_purchase"
+        # 1) In-memory pre-built bytes — the normal fast path.
+        if payload:
+            reco_type = payload.get("reco_type", reco_type)
+            if payload.get("_xlsx_bytes"):
+                data = payload["_xlsx_bytes"]
+        # 2) Disk fallback — survives an engine restart that wiped JOBS,
+        #    so an already-run job's download still works (no 404, no rebuild).
+        if data is None:
+            disk_path = _export_path(job_id)
+            if disk_path and os.path.exists(disk_path):
+                try:
+                    with open(disk_path, "rb") as f:
+                        data = f.read()
+                except Exception:
+                    data = None
+        # 3) Last resort — rebuild from in-memory results (only if payload present).
+        if data is None:
+            if not payload:
+                self.write_json({"error": "Job not found"}, 404)
+                return
             workbook = build_workbook(
                 payload["results"],
                 payload["summary"],
@@ -800,8 +909,17 @@ class ReconciliationHandler(BaseHTTPRequestHandler):
             buffer = BytesIO()
             workbook.save(buffer)
             data = buffer.getvalue()
+            # Persist the rebuilt bytes so the next download is instant.
+            try:
+                dp = _export_path(job_id)
+                if dp and not os.path.exists(dp):
+                    tmp = dp + ".part"
+                    with open(tmp, "wb") as f:
+                        f.write(data)
+                    os.replace(tmp, dp)
+            except Exception:
+                pass
         self.send_response(200)
-        reco_type = payload.get("reco_type", "gst_2b_purchase")
         if reco_type == "bank_reco":
             filename_prefix = "bank_statement"
         elif reco_type == "gstr_1_vs_books":
@@ -823,7 +941,12 @@ class ReconciliationHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Disposition", f'attachment; filename="{filename_prefix}-{job_id}.xlsx"')
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
-        self.wfile.write(data)
+        try:
+            self.wfile.write(data)
+        except (BrokenPipeError, ConnectionResetError):
+            # Client (backend/browser) disconnected mid-download — e.g. it
+            # hit its own timeout. Swallow so it doesn't spam the error log.
+            pass
 
     def log_message(self, format: str, *args) -> None:
         print(f"{self.address_string()} - {format % args}")
@@ -1820,6 +1943,7 @@ def main() -> None:
     port = int(query.get("port", ["8765"])[0])
     server = ThreadingHTTPServer(("0.0.0.0", port), ReconciliationHandler)
     print(f"CA Reconciliation Tool running at http://127.0.0.1:{port}")
+    _purge_old_exports()  # clean persisted exports older than a few days
     server.serve_forever()
 
 
