@@ -75,7 +75,7 @@ export default function ZeptoFilePicker({ onChange }) {
   };
 
   const Chip = ({ it }) => (
-    <div style={{
+    <div title={it.name} style={{
       display: 'flex', alignItems: 'center', gap: 6, padding: '5px 8px', borderRadius: 8,
       background: 'var(--page-bg, #F8FAFC)', border: '1px solid var(--card-border, #EEF2F9)', fontSize: 12,
     }}>
