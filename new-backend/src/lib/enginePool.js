@@ -17,6 +17,8 @@
  * behaves exactly as before.
  */
 
+const axios = require('axios');
+
 const DEFAULT_URL = 'http://localhost:8765';
 
 const engines = (
@@ -76,6 +78,26 @@ function enginesForJob(jobId) {
   return [owner, ...engines.filter((u) => u !== owner)];
 }
 
+/**
+ * GET a job's xlsx, trying the engine that produced it first and falling back to
+ * its siblings. Cross-engine works because every engine shares RECO_OUTPUT_DIR
+ * and export_job() falls back to that disk copy; trying the origin first only
+ * preserves the on-demand rebuild path for the rare pre-build failure.
+ * Only 404 ("not on this engine") is worth retrying — other errors surface now.
+ */
+async function exportFromEngines(jobId, axiosOpts = {}) {
+  let lastErr;
+  for (const base of enginesForJob(jobId)) {
+    try {
+      return await axios.get(`${base}/api/jobs/${jobId}/export.xlsx`, axiosOpts);
+    } catch (err) {
+      lastErr = err;
+      if (err.response && err.response.status !== 404) throw err;
+    }
+  }
+  throw lastErr;
+}
+
 /** Test-only: reset counters and the job map. */
 function _resetForTests() {
   for (const url of engines) inFlight.set(url, 0);
@@ -93,6 +115,7 @@ module.exports = {
   releaseEngine,
   rememberJob,
   enginesForJob,
+  exportFromEngines,
   _resetForTests,
   _inFlightSnapshot,
 };

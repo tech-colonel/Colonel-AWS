@@ -7,7 +7,12 @@ const crypto = require('crypto');
 const os = require('os');
 const { execFile } = require('child_process');
 
-const PYTHON_RECO_URL = process.env.PYTHON_RECO_URL || 'http://localhost:8765';
+const enginePool = require('../lib/enginePool');
+// Retained for error messages and the health endpoint only — never used to
+// dispatch work. Dispatch goes through enginePool so several engine processes
+// (one per CPU core; Python's GIL caps one process at one core) can share load.
+const PYTHON_RECO_URL = enginePool.listEngines()[0];
+const { exportFromEngines } = enginePool;
 
 // ── Production-safe paths — override via env vars on any deployment server ──
 // classify.py lives at new-backend/scripts/ (same copy as Colonel Full/Extra/)
@@ -1029,10 +1034,17 @@ const runReco = async (req, res) => {
           form.append(type, buffer, { filename });   // multi files -> engine reads as list
         }
       }
-      const pyResp = await axios.post(`${PYTHON_RECO_URL}/api/reconcile`, form, {
-        headers: { ...form.getHeaders() }, timeout: 600000,
-        maxContentLength: Infinity, maxBodyLength: Infinity,
-      });
+      const zEngine = enginePool.acquireEngine();
+      let pyResp;
+      try {
+        pyResp = await axios.post(`${zEngine}/api/reconcile`, form, {
+          headers: { ...form.getHeaders() }, timeout: 600000,
+          maxContentLength: Infinity, maxBodyLength: Infinity,
+        });
+      } finally {
+        enginePool.releaseEngine(zEngine);
+      }
+      if (pyResp.data && pyResp.data.job_id) enginePool.rememberJob(pyResp.data.job_id, zEngine);
       return res.json(pyResp.data);   // { job_id, summary, counts, results }
     }
 
@@ -1061,13 +1073,20 @@ const runReco = async (req, res) => {
         pdfForm.append('reco_type', 'pdf_bank_extract');
         pdfForm.append('bank_pdf', bankFile.buffer, { filename: bankFile.originalname, contentType: 'application/pdf' });
         if (req.body.pdf_password) pdfForm.append('pdf_password', String(req.body.pdf_password));
-        const extractResp = await axios.post(`${PYTHON_RECO_URL}/api/reconcile`, pdfForm, {
-          headers: { ...pdfForm.getHeaders() }, timeout: 600000, maxContentLength: Infinity, maxBodyLength: Infinity,
-        });
+        const pdfEngine = enginePool.acquireEngine();
+        let extractResp;
+        try {
+          extractResp = await axios.post(`${pdfEngine}/api/reconcile`, pdfForm, {
+            headers: { ...pdfForm.getHeaders() }, timeout: 600000, maxContentLength: Infinity, maxBodyLength: Infinity,
+          });
+        } finally {
+          enginePool.releaseEngine(pdfEngine);
+        }
         if (!extractResp.data || !extractResp.data.job_id) {
           return res.status(400).json({ error: 'Could not read the PDF bank statement.', detail: extractResp.data && extractResp.data.validation });
         }
-        const xlsxResp = await axios.get(`${PYTHON_RECO_URL}/api/jobs/${extractResp.data.job_id}/export.xlsx`, { responseType: 'arraybuffer', timeout: 200000 });
+        enginePool.rememberJob(extractResp.data.job_id, pdfEngine);
+        const xlsxResp = await exportFromEngines(extractResp.data.job_id, { responseType: 'arraybuffer', timeout: 200000 });
         bankPath = path.join(jobDir, 'converted_bank_statement.xlsx');
         await fs.promises.writeFile(bankPath, Buffer.from(xlsxResp.data));
         console.log(`[RECO-UNIVERSAL] PDF converted → ${extractResp.data.transaction_count || '?'} rows`);
@@ -1669,16 +1688,23 @@ const runReco = async (req, res) => {
       }
     }
 
-    const response = await axios.post(`${PYTHON_RECO_URL}/api/reconcile`, form, {
-      headers: { ...form.getHeaders() },
-      maxContentLength: Infinity,
-      maxBodyLength: Infinity,
-      // Multi-state now pre-builds the (heavy) workbook during the run so downloads
-      // are instant — give that build headroom for larger multi-state jobs.
-      // Raised to 10 min: on the small EC2 box heavy recos run slower but DO complete;
-      // 180s was cutting them off mid-build (engine still returned 200 afterwards).
-      timeout: 600000
-    });
+    const mainEngine = enginePool.acquireEngine();
+    let response;
+    try {
+      response = await axios.post(`${mainEngine}/api/reconcile`, form, {
+        headers: { ...form.getHeaders() },
+        maxContentLength: Infinity,
+        maxBodyLength: Infinity,
+        // Multi-state now pre-builds the (heavy) workbook during the run so downloads
+        // are instant — give that build headroom for larger multi-state jobs.
+        // Raised to 10 min: on the small EC2 box heavy recos run slower but DO complete;
+        // 180s was cutting them off mid-build (engine still returned 200 afterwards).
+        timeout: 600000
+      });
+    } finally {
+      enginePool.releaseEngine(mainEngine);
+    }
+    if (response.data && response.data.job_id) enginePool.rememberJob(response.data.job_id, mainEngine);
 
     res.json(response.data);
 
@@ -1844,8 +1870,8 @@ const exportReco = async (req, res) => {
       return fs.createReadStream(localPath).pipe(res);
     }
 
-    const response = await axios.get(
-      `${PYTHON_RECO_URL}/api/jobs/${req.params.jobId}/export.xlsx`,
+    const response = await exportFromEngines(
+      req.params.jobId,
       // Normally instant (pre-built bytes). Generous timeout covers the fallback
       // path where the engine must rebuild a large workbook on demand.
       { responseType: 'stream', timeout: 200000 }
@@ -1879,8 +1905,8 @@ const openInSheets = async (req, res) => {
     if (!fs.existsSync(localPath)) {
       fs.mkdirSync(RECO_TEMP_DIR, { recursive: true });
       const tmp = path.join(RECO_TEMP_DIR, `sheets-${jobId}.xlsx`);
-      const response = await axios.get(
-        `${PYTHON_RECO_URL}/api/jobs/${jobId}/export.xlsx`,
+      const response = await exportFromEngines(
+        jobId,
         { responseType: 'stream', timeout: 200000 }
       );
       await new Promise((resolve, reject) => {
@@ -1923,9 +1949,25 @@ const openInSheets = async (req, res) => {
  */
 const checkHealth = async (req, res) => {
   try {
-    // Python server serves index.html on GET / — use that as health probe
-    await axios.get(`${PYTHON_RECO_URL}/`, { timeout: 5000 });
-    res.json({ status: 'ok', python_url: PYTHON_RECO_URL });
+    // Python server serves index.html on GET / — use that as health probe.
+    // Probe every engine in the pool so a half-down pool is visible.
+    const engines = await Promise.all(
+      enginePool.listEngines().map(async (base) => {
+        try {
+          await axios.get(`${base}/`, { timeout: 5000 });
+          return { url: base, status: 'ok' };
+        } catch (e) {
+          return { url: base, status: 'down', message: e.message };
+        }
+      })
+    );
+    const up = engines.filter((e) => e.status === 'ok').length;
+    if (up === 0) throw new Error('no reco engine reachable');
+    res.json({
+      status: up === engines.length ? 'ok' : 'degraded',
+      engines,
+      python_url: PYTHON_RECO_URL,
+    });
   } catch (err) {
     res.status(503).json({
       status: 'unavailable',
