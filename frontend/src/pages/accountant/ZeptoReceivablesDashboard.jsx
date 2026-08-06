@@ -2,7 +2,7 @@ import React, { useMemo, useState } from 'react';
 import {
   PieChart, Pie, Cell, BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer,
 } from 'recharts';
-import { ChevronDown, ChevronUp, Copy, Download, Mail, Check, AlertTriangle } from 'lucide-react';
+import { ChevronDown, ChevronUp, Copy, Download, Check, AlertTriangle } from 'lucide-react';
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 const num = (v) => { const n = Number(v); return Number.isNaN(n) ? 0 : n; };
@@ -17,9 +17,23 @@ const PRIORITY = {
 const AGING_COLORS = { Overdue: '#DC2626', Due: '#D97706', 'Not Due': '#16A34A' };
 const GAP_COLORS = ['#DC2626', '#D97706', '#2563EB'];
 
+// Solid envelope — reads as a real mail icon on the (blue) Email-team button.
+const MailSolid = ({ size = 15, color = 'currentColor' }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill={color} aria-hidden="true">
+    <path d="M3.5 4h17A1.5 1.5 0 0 1 22 5.5v.35l-10 6.02L2 5.85V5.5A1.5 1.5 0 0 1 3.5 4Z" />
+    <path d="M22 8.18l-9.48 5.71a1 1 0 0 1-1.04 0L2 8.18V18.5A1.5 1.5 0 0 0 3.5 20h17a1.5 1.5 0 0 0 1.5-1.5V8.18Z" />
+  </svg>
+);
+
 // ── ticket builders (real, enumerated data — never just a count) ─────────────
+// Renders a fixed-width table: every column padded to its widest cell so the
+// "|" separators line up perfectly in the monospace template (no ragged edges).
 function tableToText(cols, data) {
-  return data.map((r) => cols.map((c) => r[c] ?? '').join('  |  ')).join('\n');
+  const w = cols.map((c) => Math.max(String(c).length, ...data.map((r) => String(r[c] ?? '').length)));
+  const pad = (s, i) => { s = String(s ?? ''); return s + ' '.repeat(Math.max(0, w[i] - s.length)); };
+  const line = (cells) => cells.map((v, i) => pad(v, i)).join('  |  ');
+  const sep = w.map((x) => '-'.repeat(x)).join('--+--');
+  return [line(cols), sep, ...data.map((r) => line(cols.map((c) => r[c])))].join('\n');
 }
 
 function buildTickets(rows) {
@@ -256,7 +270,7 @@ function TicketCard({ t }) {
               <Download style={{ width: 14, height: 14 }} /> Download ({t.count})
             </button>
             <button style={{ ...btn, background: '#0748EE', color: '#fff', border: 'none' }} onClick={() => openTeamMail(t.subject, t.body)}>
-              <Mail style={{ width: 14, height: 14 }} /> Email team
+              <MailSolid size={15} color="#fff" /> Email team
             </button>
           </div>
         </div>
