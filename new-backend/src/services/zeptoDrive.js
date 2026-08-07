@@ -25,7 +25,7 @@ async function _walk(folderId, out, ignored) {
     } else {
       const type = classifyZeptoFile(c.name);
       if (type) out.push({ id: c.id, name: c.name, mimeType: c.mimeType, type });
-      else ignored.push({ name: c.name });
+      else ignored.push({ id: c.id, name: c.name });
     }
   }
 }

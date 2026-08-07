@@ -2,7 +2,8 @@ import React, { useState, useRef, useEffect } from 'react';
 import { useParams, useNavigate, useLocation } from 'react-router-dom';
 import DashboardLayout from '../../components/layout/DashboardLayout';
 import Gstr1Dashboard from './Gstr1Dashboard';
-import ToolResultDashboard from '../../components/reco/ToolResultDashboard';
+import ToolResultDashboard, { FeedbackModal } from '../../components/reco/ToolResultDashboard';
+import ZeptoReceivablesDashboard from './ZeptoReceivablesDashboard';
 import {
   LayoutDashboard, Bot, ArrowLeft, Upload, Download,
   Play, CheckCircle2, XCircle, AlertTriangle, RotateCcw,
@@ -17,6 +18,7 @@ import OtherBrandReset from '../../components/OtherBrandReset';
 import { DEMO_SAMPLES, urlToFile } from '../../lib/demoSamples';
 import { toast } from 'sonner';
 import GoogleDriveFolderInput from './GoogleDriveFolderInput';
+import ZeptoFilePicker from './ZeptoFilePicker';
 import DriveOrUpload from '../../components/DriveOrUpload';
 import OpenInSheetsButton from '../../components/OpenInSheetsButton';
 
@@ -513,6 +515,8 @@ const RecoWorkspace = ({ agentTypeProp } = {}) => {
   const [result, setResult] = useState(null);
   const [filter, setFilter] = useState('All');
   const [downloading, setDownloading] = useState(false);
+  const [zeptoFlagOpen, setZeptoFlagOpen] = useState(false);   // Zepto: Flag rows modal (lifted to the top action bar)
+  const [zeptoPayload, setZeptoPayload] = useState({ assignments: {}, uploads: {}, driveUrl: '' });   // Zepto file-slot review
   const [showMonthly, setShowMonthly] = useState(true);
   const [ledgerStatus, setLedgerStatus] = useState(null);
 
@@ -693,6 +697,31 @@ const RecoWorkspace = ({ agentTypeProp } = {}) => {
   const handleFileChange = (key, fileOrArray) => setUploadedFiles(prev => ({ ...prev, [key]: fileOrArray }));
 
   const handleRun = async () => {
+    // Zepto Receivables: run exactly the reviewed slots (Drive files + manual uploads).
+    if (agentType === 'zepto_receivables') {
+      const { assignments = {}, uploads = {} } = zeptoPayload || {};
+      const hasDrive = Object.values(assignments).some((a) => a && a.length);
+      const hasUpload = Object.values(uploads).some((a) => a && a.length);
+      if (!hasDrive && !hasUpload) { toast.error('Add files to the slots — scan a Drive folder or upload'); return; }
+      setRunning(true); setResult(null); setEditedLedgers({}); setPhase('reconciling');
+      try {
+        const formData = new FormData();
+        formData.append('reco_type', agentType);
+        formData.append('brand_id', effectiveBrandId || brandId);
+        formData.append('drive_assignments', JSON.stringify(assignments));
+        for (const [slot, files] of Object.entries(uploads)) for (const f of files) formData.append(slot, f);
+        const { data } = await api.post('/api/reco/run', formData, {
+          headers: { 'Content-Type': 'multipart/form-data' }, timeout: 600000,
+        });
+        setPhase('done'); setResult(data); RESULT_MEMO.set(cacheKey, data);
+        try { sessionStorage.setItem(cacheKey, JSON.stringify(slimResultForCache(data))); } catch (_) {}
+        toast.success(`Reconciliation complete! ${data.results?.length || 0} records processed.`);
+      } catch (err) {
+        setPhase(null);
+        toast.error(err.response?.data?.error || 'Reconciliation failed');
+      } finally { setRunning(false); }
+      return;
+    }
     if (isDriveMode) {
       if (!driveUrl) { toast.error('Paste a Google Drive folder URL'); return; }
       setRunning(true); setResult(null); setEditedLedgers({});
@@ -1571,7 +1600,9 @@ const RecoWorkspace = ({ agentTypeProp } = {}) => {
                 {brandSelectorField}
 
                 {/* File slots */}
-                {isDriveMode ? (
+                {isDriveMode && agentType === 'zepto_receivables' ? (
+                  <ZeptoFilePicker onChange={setZeptoPayload} />
+                ) : isDriveMode ? (
                   <GoogleDriveFolderInput value={driveUrl} onChange={setDriveUrl} />
                 ) : (
                   <DriveOrUpload
@@ -2115,6 +2146,29 @@ const RecoWorkspace = ({ agentTypeProp } = {}) => {
                 {agentType === 'gstr_1_vs_books' && (
                   <OpenInSheetsButton jobId={result?.job_id} name={config.name} style={{ padding: '8px 14px', fontSize: 12 }} />
                 )}
+                {/* Zepto: Download / Google Sheets / Flag lifted up here next to View
+                    Analytics so they're not buried below the charts + tickets. */}
+                {agentType === 'zepto_receivables' && (
+                  <>
+                    <button onClick={handleDownload} disabled={downloading} style={{
+                      display: 'flex', alignItems: 'center', gap: 6, padding: '8px 14px',
+                      borderRadius: 8, fontSize: 12, fontWeight: 700,
+                      background: 'rgba(7,72,238,0.08)', border: '1px solid rgba(7,72,238,0.2)',
+                      color: '#0748EE', cursor: 'pointer', opacity: downloading ? 0.6 : 1, fontFamily: 'Barlow',
+                    }}>
+                      {downloading ? <Loader2 style={{ width: 13, height: 13 }} className="animate-spin" /> : <Download style={{ width: 13, height: 13 }} />}
+                      Download Excel
+                    </button>
+                    <OpenInSheetsButton jobId={result?.job_id} name={config.name} style={{ padding: '8px 14px', fontSize: 12 }} />
+                    <button onClick={() => setZeptoFlagOpen(true)} style={{
+                      display: 'flex', alignItems: 'center', gap: 6, padding: '8px 14px',
+                      borderRadius: 8, fontSize: 12, fontWeight: 700,
+                      background: '#fff', border: '1.5px solid #A3BFF8', color: '#0748EE', cursor: 'pointer', fontFamily: 'Barlow',
+                    }}>
+                      🚩 Flag rows / Send feedback
+                    </button>
+                  </>
+                )}
                 <button
                   onClick={() => navigate(`/brands/${effectiveBrandId || brandId}/reco/${agentType}/results/${result?.job_id}`)}
                   style={{
@@ -2152,6 +2206,14 @@ const RecoWorkspace = ({ agentTypeProp } = {}) => {
               </div>
             )}
 
+            {/* Zepto Receivables — charts (aging donut + data-gap bars) + Myntra-style
+                expandable issue tickets (overdue-to-collect / Missing PO / GRN / POD)
+                with real enumerated data + Copy / Download / Email-team. Sits above
+                the generic table below. */}
+            {agentType === 'zepto_receivables' && (
+              <ZeptoReceivablesDashboard result={result} />
+            )}
+
             {/* Premium tool-output dashboard — KPIs, charts, status filters and
                 the row-level table for every non-GSTR-1 agent. The component owns
                 filtering and the 200-row cap; we pass the FULL unfiltered rows so
@@ -2165,15 +2227,26 @@ const RecoWorkspace = ({ agentTypeProp } = {}) => {
                 rows={dashboardRows}
                 filter={filter}
                 setFilter={setFilter}
-                onDownload={handleDownload}
+                onDownload={agentType === 'zepto_receivables' ? undefined : handleDownload}
                 downloading={downloading}
                 isUniversal={isUniversal}
                 editedLedgers={editedLedgers}
                 setEditedLedgers={setEditedLedgers}
                 brandId={effectiveBrandId || brandId}
-                jobId={result?.job_id}
+                jobId={agentType === 'zepto_receivables' ? null : result?.job_id}
                 agentLabel={config?.name}
-                onSendFeedback={handleSendFeedback}
+                onSendFeedback={agentType === 'zepto_receivables' ? undefined : handleSendFeedback}
+              />
+            )}
+
+            {/* Zepto: the Flag button lives in the top bar; its modal renders here. */}
+            {agentType === 'zepto_receivables' && zeptoFlagOpen && (
+              <FeedbackModal
+                kind="generic"
+                rows={dashboardRows}
+                agentLabel={config?.name}
+                onClose={() => setZeptoFlagOpen(false)}
+                onSend={handleSendFeedback}
               />
             )}
           </div>
