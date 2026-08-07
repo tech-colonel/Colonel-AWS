@@ -2,7 +2,7 @@ import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import {
   LayoutDashboard, Bot, Upload, FileText, CreditCard,
-  CheckCircle2, AlertTriangle, Download, X, Save, Sparkles,
+  CheckCircle2, AlertTriangle, Download, X, Save, Sparkles, RotateCcw,
 } from 'lucide-react';
 import DashboardLayout from '../../components/layout/DashboardLayout';
 import { sidebarFor } from '../../lib/adminNav';
@@ -153,6 +153,18 @@ export default function CreditCardWorkspace() {
     } catch {
       setError('Download failed. Try again.');
     }
+  };
+
+  // Reset — clear this booking and purge the run from the engine/DB (frees the
+  // in-memory job + its cached export, i.e. the CPU/RAM the run was holding).
+  // Mirrors the Zepto/Reco Reset; config (card ledger, voucher type) is kept.
+  const handleReset = async () => {
+    if (!window.confirm('Clear this booking and start over? This also purges the run from the engine (frees memory). This cannot be undone.')) return;
+    if (result?.job_id && brandId && brandId !== 'demo') {
+      try { await api.delete(`/api/reco/job/${brandId}/${result.job_id}`); } catch (_) {}
+    }
+    setResult(null); setFile(null); setDriveFiles(null); setError('');
+    setEdits({}); setOnlyUnmapped(false); setSaveMsg('');
   };
 
   // Only rows the reviewer actually changed are sent — re-teaching a mapping the
@@ -727,6 +739,16 @@ export default function CreditCardWorkspace() {
                 >
                   <Download className="w-3.5 h-3.5" />
                   {result.blocked ? 'Download what was read' : 'Download Excel'}
+                </button>
+                <button
+                  onClick={handleReset}
+                  className="px-4 py-2 rounded-lg text-sm font-bold flex items-center gap-1.5"
+                  style={{ background: '#FEF2F2', color: '#DC2626', border: '1px solid #FECACA' }}
+                  data-testid="cc-reset"
+                  title="Clear this run and free engine memory"
+                >
+                  <RotateCcw className="w-3.5 h-3.5" />
+                  Reset
                 </button>
               </div>
             </div>
