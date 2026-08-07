@@ -1668,6 +1668,25 @@ const runReco = async (req, res) => {
       });
     }
 
+    // Credit Card Booking: attach the brand's chart of accounts and its
+    // auto-learned merchant directory. The Python engine never touches the DB,
+    // so everything it needs to map a merchant → ledger is passed in here, read
+    // under RLS for this brand only. Missing COA is NOT fatal — the agent still
+    // runs and simply books more rows to Suspense for review.
+    if (recoType === 'credit_card_booking' && !isDemo && brandId && brandId !== 'demo') {
+      const { getCardContext } = require('./creditCardController');
+      const ctx = await getCardContext(brandId);
+      form.append('coa', JSON.stringify(ctx.coa));
+      form.append('directory', JSON.stringify(ctx.directory));
+      if (req.body.card_ledger) form.append('card_ledger', String(req.body.card_ledger));
+      if (req.body.voucher_type) form.append('voucher_type', String(req.body.voucher_type));
+      console.log(`[CC] brand ${brandId}: ${ctx.coa.length} COA ledgers, ` +
+        `${ctx.directory.length} learned keys`);
+      if (!ctx.coa.length) {
+        console.warn('[CC] no COA for this brand — rows will fall to Suspense');
+      }
+    }
+
     // Bank statement in production: auto-attach ledger master from DB
     if (recoType === 'bank_statement' && !isDemo && brandId && brandId !== 'demo') {
       const hasLedgerUploaded = req.files.some(f => f.fieldname === 'ledger_master');

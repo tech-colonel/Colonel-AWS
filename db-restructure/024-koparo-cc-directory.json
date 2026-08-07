@@ -1,0 +1,1248 @@
+[
+  {
+    "key_type": "exact",
+    "key_value": "AMAZON MUMBAI MAH",
+    "ledger": "AMAZON PAY (INDIA) PRIVATE LIMITED",
+    "months": [
+      11
+    ],
+    "observations": 1,
+    "source_narration": "AMAZON MUMBAI MAH - Ref No: MT260240309000010004631"
+  },
+  {
+    "key_type": "exact",
+    "key_value": "AMAZON PAY INDIA PRIVA BANGALORE IND",
+    "ledger": "AMAZON PAY (INDIA) PRIVATE LIMITED",
+    "months": [
+      10
+    ],
+    "observations": 1,
+    "source_narration": "AMAZON PAY INDIA PRIVA Bangalore IND - Ref No: MT253610275000010026567"
+  },
+  {
+    "key_type": "exact",
+    "key_value": "AMAZON PAY INDIA PRIVA WWW.AMAZON.IN IND",
+    "ledger": "AMAZON PAY (INDIA) PRIVATE LIMITED",
+    "months": [
+      11
+    ],
+    "observations": 2,
+    "source_narration": "AMAZON PAY INDIA PRIVA www.amazon.in IND   Ref No: MT260230252000010009938"
+  },
+  {
+    "key_type": "exact",
+    "key_value": "AMAZON PAY INDIA PVT L BANGALORE IND",
+    "ledger": "AMAZON PAY (INDIA) PRIVATE LIMITED",
+    "months": [
+      4,
+      9,
+      10,
+      11
+    ],
+    "observations": 84,
+    "source_narration": "AMAZON PAY INDIA Pvt L Bangalore IND - Ref No: MT260200278000010028047"
+  },
+  {
+    "key_type": "exact",
+    "key_value": "BHARTI AIRTEL LIMIT GURGAON IND",
+    "ledger": "Airtel (Internet)",
+    "months": [
+      1
+    ],
+    "observations": 1,
+    "source_narration": "Bharti Airtel Limit Gurgaon IND - Ref No: MT250890269000010040191"
+  },
+  {
+    "key_type": "exact",
+    "key_value": "BHARTI AIRTEL LIMITED WWW.AIRTEL.IN IND",
+    "ledger": "Airtel (Internet)",
+    "months": [
+      10,
+      11
+    ],
+    "observations": 2,
+    "source_narration": "BHARTI AIRTEL LIMITED www.airtel.in IND   Ref No: MT260350252000010012690"
+  },
+  {
+    "key_type": "exact",
+    "key_value": "BSESR MUMBAI MAH",
+    "ledger": "Warehouse Electricity Charges",
+    "months": [
+      1,
+      4,
+      6,
+      10
+    ],
+    "observations": 12,
+    "source_narration": "BSESR MUMBAI MAH - Ref No: MT260110257000010025785"
+  },
+  {
+    "key_type": "exact",
+    "key_value": "BUSINESSONBOT URBANKARNATAK IND",
+    "ledger": "Business on Bot Private Limited",
+    "months": [
+      7
+    ],
+    "observations": 1,
+    "source_narration": "businessonbot  URBANKARNATAK  IND - Ref No: MT252620266000010005026"
+  },
+  {
+    "key_type": "exact",
+    "key_value": "DELHIVERY PRIVATE LIMI NEW DELHI IND",
+    "ledger": "Delhivery Limited",
+    "months": [
+      9
+    ],
+    "observations": 1,
+    "source_narration": "Delhivery Private Limi New Delhi IND - Ref No: MT253320273000010028207"
+  },
+  {
+    "key_type": "exact",
+    "key_value": "EASEBUZZ*SHOPFLO SOUTHWESTDELH IND",
+    "ledger": "Shopflo Technologies Private Limited",
+    "months": [
+      2,
+      3
+    ],
+    "observations": 2,
+    "source_narration": "Easebuzz*SHOPFLO SouthWestDelh IND - Ref No: MT251470269000010014895"
+  },
+  {
+    "key_type": "exact",
+    "key_value": "FACEBOOK GURGAON IND",
+    "ledger": "Facebook India Online Services Private Limited",
+    "months": [
+      1,
+      6
+    ],
+    "observations": 3,
+    "source_narration": "FACEBOOK GURGAON IND - Ref No: MT252300300000010021343"
+  },
+  {
+    "key_type": "exact",
+    "key_value": "FLIPKART INTERNET PVT WWW.FIIPKART. IND",
+    "ledger": "Flipkart Internet Private Limited (Creditor) KR",
+    "months": [
+      10
+    ],
+    "observations": 1,
+    "source_narration": "FLIPKART INTERNET PVT www.fIipkart. IND - Ref No: MT260030253000010013586"
+  },
+  {
+    "key_type": "exact",
+    "key_value": "FRESHWORKS INC SAN MATEO CA",
+    "ledger": "Freshworks Inc",
+    "months": [
+      1,
+      2,
+      3,
+      4,
+      7
+    ],
+    "observations": 6,
+    "source_narration": "FRESHWORKS  INC SAN MATEO CA - Ref No: MT252580440000010002233"
+  },
+  {
+    "key_type": "exact",
+    "key_value": "GOOGLECLOUD MUMBAI MAH",
+    "ledger": "Gmail & Google Cloud",
+    "months": [
+      6
+    ],
+    "observations": 1,
+    "source_narration": "GOOGLECLOUD MUMBAI MAH - Ref No: MT252280295000010021899"
+  },
+  {
+    "key_type": "exact",
+    "key_value": "GOOGLEWORKSP MUMBAI MAH",
+    "ledger": "Google India Private Limited (Gmail)",
+    "months": [
+      2,
+      3,
+      4,
+      6,
+      9,
+      10,
+      11
+    ],
+    "observations": 8,
+    "source_narration": "GOOGLEWORKSP MUMBAI MAH - Ref No: MT260350310000010020076"
+  },
+  {
+    "key_type": "exact",
+    "key_value": "GUPSHUP INC SAN FRANCISCO CA",
+    "ledger": "Gupshup",
+    "months": [
+      1
+    ],
+    "observations": 1,
+    "source_narration": "GUPSHUP INC SAN FRANCISCO CA - Ref No: MT250800465000010001917"
+  },
+  {
+    "key_type": "exact",
+    "key_value": "HELIUM10.COM IRVINE CA",
+    "ledger": "Helium10.Com",
+    "months": [
+      2,
+      3
+    ],
+    "observations": 2,
+    "source_narration": "HELIUM10.COM IRVINE CA - Ref No: MT251550459000010002194"
+  },
+  {
+    "key_type": "exact",
+    "key_value": "HELIUM10.COM IRVINE CA 15/01/26 129.00 USD",
+    "ledger": "Helium10.Com",
+    "months": [
+      11
+    ],
+    "observations": 1,
+    "source_narration": "HELIUM10.COM  IRVINE CA - Ref No: MT260150456000010001807 15/01/26 129.00 USD - Ref No: MT260150456000010001807"
+  },
+  {
+    "key_type": "exact",
+    "key_value": "HELIUM10.COM IRVINE CA 18/03/25 99.00 USD",
+    "ledger": "Helium10.Com",
+    "months": [
+      1
+    ],
+    "observations": 1,
+    "source_narration": "HELIUM10.COM  IRVINE CA - Ref No: MT250780461000010001524\n18/03/25 99.00 USD - Ref No: MT250780461000010001524"
+  },
+  {
+    "key_type": "exact",
+    "key_value": "IND*VISTAPRINT HTTPS://WWW.V IND",
+    "ledger": "VistaPrint",
+    "months": [
+      7
+    ],
+    "observations": 1,
+    "source_narration": "IND*VISTAPRINT https://www.v  IND - Ref No: MT252590251000010013904"
+  },
+  {
+    "key_type": "exact",
+    "key_value": "M/S. BVC TRADEPORT MUMBAI IND",
+    "ledger": "BVC TRADEPORT PRIVATE LIMITED (Vamaship)",
+    "months": [
+      1,
+      4,
+      6,
+      7,
+      9,
+      10,
+      11
+    ],
+    "observations": 94,
+    "source_narration": "M/S. BVC TRADEPORT Mumbai IND - Ref No: MT260140275000010025672"
+  },
+  {
+    "key_type": "exact",
+    "key_value": "MAKE MY TRIP GURGAON IND",
+    "ledger": "Make My Trip India",
+    "months": [
+      7
+    ],
+    "observations": 2,
+    "source_narration": "Make My Trip Gurgaon IND - Ref No: MT252690311000010023266"
+  },
+  {
+    "key_type": "exact",
+    "key_value": "MAKE MY TRIP GURUGRAM IND",
+    "ledger": "Make My Trip India",
+    "months": [
+      6
+    ],
+    "observations": 1,
+    "source_narration": "MAKE MY TRIP GURUGRAM IND - Ref No: MT252310296000010000813"
+  },
+  {
+    "key_type": "exact",
+    "key_value": "MAKEMYTRIP INDIA PVT L GURGAON IND",
+    "ledger": "Make My Trip India",
+    "months": [
+      4
+    ],
+    "observations": 1,
+    "source_narration": "MAKEMYTRIP INDIA PVT L Gurgaon IND - Ref No: MT251700269000010004285"
+  },
+  {
+    "key_type": "exact",
+    "key_value": "MAKEMYTRIP INDIA PVT L NEW DELHI DEL",
+    "ledger": "Make My Trip India",
+    "months": [
+      3,
+      4
+    ],
+    "observations": 4,
+    "source_narration": "MAKEMYTRIP  INDIA PVT L NEW DELHI DEL - Ref No: MT251870269000010037788"
+  },
+  {
+    "key_type": "exact",
+    "key_value": "MAKEMYTRIP INDIA PVT NEW DELHI DEL",
+    "ledger": "Make My Trip India",
+    "months": [
+      11
+    ],
+    "observations": 2,
+    "source_narration": "MAKEMYTRIP INDIA PVT NEW DELHI DEL- Ref No: MT260370307000010030425"
+  },
+  {
+    "key_type": "exact",
+    "key_value": "OPENAI *CHATGPT SUBSCR SAN FRANCISCO CA",
+    "ledger": "Software Charges",
+    "months": [
+      1
+    ],
+    "observations": 1,
+    "source_narration": "OPENAI *CHATGPT SUBSCR SAN FRANCISCO CA - Ref No: MT251010458000010002315"
+  },
+  {
+    "key_type": "exact",
+    "key_value": "OPENAI “CHATGPT SUBSCR SAN FRANCISCO CA",
+    "ledger": "Software Charges",
+    "months": [
+      4
+    ],
+    "observations": 1,
+    "source_narration": "OPENAI “CHATGPT SUBSCR SAN FRANCISCO CA - Ref No: MT251740451000010002855"
+  },
+  {
+    "key_type": "exact",
+    "key_value": "PADDLE.NET* OPENMAGIC LONDON GBR",
+    "ledger": "Paddle.Net",
+    "months": [
+      11
+    ],
+    "observations": 1,
+    "source_narration": "PADDLE.NET*  OPENMAGIC London GBR   Ref No: MT260200487000010001451"
+  },
+  {
+    "key_type": "exact",
+    "key_value": "PAY*BHARTI AIRTEL LIMI WWW.AIRTEL.IN IND",
+    "ledger": "Airtel (Internet)",
+    "months": [
+      6,
+      7
+    ],
+    "observations": 2,
+    "source_narration": "PAY*BHARTI AIRTEL LIMI www.airtel.in IND - Ref No: MT252770243000010014595"
+  },
+  {
+    "key_type": "exact",
+    "key_value": "PAY*BIGFOOT RETAIL SOL HTTPS://WWW.S IND",
+    "ledger": "BigFoot Retail Solutions Private Limited",
+    "months": [
+      1
+    ],
+    "observations": 9,
+    "source_narration": "PAY*BIGFOOT RETAIL SOL https://www.s IND - Ref No: MT250850251000010007126"
+  },
+  {
+    "key_type": "exact",
+    "key_value": "PAY*CBDT GURGAON HAR",
+    "ledger": "TDS on Contract (94C)",
+    "months": [
+      7
+    ],
+    "observations": 1,
+    "source_narration": "PAY*CBDT GURGAON HAR - Ref No: MT252810301000010021041"
+  },
+  {
+    "key_type": "exact",
+    "key_value": "PYU*FIIPKART BENGALURU IND",
+    "ledger": "Flipkart Internet Private Limited (Creditor) KR",
+    "months": [
+      11
+    ],
+    "observations": 1,
+    "source_narration": "PYU*FIipkart Bengaluru IND - Ref No: MT260160305000010000243"
+  },
+  {
+    "key_type": "exact",
+    "key_value": "PYU”FIIPKART BENGALURU IND",
+    "ledger": "Flipkart Internet Private Limited (Creditor) KR",
+    "months": [
+      11
+    ],
+    "observations": 1,
+    "source_narration": "PYU”FIipkart Bengaluru IND - Ref No: MT260160305000010000244"
+  },
+  {
+    "key_type": "exact",
+    "key_value": "RAZ*CONTLO TECHNOLOGIE BENGALURU U IND",
+    "ledger": "Contlo Technologies Private Limited",
+    "months": [
+      6,
+      7
+    ],
+    "observations": 2,
+    "source_narration": "RAZ*CONTLO  TECHNOLOGIE Bengaluru U IND - Ref No: MT252620249000010009132"
+  },
+  {
+    "key_type": "exact",
+    "key_value": "RAZ*EASYECOM BENGALURU IND",
+    "ledger": "Edgewise Technologies Private Limited",
+    "months": [
+      3,
+      4,
+      6,
+      7,
+      10,
+      11
+    ],
+    "observations": 7,
+    "source_narration": "RAZ*EasyEcom  Bengaluru IND - Ref No: MT260370367000010003284"
+  },
+  {
+    "key_type": "exact",
+    "key_value": "RAZ*ETIME OFFICE SOFTE VADODARA IND",
+    "ledger": "Team Office Softech Private Limited",
+    "months": [
+      7
+    ],
+    "observations": 1,
+    "source_narration": "RAZ*ETIME OFFICE SOFTE Vadodara IND   Ref No: MT252750270000010004164"
+  },
+  {
+    "key_type": "exact",
+    "key_value": "RAZ*SHIPROCKET PRIVATE GURGAON IND",
+    "ledger": "BigFoot Retail Solutions Private Limited",
+    "months": [
+      1,
+      3
+    ],
+    "observations": 19,
+    "source_narration": "RAZ*Shiprocket Private Gurgaon IND - Ref No: MT251520243000010012670"
+  },
+  {
+    "key_type": "exact",
+    "key_value": "RAZ*SHOPIFY COMMERCE S MUMBAI IND",
+    "ledger": "Shopify Commerce Singapore Pte. Ltd.",
+    "months": [
+      1,
+      2,
+      3,
+      4,
+      6,
+      7,
+      11
+    ],
+    "observations": 11,
+    "source_narration": "RAZ*Shopify Commerce S Mumbai IND - Ref No: MT260370307000010034427"
+  },
+  {
+    "key_type": "exact",
+    "key_value": "RAZ*WEFAST HTTPS://WEFAS IND",
+    "ledger": "Wefast India Private Limited",
+    "months": [
+      2,
+      4,
+      10
+    ],
+    "observations": 5,
+    "source_narration": "RAZ*WEFAST  https://wefas IND - Ref No: MT253590251000010018464"
+  },
+  {
+    "key_type": "exact",
+    "key_value": "RAZ”EASYECOM BENGALURU IND",
+    "ledger": "Edgewise Technologies Private Limited",
+    "months": [
+      11
+    ],
+    "observations": 1,
+    "source_narration": "RAZ”EasyEcom Bengaluru IND - Ref No: MT260320270000010040392"
+  },
+  {
+    "key_type": "exact",
+    "key_value": "RAZ”SHOPIFY COMMERCE S BANGALORE IND",
+    "ledger": "Shopify Commerce Singapore Pte. Ltd.",
+    "months": [
+      11
+    ],
+    "observations": 1,
+    "source_narration": "RAZ”Shopify Commerce S Bangalore IND - Ref No: MT260370367000010003227"
+  },
+  {
+    "key_type": "exact",
+    "key_value": "RAZ”SHOPIFY COMMERCE S MUMBAI IND",
+    "ledger": "Shopify Commerce Singapore Pte. Ltd.",
+    "months": [
+      1,
+      7,
+      11
+    ],
+    "observations": 3,
+    "source_narration": "RAZ”Shopify Commerce S Mumbai IND - Ref No: MT260370307000010034442"
+  },
+  {
+    "key_type": "exact",
+    "key_value": "RAZ”WEFAST HTTPS://WEFAS IND",
+    "ledger": "Wefast India Private Limited",
+    "months": [
+      7,
+      11
+    ],
+    "observations": 3,
+    "source_narration": "RAZ”WEFAST  https://wefas IND - Ref No: MT260350252000010012566"
+  },
+  {
+    "key_type": "exact",
+    "key_value": "SHIPROCKET PRIVATE GURGAON IND",
+    "ledger": "BigFoot Retail Solutions Private Limited",
+    "months": [
+      1
+    ],
+    "observations": 1,
+    "source_narration": "Shiprocket Private Gurgaon IND - Ref No: MT250890298000010000675"
+  },
+  {
+    "key_type": "exact",
+    "key_value": "SHIPROCKET PVT LTD GURGAON IND",
+    "ledger": "BigFoot Retail Solutions Private Limited",
+    "months": [
+      6,
+      7,
+      9,
+      10,
+      11
+    ],
+    "observations": 8,
+    "source_narration": "SHIPROCKET PVT LTD GURGAON IND - Ref No: MT260320253000010009271"
+  },
+  {
+    "key_type": "exact",
+    "key_value": "SHOPFLO SOUTH WEST D IND",
+    "ledger": "Shopflo Technologies Private Limited",
+    "months": [
+      4,
+      6
+    ],
+    "observations": 2,
+    "source_narration": "SHOPFLO SOUTH WEST D IND - Ref No: MT252260251000010009556"
+  },
+  {
+    "key_type": "exact",
+    "key_value": "SHOPFLO SOUTH WEST DE IND",
+    "ledger": "SHOPFLO TECHNOLOGIES PRIVATE LIMITED",
+    "months": [
+      11
+    ],
+    "observations": 6,
+    "source_narration": "SHOPFLO SOUTH WEST DE IND - Ref No: MT260320253000010011249"
+  },
+  {
+    "key_type": "exact",
+    "key_value": "SHOPIFY COMMERCE SINGA MUMBAI IND",
+    "ledger": "Shopify Commerce Singapore Pte. Ltd.",
+    "months": [
+      1
+    ],
+    "observations": 1,
+    "source_narration": "Shopify Commerce Singa Mumbai IND - Ref No: MT251000269000010013215"
+  },
+  {
+    "key_type": "exact",
+    "key_value": "WEFAST MUMBAI IND",
+    "ledger": "Wefast India Private Limited",
+    "months": [
+      9,
+      11
+    ],
+    "observations": 2,
+    "source_narration": "WeFast MUMBAI IND - Ref No: MT260420273000010022863"
+  },
+  {
+    "key_type": "exact",
+    "key_value": "YAMM.COM BRUSSELS DUB 25/09/25 60.00 USD",
+    "ledger": "Yamm.Com",
+    "months": [
+      7
+    ],
+    "observations": 1,
+    "source_narration": "YAMM.COM BRUSSELS DUB - Ref No: MT252690482000010002608 \n25/09/25 60.00 USD - Ref No: MT252690482000010002608"
+  },
+  {
+    "key_type": "merchant",
+    "key_value": "AMAZON",
+    "ledger": "AMAZON PAY (INDIA) PRIVATE LIMITED",
+    "months": [
+      11
+    ],
+    "observations": 1,
+    "source_narration": "AMAZON MUMBAI MAH - Ref No: MT260240309000010004631"
+  },
+  {
+    "key_type": "merchant",
+    "key_value": "AMAZON PAY",
+    "ledger": "AMAZON PAY (INDIA) PRIVATE LIMITED",
+    "months": [
+      4,
+      9,
+      10,
+      11
+    ],
+    "observations": 84,
+    "source_narration": "AMAZON PAY INDIA Pvt L Bangalore IND - Ref No: MT260200278000010028047"
+  },
+  {
+    "key_type": "merchant",
+    "key_value": "AMAZON PAY PRIVA",
+    "ledger": "AMAZON PAY (INDIA) PRIVATE LIMITED",
+    "months": [
+      10,
+      11
+    ],
+    "observations": 3,
+    "source_narration": "AMAZON PAY INDIA PRIVA www.amazon.in IND   Ref No: MT260230252000010009938"
+  },
+  {
+    "key_type": "merchant",
+    "key_value": "BHARTI AIRTEL AIRTEL",
+    "ledger": "Airtel (Internet)",
+    "months": [
+      10,
+      11
+    ],
+    "observations": 2,
+    "source_narration": "BHARTI AIRTEL LIMITED www.airtel.in IND   Ref No: MT260350252000010012690"
+  },
+  {
+    "key_type": "merchant",
+    "key_value": "BHARTI AIRTEL LIMI",
+    "ledger": "Airtel (Internet)",
+    "months": [
+      6,
+      7
+    ],
+    "observations": 2,
+    "source_narration": "PAY*BHARTI AIRTEL LIMI www.airtel.in IND - Ref No: MT252770243000010014595"
+  },
+  {
+    "key_type": "merchant",
+    "key_value": "BHARTI AIRTEL LIMIT",
+    "ledger": "Airtel (Internet)",
+    "months": [
+      1
+    ],
+    "observations": 1,
+    "source_narration": "Bharti Airtel Limit Gurgaon IND - Ref No: MT250890269000010040191"
+  },
+  {
+    "key_type": "merchant",
+    "key_value": "BIGFOOT RETAIL SOL",
+    "ledger": "BigFoot Retail Solutions Private Limited",
+    "months": [
+      1
+    ],
+    "observations": 9,
+    "source_narration": "PAY*BIGFOOT RETAIL SOL https://www.s IND - Ref No: MT250850251000010007126"
+  },
+  {
+    "key_type": "merchant",
+    "key_value": "BSESR",
+    "ledger": "Warehouse Electricity Charges",
+    "months": [
+      1,
+      4,
+      6,
+      10
+    ],
+    "observations": 12,
+    "source_narration": "BSESR MUMBAI MAH - Ref No: MT260110257000010025785"
+  },
+  {
+    "key_type": "merchant",
+    "key_value": "BUSINESSONBOT",
+    "ledger": "Business on Bot Private Limited",
+    "months": [
+      7
+    ],
+    "observations": 1,
+    "source_narration": "businessonbot  URBANKARNATAK  IND - Ref No: MT252620266000010005026"
+  },
+  {
+    "key_type": "merchant",
+    "key_value": "BVC TRADEPORT",
+    "ledger": "BVC TRADEPORT PRIVATE LIMITED (Vamaship)",
+    "months": [
+      1,
+      4,
+      6,
+      7,
+      9,
+      10,
+      11
+    ],
+    "observations": 94,
+    "source_narration": "M/S. BVC TRADEPORT Mumbai IND - Ref No: MT260140275000010025672"
+  },
+  {
+    "key_type": "merchant",
+    "key_value": "CBDT",
+    "ledger": "TDS on Contract (94C)",
+    "months": [
+      7
+    ],
+    "observations": 1,
+    "source_narration": "PAY*CBDT GURGAON HAR - Ref No: MT252810301000010021041"
+  },
+  {
+    "key_type": "merchant",
+    "key_value": "CONTLO TECHNOLOGIE U",
+    "ledger": "Contlo Technologies Private Limited",
+    "months": [
+      6,
+      7
+    ],
+    "observations": 2,
+    "source_narration": "RAZ*CONTLO  TECHNOLOGIE Bengaluru U IND - Ref No: MT252620249000010009132"
+  },
+  {
+    "key_type": "merchant",
+    "key_value": "DELHIVERY LIMI",
+    "ledger": "Delhivery Limited",
+    "months": [
+      9
+    ],
+    "observations": 1,
+    "source_narration": "Delhivery Private Limi New Delhi IND - Ref No: MT253320273000010028207"
+  },
+  {
+    "key_type": "merchant",
+    "key_value": "EASYECOM",
+    "ledger": "Edgewise Technologies Private Limited",
+    "months": [
+      3,
+      4,
+      6,
+      7,
+      10,
+      11
+    ],
+    "observations": 8,
+    "source_narration": "RAZ”EasyEcom Bengaluru IND - Ref No: MT260320270000010040392"
+  },
+  {
+    "key_type": "merchant",
+    "key_value": "ETIME OFFICE SOFTE",
+    "ledger": "Team Office Softech Private Limited",
+    "months": [
+      7
+    ],
+    "observations": 1,
+    "source_narration": "RAZ*ETIME OFFICE SOFTE Vadodara IND   Ref No: MT252750270000010004164"
+  },
+  {
+    "key_type": "merchant",
+    "key_value": "FACEBOOK",
+    "ledger": "Facebook India Online Services Private Limited",
+    "months": [
+      1,
+      6
+    ],
+    "observations": 3,
+    "source_narration": "FACEBOOK GURGAON IND - Ref No: MT252300300000010021343"
+  },
+  {
+    "key_type": "merchant",
+    "key_value": "FIIPKART",
+    "ledger": "Flipkart Internet Private Limited (Creditor) KR",
+    "months": [
+      11
+    ],
+    "observations": 2,
+    "source_narration": "PYU*FIipkart Bengaluru IND - Ref No: MT260160305000010000243"
+  },
+  {
+    "key_type": "merchant",
+    "key_value": "FLIPKART INTERNET FIIPKART",
+    "ledger": "Flipkart Internet Private Limited (Creditor) KR",
+    "months": [
+      10
+    ],
+    "observations": 1,
+    "source_narration": "FLIPKART INTERNET PVT www.fIipkart. IND - Ref No: MT260030253000010013586"
+  },
+  {
+    "key_type": "merchant",
+    "key_value": "FRESHWORKS",
+    "ledger": "Freshworks Inc",
+    "months": [
+      1,
+      2,
+      3,
+      4,
+      7
+    ],
+    "observations": 6,
+    "source_narration": "FRESHWORKS  INC SAN MATEO CA - Ref No: MT252580440000010002233"
+  },
+  {
+    "key_type": "merchant",
+    "key_value": "GOOGLECLOUD",
+    "ledger": "Gmail & Google Cloud",
+    "months": [
+      6
+    ],
+    "observations": 1,
+    "source_narration": "GOOGLECLOUD MUMBAI MAH - Ref No: MT252280295000010021899"
+  },
+  {
+    "key_type": "merchant",
+    "key_value": "GOOGLEWORKSP",
+    "ledger": "Google India Private Limited (Gmail)",
+    "months": [
+      2,
+      3,
+      4,
+      6,
+      9,
+      10,
+      11
+    ],
+    "observations": 8,
+    "source_narration": "GOOGLEWORKSP MUMBAI MAH - Ref No: MT260350310000010020076"
+  },
+  {
+    "key_type": "merchant",
+    "key_value": "GUPSHUP",
+    "ledger": "Gupshup",
+    "months": [
+      1
+    ],
+    "observations": 1,
+    "source_narration": "GUPSHUP INC SAN FRANCISCO CA - Ref No: MT250800465000010001917"
+  },
+  {
+    "key_type": "merchant",
+    "key_value": "HELIUM10",
+    "ledger": "Helium10.Com",
+    "months": [
+      1,
+      2,
+      3,
+      11
+    ],
+    "observations": 4,
+    "source_narration": "HELIUM10.COM  IRVINE CA - Ref No: MT260150456000010001807 15/01/26 129.00 USD - Ref No: MT260150456000010001807"
+  },
+  {
+    "key_type": "merchant",
+    "key_value": "MAKE MY TRIP",
+    "ledger": "Make My Trip India",
+    "months": [
+      6,
+      7
+    ],
+    "observations": 3,
+    "source_narration": "Make My Trip Gurgaon IND - Ref No: MT252690311000010023266"
+  },
+  {
+    "key_type": "merchant",
+    "key_value": "MAKEMYTRIP",
+    "ledger": "Make My Trip India",
+    "months": [
+      3,
+      4,
+      11
+    ],
+    "observations": 7,
+    "source_narration": "MAKEMYTRIP INDIA PVT NEW DELHI DEL- Ref No: MT260370307000010030425"
+  },
+  {
+    "key_type": "merchant",
+    "key_value": "OPENAI CHATGPT SUBSCR",
+    "ledger": "Software Charges",
+    "months": [
+      1,
+      4
+    ],
+    "observations": 2,
+    "source_narration": "OPENAI “CHATGPT SUBSCR SAN FRANCISCO CA - Ref No: MT251740451000010002855"
+  },
+  {
+    "key_type": "merchant",
+    "key_value": "PADDLE NET OPENMAGIC",
+    "ledger": "Paddle.Net",
+    "months": [
+      11
+    ],
+    "observations": 1,
+    "source_narration": "PADDLE.NET*  OPENMAGIC London GBR   Ref No: MT260200487000010001451"
+  },
+  {
+    "key_type": "merchant",
+    "key_value": "SHIPROCKET",
+    "ledger": "BigFoot Retail Solutions Private Limited",
+    "months": [
+      1,
+      3,
+      6,
+      7,
+      9,
+      10,
+      11
+    ],
+    "observations": 28,
+    "source_narration": "SHIPROCKET PVT LTD GURGAON IND - Ref No: MT260320253000010009271"
+  },
+  {
+    "key_type": "merchant",
+    "key_value": "SHOPFLO",
+    "ledger": "SHOPFLO TECHNOLOGIES PRIVATE LIMITED",
+    "months": [
+      2,
+      3,
+      4,
+      6,
+      11
+    ],
+    "observations": 10,
+    "source_narration": "SHOPFLO SOUTH WEST DE IND - Ref No: MT260320253000010011249"
+  },
+  {
+    "key_type": "merchant",
+    "key_value": "SHOPIFY COMMERCE",
+    "ledger": "Shopify Commerce Singapore Pte. Ltd.",
+    "months": [
+      1,
+      2,
+      3,
+      4,
+      6,
+      7,
+      11
+    ],
+    "observations": 15,
+    "source_narration": "RAZ*Shopify Commerce S Mumbai IND - Ref No: MT260370307000010034427"
+  },
+  {
+    "key_type": "merchant",
+    "key_value": "SHOPIFY COMMERCE SINGA",
+    "ledger": "Shopify Commerce Singapore Pte. Ltd.",
+    "months": [
+      1
+    ],
+    "observations": 1,
+    "source_narration": "Shopify Commerce Singa Mumbai IND - Ref No: MT251000269000010013215"
+  },
+  {
+    "key_type": "merchant",
+    "key_value": "VISTAPRINT V",
+    "ledger": "VistaPrint",
+    "months": [
+      7
+    ],
+    "observations": 1,
+    "source_narration": "IND*VISTAPRINT https://www.v  IND - Ref No: MT252590251000010013904"
+  },
+  {
+    "key_type": "merchant",
+    "key_value": "WEFAST",
+    "ledger": "Wefast India Private Limited",
+    "months": [
+      9,
+      11
+    ],
+    "observations": 2,
+    "source_narration": "WeFast MUMBAI IND - Ref No: MT260420273000010022863"
+  },
+  {
+    "key_type": "merchant",
+    "key_value": "WEFAST WEFAS",
+    "ledger": "Wefast India Private Limited",
+    "months": [
+      2,
+      4,
+      7,
+      10,
+      11
+    ],
+    "observations": 8,
+    "source_narration": "RAZ”WEFAST  https://wefas IND - Ref No: MT260350252000010012566"
+  },
+  {
+    "key_type": "merchant",
+    "key_value": "YAMM",
+    "ledger": "Yamm.Com",
+    "months": [
+      7
+    ],
+    "observations": 1,
+    "source_narration": "YAMM.COM BRUSSELS DUB - Ref No: MT252690482000010002608 \n25/09/25 60.00 USD - Ref No: MT252690482000010002608"
+  },
+  {
+    "key_type": "merchant1",
+    "key_value": "AMAZON",
+    "ledger": "AMAZON PAY (INDIA) PRIVATE LIMITED",
+    "months": [
+      4,
+      9,
+      10,
+      11
+    ],
+    "observations": 87,
+    "source_narration": "AMAZON PAY INDIA Pvt L Bangalore IND - Ref No: MT260200278000010028047"
+  },
+  {
+    "key_type": "merchant1",
+    "key_value": "BHARTI",
+    "ledger": "Airtel (Internet)",
+    "months": [
+      1,
+      6,
+      7,
+      10,
+      11
+    ],
+    "observations": 5,
+    "source_narration": "BHARTI AIRTEL LIMITED www.airtel.in IND   Ref No: MT260350252000010012690"
+  },
+  {
+    "key_type": "merchant1",
+    "key_value": "BIGFOOT",
+    "ledger": "BigFoot Retail Solutions Private Limited",
+    "months": [
+      1
+    ],
+    "observations": 9,
+    "source_narration": "PAY*BIGFOOT RETAIL SOL https://www.s IND - Ref No: MT250850251000010007126"
+  },
+  {
+    "key_type": "merchant1",
+    "key_value": "BVC",
+    "ledger": "BVC TRADEPORT PRIVATE LIMITED (Vamaship)",
+    "months": [
+      1,
+      4,
+      6,
+      7,
+      9,
+      10,
+      11
+    ],
+    "observations": 94,
+    "source_narration": "M/S. BVC TRADEPORT Mumbai IND - Ref No: MT260140275000010025672"
+  },
+  {
+    "key_type": "merchant1",
+    "key_value": "CONTLO",
+    "ledger": "Contlo Technologies Private Limited",
+    "months": [
+      6,
+      7
+    ],
+    "observations": 2,
+    "source_narration": "RAZ*CONTLO  TECHNOLOGIE Bengaluru U IND - Ref No: MT252620249000010009132"
+  },
+  {
+    "key_type": "merchant1",
+    "key_value": "DELHIVERY",
+    "ledger": "Delhivery Limited",
+    "months": [
+      9
+    ],
+    "observations": 1,
+    "source_narration": "Delhivery Private Limi New Delhi IND - Ref No: MT253320273000010028207"
+  },
+  {
+    "key_type": "merchant1",
+    "key_value": "ETIME",
+    "ledger": "Team Office Softech Private Limited",
+    "months": [
+      7
+    ],
+    "observations": 1,
+    "source_narration": "RAZ*ETIME OFFICE SOFTE Vadodara IND   Ref No: MT252750270000010004164"
+  },
+  {
+    "key_type": "merchant1",
+    "key_value": "FLIPKART",
+    "ledger": "Flipkart Internet Private Limited (Creditor) KR",
+    "months": [
+      10
+    ],
+    "observations": 1,
+    "source_narration": "FLIPKART INTERNET PVT www.fIipkart. IND - Ref No: MT260030253000010013586"
+  },
+  {
+    "key_type": "merchant1",
+    "key_value": "MAKE",
+    "ledger": "Make My Trip India",
+    "months": [
+      6,
+      7
+    ],
+    "observations": 3,
+    "source_narration": "Make My Trip Gurgaon IND - Ref No: MT252690311000010023266"
+  },
+  {
+    "key_type": "merchant1",
+    "key_value": "OPENAI",
+    "ledger": "Software Charges",
+    "months": [
+      1,
+      4
+    ],
+    "observations": 2,
+    "source_narration": "OPENAI “CHATGPT SUBSCR SAN FRANCISCO CA - Ref No: MT251740451000010002855"
+  },
+  {
+    "key_type": "merchant1",
+    "key_value": "PADDLE",
+    "ledger": "Paddle.Net",
+    "months": [
+      11
+    ],
+    "observations": 1,
+    "source_narration": "PADDLE.NET*  OPENMAGIC London GBR   Ref No: MT260200487000010001451"
+  },
+  {
+    "key_type": "merchant1",
+    "key_value": "SHOPIFY",
+    "ledger": "Shopify Commerce Singapore Pte. Ltd.",
+    "months": [
+      1,
+      2,
+      3,
+      4,
+      6,
+      7,
+      11
+    ],
+    "observations": 16,
+    "source_narration": "RAZ*Shopify Commerce S Mumbai IND - Ref No: MT260370307000010034427"
+  },
+  {
+    "key_type": "merchant1",
+    "key_value": "VISTAPRINT",
+    "ledger": "VistaPrint",
+    "months": [
+      7
+    ],
+    "observations": 1,
+    "source_narration": "IND*VISTAPRINT https://www.v  IND - Ref No: MT252590251000010013904"
+  },
+  {
+    "key_type": "merchant1",
+    "key_value": "WEFAST",
+    "ledger": "Wefast India Private Limited",
+    "months": [
+      2,
+      4,
+      7,
+      10,
+      11
+    ],
+    "observations": 8,
+    "source_narration": "RAZ”WEFAST  https://wefas IND - Ref No: MT260350252000010012566"
+  },
+  {
+    "key_type": "merchant2",
+    "key_value": "AMAZON PAY",
+    "ledger": "AMAZON PAY (INDIA) PRIVATE LIMITED",
+    "months": [
+      10,
+      11
+    ],
+    "observations": 3,
+    "source_narration": "AMAZON PAY INDIA PRIVA www.amazon.in IND   Ref No: MT260230252000010009938"
+  },
+  {
+    "key_type": "merchant2",
+    "key_value": "BHARTI AIRTEL",
+    "ledger": "Airtel (Internet)",
+    "months": [
+      1,
+      6,
+      7,
+      10,
+      11
+    ],
+    "observations": 5,
+    "source_narration": "BHARTI AIRTEL LIMITED www.airtel.in IND   Ref No: MT260350252000010012690"
+  },
+  {
+    "key_type": "merchant2",
+    "key_value": "BIGFOOT RETAIL",
+    "ledger": "BigFoot Retail Solutions Private Limited",
+    "months": [
+      1
+    ],
+    "observations": 9,
+    "source_narration": "PAY*BIGFOOT RETAIL SOL https://www.s IND - Ref No: MT250850251000010007126"
+  },
+  {
+    "key_type": "merchant2",
+    "key_value": "CONTLO TECHNOLOGIE",
+    "ledger": "Contlo Technologies Private Limited",
+    "months": [
+      6,
+      7
+    ],
+    "observations": 2,
+    "source_narration": "RAZ*CONTLO  TECHNOLOGIE Bengaluru U IND - Ref No: MT252620249000010009132"
+  },
+  {
+    "key_type": "merchant2",
+    "key_value": "ETIME OFFICE",
+    "ledger": "Team Office Softech Private Limited",
+    "months": [
+      7
+    ],
+    "observations": 1,
+    "source_narration": "RAZ*ETIME OFFICE SOFTE Vadodara IND   Ref No: MT252750270000010004164"
+  },
+  {
+    "key_type": "merchant2",
+    "key_value": "FLIPKART INTERNET",
+    "ledger": "Flipkart Internet Private Limited (Creditor) KR",
+    "months": [
+      10
+    ],
+    "observations": 1,
+    "source_narration": "FLIPKART INTERNET PVT www.fIipkart. IND - Ref No: MT260030253000010013586"
+  },
+  {
+    "key_type": "merchant2",
+    "key_value": "MAKE MY",
+    "ledger": "Make My Trip India",
+    "months": [
+      6,
+      7
+    ],
+    "observations": 3,
+    "source_narration": "Make My Trip Gurgaon IND - Ref No: MT252690311000010023266"
+  },
+  {
+    "key_type": "merchant2",
+    "key_value": "OPENAI CHATGPT",
+    "ledger": "Software Charges",
+    "months": [
+      1,
+      4
+    ],
+    "observations": 2,
+    "source_narration": "OPENAI “CHATGPT SUBSCR SAN FRANCISCO CA - Ref No: MT251740451000010002855"
+  },
+  {
+    "key_type": "merchant2",
+    "key_value": "PADDLE NET",
+    "ledger": "Paddle.Net",
+    "months": [
+      11
+    ],
+    "observations": 1,
+    "source_narration": "PADDLE.NET*  OPENMAGIC London GBR   Ref No: MT260200487000010001451"
+  },
+  {
+    "key_type": "merchant2",
+    "key_value": "SHOPIFY COMMERCE",
+    "ledger": "Shopify Commerce Singapore Pte. Ltd.",
+    "months": [
+      1
+    ],
+    "observations": 1,
+    "source_narration": "Shopify Commerce Singa Mumbai IND - Ref No: MT251000269000010013215"
+  }
+]

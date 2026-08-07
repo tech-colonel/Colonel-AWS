@@ -77,6 +77,10 @@ const SLOTS = {
     { key: 'tally_daybook', label: 'Tally Bank Daybook', required: true, accept: '.xls,.xlsx', match: { keywords: ['daybook', 'day book', 'tally bank', 'tally'], extensions: XLS } },
     { key: 'bank_output', label: 'Universal Bank Statement Output', required: false, accept: '.xlsx', match: { keywords: ['universal bank', 'bank output', 'universal', 'output'], extensions: ['.xlsx'] } },
   ],
+  credit_card_booking: [
+    { key: 'card_statement', label: 'Credit Card Statement (PDF or Excel)', required: true,
+      accept: '.pdf,.xlsx,.xls', match: { keywords: ['credit card', 'card statement', 'statement'], extensions: ['.pdf', '.xlsx', '.xls'] } },
+  ],
   pdf_bank_extract: [
     { key: 'bank_pdf', label: 'Bank Statement PDF', required: true, accept: '.pdf', match: { keywords: ['bank', 'statement'], extensions: ['.pdf'] } },
   ],

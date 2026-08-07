@@ -48,6 +48,14 @@ const RECO_AGENTS = [
     agentId: '974ac4f2-1437-4ccc-826c-c2ea68e5b5e3',
   },
   {
+    id: 'credit_card_booking', category: 'Bank & Finance',
+    name: 'Credit Card Booking', icon: '💳',
+    color: '#4338CA', bg: '#EEF2FF', border: '#C7D2FE',
+    description: 'Convert a credit card statement (PDF or Excel) into ready-to-post Tally entries. Learns your merchant → ledger mappings, so each month books more of itself.',
+    fields: ['Credit Card Statement'], accuracy: '96.4%',
+    route: 'credit-card',
+  },
+  {
     id: 'zepto_receivables', category: 'Bank & Finance',
     name: 'Zepto Receivables', icon: '💳',
     color: '#6366F1', bg: '#EEF2FF', border: '#C7D2FE',
@@ -65,7 +73,10 @@ const AgentCard = ({ agent, brandId, navigate, idx }) => {
 
   return (
     <button
-      onClick={() => navigate(agent.agentId ? `/brands/${brandId}/agents/${agent.agentId}` : `/brands/${brandId}/reco/${agent.id}`)}
+      onClick={() => navigate(
+        agent.route ? `/brands/${brandId}/${agent.route}`
+          : agent.agentId ? `/brands/${brandId}/agents/${agent.agentId}`
+            : `/brands/${brandId}/reco/${agent.id}`)}
       className="glass-card p-5 text-left group"
       data-testid={`reco-card-${agent.id}`}
       style={{

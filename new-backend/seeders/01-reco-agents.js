@@ -50,6 +50,14 @@ const RECO_AGENTS = [
     updatedAt: new Date(),
   },
   {
+    id: 'f3a91c47-0d62-4b8e-9a5d-6c2e83417bd9',
+    name: 'credit_card_booking',
+    description: 'Credit card statement (PDF or Excel) → Tally booking entries, mapped to the brand chart of accounts',
+    columns: JSON.stringify([]),
+    createdAt: new Date(),
+    updatedAt: new Date(),
+  },
+  {
     id: '974ac4f2-1437-4ccc-826c-c2ea68e5b5e3',
     name: 'pdf_bank_extract',
     description: 'Convert any Indian bank statement PDF (HDFC, ICICI, SBI, Axis, Kotak) to Excel with Check Point validation columns',

@@ -63,6 +63,11 @@ const RECO_AGENT_META = {
     color: '#D97706', bg: '#FFFBEB', border: '#FDE68A', accuracy: '99.8%',
     fields: ['Drive Folder Link', 'B2B Report', 'B2C Report'],
   },
+  credit_card_booking: {
+    displayName: 'Credit Card Booking', icon: '💳', category: 'Bank & Finance',
+    color: '#4338CA', bg: '#EEF2FF', border: '#C7D2FE', accuracy: '96.4%',
+    fields: ['Credit Card Statement (PDF or Excel)'],
+  },
   pdf_bank_extract: {
     displayName: 'PDF → Bank Statement', icon: '📄', category: 'Bank & Finance',
     color: '#0748EE', bg: '#E8EFFE', border: '#A3BFF8', accuracy: 'Auto-detect',
@@ -139,7 +144,8 @@ const channelBrand = (name) => {
 const sectionOf = (agent) => {
   const n = (agent.name || '').toLowerCase();
   if (RECO_AGENT_META[agent.name]) {
-    if (n === 'universal_bank_statement' || n === 'pdf_bank_extract' || n === 'bank_tally_reco') return 'bank';
+    if (n === 'universal_bank_statement' || n === 'pdf_bank_extract' || n === 'bank_tally_reco'
+        || n === 'credit_card_booking') return 'bank';
     if (n === 'amazon_mtr_consolidator') return 'marketplace';
     if (n === 'receivable_cycle') return 'other';
     return 'reco';

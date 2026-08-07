@@ -115,6 +115,33 @@ class _JobStore(dict):
 
 JOBS: dict[str, dict] = _JobStore()
 
+
+def _card_rows_for_ui(working_rows: list[dict]) -> list[dict]:
+    """Serialise Credit Card Booking rows for the review grid.
+
+    Dates become ISO strings (JSON has no date type) and only the fields the UI
+    needs are sent — the workbook is fetched separately via the export endpoint,
+    so the whole statement is not duplicated into this response.
+    """
+    out = []
+    for i, w in enumerate(working_rows):
+        d = w.get("date")
+        out.append({
+            "row":         i,
+            "date":        d.isoformat() if hasattr(d, "isoformat") else (d or ""),
+            "narration":   w.get("narration") or "",
+            "category":    w.get("category") or "",
+            "debit":       w.get("debit") or "",
+            "credit":      w.get("credit") or "",
+            "amount":      w.get("amount"),
+            "voucher_type": w.get("voucher_type") or "",
+            "layer":       w.get("layer") or "",
+            "confidence":  w.get("confidence") or "",
+            "is_suspense": bool(w.get("is_suspense")),
+            "no_amount":   bool(w.get("no_amount")),
+        })
+    return out
+
 # Limit simultaneous reconciliation jobs to prevent OOM under heavy load.
 # Each job can hold large DataFrames in memory; 8 concurrent runs is safe
 # for a server with 8+ GB RAM. Override via MAX_CONCURRENT_RECO env var.
@@ -663,6 +690,76 @@ class ReconciliationHandler(BaseHTTPRequestHandler):
                     "counts":            {"transaction_rows": data.get("transaction_count", 0)},
                     "results":           [],  # not used — download is via export endpoint
                     "_xlsx_bytes":       excel_bytes,
+                }
+                JOBS[job_id] = payload
+                self.write_json({k: v for k, v in payload.items() if not k.startswith("_")})
+                return
+
+            if reco_type == "credit_card_booking":
+                from recon.credit_card_booking import run as run_card_booking
+                card_file = files.get("card_statement")
+                if not card_file:
+                    self.write_json({"error": "Upload a credit card statement PDF or Excel "
+                                              "(field name: card_statement)."}, 400)
+                    return
+                if isinstance(card_file, dict):
+                    content, fname = card_file["content"], card_file.get("filename", "")
+                else:
+                    content, fname = card_file[0]["content"], card_file[0].get("filename", "")
+
+                # The chart of accounts and the learned merchant directory are read
+                # from the brand's DB by Node (under RLS) and passed in as JSON —
+                # this engine never touches the database, same as every other agent.
+                def _json_field(name):
+                    raw = (fields.get(name) or "").strip()
+                    if not raw:
+                        return []
+                    try:
+                        return json.loads(raw)
+                    except Exception:
+                        logging.warning("credit_card_booking: bad JSON in field %r", name)
+                        return []
+
+                data = run_card_booking(
+                    content,
+                    filename=fname,
+                    password=(fields.get("pdf_password") or "").strip(),
+                    coa=_json_field("coa"),
+                    directory=_json_field("directory"),
+                    card_ledger=(fields.get("card_ledger") or "").strip(),
+                    voucher_type=(fields.get("voucher_type") or "").strip(),
+                    use_llm=(fields.get("use_llm") or "1").strip() not in ("0", "false", "no"),
+                )
+                if data.get("error"):
+                    self.write_json({"error": data["error"]}, 400)
+                    return
+
+                summary = data.get("summary") or {}
+                job_id = uuid4().hex
+                payload = {
+                    "job_id":            job_id,
+                    "reco_type":         reco_type,
+                    "bank_name":         (data.get("meta") or {}).get("bank_name", ""),
+                    "account_no":        (data.get("meta") or {}).get("account_no", ""),
+                    "period":            (data.get("meta") or {}).get("period", ""),
+                    "card_ledger":       (data.get("meta") or {}).get("card_ledger", ""),
+                    "transaction_count": summary.get("extracted", 0),
+                    "summary":           summary,
+                    "verification":      data.get("verification") or {},
+                    "blocked":           bool(data.get("blocked")),
+                    "counts": {
+                        "extracted":         summary.get("extracted", 0),
+                        "booked":            summary.get("booked", 0),
+                        "suspense":          summary.get("suspense", 0),
+                        "zero_amount":       summary.get("zero_amount", 0),
+                        "excluded_credits":  summary.get("excluded_credits", 0),
+                        "excluded_payments": summary.get("excluded_payments", 0),
+                    },
+                    # Rows feed the review grid; the reviewer's corrections are what
+                    # the learning loop consumes.
+                    "results":           _card_rows_for_ui(data.get("working_rows") or []),
+                    "learned_keys":      data.get("learned_keys") or [],
+                    "_xlsx_bytes":       data.get("excel"),
                 }
                 JOBS[job_id] = payload
                 self.write_json({k: v for k, v in payload.items() if not k.startswith("_")})

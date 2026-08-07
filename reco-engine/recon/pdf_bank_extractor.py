@@ -256,6 +256,31 @@ def _distinct_tags(words: list) -> set:
     return tags
 
 
+# Long lowercase words that ARE legitimate column labels. Anything else long and
+# lowercase-initial is running text, not a header cell.
+_HEADER_WORD_WHITELIST = {
+    'particulars', 'balance', 'deposit', 'deposits', 'withdrawal', 'withdrawals',
+    'description', 'narration', 'transaction', 'transactions', 'details', 'amount',
+    'cheque', 'reference', 'remarks', 'closing', 'opening', 'credit', 'debit',
+    'value', 'branch', 'instrument', 'particular', 'chq/ref', 'nos.',
+}
+
+
+def _is_prose_line(line: dict) -> bool:
+    """Running text rather than a row of column labels.
+
+    Detected by a long lowercase-initial word that is not a known column label —
+    'outstanding', 'available', 'statement period' prose and so on. Kept
+    deliberately narrow so genuinely wrapped headers ('Running' / 'Balance',
+    ICICI's 3-line header) are never rejected.
+    """
+    for w in line.get('words', []):
+        t = (w.get('text') or '').strip().strip('.,:;')
+        if len(t) >= 6 and t[:1].islower() and t.lower() not in _HEADER_WORD_WHITELIST:
+            return True
+    return False
+
+
 def _find_header_band(lines: list[dict]) -> Optional[dict]:
     """Choose the transaction-table header. Tries each line and each pair of
     consecutive lines (wrapped headers like 'Running / Balance'); picks the band
@@ -272,6 +297,18 @@ def _find_header_band(lines: list[dict]) -> Optional[dict]:
             # line means it's a transaction row, not a wrapped header.
             if span >= 2 and any(_parse_date(w['text'])
                                  for ln in lines[i + 1:i + span] for w in ln['words']):
+                continue
+            # Never merge PROSE into the header. Statements print marketing text
+            # directly above the table ("...to know your outstanding balance.
+            # Details"), and a stray word like "balance." adds a `balance` tag,
+            # so the polluted band outscores the real header and every column
+            # below it is mis-tagged. Measured on a Yes Bank credit-card
+            # statement: 'Transaction Details' was tagged `balance`, so every
+            # narration was run through _parse_amount() and destroyed.
+            # Checks EVERY line in the band, including the first: the prose sits
+            # ABOVE the real header, so a band starting on the prose line would
+            # slip through a check that only looked at the trailing lines.
+            if span >= 2 and any(_is_prose_line(ln) for ln in lines[i:i + span]):
                 continue
             band_words = [w for ln in lines[i:i + span] for w in ln['words']]
             # header lines are short; a data line with 30 words isn't a header

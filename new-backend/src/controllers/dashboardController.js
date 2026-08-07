@@ -358,6 +358,7 @@ const TOOL_LABELS = {
   bank_reco: 'Bank Statement',
   universal_bank_statement: 'Universal Bank Statement',
   pdf_bank_extract: 'PDF → Bank Statement',
+  credit_card_booking: 'Credit Card Booking',
   amazon_mtr_consolidator: 'Amazon MTR Consolidator',
   einvoice_reco: 'E-Invoice Reco',
 };
