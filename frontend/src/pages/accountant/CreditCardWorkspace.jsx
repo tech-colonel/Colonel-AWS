@@ -263,7 +263,8 @@ export default function CreditCardWorkspace() {
             The T-account line states what this tool produces before you
             upload anything: every row it writes is one double entry, and the
             Credit side is already known. */}
-        <div className="flex items-start gap-4 mb-6">
+        <div className="flex items-start justify-between gap-4 mb-6">
+          <div className="flex items-start gap-4 min-w-0">
           <div className="w-12 h-12 rounded-2xl flex items-center justify-center flex-shrink-0"
             style={{ background: 'linear-gradient(135deg,#4338CA,#6366F1)' }}>
             <CreditCard className="w-6 h-6" style={{ color: '#FFFFFF' }} />
@@ -289,6 +290,18 @@ export default function CreditCardWorkspace() {
               </span>
             </div>
           </div>
+          </div>
+          {result && (
+            <button
+              onClick={handleReset}
+              className="px-4 py-2 rounded-lg text-sm font-bold flex items-center gap-1.5 flex-shrink-0"
+              style={{ background: '#FEF2F2', color: '#DC2626', border: '1px solid #FECACA' }}
+              data-testid="cc-reset-top"
+              title="Clear this run and free engine memory"
+            >
+              <RotateCcw className="w-3.5 h-3.5" /> Reset
+            </button>
+          )}
         </div>
 
         {/* ── Inputs: source on the left, settings on the right ─────── */}
