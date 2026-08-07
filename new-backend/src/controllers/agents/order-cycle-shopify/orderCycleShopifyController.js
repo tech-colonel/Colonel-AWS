@@ -423,7 +423,7 @@ const getReportData = async (req, res, next) => {
         // Aggregation accumulators
         let grossSales = 0, totalReturns = 0, netSales = 0;
         let cancelledCount = 0, rtoCount = 0, cancelledAmount = 0;
-        let reconciledCount = 0, pendingCount = 0, overpaidCount = 0, advanceCount = 0;
+        let reconciledCount = 0, pendingCount = 0, overpaidCount = 0, advanceCount = 0, neverTouchedCount = 0;
 
         const providers = {
             'Ekart COD':     { type: 'COD',     amount: 0, orders: 0, matched: 0, settledAmount: 0, settledOrders: 0, unsettledAmount: 0, unsettledOrders: 0, color: '#10b981' },
@@ -463,8 +463,18 @@ const getReportData = async (req, res, next) => {
             if (ds === 'CANCELLED') { cancelledCount++; cancelledAmount += ga; }
             if (ds === 'RTO')       rtoCount++;
 
+            // A PENDING RECEIVABLE row that was never returned AND never received a
+            // rupee from any courier/gateway hasn't actually been found to be a
+            // mismatch — it just hasn't been paid out yet. Counted separately as
+            // "never touched" (rolled into Unsettled below) instead of Pending,
+            // mirroring the same split in buildTransactionsWhere.
+            const neverTouched = ra <= 0 && toNum(row.total_settlement_received) <= 0;
+
             if (isReconciled)                             reconciledCount++;
-            else if (status === 'PENDING RECEIVABLE')     pendingCount++;
+            else if (status === 'PENDING RECEIVABLE') {
+                if (neverTouched) neverTouchedCount++;
+                else              pendingCount++;
+            }
             else if (status === 'OVERPAID / INVESTIGATE') overpaidCount++;
             else if (status === 'ADVANCE')                advanceCount++;
 
@@ -533,6 +543,9 @@ const getReportData = async (req, res, next) => {
                 advance: advanceCount,
                 rto: rtoCount,
                 cancelled: cancelledCount,
+                // Never returned AND never received any settlement (RTO/cancelled rows
+                // are already their own distinct statuses, counted separately above).
+                unsettled: rtoCount + cancelledCount + neverTouchedCount,
                 matchPct,
             },
             // Backward-compatible defaults (settled view)
@@ -570,11 +583,22 @@ const getReportData = async (req, res, next) => {
  *   - notreturn    → mismatched orders with no matching return record
  *   - advance      → sold (Tally GST) AND returned (Return GST) AND still has a courier/gateway
  *                     settlement against it — reconciliation_status === 'ADVANCE'
+ *
+ * A PENDING RECEIVABLE row that was never returned AND never received a rupee
+ * from any courier/gateway (NEVER_TOUCHED below) hasn't actually been found to
+ * be a mismatch yet — it just hasn't been paid out at all. Those belong under
+ * the Unsettled tab, not Mismatched — Mismatched is reserved for rows that DID
+ * get some money moving against them (a return and/or a settlement) but still
+ * don't balance.
  */
 function buildTransactionsWhere(decodedFilename, tab, sub, search) {
     const { Op } = require('sequelize');
     const SETTLED = ['RECONCILED', 'PENDING RECEIVABLE', 'OVERPAID / INVESTIGATE', 'ADVANCE'];
     const MISMATCHED = ['PENDING RECEIVABLE', 'OVERPAID / INVESTIGATE'];
+
+    const ZERO_RETURN = { [Op.or]: [{ return_amount: null }, { return_amount: { [Op.lte]: 0 } }] };
+    const ZERO_SETTLEMENT = { [Op.or]: [{ total_settlement_received: null }, { total_settlement_received: { [Op.lte]: 0 } }] };
+    const NEVER_TOUCHED = { [Op.and]: [ZERO_RETURN, ZERO_SETTLEMENT] };
 
     let where;
     if (tab === 'unsettled') {
@@ -585,6 +609,7 @@ function buildTransactionsWhere(decodedFilename, tab, sub, search) {
                     [Op.or]: [
                         { reconciliation_status: null },
                         { reconciliation_status: { [Op.notIn]: SETTLED } },
+                        { [Op.and]: [{ reconciliation_status: 'PENDING RECEIVABLE' }, NEVER_TOUCHED] },
                     ],
                 },
             ],
@@ -592,7 +617,10 @@ function buildTransactionsWhere(decodedFilename, tab, sub, search) {
     } else {
         where = { filename: decodedFilename };
         if (tab === 'matched')                     where.reconciliation_status = 'RECONCILED';
-        if (tab === 'mismatched' && sub === 'less') where.reconciliation_status = 'PENDING RECEIVABLE';
+        if (tab === 'mismatched' && sub === 'less') {
+            where.reconciliation_status = 'PENDING RECEIVABLE';
+            where[Op.and] = [{ [Op.not]: NEVER_TOUCHED }];
+        }
         if (tab === 'mismatched' && sub === 'more') where.reconciliation_status = 'OVERPAID / INVESTIGATE';
         if (tab === 'mismatched' && sub === 'return') {
             where.reconciliation_status = { [Op.in]: MISMATCHED };
@@ -600,12 +628,15 @@ function buildTransactionsWhere(decodedFilename, tab, sub, search) {
         }
         if (tab === 'mismatched' && sub === 'notreturn') {
             where.reconciliation_status = { [Op.in]: MISMATCHED };
-            where[Op.and] = [{
-                [Op.or]: [
-                    { return_amount: { [Op.lte]: 0 } },
-                    { return_amount: null },
-                ],
-            }];
+            where[Op.and] = [
+                {
+                    [Op.or]: [
+                        { return_amount: { [Op.lte]: 0 } },
+                        { return_amount: null },
+                    ],
+                },
+                { [Op.not]: NEVER_TOUCHED },
+            ];
         }
         if (tab === 'mismatched' && sub === 'advance') where.reconciliation_status = 'ADVANCE';
         // tab === 'all' | 'sales' → no status filter
@@ -791,14 +822,29 @@ const downloadTransactions = async (req, res, next) => {
         const where = buildTransactionsWhere(decodedFilename, 'all', null, search);
         const rows  = await Model.findAll({ where, raw: true, order: [['id', 'ASC']] });
 
+        // A PENDING RECEIVABLE row with no return AND no settlement at all hasn't
+        // been found to be a mismatch — it just hasn't been paid out yet. Mirrors
+        // the NEVER_TOUCHED split in buildTransactionsWhere so this export's sheets
+        // match the UI's Mismatched/Unsettled tabs.
+        const neverTouched = r => {
+            const ret = Number(r.return_amount || 0);
+            const settled = Number(r.total_settlement_received || 0);
+            return ret <= 0 && settled <= 0;
+        };
+
         const SETTLED = ['RECONCILED', 'PENDING RECEIVABLE', 'OVERPAID / INVESTIGATE', 'ADVANCE'];
         const matchedRows    = rows.filter(r => (r.reconciliation_status || '').toUpperCase().trim() === 'RECONCILED');
         const mismatchedRows = rows.filter(r => {
             const s = (r.reconciliation_status || '').toUpperCase().trim();
-            return s === 'PENDING RECEIVABLE' || s.startsWith('OVERPAID');
+            if (s === 'PENDING RECEIVABLE') return !neverTouched(r);
+            return s.startsWith('OVERPAID');
         });
         const advanceRows    = rows.filter(r => (r.reconciliation_status || '').toUpperCase().trim() === 'ADVANCE');
-        const unsettledRows  = rows.filter(r => !SETTLED.includes((r.reconciliation_status || '').toUpperCase().trim()));
+        const unsettledRows  = rows.filter(r => {
+            const s = (r.reconciliation_status || '').toUpperCase().trim();
+            if (!SETTLED.includes(s)) return true;
+            return s === 'PENDING RECEIVABLE' && neverTouched(r);
+        });
 
         const workbook = new ExcelJS.Workbook();
         addSheet(workbook, 'Matched',       '10B981', NORMAL_COLUMNS, matchedRows,    normalRowValues);
