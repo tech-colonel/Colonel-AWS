@@ -66,7 +66,14 @@ export default function CreditCardWorkspace() {
     api.get(`/api/credit-card/${brandId}/ledgers`)
       .then((r) => {
         setLedgers(r.data?.ledgers || []);
-        setCoa({ count: r.data?.count ?? 0, updatedAt: r.data?.updatedAt || null });
+        // Only claim a COA count when the response actually carried one. A
+        // failed call (an unmounted route returns the SPA's HTML, not JSON)
+        // otherwise fell through to `?? 0` and rendered "No chart of accounts
+        // for this brand" — a confident, wrong statement about the brand's data
+        // when the truth was that we never reached the server.
+        setCoa(typeof r.data?.count === 'number'
+          ? { count: r.data.count, updatedAt: r.data.updatedAt || null, error: false }
+          : { count: null, updatedAt: null, error: true });
         const cards = r.data?.cardLedgers || [];
         // Prefer the plain card ledger; the "… Purchase" variant is a different
         // account and must never be picked by accident.
@@ -75,7 +82,7 @@ export default function CreditCardWorkspace() {
           || cards[0];
         if (preferred) setCardLedger(preferred);
       })
-      .catch(() => {});
+      .catch(() => setCoa({ count: null, updatedAt: null, error: true }));
   }, [brandId]);
 
   const sidebarItems = sidebarFor([
@@ -418,6 +425,13 @@ export default function CreditCardWorkspace() {
             </datalist>
 
             {/* COA freshness — this agent reads ledger_master, never writes it. */}
+            {coa.error && (
+              <div className="mt-4 px-3 py-2 rounded-lg text-xs"
+                style={{ background: '#FEF2F2', border: '1px solid #FECACA', color: '#991B1B' }}>
+                Could not load this brand&apos;s chart of accounts. The booking will still run, but
+                ledgers cannot be checked — reload, or check that the backend is running.
+              </div>
+            )}
             {coa.count != null && (
               <div className="mt-4 px-3 py-2 rounded-lg text-xs"
                 style={{ background: coa.count > 0 ? '#F8FAFC' : '#FFFBEB',
