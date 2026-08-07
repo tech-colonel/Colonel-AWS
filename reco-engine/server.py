@@ -405,8 +405,22 @@ class ReconciliationHandler(BaseHTTPRequestHandler):
                     return
                 
                 payload = process_bank_statement(bank_file["content"])
+                # Pre-build workbook so Download is instant AND survives an engine
+                # restart (_JobStore persists _xlsx_bytes to disk). Best-effort:
+                # on failure export_job rebuilds on demand — zero regression.
+                try:
+                    from io import BytesIO as _BytesIO
+                    _wb = build_workbook(
+                        payload["results"], payload["summary"], payload["counts"],
+                        reco_type,
+                    )
+                    _buf = _BytesIO(); _wb.save(_buf)
+                    payload["_xlsx_bytes"] = _buf.getvalue()
+                except Exception as _e:
+                    _log.getLogger(__name__).error("Pre-build bank_reco workbook failed: %s", _e)
+                    payload["_xlsx_bytes"] = None
                 JOBS[payload["job_id"]] = payload
-                self.write_json(payload)
+                self.write_json({k: v for k, v in payload.items() if k != "_xlsx_bytes"})
                 return
 
             # GSTR-2B vs Books (Purchase Register + Debit Note Register)
@@ -660,6 +674,20 @@ class ReconciliationHandler(BaseHTTPRequestHandler):
                     "_monthly_data":   monthly_data,
                     "_state_summary":  state_summary,
                 }
+                # Pre-build workbook so Download is instant AND survives an engine
+                # restart (_JobStore persists _xlsx_bytes to disk). Best-effort:
+                # on failure export_job rebuilds on demand — zero regression.
+                try:
+                    from io import BytesIO as _BytesIO
+                    _wb = build_workbook(
+                        payload["results"], payload["summary"], payload["counts"],
+                        reco_type, payload=payload,   # gstr_3b_tally reads _monthly_data/_state_summary from payload
+                    )
+                    _buf = _BytesIO(); _wb.save(_buf)
+                    payload["_xlsx_bytes"] = _buf.getvalue()
+                except Exception as _e:
+                    _log.getLogger(__name__).error("Pre-build gstr_3b_tally_entry workbook failed: %s", _e)
+                    payload["_xlsx_bytes"] = None
                 JOBS[job_id] = payload
                 self.write_json({k: v for k, v in payload.items() if not k.startswith("_")})
                 return

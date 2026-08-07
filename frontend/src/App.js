@@ -41,6 +41,8 @@ import PdfBankExtractorWorkspace from './pages/accountant/PdfBankExtractorWorksp
 import CreditCardWorkspace from './pages/accountant/CreditCardWorkspace';
 import RecoJobDashboard      from './pages/accountant/RecoJobDashboard';
 import ReceivableDashboard   from './pages/accountant/ReceivableDashboard';
+import AmazonReceivablesDashboard  from './pages/accountant/AmazonReceivablesDashboard';
+import ShopifyReceivablesDashboard from './pages/accountant/ShopifyReceivablesDashboard';
 import ComplianceTracker     from './pages/accountant/ComplianceTracker';
 import StatutoryTracker      from './pages/accountant/StatutoryTracker';
 import StatutoryRedirect     from './pages/accountant/StatutoryRedirect';
@@ -308,6 +310,23 @@ function App() {
             element={
               <ProtectedRoute allowedRoles={['accountant', 'admin']}>
                 <ReceivableDashboard />
+              </ProtectedRoute>
+            }
+          />
+          {/* ── Marketplace Receivables — FAKE demo pages (no backend) ────── */}
+          <Route
+            path="/brands/:brandId/amazon-receivables"
+            element={
+              <ProtectedRoute allowedRoles={['accountant', 'admin']}>
+                <AmazonReceivablesDashboard />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/brands/:brandId/shopify-receivables"
+            element={
+              <ProtectedRoute allowedRoles={['accountant', 'admin']}>
+                <ShopifyReceivablesDashboard />
               </ProtectedRoute>
             }
           />

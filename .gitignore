@@ -69,3 +69,4 @@ new-backend/seed-accountants.js
 db-backups/
 n8n-backups/
 scratchpad-backups/
+reco-engine/exports/

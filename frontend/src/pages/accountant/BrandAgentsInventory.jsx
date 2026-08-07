@@ -74,16 +74,41 @@ const RECO_AGENT_META = {
     fields: ['Bank Statement PDF'],
   },
   receivable_cycle: {
-    displayName: 'Receivable Cycle', icon: '📦', category: 'Other',
-    color: '#7C3AED', bg: '#F5F3FF', border: '#C4B5FD', accuracy: null,
+    displayName: 'Receivable Cycle', icon: '🔄', category: 'Receivables',
+    color: '#0748EE', bg: '#E8EFFE', border: '#A3BFF8', accuracy: null,
     fields: ['Tally GST Report', 'Sales Order Combine', 'Courier COD Settlement', 'SRN Report'],
+  },
+  zepto_receivables: {
+    displayName: 'Zepto Receivables', icon: '⚡', category: 'Receivables',
+    color: '#6C2BD9', bg: '#F5F3FF', border: '#C4B5FD', accuracy: null,
+    fields: ['Google Drive Folder (Tally + Zepto)'], logoSrc: channelLogoSrc('zepto'),
   },
   bank_tally_reco: {
     displayName: 'Bank Reco', icon: '🏦', category: 'Bank & Finance',
     color: '#0748EE', bg: '#EFF4FF', border: '#A3BFF8', accuracy: null,
     fields: ['Tally Daybook', 'Universal Bank Output'],
   },
+  // Fake demo cards (no backend) — matched by their synthetic agent `name`.
+  'Amazon Receivables': {
+    displayName: 'Amazon Receivables', icon: '📦', category: 'Receivables',
+    color: '#B45309', bg: '#FFF7ED', border: '#FED7AA', accuracy: null,
+    fields: ['Amazon Settlement Report', 'Books'], logoSrc: channelLogoSrc('amazon'),
+  },
+  'Shopify Receivables': {
+    displayName: 'Shopify Receivables', icon: '🛍️', category: 'Receivables',
+    color: '#5E8E3E', bg: '#F0FDF4', border: '#BBF7D0', accuracy: null,
+    fields: ['Shopify Payouts Export', 'Books'], logoSrc: channelLogoSrc('shopify'),
+  },
 };
+
+// Fake demo agents injected into the Receivables section (no backend, no DB).
+// Each has a _fakeRoute → a client-only dashboard page.
+const FAKE_RECEIVABLES = [
+  { id: '__amazon_receivables', name: 'Amazon Receivables', _fakeRoute: 'amazon-receivables',
+    description: 'Track Amazon settlements against Books — chase overdue receivables and raise seller-support tickets for missing Order / Shipment / Settlement IDs.' },
+  { id: '__shopify_receivables', name: 'Shopify Receivables', _fakeRoute: 'shopify-receivables',
+    description: 'Reconcile Shopify payouts against Books — surface overdue receivables and raise tickets for missing Order / Fulfillment / Payout IDs.' },
+];
 
 // Category sections, in display order (mirrors the admin Agents page).
 const SECTIONS = [
@@ -91,6 +116,7 @@ const SECTIONS = [
   { key: 'bank',        label: 'Bank & Finance',     accent: '#059669' },
   { key: 'invoice',     label: 'Invoice',            accent: '#7C3AED' },
   { key: 'marketplace', label: 'Marketplace MIS',    accent: '#D97706' },
+  { key: 'receivables', label: 'Receivables',        accent: '#8B5CF6' },
   { key: 'other',       label: 'Other',              accent: '#64748B' },
 ];
 
@@ -100,6 +126,7 @@ const SECTION_STYLE = {
   bank:        { category: 'Bank & Finance',     color: '#059669', bg: '#ECFDF5', border: '#A7F3D0' },
   invoice:     { category: 'Invoice',            color: '#7C3AED', bg: '#F5F3FF', border: '#C4B5FD' },
   marketplace: { category: 'Marketplace MIS',    color: '#D97706', bg: '#FFFBEB', border: '#FDE68A' },
+  receivables: { category: 'Receivables',        color: '#8B5CF6', bg: '#F5F3FF', border: '#C4B5FD' },
   other:       { category: 'Other',              color: '#64748B', bg: '#F1F5F9', border: '#CBD5E1' },
 };
 
@@ -143,6 +170,7 @@ const channelBrand = (name) => {
 // Decide a section for any agent: rich meta wins, else infer from the name.
 const sectionOf = (agent) => {
   const n = (agent.name || '').toLowerCase();
+  if (/receivabl/.test(n)) return 'receivables';   // zepto_receivables, receivable_cycle, *_receivables
   if (RECO_AGENT_META[agent.name]) {
     if (n === 'universal_bank_statement' || n === 'pdf_bank_extract' || n === 'bank_tally_reco'
         || n === 'credit_card_booking') return 'bank';
@@ -321,9 +349,14 @@ const BrandAgentsInventory = () => {
     ? allAgents.filter(agent => (RECO_ID_TO_TYPE[agent.id] || isSalesMarketplace(agent) || isInvoice(agent)) && !HIDDEN_WHEN_RECO_ONLY.has(agent.id))
     : allAgents;
 
-  // Group visible agents into category sections (drop empty sections).
+  // Group visible agents into category sections; inject the fake receivables
+  // demo cards into the Receivables section, then drop empty sections.
   const bySection = SECTIONS
-    .map(s => ({ ...s, items: visibleAgents.filter(a => sectionOf(a) === s.key) }))
+    .map(s => {
+      let items = visibleAgents.filter(a => sectionOf(a) === s.key);
+      if (s.key === 'receivables') items = [...items, ...FAKE_RECEIVABLES];
+      return { ...s, items };
+    })
     .filter(s => s.items.length > 0);
 
   // Only surface workflows whose parent agent is actually assigned to this brand —
@@ -374,8 +407,10 @@ const BrandAgentsInventory = () => {
                   <AgentCard
                     key={agent.id}
                     agent={agent}
-                    assigned={isAssigned(agent.id)}
-                    onClick={() => handleAgentClick(agent)}
+                    assigned={agent._fakeRoute ? true : isAssigned(agent.id)}
+                    onClick={() => agent._fakeRoute
+                      ? navigate(`/brands/${brandId}/${agent._fakeRoute}`)
+                      : handleAgentClick(agent)}
                   />
                 ))}
               </div>

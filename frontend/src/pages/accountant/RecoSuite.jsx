@@ -56,11 +56,35 @@ const RECO_AGENTS = [
     route: 'credit-card',
   },
   {
-    id: 'zepto_receivables', category: 'Bank & Finance',
-    name: 'Zepto Receivables', icon: '💳',
-    color: '#6366F1', bg: '#EEF2FF', border: '#C7D2FE',
+    id: 'zepto_receivables', category: 'Receivables',
+    name: 'Zepto Receivables', icon: '⚡',
+    color: '#6C2BD9', bg: '#F5F3FF', border: '#C4B5FD',
     description: 'Paste a Google Drive folder of Zepto/Tally files — reconcile receivables, download the Invoice Tracker.',
     fields: ['Google Drive Folder URL'], accuracy: '—',
+  },
+  {
+    id: 'amazon_receivables', category: 'Receivables',
+    name: 'Amazon Receivables', icon: '📦',
+    color: '#FF9900', bg: '#FFF7ED', border: '#FED7AA',
+    description: 'Track Amazon settlements against Books — chase overdue receivables and raise seller-support tickets for missing Order / Shipment / Settlement IDs.',
+    fields: ['Amazon Settlement Report', 'Books'], accuracy: '—',
+    route: 'amazon-receivables',
+  },
+  {
+    id: 'shopify_receivables', category: 'Receivables',
+    name: 'Shopify Receivables', icon: '🛍️',
+    color: '#5E8E3E', bg: '#F0FDF4', border: '#BBF7D0',
+    description: 'Reconcile Shopify payouts against Books — surface overdue receivables and raise tickets for missing Order / Fulfillment / Payout IDs.',
+    fields: ['Shopify Payouts Export', 'Books'], accuracy: '—',
+    route: 'shopify-receivables',
+  },
+  {
+    id: 'receivable_cycle', category: 'Receivables',
+    name: 'Receivable Cycle', icon: '🔄',
+    color: '#0748EE', bg: '#E8EFFE', border: '#A3BFF8',
+    description: 'End-to-end order-to-cash: reconcile Tally GST, sales orders and COD settlements (Delhivery / Ekart / Xpressbees) to track the full receivable cycle.',
+    fields: ['Tally GST', 'Sales Order', 'COD Settlements'], accuracy: '—',
+    route: 'receivables',
   },
 ];
 
@@ -111,7 +135,7 @@ const AgentCard = ({ agent, brandId, navigate, idx }) => {
       <div className="flex items-center justify-between">
         <span className="text-xs font-semibold px-2 py-0.5 rounded-full"
           style={{ background: agent.bg, color: agent.color, border: `1px solid ${agent.border}` }}>
-          {agent.category === 'Bank & Finance' ? 'Bank' : 'GSTR'}
+          {({ 'Bank & Finance': 'Bank', 'Receivables': 'Receivables', 'Journal Entry': 'Journal' }[agent.category]) || 'GSTR'}
         </span>
         <div className="flex items-center gap-1 text-xs font-semibold transition-all group-hover:gap-1.5"
           style={{ color: agent.color }}>
@@ -133,9 +157,10 @@ const RecoSuite = () => {
     { path: `/brands/${brandId}/reco`, label: 'Reconciliation', icon: ClipboardList, testId: 'nav-reco' },
   ];
 
-  const gstAgents     = RECO_AGENTS.filter(a => a.category === 'GST Reconciliation');
-  const journalAgents = RECO_AGENTS.filter(a => a.category === 'Journal Entry');
-  const bankAgents    = RECO_AGENTS.filter(a => a.category === 'Bank & Finance');
+  const gstAgents         = RECO_AGENTS.filter(a => a.category === 'GST Reconciliation');
+  const journalAgents     = RECO_AGENTS.filter(a => a.category === 'Journal Entry');
+  const bankAgents        = RECO_AGENTS.filter(a => a.category === 'Bank & Finance');
+  const receivablesAgents = RECO_AGENTS.filter(a => a.category === 'Receivables');
 
   return (
     <DashboardLayout sidebarItems={sidebarItems}>
@@ -170,7 +195,7 @@ const RecoSuite = () => {
         <div className="grid grid-cols-3 gap-4 mb-8">
           {[
             { label: 'Total Runs', value: '1,000+', icon: Activity, color: '#0748EE', bg: '#E8EFFE', border: '#C7D8FC' },
-            { label: 'Agents', value: '4', icon: Zap, color: '#D97706', bg: '#FFFBEB', border: '#FDE68A' },
+            { label: 'Agents', value: String(RECO_AGENTS.length), icon: Zap, color: '#D97706', bg: '#FFFBEB', border: '#FDE68A' },
             { label: 'Avg Accuracy', value: '99.7%', icon: Shield, color: '#059669', bg: '#ECFDF5', border: '#A7F3D0' },
           ].map(stat => (
             <div key={stat.label} className="stat-card">
@@ -223,18 +248,35 @@ const RecoSuite = () => {
         </div>
 
         {/* Bank & Finance */}
-        <div>
+        <div className="mb-8">
           <div className="flex items-center gap-3 mb-4">
             <div className="flex items-center gap-2">
               <div className="w-1 h-5 rounded-full bg-rose-500" />
               <h2 className="text-sm font-bold" style={{ color: '#0F172A', fontFamily: 'Barlow' }}>Bank &amp; Finance</h2>
             </div>
             <div className="flex-1 h-px" style={{ background: '#E2E8F0' }} />
-            <span className="text-xs" style={{ color: '#94A3B8' }}>{bankAgents.length} agent</span>
+            <span className="text-xs" style={{ color: '#94A3B8' }}>{bankAgents.length} agents</span>
           </div>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             {bankAgents.map((agent, idx) => (
               <AgentCard key={agent.id} agent={agent} brandId={brandId} navigate={navigate} idx={gstAgents.length + journalAgents.length + idx} />
+            ))}
+          </div>
+        </div>
+
+        {/* Receivables */}
+        <div>
+          <div className="flex items-center gap-3 mb-4">
+            <div className="flex items-center gap-2">
+              <div className="w-1 h-5 rounded-full bg-violet-500" />
+              <h2 className="text-sm font-bold" style={{ color: '#0F172A', fontFamily: 'Barlow' }}>Receivables</h2>
+            </div>
+            <div className="flex-1 h-px" style={{ background: '#E2E8F0' }} />
+            <span className="text-xs" style={{ color: '#94A3B8' }}>{receivablesAgents.length} agents</span>
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            {receivablesAgents.map((agent, idx) => (
+              <AgentCard key={agent.id} agent={agent} brandId={brandId} navigate={navigate} idx={gstAgents.length + journalAgents.length + bankAgents.length + idx} />
             ))}
           </div>
         </div>
