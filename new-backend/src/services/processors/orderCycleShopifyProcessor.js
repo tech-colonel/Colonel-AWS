@@ -363,10 +363,13 @@ function buildSnapmintLookup(rows) {
             getCol(row, 'Shopify Order No._2', 'Shopify Order No.', 'Sale Order Number', 'Order No.')
         );
         if (!orderNo) continue;
+        // "Order value" is the correct settled amount for Snapmint — Settlement
+        // Value/Amount doesn't reliably reflect what was actually paid out.
+        const orderValue = safeNum(getCol(row, 'Order value'));
         (byOrder[orderNo] ||= []).push({
-            order_value: safeNum(getCol(row, 'Order value')),
+            order_value: orderValue,
             settlement_date: safeDate(getCol(row, 'Merchant Settlement Date', 'Settlement Date', 'settled_at')),
-            settlement_amount: safeNum(getCol(row, 'Settlement Value', 'Amount')),
+            settlement_amount: orderValue,
         });
     }
     return byOrder;
@@ -374,8 +377,11 @@ function buildSnapmintLookup(rows) {
 
 function buildBharatXLookup(rows) {
     // A single BharatX loan spans several ledger rows (TRANSACTION, TRANSACTION_MDR,
-    // TRANSACTION_REFUND, ...) sharing one Merchant Transaction Id — group those first
-    // so each transaction becomes one candidate, not one candidate per ledger line.
+    // TRANSACTION_REFUND, ...) sharing one Merchant Transaction Id and the same
+    // "Transaction Amount" — group those first so each transaction becomes one
+    // candidate, not one candidate per ledger line. "Transaction Amount" is the
+    // correct settled amount; it's read once per transaction (not summed across
+    // its ledger rows).
     const byTxn = {};
     for (const row of rows) {
         // "Order id by Vlook" = numeric Shopify order number; "Merchant Transaction Id" = receipt hash
@@ -384,17 +390,15 @@ function buildBharatXLookup(rows) {
         const txnId = safeStr(getCol(row, 'Merchant Transaction Id'));
         const key = `${orderNo}|${txnId}`;
         if (!byTxn[key]) {
+            const transactionAmount = safeNum(getCol(row, 'Transaction Amount'));
             byTxn[key] = {
                 order_no: orderNo,
-                order_value: safeNum(getCol(row, 'Transaction Amount')),
+                order_value: transactionAmount,
                 // Settlement Timestamp = payout date; Ledger Timestamp = transaction date (earlier)
                 settlement_date: safeDate(getCol(row, 'Settlement Timestamp', 'Ledger Timestamp')),
-                settlement_amount: 0,
+                settlement_amount: transactionAmount,
             };
         }
-        // Ledger Amount: positive for TRANSACTION rows, negative for TRANSACTION_MDR (fee deductions)
-        // Summing all lines of the SAME transaction gives its net settlement received
-        byTxn[key].settlement_amount += safeNum(getCol(row, 'Ledger Amount'));
     }
     const byOrder = {};
     for (const t of Object.values(byTxn)) {
@@ -639,6 +643,100 @@ async function orderCycleShopifyProcessor(
         row.net_amount = row.sales_amount - row.return_amount;
     }
 
+    // ── STEP 2b: Split-invoice return re-attribution ─────────────────────────
+    // A return note can cover TWO units that were actually invoiced as two
+    // SEPARATE qty-1 invoices/AWBs (dispatched seconds apart — verified across
+    // every case in this data) while naming only ONE of those invoices as its
+    // "Original Invoice No" — its own Total spans both units, not just that
+    // invoice's own share. Left as-is, Step 2 dumps the entire return onto that
+    // one invoice (false OVERPAID/INVESTIGATE) while its twin gets zero return
+    // credit (false PENDING RECEIVABLE), even though the twin's own sale amount
+    // exactly reconstructs the "excess" (return minus the holder's own share).
+    //
+    // Sale Order Number recycles across unrelated transactions over time (see
+    // buildSnapmintLookup/buildBharatXLookup comments above) — verified case:
+    // order 229728 carries 7 invoices across 3 different dispatch dates, only
+    // one of which is the genuine twin. So this doesn't trust the whole order
+    // group; it looks for the SPECIFIC sibling invoice(s) under that order
+    // number whose own sale amount corresponds to the excess (the same
+    // amount-correspondence check already used for gateway settlements,
+    // amountsCorrespond).
+    //
+    // Amount alone can still tie: a recycled order number can carry a LATER
+    // unrelated invoice that happens to land within the 2% band too (verified
+    // cases: order 226260, 235176, 241498, 248126, 250702, 253042 each had 2-3
+    // amount-matching candidates). Dispatch timing breaks the tie safely — every
+    // verified genuine twin was dispatched within ~16 hours of its holder, while
+    // every false amount-match sat 27+ days away, an enormous, clean separation.
+    // A cutoff of 48 hours (with margin) picks the genuine twin only when it's
+    // truly the sole close-in-time candidate; anything left ambiguous even after
+    // that is genuinely unresolvable and flagged instead of guessed at — same
+    // caution assignGatewayCandidates uses for its own ambiguous case.
+    const TWIN_TIME_WINDOW_MS = 48 * 3600 * 1000;
+    const returnRedistributions = [];
+    const returnSplitIssues = [];
+    const masterByOrderForReturn = {};
+    for (const row of masterRows) {
+        if (row.sale_order_number) (masterByOrderForReturn[row.sale_order_number] ||= []).push(row);
+    }
+    for (const rowsForOrder of Object.values(masterByOrderForReturn)) {
+        if (rowsForOrder.length < 2) continue;
+
+        for (const holder of rowsForOrder) {
+            if (holder.return_amount <= 0) continue;
+            if (amountsCorrespond(holder.return_amount, holder.sales_amount)) continue; // already correct
+
+            const excess = holder.return_amount - holder.sales_amount;
+            if (excess <= 0) continue; // return is less than its own sale — ordinary partial return, leave alone
+
+            let candidates = rowsForOrder.filter(r =>
+                r !== holder && r.return_amount <= 0 && amountsCorrespond(r.sales_amount, excess)
+            );
+            let tieBroken = false;
+
+            if (candidates.length > 1 && holder.dispatch_date) {
+                const withinWindow = candidates
+                    .filter(c => c.dispatch_date)
+                    .map(c => ({ row: c, gapMs: Math.abs(c.dispatch_date.getTime() - holder.dispatch_date.getTime()) }))
+                    .filter(c => c.gapMs <= TWIN_TIME_WINDOW_MS)
+                    .sort((a, b) => a.gapMs - b.gapMs);
+                if (withinWindow.length === 1) {
+                    candidates = [withinWindow[0].row];
+                    tieBroken = true;
+                }
+            }
+
+            if (candidates.length === 1) {
+                const sibling = candidates[0];
+                const total = holder.sales_amount + sibling.sales_amount;
+                const totalReturn = holder.return_amount;
+                const holderShare = total > 0 ? totalReturn * (holder.sales_amount / total) : totalReturn / 2;
+                const siblingShare = total > 0 ? totalReturn * (sibling.sales_amount / total) : totalReturn / 2;
+
+                sibling.return_amount = siblingShare;
+                sibling.return_date = holder.return_date;
+                sibling.srn = holder.srn;
+                sibling.net_amount = sibling.sales_amount - sibling.return_amount;
+
+                holder.return_amount = holderShare;
+                holder.net_amount = holder.sales_amount - holder.return_amount;
+
+                returnRedistributions.push({
+                    orderNo: holder.sale_order_number, srn: holder.srn,
+                    holderInvoice: holder.invoice_number, siblingInvoice: sibling.invoice_number, totalReturn,
+                    viaTimeProximity: tieBroken,
+                });
+            } else if (candidates.length > 1) {
+                returnSplitIssues.push({
+                    orderNo: holder.sale_order_number, invoice: holder.invoice_number,
+                    reason: 'ambiguous', candidateCount: candidates.length,
+                });
+            }
+            // candidates.length === 0 → no matching twin found; leave as-is (still
+            // surfaced by the existing Overpaid Order exception below).
+        }
+    }
+
     // Return entries that never matched any invoice/AWB in the GST report would
     // otherwise be silently dropped — flag them instead.
     const sumCandidates = (list) => ({
@@ -820,6 +918,24 @@ async function orderCycleShopifyProcessor(
         detail: `SRN ${u.srn || '(none)'}, amount ${u.amount.toFixed(2)} — no matching invoice/AWB found in GST report`
     }));
     validations.push({ check: 'Unmatched Return Entries', value: unmatchedReturns.length, status: unmatchedReturns.length === 0 ? 'PASS' : 'FAIL' });
+
+    // V3c: Split-invoice returns re-attributed to their genuine twin (Step 2b)
+    returnRedistributions.forEach(r => exceptions.push({
+        type: 'Split-Invoice Return Redistributed',
+        reference: r.orderNo,
+        detail: `SRN ${r.srn || '(none)'}, return ${r.totalReturn.toFixed(2)} originally tagged to invoice ${r.holderInvoice} — split with twin invoice ${r.siblingInvoice} under the same order`
+            + (r.viaTimeProximity ? ' (disambiguated by dispatch-time proximity — multiple invoices matched the return amount)' : '')
+    }));
+    validations.push({ check: 'Split-Invoice Return Redistributions', value: returnRedistributions.length, status: 'INFO' });
+
+    // V3d: Split-invoice return whose excess matched more than one sibling —
+    // not auto-attributed, needs manual review.
+    returnSplitIssues.forEach(i => exceptions.push({
+        type: 'Ambiguous Split-Invoice Return',
+        reference: i.orderNo,
+        detail: `Invoice ${i.invoice}: return excess matches ${i.candidateCount} sibling invoices under order ${i.orderNo} — not auto-attributed`
+    }));
+    validations.push({ check: 'Ambiguous Split-Invoice Returns', value: returnSplitIssues.length, status: returnSplitIssues.length === 0 ? 'PASS' : 'FAIL' });
 
     // V3c: Return candidate that shared this invoice's Original Invoice No / AWB key
     // but whose own AWB or Channel contradicted it — excluded from the invoice's
