@@ -309,9 +309,12 @@ function TransactionSheet({ brandId, agentId, filename, reconciliation }) {
 
     const toNum = v => { const n = Number(v); return isNaN(n) ? 0 : n; };
 
-    // Tab counts from parent reconciliation (already loaded, no extra fetch)
+    // Tab counts from parent reconciliation (already loaded, no extra fetch).
+    // rc.unsettled is the backend's own count of rows never returned AND never
+    // settled by any courier/gateway (plus RTO/cancelled) — same definition the
+    // /transactions?tab=unsettled query itself uses, so these stay in lockstep.
     const rc = reconciliation || {};
-    const unsettledCount = Math.max(0, (rc.total || 0) - (rc.reconciled || 0) - (rc.pending || 0) - (rc.overpaid || 0) - (rc.advance || 0));
+    const unsettledCount = rc.unsettled || 0;
     const tabs = [
         { key: 'matched',    label: 'Matched',     count: rc.reconciled },
         { key: 'mismatched', label: 'Mismatched',  count: (rc.pending || 0) + (rc.overpaid || 0) + (rc.advance || 0) },
@@ -408,6 +411,17 @@ function TransactionSheet({ brandId, agentId, filename, reconciliation }) {
                     </button>
                 </div>
             </div>
+
+            {/* Unsettled callout */}
+            {unsettledCount > 0 && (
+                <div className="mx-5 mt-3 mb-1 flex items-center gap-2 px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg">
+                    <AlertCircle className="h-4 w-4 text-slate-400 shrink-0" />
+                    <p className="text-xs text-slate-600">
+                        <span className="font-bold text-slate-800">{unsettledCount.toLocaleString()} orders</span> are Unsettled —
+                        never returned and never received any settlement from a courier or payment gateway.
+                    </p>
+                </div>
+            )}
 
             {/* Tabs */}
             <div className="flex gap-0 border-b border-slate-100">
@@ -705,6 +719,10 @@ function ReconciliationView({ file, brandId, agentId, onBack, onDownload }) {
                                 <div>
                                     <p className="text-[10px] text-slate-400">Cancelled</p>
                                     <p className="text-sm font-bold text-slate-500">{reconciliation.cancelled.toLocaleString()}</p>
+                                </div>
+                                <div>
+                                    <p className="text-[10px] text-slate-400">Unsettled</p>
+                                    <p className="text-sm font-bold text-slate-600">{(reconciliation.unsettled || 0).toLocaleString()}</p>
                                 </div>
                             </div>
                         </div>
