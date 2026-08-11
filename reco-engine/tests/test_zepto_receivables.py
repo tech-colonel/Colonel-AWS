@@ -643,7 +643,7 @@ def _find_summary_amount(ws, label: str):
 def test_build_zepto_workbook_has_summary_tab():
     from recon.zepto_receivables import build_zepto_workbook
 
-    def _row(inv, total, cn, dn, tds, incl, net):
+    def _row(inv, total, cn, dn, tds, incl, net, due_status="Not Paid"):
         r = {k: "" for k in __import__("recon.zepto_receivables", fromlist=["COLUMN_KEYS"]).COLUMN_KEYS}
         r.update({
             "invoice_number": inv,
@@ -654,13 +654,15 @@ def test_build_zepto_workbook_has_summary_tab():
             "payment_received_incl_tds": incl,
             "net_outstanding": net,
             "status": "Not Paid",
+            "due_status": due_status,
         })
         return r
 
     results = [
-        _row("INV1", 56685.0, 100.0, 50.0, 10.0, 40000.0, 16735.0),
-        _row("INV2", 21369.43, 0.0, 0.0, 5.0, 21369.43, 0.0),
-        _row("INV3", 1000.0, 25.0, 0.0, 0.0, 975.0, 0.0),
+        _row("INV1", 56685.0, 100.0, 50.0, 10.0, 40000.0, 16735.0, "Overdue"),
+        _row("INV2", 21369.43, 0.0, 0.0, 5.0, 21369.43, 5000.0, "Not Due"),
+        _row("INV3", 1000.0, 25.0, 0.0, 0.0, 975.0, 300.0, "Due"),
+        _row("INV4", 2000.0, 0.0, 0.0, 0.0, 1000.0, 700.0, "Not Due"),
     ]
     wb = build_zepto_workbook(results)
 
@@ -676,6 +678,16 @@ def test_build_zepto_workbook_has_summary_tab():
     # Amount Received in Bank is auto = total of the Payment Advice Consolidate
     # tab; with no payment-advice PDFs the consolidate is empty -> 0.
     assert _find_summary_amount(ws, "Amount Received in Bank") == 0
+
+    # Ageing of Net Receivables: Net Outstanding bucketed by Due Status.
+    assert _find_summary_amount(ws, "Not Due") == round(5000.0 + 700.0, 2)   # INV2 + INV4
+    assert _find_summary_amount(ws, "Due") == 300.0                          # INV3
+    assert _find_summary_amount(ws, "Overdue") == 16735.0                    # INV1
+    # The breakdown sits right after Net Receivables, under its own sub-header.
+    labels = [c.value for c in ws["A"] if c.value]
+    i = labels.index("Net Receivables")
+    assert labels[i+1] == "Ageing of Net Receivables (by Due Status)"
+    assert labels[i+2:i+5] == ["Not Due", "Due", "Overdue"]
     print("test_build_zepto_workbook_has_summary_tab OK")
 
 
@@ -725,31 +737,48 @@ def test_po_matches_despite_trailing_slash_and_ignores_grn_gate():
 
 
 def test_due_date_and_status():
-    # #00001: Due Date = invoice date + 30 calendar days.
+    # #00001: Due Date = GRN Date + 30 calendar days (payment clock runs from
+    #         delivery/GRN, NOT the invoice date).
     # #00002: Not Due (future) / Due (today) / Overdue (past), UNPAID rows only;
     #         Paid rows -> blank Due status (but Due Date still computed).
+    #         No GRN Date (GRN missing) -> Due Date and Due Status BOTH blank.
     import datetime
     invd = _xlsx({"Invoice Details": [
         ["t"],
         ["invoice_number","reference_number","customer_name","date","bcy_total","tax_amount",
          "amount_without_tax","place_of_supply","gst_no","billing_state","shipping_state"],
-        ["INV-A","SO1","ZEPTO A","2026-07-01",50000,0,50000,"MH","27AAICK4821A1Z5","MH","MH"],  # due 07-31 -> Not Due
-        ["INV-B","SO2","ZEPTO B","2026-06-15",40000,0,40000,"MH","27AAICK4821A1Z5","MH","MH"],  # due 07-15 -> Due (today)
-        ["INV-C","SO3","ZEPTO C","2026-04-14",30000,0,30000,"MH","27AAICK4821A1Z5","MH","MH"],  # due 05-14 -> Overdue
-        ["INV-D","SO4","ZEPTO D","2026-04-14",5,0,5,"MH","27AAICK4821A1Z5","MH","MH"],          # net 5 <=10 -> Paid -> blank
+        ["INV-A","SO1","ZEPTO A","2026-04-01",50000,0,50000,"MH","27AAICK4821A1Z5","MH","MH"],  # GRN 07-01 -> due 07-31 -> Not Due
+        ["INV-B","SO2","ZEPTO B","2026-04-01",40000,0,40000,"MH","27AAICK4821A1Z5","MH","MH"],  # GRN 06-15 -> due 07-15 -> Due (today)
+        ["INV-C","SO3","ZEPTO C","2026-04-01",30000,0,30000,"MH","27AAICK4821A1Z5","MH","MH"],  # GRN 05-14 -> due 06-13 -> Overdue
+        ["INV-D","SO4","ZEPTO D","2026-04-01",5,0,5,"MH","27AAICK4821A1Z5","MH","MH"],          # net 5 <=10 -> Paid -> blank status
+        ["INV-E","SO5","ZEPTO E","2026-04-01",20000,0,20000,"MH","27AAICK4821A1Z5","MH","MH"],  # no GRN -> blank due date/status
     ]})
-    pay = _xlsx({"Zepto Payment track": [["Zepto Payment track PO Number","Invoice Number","Cities"]]})
-    grn = b"GRN ID,PO ID,Created On,Status\r\n"
+    pay = _xlsx({"Zepto Payment track": [
+        ["Zepto Payment track PO Number","Invoice Number","Cities"],
+        ["PA","INV-A","X"], ["PB","INV-B","X"], ["PC","INV-C","X"],
+        ["PD","INV-D","X"], ["PE","INV-E","X"],   # PE not in GRN pool -> no GRN Date
+    ]})
+    grn = (b"GRN ID,PO ID,Created On,Status\r\n"
+           b"GA,PA,7/1/2026,CONFIRMED\r\n"
+           b"GB,PB,6/15/2026,CONFIRMED\r\n"
+           b"GC,PC,5/14/2026,CONFIRMED\r\n"
+           b"GD,PD,5/14/2026,CONFIRMED\r\n")
     cn = _xlsx({"Credit Note Details": [["t"], ["invoice_number","bcy_total"]]})
     files = {"zepto_payment": _file(pay), "grn_list": [_file(grn)],
              "invoice_details": _file(invd), "payment_advice": [], "credit_note": _file(cn)}
     res = reconcile_zepto(files, today=datetime.date(2026, 7, 15))
     by = {r["invoice_number"]: r for r in res}
+    assert by["INV-A"]["grn_date"] == "2026-07-01"
     assert by["INV-A"]["due_date"] == "2026-07-31" and by["INV-A"]["due_status"] == "Not Due"
     assert by["INV-B"]["due_date"] == "2026-07-15" and by["INV-B"]["due_status"] == "Due"
-    assert by["INV-C"]["due_date"] == "2026-05-14" and by["INV-C"]["due_status"] == "Overdue"
+    assert by["INV-C"]["due_date"] == "2026-06-13" and by["INV-C"]["due_status"] == "Overdue"
     assert by["INV-D"]["status"] == "Paid"
-    assert by["INV-D"]["due_date"] == "2026-05-14" and by["INV-D"]["due_status"] == ""   # Paid -> blank status, date still shown
+    assert by["INV-D"]["due_date"] == "2026-06-13" and by["INV-D"]["due_status"] == ""   # Paid -> blank status, date still shown
+    # No GRN Date -> can't age it, so Due Date stays blank but Due Status is
+    # "Not Due" (not blank), and the Remark spells out "Missing GRN".
+    assert by["INV-E"]["grn_date"] == "" and by["INV-E"]["due_date"] == ""
+    assert by["INV-E"]["due_status"] == "Not Due"
+    assert "Missing GRN" in by["INV-E"]["remark"]
 
     # Column placement (after DN Accepted/Not-Accepted -> single DN Status merge):
     # Status=W, Due Date=X, Due Status=Y, GRN No.=Z.
@@ -962,9 +991,12 @@ def test_grn_from_payment_track_and_wafers_dropped():
     # NO grn -> flagged, not silently accepted.
     d = by["INV26-27/000600"]
     assert d["grn_no"] == "" and d["remark"] == "Missing GRN"
-    # Remark column spells out the gaps.
-    assert a["remark"] == ""                    # PO + GRN + POD all present
-    assert b["remark"] == "Missing POD"         # only the LRN/POD is missing
+    # Remark column spells out the gaps. GRN carried from the Payment track has
+    # no date, so it can't be aged: Due Status = Not Due, Remark = Missing GRN
+    # Date (the number is present, only the date is missing -> distinct wording).
+    assert a["remark"] == "Missing GRN Date" and a["due_status"] == "Not Due"
+    assert a["due_date"] == ""
+    assert b["remark"] == "Missing GRN Date; Missing POD"   # no GRN date + no LRN/POD
     print("test_grn_from_payment_track_and_wafers_dropped OK")
 
 
@@ -973,13 +1005,14 @@ def test_dn_status_merge_missing_grn_and_tab_colors():
     # DN Accepted / DN Not Accepted merged into one DN Status column.
     assert "dn_status" in COLUMN_KEYS
     assert "dn_accepted" not in COLUMN_KEYS and "dn_not_accepted" not in COLUMN_KEYS
-    def mk(inv, po, grn, status):
+    def mk(inv, po, grn, status, grn_date=""):
         r = {k: "" for k in COLUMN_KEYS}
-        r.update({"invoice_number": inv, "po": po, "grn_no": grn, "total_invoice_amt": 1000.0,
-                  "net_outstanding": 0.0, "status": status})
+        r.update({"invoice_number": inv, "po": po, "grn_no": grn, "grn_date": grn_date,
+                  "total_invoice_amt": 1000.0, "net_outstanding": 0.0, "status": status})
         return r
-    results = _RecoRows([mk("INV1", "P1", "", "Not Paid"),      # PO but no GRN -> Missing GRN
-                         mk("INV2", "P2", "GrnCode9", "Paid")])  # has GRN
+    results = _RecoRows([mk("INV1", "P1", "", "Not Paid"),                     # PO but no GRN -> Missing GRN
+                         mk("INV2", "P2", "GrnCode9", "Paid"),                 # GRN No but no date -> Missing GRN Date
+                         mk("INV3", "P3", "GrnCode7", "Not Paid", "2026-05-11")])  # GRN No + date -> fine
     wb = build_zepto_workbook(results)
     ws = wb["1. Invoice Tracker"]
     # header + dropdown on DN Status
@@ -989,6 +1022,15 @@ def test_dn_status_merge_missing_grn_and_tab_colors():
     g = ws[f"{_KEYCOL['grn_no']}3"]
     assert g.value == "Missing GRN" and g.fill.fgColor.rgb.endswith("FFC7CE")
     assert ws[f"{_KEYCOL['grn_no']}4"].value == "GrnCode9"   # INV2 keeps its GRN
+    # Missing GRN Date: GRN No present but no date -> GRN Date cell is a red
+    # "Missing GRN Date" label (same treatment as Missing GRN, so it's not
+    # mistaken for "not captured"). INV1 (no GRN at all) leaves the date blank;
+    # INV3 (GRN + date) shows the date with no red.
+    assert ws[f"{_KEYCOL['grn_date']}3"].value in ("", None)                    # INV1: no GRN -> date blank, not flagged
+    gd = ws[f"{_KEYCOL['grn_date']}4"]
+    assert gd.value == "Missing GRN Date" and gd.fill.fgColor.rgb.endswith("FFC7CE")
+    gd3 = ws[f"{_KEYCOL['grn_date']}5"]
+    assert gd3.value == "2026-05-11" and not gd3.fill.fgColor.rgb.endswith("FFC7CE")
     # Status static fill (renders in Numbers): Not Paid red, Paid green
     assert ws[f"{_KEYCOL['status']}3"].fill.fgColor.rgb.endswith("FFC7CE")   # Not Paid
     assert ws[f"{_KEYCOL['status']}4"].fill.fgColor.rgb.endswith("C6EFCE")   # Paid

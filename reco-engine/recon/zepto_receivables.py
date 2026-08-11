@@ -300,17 +300,23 @@ def _grn_date_only(v: Any) -> str:
     return s2 or s
 
 
-def _due_date(inv_date):
-    """#00001: Due Date = invoice date + 30 calendar days."""
+def _due_date(base_date):
+    """#00001: Due Date = base date + 30 calendar days. The base is the GRN
+    Date (payment clock starts on delivery/GRN, not on the invoice) — see the
+    caller. Returns None when there is no base date (e.g. GRN not yet raised)."""
     import datetime as _dt
-    return inv_date + _dt.timedelta(days=30) if inv_date else None
+    return base_date + _dt.timedelta(days=30) if base_date else None
 
 
 def _due_status(due, is_paid: bool, today) -> str:
     """#00002: Not Due (due in future) / Due (due today) / Overdue (due passed),
-    for UNPAID invoices only. Paid rows and rows with no due date -> blank."""
-    if is_paid or due is None:
+    for UNPAID invoices only. Paid rows -> blank. Unpaid rows with NO due date
+    (GRN Date missing, so the payment clock hasn't started) -> Not Due; the
+    Remark column spells out the "Missing GRN" reason so there's no confusion."""
+    if is_paid:
         return ""
+    if due is None:
+        return "Not Due"
     if due > today:
         return "Not Due"
     if due == today:
@@ -1000,10 +1006,15 @@ def reconcile_zepto(files: dict, today=None) -> list[dict]:
         # settled too.
         row["status"] = "Paid" if net <= 10 else "Not Paid"
 
-        # #00001/#00002: Due Date = invoice date + 30 days; Due status (Not Due /
-        # Due / Overdue) vs `today`, for UNPAID rows only (Paid -> blank).
-        inv_dt = _parse_date(det.get("date"))
-        due = _due_date(inv_dt)
+        # #00001/#00002: Due Date = GRN Date + 30 days; Due status (Not Due /
+        # Due / Overdue) vs `today`, for UNPAID rows only (Paid -> blank). The
+        # payment clock runs from delivery (GRN), not the invoice date. When
+        # there is no GRN Date (GRN missing / carried only from the Payment
+        # track, which has no timestamp) there is no base -> Due Date stays
+        # blank, but Due Status shows "Not Due" (payment clock not started yet)
+        # and the Remark spells out "Missing GRN" so it's not confusing.
+        grn_dt = _parse_date(row.get("grn_date"))
+        due = _due_date(grn_dt)
         row["due_date"] = due.isoformat() if due else ""
         row["due_status"] = _due_status(due, row["status"] == "Paid", today)
 
@@ -1014,6 +1025,10 @@ def reconcile_zepto(files: dict, today=None) -> list[dict]:
             flags.append("Missing PO")
         elif not row["grn_no"]:
             flags.append("Missing GRN")
+        elif not row["grn_date"]:
+            # GRN number carried from the Payment track (no timestamp) -> we
+            # can't age it, so it shows Not Due; say why, so it's not confusing.
+            flags.append("Missing GRN Date")
         if not row["pod_no"]:
             flags.append("Missing POD")
         row["remark"] = "; ".join(flags)
@@ -1104,7 +1119,9 @@ def build_summary_sheet(wb, results: list[dict]):
     hdr_fill = PatternFill("solid", fgColor="1F3864")
     label_font = Font(bold=False, size=10)
     key_total_font = Font(bold=True, size=10, color="123C69")
+    subhead_font = Font(bold=True, size=10, color="1F3864")
     manual_fill = PatternFill("solid", fgColor="F2F2F2")
+    aging_fill = PatternFill("solid", fgColor="EAF1FB")
     money_fmt = "#,##0.00"
 
     ws["A1"] = "Zepto Receivable Summary"
@@ -1145,8 +1162,19 @@ def build_summary_sheet(wb, results: list[dict]):
 
     net_receivables_2 = net_receivables + pmdn
 
+    # Receivables aging: bucket the invoice-level Net Outstanding of UNPAID
+    # invoices by their Due Status (Paid rows carry a blank status -> excluded,
+    # they're settled). Not Due + Due + Overdue = total still to collect.
+    def _bucket(status):
+        return round(sum(_to_float(r.get("net_outstanding", 0))
+                         for r in results if r.get("due_status") == status), 2)
+    not_due_amt = _bucket("Not Due")
+    due_amt = _bucket("Due")
+    overdue_amt = _bucket("Overdue")
+
     # (label, value_or_None, remark, kind). kind: "key" = headline total (bold),
-    # "manual" = grey informational/manual row, "" = plain auto row.
+    # "manual" = grey informational/manual row, "subhead"/"sub" = aging breakdown,
+    # "" = plain auto row.
     rows_spec = [
         ("Sales Including Tax", round(sales_incl_tax, 2), "", ""),
         ("Sale Return (Credit Notes)", round(sale_return, 2), "", ""),
@@ -1155,6 +1183,10 @@ def build_summary_sheet(wb, results: list[dict]):
         ("Net Sales", round(net_sales, 2), "Sales Incl. Tax - Sale Return - Debit Note - TDS", "key"),
         ("Payment Received (Including TDS)", round(payment_received, 2), "", ""),
         ("Net Receivables", round(net_receivables, 2), "Net Sales - Payment Received (Incl. TDS)", "key"),
+        ("Ageing of Net Receivables (by Due Status)", None, "Net Outstanding of unpaid invoices, split by Due Status", "subhead"),
+        ("Not Due", not_due_amt, "GRN Date + 30d is still in the future", "sub"),
+        ("Due", due_amt, "Due today (GRN Date + 30d = today)", "sub"),
+        ("Overdue", overdue_amt, "Past the due date (GRN Date + 30d already passed)", "sub"),
         ("Debit Note Accepted", None, "Manual entry", "manual"),
         ("Debit Note Not Accepted", None, "Manual entry", "manual"),
         ("Amount Received in Bank", amount_received_in_bank, "Total of Payment Advice Consolidate tab", "manual"),
@@ -1165,8 +1197,17 @@ def build_summary_sheet(wb, results: list[dict]):
 
     r = 4
     for label, value, remark, kind in rows_spec:
-        row_font = key_total_font if kind == "key" else label_font
-        ws.cell(row=r, column=1, value=label).font = row_font
+        if kind == "key":
+            row_font = key_total_font
+        elif kind == "subhead":
+            row_font = subhead_font
+        else:
+            row_font = label_font
+        lbl_cell = ws.cell(row=r, column=1, value=label)
+        lbl_cell.font = row_font
+        # Indent the three aging buckets so they read as a sub-list under the header.
+        if kind == "sub":
+            lbl_cell.alignment = Alignment(horizontal="left", indent=2)
         amt_cell = ws.cell(row=r, column=2, value=value)
         amt_cell.number_format = money_fmt
         amt_cell.font = row_font
@@ -1177,6 +1218,8 @@ def build_summary_sheet(wb, results: list[dict]):
             cell.border = border
             if kind == "manual":
                 cell.fill = manual_fill
+            elif kind in ("subhead", "sub"):
+                cell.fill = aging_fill
         r += 1
 
     ws.column_dimensions["A"].width = 45
@@ -1383,7 +1426,7 @@ def build_zepto_workbook(results: list[dict], payload: dict | None = None):
         ("Payment Advice (Zepto Portal)", "payment_received_incl_tds", "tds"),
         ("From Zepto Ledger / Payment Advice", "debit_note_issued", "credit_note_no"),
         ("Computed", "gross_outstanding", "status"),
-        ("Aging (Invoice Date + 30d)", "due_date", "due_status"),
+        ("Aging (GRN Date + 30d)", "due_date", "due_status"),
         ("From Zepto Dashboard", "grn_no", "invoice_not_in_ledger"),
         ("From Courier (Delhivery)", "pod_no", "payment_date"),
         ("Remarks", "remark", "remark"),
@@ -1411,6 +1454,7 @@ def build_zepto_workbook(results: list[dict], payload: dict | None = None):
         row_fill = zebra_fill if idx % 2 == 1 else None
         for col_i, key in enumerate(COLUMN_KEYS, start=1):
             missing_grn = False
+            missing_grn_date = False
             # All formula column-letters resolve through _KEYCOL so a column
             # move (e.g. the DN Status merge) can never silently mis-point them.
             if key == "pending_amount":
@@ -1435,6 +1479,15 @@ def build_zepto_workbook(results: list[dict], payload: dict | None = None):
                     # track carry a GrnCode -> flag it (red cell below).
                     val = "Missing GRN"
                     missing_grn = True
+            elif key == "grn_date":
+                val = row.get(key, "")
+                if not val and row.get("grn_no"):
+                    # GRN No. IS present (carried from the Payment track, which
+                    # has no timestamp) but its date isn't -> paint the cell red
+                    # with "Missing GRN Date" text, exactly like Missing GRN, so
+                    # it reads as a known gap, NOT "we failed to capture it".
+                    val = "Missing GRN Date"
+                    missing_grn_date = True
             else:
                 val = row.get(key, "")
                 if val == "" and key in _MONEY_KEYS:
@@ -1457,8 +1510,9 @@ def build_zepto_workbook(results: list[dict], payload: dict | None = None):
                 paid = row.get("status") == "Paid"
                 c.fill = PatternFill("solid", fgColor=_PAID_FILL_HEX if paid else _NOTPAID_FILL_HEX)
                 c.font = Font(color=_PAID_FONT_HEX if paid else _NOTPAID_FONT_HEX, bold=True)
-            # Missing GRN: red cell + dark-red bold text, centered.
-            if missing_grn:
+            # Missing GRN / Missing GRN Date: red cell + dark-red bold text,
+            # centered (same treatment so both read as flagged gaps, not blanks).
+            if missing_grn or missing_grn_date:
                 c.fill = PatternFill("solid", fgColor=_NOTPAID_FILL_HEX)
                 c.font = Font(color=_NOTPAID_FONT_HEX, bold=True)
                 c.alignment = Alignment(horizontal="center")
