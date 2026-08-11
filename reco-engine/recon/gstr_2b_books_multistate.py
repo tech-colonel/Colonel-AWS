@@ -27,7 +27,7 @@ from .gstr_2b_books import (
     _extract_gstin,
     _ensure_xlsx,
     _append_rcm_rows,
-    _is_octa_format,
+    _find_octa_sheet_name,
 )
 
 
@@ -234,14 +234,22 @@ def _merge_state_into_sheets(wb, file_bytes: bytes, label_prefix: str) -> None:
     pfx = f"{label_prefix} - "
     try:
         xlsx_bytes = _ensure_xlsx(file_bytes)
-        # OCTA 2B exports are a single flat sheet — copy it as-is, don't filter to B2B tabs.
-        is_octa_2b = label_prefix == "2B" and _is_octa_format(xlsx_bytes)
+        # OCTA 2B exports carry their data on one flat sheet — copy it as-is, don't
+        # filter to B2B tabs. Portal exports keep the ALLOWED_SHEETS filter below.
+        octa_sheet = _find_octa_sheet_name(xlsx_bytes) if label_prefix == "2B" else None
         src_wb = openpyxl.load_workbook(BytesIO(xlsx_bytes), read_only=True, data_only=True)
 
         for src_sheet_name in src_wb.sheetnames:
             # For 2B only copy the same sheets the base engine copies
-            if label_prefix == "2B" and not is_octa_2b and src_sheet_name.upper().strip() not in _allowed_2b:
-                continue
+            if label_prefix == "2B":
+                if octa_sheet is not None:
+                    # OCTA: only the data sheet. This path APPENDS rows into an existing
+                    # output tab, so letting the "Overview" cover sheet through would
+                    # inject its metadata rows into state 2-N invoice data.
+                    if src_sheet_name != octa_sheet:
+                        continue
+                elif src_sheet_name.upper().strip() not in _allowed_2b:
+                    continue
 
             # Match to existing output sheet
             target_name = (pfx + src_sheet_name)[:31]

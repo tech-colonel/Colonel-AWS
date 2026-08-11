@@ -239,18 +239,43 @@ def _find_octa_header_idx(raw) -> int:
     return -1
 
 
-def _is_octa_format(data: bytes) -> bool:
-    """True when the first sheet carries the OCTA signature headers."""
+def _find_octa_sheet_name(data: bytes) -> str | None:
+    """Return the name of the sheet carrying the OCTA data, or None if not OCTA.
+
+    The data sheet is NOT reliably the first sheet: older OCTA exports are a bare
+    single 'Purchase' sheet, while newer ones prepend an 'Overview' cover sheet and
+    append an 'ISD' sheet. Probing only sheet 0 makes those newer exports fall
+    through to the GST-portal parser, which finds no B2B/CDNR tabs and yields zero
+    records. Scan every sheet instead; only the first 15 rows are read per sheet,
+    which is all _find_octa_header_idx() inspects."""
     try:
-        raw = pd.read_excel(BytesIO(data), sheet_name=0, header=None, dtype=object)
+        # Context-managed: this runs several times per reconciliation (detection,
+        # parsing, and each sheet-copy path), and an unclosed workbook handle would
+        # sit on the heap until GC on a box that is already memory-tight.
+        with pd.ExcelFile(BytesIO(data)) as xl:
+            for name in xl.sheet_names:
+                try:
+                    probe = xl.parse(name, header=None, dtype=object, nrows=15)
+                except Exception:
+                    continue
+                if _find_octa_header_idx(probe) >= 0:
+                    return name
     except Exception:
-        return False
-    return _find_octa_header_idx(raw) >= 0
+        return None
+    return None
+
+
+def _is_octa_format(data: bytes) -> bool:
+    """True when any sheet carries the OCTA signature headers."""
+    return _find_octa_sheet_name(data) is not None
 
 
 def _read_octa_sheet(data: bytes) -> list[dict[str, Any]]:
-    """Read the OCTA flat sheet into row dicts (header detected dynamically)."""
-    raw = pd.read_excel(BytesIO(data), sheet_name=0, header=None, dtype=object)
+    """Read the OCTA flat sheet into row dicts (sheet and header detected dynamically)."""
+    sheet_name = _find_octa_sheet_name(data)
+    if sheet_name is None:
+        return []
+    raw = pd.read_excel(BytesIO(data), sheet_name=sheet_name, header=None, dtype=object)
     header_idx = _find_octa_header_idx(raw)
     if header_idx < 0:
         return []
@@ -699,6 +724,86 @@ def _name_sim(a: str, b: str) -> float:
     return len(wa & wb) / max(len(wa), len(wb))
 
 
+# Legal-form suffixes only. A Tally ledger name routinely drops them while the GST
+# legal name spells them out, so they carry no identifying information. Industry
+# words ("industries", "packaging", "foods") are deliberately NOT listed here —
+# they are still compared, they just cannot carry a match on their own (see below).
+_PARTY_NOISE = {
+    "private", "pvt", "limited", "ltd", "llp", "llc", "inc",
+    "company", "co", "corporation", "corp", "the", "and",
+}
+
+
+def _party_tokens(name: str) -> list[str]:
+    words = re.sub(r"[^a-z0-9]", " ", str(name or "").lower()).split()
+    return [w for w in words if w not in _PARTY_NOISE]
+
+
+def _tok_match(wa: str, wb: str) -> bool:
+    """True when two name tokens are the same word, or one is a clear truncation of
+    the other (a ledger abbreviation of the same root word).
+
+    The shared prefix is measured against the LONGER token, not the shorter one.
+    Measured against the shorter, any short word that happens to open with the same
+    letters as a longer unrelated word clears the bar and links distinct vendors.
+    Against the longer token, a genuine truncation still passes because almost all of
+    the longer word is shared, while a coincidental prefix falls well short."""
+    if wa == wb:
+        return True
+    if len(wa) < 4 or len(wb) < 4:
+        return False
+    common = 0
+    for ca, cb in zip(wa, wb):
+        if ca != cb:
+            break
+        common += 1
+    return common >= 4 and common >= 0.8 * max(len(wa), len(wb))
+
+
+def _party_sim(a: str, b: str) -> float:
+    """Identity-based supplier-name similarity, for CN↔DN party checks only.
+
+    Answers "is this the same company?", not "do these strings share words".
+    _name_sim() counts only whole-word equality, so a full GST legal name scores far
+    too low against the shortened ledger name a client actually books under, and the
+    pair is rejected even when the amount matches to the paisa.
+
+    Two rules keep that from becoming loose keyword matching:
+
+    1. The identifying word leads in Indian company names, so the FIRST
+       non-legal-form token must match on both sides. Without this, a shared generic
+       trailing word (an industry or product word) alone links unrelated vendors.
+    2. Every token of the shorter name must be accounted for. A ledger name may DROP
+       words the legal name carries, but a leftover distinct word on BOTH sides means
+       two separate legal entities that merely share a group prefix.
+
+    Both rules return 0.0 rather than a reduced score, deliberately: a missed match
+    surfaces as a visible unmatched row the accountant reviews, whereas a false match
+    silently pairs the wrong parties. Callers still gate on document type and amount.
+
+    Fully name-agnostic — no vendor, brand, or ledger is referenced anywhere in the
+    logic. _name_sim() is left untouched for every other caller."""
+    ta, tb = _party_tokens(a), _party_tokens(b)
+    if not ta or not tb:
+        return 0.0
+    # Identity gate — the distinctive leading word must be the same company.
+    if not _tok_match(ta[0], tb[0]):
+        return 0.0
+    unused = list(tb)
+    hits = 0
+    for wa in ta:
+        for i, wb in enumerate(unused):
+            if _tok_match(wa, wb):
+                hits += 1
+                unused.pop(i)
+                break
+    # Rule 2 — the shorter name must be fully accounted for. Dropped words are fine
+    # (ledger abbreviations); a leftover distinct word on BOTH sides is not.
+    if hits < min(len(ta), len(tb)):
+        return 0.0
+    return hits / max(len(ta), len(tb))
+
+
 def _core_digits(doc_no: str) -> str:
     """Extract the core numeric/alpha digits stripping common year suffixes (2025/2026)."""
     s = re.sub(r"(2025|2026)$", "", doc_no.upper())
@@ -836,7 +941,7 @@ def reconcile_by_invoice_no(
         for b_idx, b_rec in enumerate(books):
             if b_idx in used_books or b_rec.doc_type != "DBN":
                 continue
-            sim = _name_sim(g_rec.supplier_name, b_rec.supplier_name)
+            sim = _party_sim(g_rec.supplier_name, b_rec.supplier_name)
             if sim >= 0.5 and abs(g_rec.taxable_value - b_rec.taxable_value) <= tolerance:
                 if sim > best_sim:
                     best_b, best_sim = b_idx, sim
@@ -1649,19 +1754,26 @@ def _copy_workbook_sheets(src_bytes: bytes, target_wb: Any, title_prefix: str) -
     import openpyxl
     from io import BytesIO
     import copy
-    # OCTA 2B exports are a single flat sheet (e.g. "Sheet1"), not the portal
-    # B2B/B2BA/CDNR tabs — copy it as-is instead of filtering it out.
-    is_octa_2b = title_prefix == "2B" and _is_octa_format(src_bytes)
+    # OCTA 2B exports carry their data on one flat sheet (e.g. "Purchase"), not the
+    # portal B2B/B2BA/CDNR tabs — copy that sheet as-is instead of filtering it out.
+    octa_sheet = _find_octa_sheet_name(src_bytes) if title_prefix == "2B" else None
     try:
         src_wb = openpyxl.load_workbook(BytesIO(src_bytes), data_only=True)
         for name in src_wb.sheetnames:
             # ONLY copy the allowed 2B sheets (case-insensitive checking) if prefix is 2B
-            if title_prefix == "2B" and not is_octa_2b:
-                name_clean = str(name).strip().upper()
-                allowed_clean = {s.upper() for s in ALLOWED_SHEETS}
-                if name_clean not in allowed_clean:
-                    continue
-            
+            if title_prefix == "2B":
+                if octa_sheet is not None:
+                    # OCTA: copy only the data sheet. Newer exports also ship an
+                    # "Overview" cover sheet and an "ISD" sheet, which are not 2B
+                    # invoice data and must not become source tabs.
+                    if name != octa_sheet:
+                        continue
+                else:
+                    name_clean = str(name).strip().upper()
+                    allowed_clean = {s.upper() for s in ALLOWED_SHEETS}
+                    if name_clean not in allowed_clean:
+                        continue
+
             src_sheet = src_wb[name]
             # Ensure unique and beautiful sheet title
             # Max sheet title length in Excel is 31 characters
