@@ -173,6 +173,12 @@ class ReconciliationHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
+        if parsed.path == "/api/einvoice/parse":
+            self.handle_einvoice_parse()
+            return
+        if parsed.path == "/api/einvoice/build":
+            self.handle_einvoice_build()
+            return
         if parsed.path != "/api/reconcile":
             self.write_json({"error": "Not found"}, 404)
             return
@@ -934,6 +940,69 @@ class ReconciliationHandler(BaseHTTPRequestHandler):
             self.write_json({"error": str(exc)}, 500)
         finally:
             _RECO_SEMAPHORE.release()
+
+    def handle_einvoice_parse(self) -> None:
+        """Parse ONE e-invoice PDF. Returns per-invoice header + line items, or a
+        rejection ({ok:false, reason:'not_einvoice'|'parse_error'}) so the caller
+        can flag that file without failing the whole batch."""
+        try:
+            _fields, files = self.read_multipart()
+            f = files.get("file") or files.get("pdf") or files.get("card_statement")
+            if isinstance(f, list):
+                f = f[0] if f else None
+            if not f:
+                self.write_json({"ok": False, "reason": "no_file"}, 400)
+                return
+            from recon.einvoice_extract import parse_einvoice, NotAnEInvoice
+            fn = f.get("filename", "")
+            try:
+                r = parse_einvoice(f["content"])
+            except NotAnEInvoice:
+                self.write_json({"ok": False, "reason": "not_einvoice", "filename": fn})
+                return
+            except Exception as exc:  # noqa: BLE001
+                self.write_json({"ok": False, "reason": "parse_error", "detail": str(exc), "filename": fn})
+                return
+            items = r.get("line_items", [])
+            self.write_json({
+                "ok": True, "filename": fn,
+                "header": r.get("header", {}),
+                "line_items": items,
+                "counts": {"line_items": len(items)},
+            })
+        except Exception as exc:  # noqa: BLE001
+            self.write_json({"ok": False, "reason": "error", "detail": str(exc)}, 500)
+
+    def handle_einvoice_build(self) -> None:
+        """Build the styled 3-sheet register xlsx from already-parsed invoices and
+        register it as a job (so the existing /export.xlsx + Sheets paths work)."""
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            body = self.rfile.read(length) if length else b"{}"
+            data = json.loads(body or b"{}")
+            invoices = data.get("invoices", []) or []
+            from io import BytesIO as _BytesIO
+            from recon.einvoice_extract import build_workbook, build_register_rows
+            job_id = data.get("job_id") or uuid4().hex
+            rows = build_register_rows(invoices)
+            payload = {
+                "job_id": job_id,
+                "reco_type": "einvoice_extract",
+                "summary": {"invoices": len(invoices), "line_items": len(rows)},
+                "counts": {"invoices": len(invoices), "line_items": len(rows)},
+                "results": rows,
+            }
+            try:
+                wb = build_workbook(invoices)
+                buf = _BytesIO(); wb.save(buf)
+                payload["_xlsx_bytes"] = buf.getvalue()
+            except Exception as exc:  # noqa: BLE001
+                logging.getLogger(__name__).error("einvoice build_workbook failed: %s", exc)
+                payload["_xlsx_bytes"] = None
+            JOBS[job_id] = payload
+            self.write_json({k: v for k, v in payload.items() if not k.startswith("_")})
+        except Exception as exc:  # noqa: BLE001
+            self.write_json({"error": str(exc)}, 500)
 
     def read_multipart(self) -> tuple[dict[str, str], dict[str, dict]]:
         content_type = self.headers.get("Content-Type", "")

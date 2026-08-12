@@ -36,6 +36,7 @@ const gstr3bRoutes          = require('./routes/gstr3bRoutes');
 // ── Sales agents ─────────────────────────────────────────────────────────────
 const salesRoutes           = require('./routes/salesRoutes');
 const invoiceRoutes         = require('./routes/invoiceRoutes');
+const einvoiceRoutes        = require('./routes/einvoiceRoutes');
 const orderCycleRoutes      = require('./routes/orderCycleRoutes');
 const settlementRoutes      = require('./routes/settlementRoutes');
 // ── CFO dashboards ────────────────────────────────────────────────────────────
@@ -71,6 +72,7 @@ app.use('/api',           taskRoutes);
 app.use('/api',           gstr3bRoutes);
 app.use('/api',           salesRoutes);
 app.use('/api',           invoiceRoutes);
+app.use('/api',           einvoiceRoutes);
 app.use('/api',           orderCycleRoutes);
 app.use('/api',           settlementRoutes);
 app.use('/api',           cfoAnalyticsRoutes);

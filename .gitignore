@@ -70,3 +70,4 @@ db-backups/
 n8n-backups/
 scratchpad-backups/
 reco-engine/exports/
+new-backend/output/einvoice/

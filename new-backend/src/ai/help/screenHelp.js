@@ -52,6 +52,7 @@ const AGENTS = {
   gstr_3b_vs_2b: { title: 'GSTR-3B vs GSTR-2B', files: 'GSTR-3B working file, GSTR-2B file.' },
   gstr_1_vs_books: { title: 'GSTR-1 vs Books', files: 'Tally Sales Register, GSTR-1 OCTA report; optional GSTR-1 PDF and Credit Note Register.' },
   einvoice_reco: { title: 'E-Invoice Reconciliation', files: 'E-Invoice Register, and Books — Combined (Sales + Credit Note).' },
+  einvoice_extract: { title: 'E-Invoice Extraction', files: 'GST e-invoice PDFs (upload several, or paste a Google Drive folder) — each is parsed into the standard 3-sheet e-Invoice Register (Invoice Details + HSN summary + B2B summary), downloadable as Excel or opened in Google Sheets. It only accepts real GST e-invoices (with an IRN); other PDFs are flagged.' },
   bank_statement: { title: 'Bank Statement Classifier', files: 'the bank statement (.xlsx/.xls/.csv).' },
   universal_bank_statement: { title: 'Universal Bank Statement', files: 'the bank statement (.xlsx/.xls/.csv/.pdf); optional Ledger Master / chart of accounts, which is saved for next time.' },
   gstr_3b_tally_entry: { title: 'GSTR-3B Tally Entry', files: 'the GSTR-3B file — it is parsed into ready-to-post Tally journal entries.' },

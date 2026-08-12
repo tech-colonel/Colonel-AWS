@@ -48,6 +48,11 @@ const RECO_AGENT_META = {
     color: '#0284C7', bg: '#F0F9FF', border: '#BAE6FD', accuracy: '99.6%',
     fields: ['E-Invoice Register', 'Books (Sales + Credit Note)'],
   },
+  einvoice_extract: {
+    displayName: 'E-Invoice Extraction', icon: '🧾', category: 'Extraction',
+    color: '#7C3AED', bg: '#F5F3FF', border: '#C4B5FD', accuracy: null,
+    fields: ['E-Invoice PDFs', 'Google Drive Folder'],
+  },
   gstr_3b_tally_entry: {
     displayName: 'GSTR-3B Tally Entry', icon: '📒', category: 'Journal Entry',
     color: '#0F766E', bg: '#F0FDFA', border: '#99F6E4', accuracy: '99.9%',
@@ -114,7 +119,7 @@ const FAKE_RECEIVABLES = [
 const SECTIONS = [
   { key: 'reco',        label: 'GST Reconciliation', accent: '#0748EE' },
   { key: 'bank',        label: 'Bank & Finance',     accent: '#059669' },
-  { key: 'invoice',     label: 'Invoice',            accent: '#7C3AED' },
+  { key: 'invoice',     label: 'Extraction',         accent: '#7C3AED' },
   { key: 'marketplace', label: 'Marketplace MIS',    accent: '#D97706' },
   { key: 'receivables', label: 'Receivables',        accent: '#8B5CF6' },
   { key: 'other',       label: 'Other',              accent: '#64748B' },
@@ -170,6 +175,7 @@ const channelBrand = (name) => {
 // Decide a section for any agent: rich meta wins, else infer from the name.
 const sectionOf = (agent) => {
   const n = (agent.name || '').toLowerCase();
+  if (n === 'einvoice_extract') return 'invoice';   // grouped with Invoice Process under "Extraction"
   if (/receivabl/.test(n)) return 'receivables';   // zepto_receivables, receivable_cycle, *_receivables
   if (RECO_AGENT_META[agent.name]) {
     if (n === 'universal_bank_statement' || n === 'pdf_bank_extract' || n === 'bank_tally_reco'
