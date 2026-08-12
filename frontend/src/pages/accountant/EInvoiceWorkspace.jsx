@@ -2,7 +2,7 @@ import React, { useState, useRef, useCallback, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import {
   LayoutDashboard, Bot, Upload, FileText, X, Download, ChevronRight, ChevronDown,
-  RotateCcw, AlertTriangle, CheckCircle2, Loader2, Link2,
+  RotateCcw, AlertTriangle, CheckCircle2, Loader2, Link2, Trash2,
 } from 'lucide-react';
 import DashboardLayout from '../../components/layout/DashboardLayout';
 import { sidebarFor } from '../../lib/adminNav';
@@ -149,6 +149,24 @@ export default function EInvoiceWorkspace() {
     } catch (_) { toast.error('Download failed'); }
   };
 
+  // Delete ONE e-invoice (row + PDF from DB) — removes it from the list.
+  const handleDeleteOne = async (inv, idx, e) => {
+    if (e) e.stopPropagation();
+    if (!window.confirm('Delete this e-invoice? This removes it from history and cannot be undone.')) return;
+    if (inv?.id) { try { await api.delete(`/api/brands/${brandId}/agents/${agentId}/einvoices/${inv.id}`); } catch (_) { /* */ } }
+    setInvoices((prev) => (prev || []).filter((_, i) => i !== idx));
+    if (openIdx === idx) { setOpenIdx(null); setPreviewUrl(null); }
+  };
+
+  // Delete All — like Reset (clears the view / frees the run) AND purges every
+  // e-invoice for this brand+agent from the DB + disk.
+  const handleDeleteAll = async () => {
+    if (!window.confirm('Delete ALL extracted e-invoices? This clears the screen and permanently removes them from the database. This cannot be undone.')) return;
+    try { await api.delete(`/api/brands/${brandId}/agents/${agentId}/einvoices`); } catch (_) { /* */ }
+    setInvoices(null); setFiles([]); setDriveUrl(''); setJobId(null); setOpenIdx(null); setPreviewUrl(null); setCounts(null);
+    toast.success('All e-invoices deleted');
+  };
+
   const openCard = (idx) => {
     if (openIdx === idx) { setOpenIdx(null); setPreviewUrl(null); return; }
     setOpenIdx(idx);
@@ -195,10 +213,10 @@ export default function EInvoiceWorkspace() {
             </div>
           </div>
           {invoices && (
-            <button onClick={() => { setInvoices(null); setFiles([]); setDriveUrl(''); setJobId(null); setOpenIdx(null); }}
+            <button onClick={handleDeleteAll}
               className="px-4 py-2 rounded-lg text-sm font-bold flex items-center gap-1.5 flex-shrink-0"
               style={{ background: '#FEF2F2', color: '#DC2626', border: '1px solid #FECACA' }}>
-              <RotateCcw className="w-3.5 h-3.5" /> Reset
+              <Trash2 className="w-3.5 h-3.5" /> Delete All
             </button>
           )}
         </div>
@@ -290,7 +308,7 @@ export default function EInvoiceWorkspace() {
                 const open = openIdx === idx;
                 return (
                   <div key={idx} className="rounded-xl border overflow-hidden" style={{ borderColor: st.border, background: '#fff' }}>
-                    <button onClick={() => openCard(idx)} className="w-full flex items-center gap-3 px-4 py-3 text-left">
+                    <div onClick={() => openCard(idx)} className="w-full flex items-center gap-3 px-4 py-3 text-left cursor-pointer">
                       <span style={{ width: 10, height: 10, borderRadius: 999, background: st.dot, flexShrink: 0 }} />
                       <div className="min-w-0 flex-1">
                         <div className="text-sm font-bold truncate" style={{ color: '#0F172A' }}>
@@ -302,8 +320,12 @@ export default function EInvoiceWorkspace() {
                         </div>
                       </div>
                       <span className="text-[11px] font-bold px-2 py-0.5 rounded-full" style={{ background: st.bg, color: st.color, border: `1px solid ${st.border}` }}>{inv.status}</span>
+                      <button onClick={(e) => handleDeleteOne(inv, idx, e)} title="Delete this e-invoice"
+                        className="p-1 rounded flex-shrink-0" style={{ color: '#DC2626' }} data-testid={`einv-del-${idx}`}>
+                        <Trash2 className="w-4 h-4" />
+                      </button>
                       {open ? <ChevronDown className="w-4 h-4" style={{ color: '#94A3B8' }} /> : <ChevronRight className="w-4 h-4" style={{ color: '#94A3B8' }} />}
-                    </button>
+                    </div>
 
                     {open && (
                       <div className="px-4 pb-4 grid grid-cols-1 lg:grid-cols-5 gap-4">

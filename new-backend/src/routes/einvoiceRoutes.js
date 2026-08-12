@@ -3,7 +3,7 @@ const multer = require('multer');
 const router = express.Router();
 
 const { authenticateToken } = require('../middleware/authMiddleware');
-const { processEInvoices, cancelEInvoice, listEInvoices, getEInvoicePdf } = require('../controllers/agents/einvoice-extract/einvoiceController');
+const { processEInvoices, cancelEInvoice, listEInvoices, getEInvoicePdf, deleteEInvoice, deleteAllEInvoices } = require('../controllers/agents/einvoice-extract/einvoiceController');
 const { addSseClient, removeSseClient, getState } = require('../utils/einvoiceEvents');
 
 // e-invoice PDFs are small; allow generous multi-file uploads
@@ -20,6 +20,8 @@ const tokenFromQuery = (req, _res, next) => {
 router.post('/brands/:brandId/agents/:agentId/einvoice/process', authenticateToken, upload.any(), processEInvoices);
 router.post('/brands/:brandId/agents/:agentId/einvoice/cancel',  authenticateToken, cancelEInvoice);
 router.get('/brands/:brandId/agents/:agentId/einvoices',              authenticateToken, listEInvoices);
+router.delete('/brands/:brandId/agents/:agentId/einvoices/:id',       authenticateToken, deleteEInvoice);
+router.delete('/brands/:brandId/agents/:agentId/einvoices',           authenticateToken, deleteAllEInvoices);
 router.get('/brands/:brandId/agents/:agentId/einvoice/pdf/:id',       tokenFromQuery, authenticateToken, getEInvoicePdf);
 
 // ─── SSE: live "Processing X of N" status ──────────────────────────────────

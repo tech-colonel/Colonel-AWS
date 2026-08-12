@@ -210,4 +210,35 @@ async function getEInvoicePdf(req, res) {
   }
 }
 
-module.exports = { processEInvoices, cancelEInvoice, listEInvoices, getEInvoicePdf };
+// ── Delete ONE e-invoice from history (row + its stored PDF) ────────────────
+async function deleteEInvoice(req, res) {
+  const { brandId, id } = req.params;
+  const conn = await brandConn(brandId);
+  if (!conn) return res.status(404).json({ error: 'not found' });
+  try {
+    const [rows] = await conn.query('SELECT pdf_path FROM einvoice_process WHERE id = :id', { replacements: { id } });
+    await conn.query('DELETE FROM einvoice_process WHERE id = :id', { replacements: { id } });
+    const p = rows && rows[0] && rows[0].pdf_path;
+    if (p) { try { fs.unlinkSync(p); } catch (_) { /* file gone */ } }
+    return res.json({ deleted: true });
+  } catch (e) {
+    return res.status(500).json({ error: e.message });
+  }
+}
+
+// ── Delete ALL history for this brand+agent (rows + PDFs) — "Delete All" ─────
+async function deleteAllEInvoices(req, res) {
+  const { brandId, agentId } = req.params;
+  const conn = await brandConn(brandId);
+  if (!conn) return res.json({ deleted: 0 });
+  try {
+    const [rows] = await conn.query('SELECT pdf_path FROM einvoice_process WHERE agent_id = :aid', { replacements: { aid: agentId } });
+    await conn.query('DELETE FROM einvoice_process WHERE agent_id = :aid', { replacements: { aid: agentId } });
+    for (const r of (rows || [])) { if (r.pdf_path) { try { fs.unlinkSync(r.pdf_path); } catch (_) { /* gone */ } } }
+    return res.json({ deleted: (rows || []).length });
+  } catch (e) {
+    return res.status(500).json({ error: e.message });
+  }
+}
+
+module.exports = { processEInvoices, cancelEInvoice, listEInvoices, getEInvoicePdf, deleteEInvoice, deleteAllEInvoices };
