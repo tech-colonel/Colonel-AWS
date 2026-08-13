@@ -590,26 +590,54 @@ async function amazonB2CProcessor(
     // STEP 6: CREATE FINAL PIVOT STRUCTURE (EXCELJS)
     // ==================================
     const pivotSheet = workbook.addWorksheet('amazon-b2c-pivot');
-    const pivotData = filteredRows.map(row => ({
-      'Seller Gstin': row['Seller Gstin'] || '',
-      'Final Invoice No.': row['Final Invoice No.'] || '',
-      'Ship To State Tally Ledger': row['Ship To State Tally Ledger'] || '',
-      'FG': row['FG'] || '',
-      'Quantity': Number(row['Quantity'] || 0),
-      'Final Tax rate': Number(row['Cgst Rate'] || 0) + Number(row['Sgst Rate'] || 0) + Number(row['Igst Rate'] || 0),
-      'Final Taxable Sales Value': Number(row['Final Taxable Sales Value'] || 0),
-      'Final Taxable Shipping Value': Number(row['Final Taxable Shipping Value'] || 0),
-      'Final CGST Tax': Number(row['Final CGST Tax'] || 0),
-      'Final SGST Tax': Number(row['Final SGST Tax'] || 0),
-      'Final IGST Tax': Number(row['Final IGST Tax'] || 0),
-      'Final Shipping CGST Tax': Number(row['Final Shipping CGST Tax'] || 0),
-      'Final Shipping SGST Tax': Number(row['Final Shipping SGST Tax'] || 0),
-      'Final Shipping IGST Tax': Number(row['Final Shipping IGST Tax'] || 0),
-      'Tcs Cgst Amount': Number(row['Tcs Cgst Amount'] || 0),
-      'Tcs Sgst Amount': Number(row['Tcs Sgst Amount'] || 0),
-      'Tcs Igst Amount': Number(row['Tcs Igst Amount'] || 0),
-      'Final Amount Receivable': Number(row['Final Amount Receivable'] || 0)
-    }));
+    // Grouped (summed) by Seller Gstin + Final Invoice No. + Ship To State Tally
+    // Ledger + FG, instead of one row per raw transaction line — multiple lines
+    // for the same invoice/stock-item/ledger combo collapse into one pivot row.
+    const pivotMap = {};
+    filteredRows.forEach(row => {
+      const sellerGstin = row['Seller Gstin'] || '';
+      const finalInvoiceNo = row['Final Invoice No.'] || '';
+      const shipToStateTallyLedger = row['Ship To State Tally Ledger'] || '';
+      const fg = row['FG'] || '';
+      const key = `${sellerGstin}|${finalInvoiceNo}|${shipToStateTallyLedger}|${fg}`;
+      if (!pivotMap[key]) {
+        pivotMap[key] = {
+          'Seller Gstin': sellerGstin,
+          'Final Invoice No.': finalInvoiceNo,
+          'Ship To State Tally Ledger': shipToStateTallyLedger,
+          'FG': fg,
+          'Quantity': 0,
+          'Final Tax rate': Number(row['Cgst Rate'] || 0) + Number(row['Sgst Rate'] || 0) + Number(row['Igst Rate'] || 0),
+          'Final Taxable Sales Value': 0,
+          'Final Taxable Shipping Value': 0,
+          'Final CGST Tax': 0,
+          'Final SGST Tax': 0,
+          'Final IGST Tax': 0,
+          'Final Shipping CGST Tax': 0,
+          'Final Shipping SGST Tax': 0,
+          'Final Shipping IGST Tax': 0,
+          'Tcs Cgst Amount': 0,
+          'Tcs Sgst Amount': 0,
+          'Tcs Igst Amount': 0,
+          'Final Amount Receivable': 0
+        };
+      }
+      const group = pivotMap[key];
+      group['Quantity'] += Number(row['Quantity'] || 0);
+      group['Final Taxable Sales Value'] += Number(row['Final Taxable Sales Value'] || 0);
+      group['Final Taxable Shipping Value'] += Number(row['Final Taxable Shipping Value'] || 0);
+      group['Final CGST Tax'] += Number(row['Final CGST Tax'] || 0);
+      group['Final SGST Tax'] += Number(row['Final SGST Tax'] || 0);
+      group['Final IGST Tax'] += Number(row['Final IGST Tax'] || 0);
+      group['Final Shipping CGST Tax'] += Number(row['Final Shipping CGST Tax'] || 0);
+      group['Final Shipping SGST Tax'] += Number(row['Final Shipping SGST Tax'] || 0);
+      group['Final Shipping IGST Tax'] += Number(row['Final Shipping IGST Tax'] || 0);
+      group['Tcs Cgst Amount'] += Number(row['Tcs Cgst Amount'] || 0);
+      group['Tcs Sgst Amount'] += Number(row['Tcs Sgst Amount'] || 0);
+      group['Tcs Igst Amount'] += Number(row['Tcs Igst Amount'] || 0);
+      group['Final Amount Receivable'] += Number(row['Final Amount Receivable'] || 0);
+    });
+    const pivotData = Object.values(pivotMap);
 
     if (pivotData.length > 0) {
       const pivotHeaders = Object.keys(pivotData[0]);

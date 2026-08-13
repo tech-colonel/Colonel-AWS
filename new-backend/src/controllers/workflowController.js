@@ -821,5 +821,6 @@ module.exports = {
   applyWorkflow,
   downloadWorkflowOutput,
   getMasterSchema,
-  extractAllSheetsFromBuffer
+  extractAllSheetsFromBuffer,
+  applyMultiSheetWorkflow
 };
