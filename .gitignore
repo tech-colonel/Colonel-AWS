@@ -33,6 +33,7 @@ Extra/
 # ── Local test fixtures (large source Excel exports, never commit) ─────────────
 /test files receivables/
 /new one month receivable /
+/db_backups/
 
 # ── macOS ──────────────────────────────────────────────────────────────────────
 .DS_Store
