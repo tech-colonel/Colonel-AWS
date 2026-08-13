@@ -216,13 +216,16 @@ const emptyReceivableDashboard = () => ({
   kpis: null,
   receivedBySource: [],
   receivedByChannel: [],
+  receivedPrepaidByChannel: [],
   settledOfThisMonthsSalesBySource: [],
+  settledPrepaidByChannel: [],
   carriedForwardCollections: [],
   salesByChannel: [],
   courierAging: [],
   thisMonthPendingByCourier: [],
   receivableByCourierAsOfDate: [],
   returnsBySource: [],
+  returnsPrepaidByChannel: [],
   returnsByMonth: [],
   monthlyTrend: [],
   receivableByMonth: [],
@@ -805,6 +808,52 @@ const getBrandAgentDetail = async (req, res) => {
 const SETTLED_ASOF = `(settled_flag AND (settled_year * 12 + settled_month) <= ($3 * 12 + $2))`;
 const RETURNED_ASOF = `(returned_flag AND (returned_year * 12 + returned_month) <= ($3 * 12 + $2))`;
 
+// Best-effort join from a prepaid receivable_ledger row to the actual payment
+// gateway that financed it (Snapmint / BharatX / Razorpay) — that attribution
+// only ever lives in shopify_order_cycle (the Shopify Order Cycle agent's saved
+// rows), matched by normalized AWB, falling back to normalized invoice number
+// when there's no AWB — mirroring the same normCode() rules
+// buildReceivableLedger.js used to build receivable_ledger's own awb/invoice_key
+// in the first place, so the join keys are apples-to-apples.
+//
+// shopify_order_cycle only ever contains Shopify-store rows, so any prepaid
+// order whose sales channel isn't Shopify (or its "Custom / Manual" bucket)
+// will always come back "No gateway match" — that's a true fact about the data
+// (Amazon/Flipkart/Zepto prepaid orders settle through the marketplace itself,
+// with no gateway settlement file to match against), not a join bug. It also
+// means "Snapmint"/"Zepto" etc. can legitimately appear as a CHANNEL (a raw
+// Tally "Channel Ledger" tag) with gateway = "No gateway match" — that channel
+// tag is not the same fact as the gateway column, which is exactly the mix-up
+// this join exists to make visually unambiguous.
+//
+// Split into two separate equi-joins (by awb, by invoice) instead of one
+// OR'd condition so Postgres can hash-join both gw_awb/gw_inv against
+// receivable_ledger instead of a nested-loop regex re-scan per row — verified
+// on real data (one brand, ~190k prepaid rows / ~66k shopify_order_cycle rows):
+// the OR'd single-join version took ~30s, this version ~80ms.
+const PREPAID_GATEWAY_CTE = `
+  WITH gw_raw AS (
+    SELECT
+      regexp_replace(upper(regexp_replace(COALESCE(awb_number,''), '\\.0+$', '')), '\\s+', '', 'g') AS awb_norm,
+      regexp_replace(upper(regexp_replace(COALESCE(invoice_number,''), '\\.0+$', '')), '\\s+', '', 'g') AS invoice_norm,
+      CASE
+        WHEN COALESCE(snapmint_settlement_value,0) > 0 THEN 'Snapmint'
+        WHEN COALESCE(bharatx_ledger_amount,0) > 0 THEN 'BharatX'
+        WHEN COALESCE(razorpay_settlement_amount,0) > 0 THEN 'Razorpay'
+      END AS gateway
+    FROM shopify_order_cycle
+    WHERE brand_id = $1
+      AND (COALESCE(snapmint_settlement_value,0) > 0 OR COALESCE(bharatx_ledger_amount,0) > 0 OR COALESCE(razorpay_settlement_amount,0) > 0)
+  ),
+  gw_awb AS (SELECT DISTINCT ON (awb_norm) awb_norm, gateway FROM gw_raw WHERE awb_norm <> ''),
+  gw_inv AS (SELECT DISTINCT ON (invoice_norm) invoice_norm, gateway FROM gw_raw WHERE invoice_norm <> '')
+`;
+const PREPAID_GATEWAY_JOIN = `
+  LEFT JOIN gw_awb ga ON rl.awb <> '' AND ga.awb_norm = rl.awb
+  LEFT JOIN gw_inv gi ON rl.awb = '' AND rl.invoice_key <> '' AND gi.invoice_norm = rl.invoice_key
+`;
+const PREPAID_GATEWAY_COL = `COALESCE(ga.gateway, gi.gateway, 'No gateway match')`;
+
 /**
  * GET /api/dashboard/receivables/:brandId?month=&year=
  * Global Receivable Cycle dashboard — reads the cross-year receivable_ledger
@@ -932,7 +981,31 @@ const getReceivableDashboard = async (req, res) => {
            -- earlier-closing later one; a return processed AFTER the selected period does
            -- not count here). Different from returns_this_month_amount above, which is
            -- returns PROCESSED this month regardless of the sale's own month.
-           COALESCE(SUM(total_amount) FILTER (WHERE order_month = $2 AND order_year = $3 AND ${RETURNED_ASOF}), 0) AS returned_of_this_months_sales
+           COALESCE(SUM(total_amount) FILTER (WHERE order_month = $2 AND order_year = $3 AND ${RETURNED_ASOF}), 0) AS returned_of_this_months_sales,
+           -- Movement bridge behind the "Total receivable" / "Carried forward" drill-downs —
+           -- same population as carried_forward_receivable/total_receivable_as_of_date above,
+           -- but evaluated as of the PREVIOUS calendar month's close (($3*12+$2)-1 instead of
+           -- $3*12+$2; a plain integer step, so Jan correctly rolls back into December of the
+           -- prior year with no special-casing). Lets the dashboard show, in real rupees, why a
+           -- month's own receivable shrinks every time a later month re-reads it: opening balance
+           -- minus what got collected and returned since, landing exactly on the new figure —
+           -- total_receivable_as_of_previous_month − received_from_carried_forward −
+           -- returned_of_carried_forward_this_month = carried_forward_receivable, to the rupee.
+           COALESCE(SUM(total_amount) FILTER (
+             WHERE NOT (settled_flag AND (settled_year * 12 + settled_month) <= (($3 * 12 + $2) - 1))
+               AND NOT (returned_flag AND (returned_year * 12 + returned_month) <= (($3 * 12 + $2) - 1))
+               AND (order_year * 12 + order_month) <= (($3 * 12 + $2) - 1) AND (order_year * 12 + order_month) >= $4
+           ), 0) AS total_receivable_as_of_previous_month,
+           -- Must be measured in total_amount (like every other bucket in this bridge, not
+           -- returned_amount) AND restricted to orders that were still in the OPENING pending
+           -- pool (not already settled by the previous month's close) — otherwise this also
+           -- picks up orders that had already settled by then and were only returned/refunded
+           -- afterward, which were never part of the opening balance and would double-subtract.
+           COALESCE(SUM(total_amount) FILTER (
+             WHERE returned_month = $2 AND returned_year = $3
+               AND (order_year * 12 + order_month) < ($3 * 12 + $2) AND (order_year * 12 + order_month) >= $4
+               AND NOT (settled_flag AND (settled_year * 12 + settled_month) <= (($3 * 12 + $2) - 1))
+           ), 0) AS returned_of_carried_forward_this_month
          FROM receivable_ledger WHERE brand_id = $1`,
         { bind, transaction: t }
       );
@@ -964,6 +1037,21 @@ const getReceivableDashboard = async (req, res) => {
         { bind: bindNoCycleStart, transaction: t }
       );
 
+      // Prepaid's row in receivedBySource above is one lump sum (settled_source is
+      // always the literal 'prepaid') — this splits that same population by sales
+      // channel/portal AND (best-effort) actual payment gateway, so "Received →
+      // Prepaid" is a real two-dimensional breakdown, not a dead end.
+      const [receivedPrepaidByChannel] = await seq.query(
+        `${PREPAID_GATEWAY_CTE}
+         SELECT COALESCE(NULLIF(rl.channel, ''), 'Unknown') AS channel, ${PREPAID_GATEWAY_COL} AS gateway,
+                COUNT(*) AS count, SUM(rl.settled_amount) AS amount
+         FROM receivable_ledger rl
+         ${PREPAID_GATEWAY_JOIN}
+         WHERE rl.brand_id = $1 AND rl.payment_method = 'PREPAID' AND rl.settled_month = $2 AND rl.settled_year = $3 AND NOT ${RETURNED_ASOF}
+         GROUP BY 1, 2 ORDER BY 1, amount DESC`,
+        { bind: bindNoCycleStart, transaction: t }
+      );
+
       // Behind the reconciliation strip's "Settled to date" figure
       // (kpis.settled_of_this_months_sales) — same mutually-exclusive total_amount
       // partition, grouped by settled_source, so "how much of THIS MONTH'S OWN sales
@@ -980,6 +1068,22 @@ const getReceivableDashboard = async (req, res) => {
          WHERE brand_id = $1 AND order_month = $2 AND order_year = $3
            AND ${SETTLED_ASOF} AND NOT ${RETURNED_ASOF} AND (order_year * 12 + order_month) >= $4
          GROUP BY 1 ORDER BY amount DESC`,
+        { bind, transaction: t }
+      );
+
+      // Prepaid's row in settledOfThisMonthsSalesBySource above is one lump sum —
+      // this splits that same "settled as of this period, this month's own sale"
+      // population by sales channel/portal AND (best-effort) actual payment
+      // gateway, behind the "Settled to date" modal's Prepaid breakdown.
+      const [settledPrepaidByChannel] = await seq.query(
+        `${PREPAID_GATEWAY_CTE}
+         SELECT COALESCE(NULLIF(rl.channel, ''), 'Unknown') AS channel, ${PREPAID_GATEWAY_COL} AS gateway,
+                COUNT(*) AS count, SUM(rl.total_amount) AS amount
+         FROM receivable_ledger rl
+         ${PREPAID_GATEWAY_JOIN}
+         WHERE rl.brand_id = $1 AND rl.payment_method = 'PREPAID' AND rl.order_month = $2 AND rl.order_year = $3
+           AND ${SETTLED_ASOF} AND NOT ${RETURNED_ASOF} AND (rl.order_year * 12 + rl.order_month) >= $4
+         GROUP BY 1, 2 ORDER BY 1, amount DESC`,
         { bind, transaction: t }
       );
 
@@ -1077,12 +1181,39 @@ const getReceivableDashboard = async (req, res) => {
         { bind, transaction: t }
       );
 
+      // Prepaid's row in returnsBySource above is one lump sum — this splits that
+      // same "returns processed this period" population by sales channel/portal
+      // AND (best-effort) actual payment gateway, behind the "Returns (SRN)"
+      // modal's Prepaid breakdown.
+      const [returnsPrepaidByChannel] = await seq.query(
+        `${PREPAID_GATEWAY_CTE}
+         SELECT COALESCE(NULLIF(rl.channel, ''), 'Unknown') AS channel, ${PREPAID_GATEWAY_COL} AS gateway,
+                COUNT(*) AS count, SUM(rl.returned_amount) AS amount
+         FROM receivable_ledger rl
+         ${PREPAID_GATEWAY_JOIN}
+         WHERE rl.brand_id = $1 AND rl.payment_method = 'PREPAID' AND rl.returned_month = $2 AND rl.returned_year = $3
+           AND (rl.order_year * 12 + rl.order_month) >= $4
+         GROUP BY 1, 2 ORDER BY 1, amount DESC`,
+        { bind, transaction: t }
+      );
+
       // Also behind "Returns (SRN)" — this month's returns broken down by which
       // ORIGIN month the underlying sale happened in. A return processed this month
       // is very often for a sale from a previous month, not this month's own — this
       // is what makes that visible instead of one lump total.
+      // Bifurcates each origin month's returns (processed this period) into orders that
+      // were STILL OPEN going into this period (not yet settled as of the PREVIOUS
+      // month's close — the same population the Carried Forward bridge's "Returned"
+      // line moves) vs orders that had ALREADY SETTLED by then and only got
+      // reversed/refunded this period. Both total_amount-based, so still_open_amount
+      // reconciles exactly to returned_of_carried_forward_this_month in the kpis above
+      // for that origin month's own contribution.
       const [returnsByMonth] = await seq.query(
-        `SELECT order_month AS month, order_year AS year, COUNT(*) AS count, SUM(returned_amount) AS amount
+        `SELECT order_month AS month, order_year AS year, COUNT(*) AS count, SUM(returned_amount) AS amount,
+                COUNT(*) FILTER (WHERE NOT (settled_flag AND (settled_year * 12 + settled_month) <= (($3 * 12 + $2) - 1))) AS still_open_count,
+                COALESCE(SUM(total_amount) FILTER (WHERE NOT (settled_flag AND (settled_year * 12 + settled_month) <= (($3 * 12 + $2) - 1))), 0) AS still_open_amount,
+                COUNT(*) FILTER (WHERE settled_flag AND (settled_year * 12 + settled_month) <= (($3 * 12 + $2) - 1)) AS already_settled_count,
+                COALESCE(SUM(total_amount) FILTER (WHERE settled_flag AND (settled_year * 12 + settled_month) <= (($3 * 12 + $2) - 1)), 0) AS already_settled_amount
          FROM receivable_ledger
          WHERE brand_id = $1 AND returned_month = $2 AND returned_year = $3 AND (order_year * 12 + order_month) >= $4
          GROUP BY order_month, order_year ORDER BY order_year DESC, order_month DESC`,
@@ -1136,26 +1267,212 @@ const getReceivableDashboard = async (req, res) => {
         { bind: [brandId], transaction: t }
       );
 
-      return { kpis, receivedBySource, receivedByChannel, settledOfThisMonthsSalesBySource, carriedForwardCollections, salesByChannel, courierAging, thisMonthPendingByCourier, receivableByCourierAsOfDate, returnsBySource, returnsByMonth, monthlyTrend, receivableByMonth, dataQualityTotals, dataQualityBySource };
+      return { kpis, receivedBySource, receivedByChannel, receivedPrepaidByChannel, settledOfThisMonthsSalesBySource, settledPrepaidByChannel, carriedForwardCollections, salesByChannel, courierAging, thisMonthPendingByCourier, receivableByCourierAsOfDate, returnsBySource, returnsPrepaidByChannel, returnsByMonth, monthlyTrend, receivableByMonth, dataQualityTotals, dataQualityBySource };
     });
+
+    const prevIndex = year * 12 + month - 1;
+    const previousPeriod = { month: ((prevIndex - 1) % 12) + 1, year: Math.floor((prevIndex - 1) / 12) };
 
     res.json({
       period: { month, year },
+      previousPeriod,
       cycleStart: startIndex > 0 ? { month: startMonth, year: startYear } : null,
       kpis: data.kpis,
       receivedBySource: data.receivedBySource,
       receivedByChannel: data.receivedByChannel,
+      receivedPrepaidByChannel: data.receivedPrepaidByChannel,
       settledOfThisMonthsSalesBySource: data.settledOfThisMonthsSalesBySource,
+      settledPrepaidByChannel: data.settledPrepaidByChannel,
       carriedForwardCollections: data.carriedForwardCollections,
       salesByChannel: data.salesByChannel,
       courierAging: data.courierAging,
       thisMonthPendingByCourier: data.thisMonthPendingByCourier,
       receivableByCourierAsOfDate: data.receivableByCourierAsOfDate,
       returnsBySource: data.returnsBySource,
+      returnsPrepaidByChannel: data.returnsPrepaidByChannel,
       returnsByMonth: data.returnsByMonth,
       monthlyTrend: data.monthlyTrend,
       receivableByMonth: data.receivableByMonth,
       dataQuality: { ...data.dataQualityTotals, bySource: data.dataQualityBySource },
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+};
+
+/**
+ * GET /api/dashboard/receivables/:brandId/journey?month=&year=&startMonth=&startYear=&originMonth=&originYear=&channel=&courier=&source=
+ * "Click any number, see its complete journey" drill-down — the month-by-month
+ * trajectory behind a single figure on the Receivable Dashboard, instead of the
+ * one-step (this month vs previous month) view the KPI cards show.
+ *
+ * Two modes:
+ *  - Ledger mode (default): one row per calendar month that has ledger activity,
+ *    from the cycle start (or the ledger's own first month) through the selected
+ *    month, each row re-evaluating the SAME whole-ledger metrics AS OF that row's
+ *    own month-end — e.g. total_receivable_as_of's last row always equals the
+ *    "Total receivable" KPI card's own value for the selected month, to the rupee.
+ *    Optionally scoped to one channel/courier (order-level attributes, valid for
+ *    every metric) and/or one settlement source (valid only for the settled_of_own/
+ *    received_* columns — a pending order has no settled_source yet).
+ *  - Origin mode (originMonth/originYear given): fixes the ORDER population to one
+ *    specific month's own sales and traces only how much of THAT month's own sale
+ *    has settled/returned/still-pending, evaluated as of each later month's close —
+ *    e.g. this is what shows Feb's own receivable shrinking from Feb's close to
+ *    March's close as March's collections/returns land. Ignores the whole-ledger
+ *    cumulative columns (total_receivable_as_of/carried_forward_as_of), which don't
+ *    apply to a single fixed origin month.
+ */
+const getReceivableJourney = async (req, res) => {
+  const { brandId } = req.params;
+  const month = parseInt(req.query.month, 10);
+  const year = parseInt(req.query.year, 10);
+  const startMonth = parseInt(req.query.startMonth, 10) || null;
+  const startYear = parseInt(req.query.startYear, 10) || null;
+  const startIndex = (startMonth && startYear) ? (startYear * 12 + startMonth) : 0;
+  const originMonth = parseInt(req.query.originMonth, 10) || null;
+  const originYear = parseInt(req.query.originYear, 10) || null;
+  const channel = (req.query.channel || '').trim() || null;
+  const courier = (req.query.courier || '').trim() || null;
+  const source = (req.query.source || '').trim() || null;
+
+  if (!brandId || brandId === 'demo') return res.status(400).json({ error: 'brandId required' });
+  if (!month || !year) return res.status(400).json({ error: 'month and year query params required' });
+
+  try {
+    const seq = await getBrandSeq(brandId);
+    const months = await withBypass(seq, async (t) => {
+      if (originMonth && originYear) {
+        const [rows] = await seq.query(
+          `WITH months AS (
+             SELECT DISTINCT order_month AS month, order_year AS year
+             FROM receivable_ledger
+             WHERE brand_id = $1 AND (order_year * 12 + order_month) <= ($3 * 12 + $2)
+               AND (order_year * 12 + order_month) >= ($5 * 12 + $4)
+           )
+           SELECT m.month, m.year, agg.*
+           FROM months m
+           CROSS JOIN LATERAL (
+             SELECT
+               COALESCE(SUM(total_amount) FILTER (WHERE order_month = $4 AND order_year = $5), 0) AS origin_sales,
+               COALESCE(SUM(total_amount) FILTER (
+                 WHERE order_month = $4 AND order_year = $5
+                   AND (settled_flag AND (settled_year * 12 + settled_month) <= (m.year * 12 + m.month))
+                   AND NOT (returned_flag AND (returned_year * 12 + returned_month) <= (m.year * 12 + m.month))
+               ), 0) AS origin_settled_as_of,
+               COALESCE(SUM(total_amount) FILTER (
+                 WHERE order_month = $4 AND order_year = $5
+                   AND (returned_flag AND (returned_year * 12 + returned_month) <= (m.year * 12 + m.month))
+               ), 0) AS origin_returned_as_of,
+               COALESCE(SUM(total_amount) FILTER (
+                 WHERE order_month = $4 AND order_year = $5
+                   AND NOT (settled_flag AND (settled_year * 12 + settled_month) <= (m.year * 12 + m.month))
+                   AND NOT (returned_flag AND (returned_year * 12 + returned_month) <= (m.year * 12 + m.month))
+               ), 0) AS origin_pending_as_of
+             FROM receivable_ledger
+             WHERE brand_id = $1
+           ) agg
+           ORDER BY m.year, m.month`,
+          { bind: [brandId, month, year, originMonth, originYear], transaction: t }
+        );
+        return rows;
+      }
+
+      const bind = [brandId, month, year, startIndex];
+      let dimClause = '';
+      if (channel) {
+        bind.push(channel);
+        dimClause += ` AND channel = $${bind.length}`;
+      }
+      if (courier) {
+        bind.push(courier);
+        dimClause += ` AND courier = $${bind.length}`;
+      }
+      let sourceClause = '';
+      if (source) {
+        bind.push(source);
+        sourceClause = ` AND settled_source = $${bind.length}`;
+      }
+
+      const [rows] = await seq.query(
+        `WITH months AS (
+           SELECT DISTINCT order_month AS month, order_year AS year
+           FROM receivable_ledger
+           WHERE brand_id = $1 AND (order_year * 12 + order_month) <= ($3 * 12 + $2)
+             AND (order_year * 12 + order_month) >= $4 ${dimClause}
+         )
+         SELECT m.month, m.year, agg.*
+         FROM months m
+         CROSS JOIN LATERAL (
+           SELECT
+             COALESCE(SUM(total_amount) FILTER (WHERE order_month = m.month AND order_year = m.year), 0) AS sales,
+             COALESCE(SUM(total_amount) FILTER (
+               WHERE order_month = m.month AND order_year = m.year
+                 AND (settled_flag AND (settled_year * 12 + settled_month) <= (m.year * 12 + m.month))
+                 AND NOT (returned_flag AND (returned_year * 12 + returned_month) <= (m.year * 12 + m.month))
+                 ${sourceClause}
+             ), 0) AS settled_of_own,
+             COALESCE(SUM(total_amount) FILTER (
+               WHERE order_month = m.month AND order_year = m.year
+                 AND (returned_flag AND (returned_year * 12 + returned_month) <= (m.year * 12 + m.month))
+             ), 0) AS returned_of_own,
+             COALESCE(SUM(total_amount) FILTER (
+               WHERE order_month = m.month AND order_year = m.year
+                 AND NOT (settled_flag AND (settled_year * 12 + settled_month) <= (m.year * 12 + m.month))
+                 AND NOT (returned_flag AND (returned_year * 12 + returned_month) <= (m.year * 12 + m.month))
+             ), 0) AS this_month_own_receivable,
+             COALESCE(SUM(total_amount) FILTER (
+               WHERE (order_year * 12 + order_month) <= (m.year * 12 + m.month) AND (order_year * 12 + order_month) >= $4
+                 AND NOT (settled_flag AND (settled_year * 12 + settled_month) <= (m.year * 12 + m.month))
+                 AND NOT (returned_flag AND (returned_year * 12 + returned_month) <= (m.year * 12 + m.month))
+             ), 0) AS total_receivable_as_of,
+             COALESCE(SUM(total_amount) FILTER (
+               WHERE (order_year * 12 + order_month) < (m.year * 12 + m.month) AND (order_year * 12 + order_month) >= $4
+                 AND NOT (settled_flag AND (settled_year * 12 + settled_month) <= (m.year * 12 + m.month))
+                 AND NOT (returned_flag AND (returned_year * 12 + returned_month) <= (m.year * 12 + m.month))
+             ), 0) AS carried_forward_as_of,
+             COALESCE(SUM(settled_amount) FILTER (
+               WHERE settled_month = m.month AND settled_year = m.year AND order_month = m.month AND order_year = m.year
+                 AND NOT (returned_flag AND (returned_year * 12 + returned_month) <= (m.year * 12 + m.month))
+                 ${sourceClause}
+             ), 0) AS received_from_own,
+             COALESCE(SUM(settled_amount) FILTER (
+               WHERE settled_month = m.month AND settled_year = m.year AND (order_year * 12 + order_month) < (m.year * 12 + m.month)
+                 AND NOT (returned_flag AND (returned_year * 12 + returned_month) <= (m.year * 12 + m.month))
+                 ${sourceClause}
+             ), 0) AS received_from_carried_forward,
+             COALESCE(SUM(settled_amount) FILTER (
+               WHERE settled_month = m.month AND settled_year = m.year
+                 AND NOT (returned_flag AND (returned_year * 12 + returned_month) <= (m.year * 12 + m.month))
+                 ${sourceClause}
+             ), 0) AS received_this_month,
+             COALESCE(SUM(returned_amount) FILTER (
+               WHERE returned_month = m.month AND returned_year = m.year AND (order_year * 12 + order_month) >= $4
+             ), 0) AS returns_this_month,
+             -- total_amount (not returned_amount) of orders from BEFORE m that were still
+             -- open going into m (not yet settled as of the month before m) and got
+             -- returned in m — the "returned" leg of the carried-forward bridge. Mirrors
+             -- returned_of_carried_forward_this_month in getReceivableDashboard's kpis.
+             COALESCE(SUM(total_amount) FILTER (
+               WHERE returned_month = m.month AND returned_year = m.year
+                 AND (order_year * 12 + order_month) < (m.year * 12 + m.month) AND (order_year * 12 + order_month) >= $4
+                 AND NOT (settled_flag AND (settled_year * 12 + settled_month) <= ((m.year * 12 + m.month) - 1))
+             ), 0) AS returned_of_carried_forward
+           FROM receivable_ledger
+           WHERE brand_id = $1 ${dimClause}
+         ) agg
+         ORDER BY m.year, m.month`,
+        { bind, transaction: t }
+      );
+      return rows;
+    });
+
+    res.json({
+      mode: (originMonth && originYear) ? 'origin' : 'ledger',
+      period: { month, year },
+      origin: (originMonth && originYear) ? { month: originMonth, year: originYear } : null,
+      dimension: channel ? { type: 'channel', value: channel } : courier ? { type: 'courier', value: courier } : source ? { type: 'source', value: source } : null,
+      months,
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -1178,12 +1495,57 @@ const RECEIVABLE_SHEET_FILTERS = {
 };
 const RECEIVABLE_SHEET_ORDER = Object.keys(RECEIVABLE_SHEET_FILTERS);
 
+// Whitelist of headers the "view sheet data" table exposes as Excel-style column
+// filters. `expr` is the only thing that ever reaches raw SQL for a given key —
+// never interpolate a client-supplied column name directly. SETTLED_ASOF/RETURNED_ASOF
+// reference the fixed $2 (month) / $3 (year) bind positions, so callers of
+// buildColumnFilterClause() must always start their bind array as [brandId, month, year, ...].
+const RECEIVABLE_SHEET_COLUMNS = {
+  date: `to_char(order_date, 'YYYY-MM-DD')`,
+  invoice: `COALESCE(invoice_number, '')`,
+  order: `COALESCE(sale_order_number, '')`,
+  awb: `COALESCE(awb, '')`,
+  channel: `COALESCE(channel, '')`,
+  payment: `COALESCE(payment_method, '')`,
+  total: `total_amount::text`,
+  collection: `(CASE WHEN ${SETTLED_ASOF} THEN 'Settled' ELSE 'Pending' END)`,
+  return: `(CASE WHEN ${RETURNED_ASOF} THEN 'Returned' ELSE 'Not Returned' END)`,
+};
+
+// Parses the `filters` query param (JSON object of column key -> selected values)
+// and appends a parameterized `AND <expr> = ANY($n::text[])` clause per column,
+// skipping unknown keys, empty arrays, and (if given) `excludeKey` itself — used by
+// the column-values endpoint so a column's own selection never narrows its own list.
+const buildColumnFilterClause = (rawFilters, bind, excludeKey) => {
+  let filters = {};
+  if (rawFilters) {
+    try {
+      filters = JSON.parse(rawFilters);
+    } catch {
+      return '';
+    }
+  }
+  let clause = '';
+  for (const [key, values] of Object.entries(filters)) {
+    if (key === excludeKey) continue;
+    if (!(key in RECEIVABLE_SHEET_COLUMNS)) continue;
+    if (!Array.isArray(values) || !values.length) continue;
+    const cleanValues = values.filter((v) => typeof v === 'string').slice(0, 500);
+    if (!cleanValues.length) continue;
+    bind.push(cleanValues);
+    clause += ` AND ${RECEIVABLE_SHEET_COLUMNS[key]} = ANY($${bind.length}::text[])`;
+  }
+  return clause;
+};
+
 /**
- * GET /api/dashboard/receivables/:brandId/sheet?month=&year=&sheet=&status=&search=&page=&pageSize=
+ * GET /api/dashboard/receivables/:brandId/sheet?month=&year=&sheet=&status=&search=&filters=&page=&pageSize=
  * Row-level "sheet" browser behind the Receivable Dashboard's "View" button —
  * same tab set as the per-run Receivable Cycle workbook (Main Sheet, COD main
  * sheet, one tab per courier), but reading the cross-year receivable_ledger for
  * whichever month is selected on the dashboard, instead of a single upload's rows.
+ * `filters` is a JSON-encoded { columnKey: [selectedValue, ...] } map driving the
+ * per-header Excel-style checkbox filters (see RECEIVABLE_SHEET_COLUMNS).
  */
 const getReceivableSheetRows = async (req, res) => {
   const { brandId } = req.params;
@@ -1216,8 +1578,9 @@ const getReceivableSheetRows = async (req, res) => {
         bind.push(`%${search}%`);
         searchClause = `AND (invoice_number ILIKE $${bind.length} OR awb ILIKE $${bind.length} OR sale_order_number ILIKE $${bind.length})`;
       }
+      const columnFilterClause = buildColumnFilterClause(req.query.filters, bind);
       const whereSql = `WHERE brand_id = $1 AND order_month = $2 AND order_year = $3
-        ${RECEIVABLE_SHEET_FILTERS[sheet]} ${statusClause} ${searchClause}`;
+        ${RECEIVABLE_SHEET_FILTERS[sheet]} ${statusClause} ${searchClause} ${columnFilterClause}`;
 
       const [[{ count }]] = await seq.query(
         `SELECT COUNT(*) AS count FROM receivable_ledger ${whereSql}`,
@@ -1246,4 +1609,438 @@ const getReceivableSheetRows = async (req, res) => {
   }
 };
 
-module.exports = { getRecoHistory, getJobResults, getDashboardSummary, getJobById, getAdminToolAnalytics, getUserActivity, getToolDetails, getUsersOverview, getBrandActivity, getBrandAgentDetail, getReceivableDashboard, getReceivableSheetRows };
+const COLUMN_VALUES_LIMIT = 500;
+
+/**
+ * GET /api/dashboard/receivables/:brandId/sheet/column-values?column=&month=&year=&sheet=&status=&search=&filters=&q=
+ * Distinct values for one column of the sheet browser, scoped by the currently
+ * active sheet tab / status pill / global search / other column filters (but NOT
+ * this column's own filter, so its popup always lists every option — same
+ * cascading behaviour as Excel's AutoFilter). `q` narrows the list for the
+ * popup's own search box. Powers the per-header filter popovers.
+ */
+const getReceivableSheetColumnValues = async (req, res) => {
+  const { brandId } = req.params;
+  const month = parseInt(req.query.month, 10);
+  const year = parseInt(req.query.year, 10);
+  const sheet = req.query.sheet || 'Main Sheet';
+  const status = req.query.status || 'all';
+  const search = (req.query.search || '').trim();
+  const column = req.query.column;
+  const q = (req.query.q || '').trim();
+
+  if (!brandId || brandId === 'demo') return res.status(400).json({ error: 'brandId required' });
+  if (!month || !year) return res.status(400).json({ error: 'month and year query params required' });
+  if (!(sheet in RECEIVABLE_SHEET_FILTERS)) return res.status(400).json({ error: `Unknown sheet "${sheet}"` });
+  if (!(column in RECEIVABLE_SHEET_COLUMNS)) return res.status(400).json({ error: `Unknown column "${column}"` });
+
+  const statusClause = status === 'pending' ? `AND NOT ${SETTLED_ASOF}`
+    : status === 'settled' ? `AND ${SETTLED_ASOF}`
+    : status === 'returned' ? `AND ${RETURNED_ASOF}`
+    : '';
+
+  try {
+    const seq = await getBrandSeq(brandId);
+    const data = await withBypass(seq, async (t) => {
+      const bind = [brandId, month, year];
+      let searchClause = '';
+      if (search) {
+        bind.push(`%${search}%`);
+        searchClause = `AND (invoice_number ILIKE $${bind.length} OR awb ILIKE $${bind.length} OR sale_order_number ILIKE $${bind.length})`;
+      }
+      const columnFilterClause = buildColumnFilterClause(req.query.filters, bind, column);
+      const expr = RECEIVABLE_SHEET_COLUMNS[column];
+      let qClause = '';
+      if (q) {
+        bind.push(`%${q}%`);
+        qClause = `AND ${expr} ILIKE $${bind.length}`;
+      }
+      const whereSql = `WHERE brand_id = $1 AND order_month = $2 AND order_year = $3
+        ${RECEIVABLE_SHEET_FILTERS[sheet]} ${statusClause} ${searchClause} ${columnFilterClause} ${qClause}`;
+
+      bind.push(COLUMN_VALUES_LIMIT + 1);
+      const [rows] = await seq.query(
+        `SELECT DISTINCT ${expr} AS value
+         FROM receivable_ledger ${whereSql}
+         AND ${expr} IS NOT NULL AND ${expr} <> ''
+         ORDER BY 1
+         LIMIT $${bind.length}`,
+        { bind, transaction: t }
+      );
+      return rows.map((r) => r.value);
+    });
+
+    const truncated = data.length > COLUMN_VALUES_LIMIT;
+    res.json({ column, values: truncated ? data.slice(0, COLUMN_VALUES_LIMIT) : data, truncated });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+};
+
+// ── Advance Amount Dashboard ─────────────────────────────────────────────────
+// Money already collected via a prepaid gateway (Snapmint / BharatX / Razorpay)
+// for a Shopify order that has NOT been delivered yet — cash in hand that isn't
+// earned revenue, and is at risk of refund if the order never ships. Sourced from
+// shopify_order_cycle (the Shopify-Order-Cycle agent's saved rows) — the only
+// table where these three gateways' settlement amounts live; receivable_ledger
+// (behind the Receivable Dashboard) is COD-courier-only and has no gateway columns.
+//
+// "Not delivered" = delivery_status is anything other than 'DELIVERED' (blank/
+// not-yet-dispatched, 'partial', or any other non-terminal-delivered status).
+//
+// The table's own `month`/`year` columns are the upload form's selected period,
+// NOT derived from the order's actual dispatch date (verified against real data —
+// every advance row has month/year stamped to the upload date, unrelated to its
+// `date` column) — so date-range filtering here uses the `date` column itself,
+// normalized to IST so bucketing doesn't drift with the DB session's timezone.
+const ADVANCE_TABLE = 'shopify_order_cycle';
+const ADVANCE_GATEWAY_AMOUNT = `(COALESCE(snapmint_settlement_value,0) + COALESCE(bharatx_ledger_amount,0) + COALESCE(razorpay_settlement_amount,0))`;
+const ADVANCE_FILTER = `(COALESCE(snapmint_settlement_value,0) > 0 OR COALESCE(bharatx_ledger_amount,0) > 0 OR COALESCE(razorpay_settlement_amount,0) > 0) AND COALESCE(delivery_status, '') <> 'DELIVERED'`;
+const ADVANCE_MONTH_INDEX = `(EXTRACT(YEAR FROM date AT TIME ZONE 'Asia/Kolkata')::int * 12 + EXTRACT(MONTH FROM date AT TIME ZONE 'Asia/Kolkata')::int)`;
+const ADVANCE_IST_DATE = `(date AT TIME ZONE 'Asia/Kolkata')::date`;
+
+const emptyAdvanceAmountDashboard = () => ({
+  range: null,
+  availableRange: null,
+  kpis: null,
+  byGateway: [],
+  byStatus: [],
+  aging: [],
+  monthlyTrend: [],
+});
+
+// Inverse of (year*12 + month) — month always lands in [1,12].
+const monthIndexToPeriod = (idx) => {
+  const i = Number(idx);
+  const year = Math.floor((i - 1) / 12);
+  return { month: i - year * 12, year };
+};
+
+/**
+ * GET /api/dashboard/advance-amount/:brandId?fromMonth&fromYear&toMonth&toYear
+ * No range given → defaults to the full span of available advance data.
+ */
+const getAdvanceAmountDashboard = async (req, res) => {
+  const { brandId } = req.params;
+  if (!brandId || brandId === 'demo') return res.status(400).json({ error: 'brandId required' });
+
+  let fromMonth = parseInt(req.query.fromMonth, 10) || null;
+  let fromYear = parseInt(req.query.fromYear, 10) || null;
+  let toMonth = parseInt(req.query.toMonth, 10) || null;
+  let toYear = parseInt(req.query.toYear, 10) || null;
+
+  try {
+    const seq = await getBrandSeq(brandId);
+
+    const availableSpan = await withBypass(seq, async (t) => {
+      const [[row]] = await seq.query(
+        `SELECT MIN(${ADVANCE_MONTH_INDEX}) AS min_idx, MAX(${ADVANCE_MONTH_INDEX}) AS max_idx
+         FROM ${ADVANCE_TABLE} WHERE brand_id = $1 AND ${ADVANCE_FILTER}`,
+        { bind: [brandId], transaction: t }
+      );
+      return row;
+    });
+
+    if (availableSpan.min_idx == null) return res.json(emptyAdvanceAmountDashboard());
+
+    const availableRange = {
+      from: monthIndexToPeriod(availableSpan.min_idx),
+      to: monthIndexToPeriod(availableSpan.max_idx),
+    };
+
+    if (!fromMonth || !fromYear) { fromMonth = availableRange.from.month; fromYear = availableRange.from.year; }
+    if (!toMonth || !toYear) { toMonth = availableRange.to.month; toYear = availableRange.to.year; }
+
+    const fromIdx = fromYear * 12 + fromMonth;
+    const toIdx = toYear * 12 + toMonth;
+
+    const data = await withBypass(seq, async (t) => {
+      const bind = [brandId, fromIdx, toIdx];
+      const whereSql = `WHERE brand_id = $1 AND ${ADVANCE_FILTER} AND ${ADVANCE_MONTH_INDEX} BETWEEN $2 AND $3`;
+
+      const [[kpis]] = await seq.query(
+        `SELECT
+           COUNT(*) AS total_orders,
+           COALESCE(SUM(${ADVANCE_GATEWAY_AMOUNT}), 0) AS total_advance_amount,
+           COALESCE(AVG(CURRENT_DATE - ${ADVANCE_IST_DATE}), 0) AS avg_days_pending,
+           COALESCE(MAX(CURRENT_DATE - ${ADVANCE_IST_DATE}), 0) AS oldest_days_pending
+         FROM ${ADVANCE_TABLE} ${whereSql}`,
+        { bind, transaction: t }
+      );
+
+      // One row per (order, gateway-that-actually-paid) — an order only appears more
+      // than once here if more than one gateway shows money against it.
+      const [byGateway] = await seq.query(
+        `SELECT gateway, COUNT(*) AS orders, SUM(amount) AS amount FROM (
+           SELECT 'Snapmint' AS gateway, snapmint_settlement_value AS amount FROM ${ADVANCE_TABLE} ${whereSql} AND COALESCE(snapmint_settlement_value,0) > 0
+           UNION ALL
+           SELECT 'BharatX' AS gateway, bharatx_ledger_amount AS amount FROM ${ADVANCE_TABLE} ${whereSql} AND COALESCE(bharatx_ledger_amount,0) > 0
+           UNION ALL
+           SELECT 'Razorpay' AS gateway, razorpay_settlement_amount AS amount FROM ${ADVANCE_TABLE} ${whereSql} AND COALESCE(razorpay_settlement_amount,0) > 0
+         ) g GROUP BY gateway ORDER BY amount DESC`,
+        { bind, transaction: t }
+      );
+
+      const [byStatus] = await seq.query(
+        `SELECT COALESCE(NULLIF(delivery_status, ''), 'Not dispatched') AS status,
+                COUNT(*) AS orders, SUM(${ADVANCE_GATEWAY_AMOUNT}) AS amount
+         FROM ${ADVANCE_TABLE} ${whereSql}
+         GROUP BY 1 ORDER BY amount DESC`,
+        { bind, transaction: t }
+      );
+
+      const [aging] = await seq.query(
+        `SELECT
+           CASE
+             WHEN (CURRENT_DATE - ${ADVANCE_IST_DATE}) <= 7 THEN '0-7 days'
+             WHEN (CURRENT_DATE - ${ADVANCE_IST_DATE}) <= 15 THEN '8-15 days'
+             WHEN (CURRENT_DATE - ${ADVANCE_IST_DATE}) <= 30 THEN '16-30 days'
+             WHEN (CURRENT_DATE - ${ADVANCE_IST_DATE}) <= 60 THEN '31-60 days'
+             ELSE '60+ days'
+           END AS bucket,
+           MIN(CASE
+             WHEN (CURRENT_DATE - ${ADVANCE_IST_DATE}) <= 7 THEN 1
+             WHEN (CURRENT_DATE - ${ADVANCE_IST_DATE}) <= 15 THEN 2
+             WHEN (CURRENT_DATE - ${ADVANCE_IST_DATE}) <= 30 THEN 3
+             WHEN (CURRENT_DATE - ${ADVANCE_IST_DATE}) <= 60 THEN 4
+             ELSE 5
+           END) AS sort_order,
+           COUNT(*) AS orders, SUM(${ADVANCE_GATEWAY_AMOUNT}) AS amount
+         FROM ${ADVANCE_TABLE} ${whereSql}
+         GROUP BY 1 ORDER BY sort_order`,
+        { bind, transaction: t }
+      );
+
+      const [monthlyTrend] = await seq.query(
+        `SELECT EXTRACT(YEAR FROM date AT TIME ZONE 'Asia/Kolkata')::int AS year,
+                EXTRACT(MONTH FROM date AT TIME ZONE 'Asia/Kolkata')::int AS month,
+                COUNT(*) AS orders, SUM(${ADVANCE_GATEWAY_AMOUNT}) AS amount
+         FROM ${ADVANCE_TABLE} ${whereSql}
+         GROUP BY 1, 2 ORDER BY 1, 2`,
+        { bind, transaction: t }
+      );
+
+      return { kpis, byGateway, byStatus, aging, monthlyTrend };
+    });
+
+    res.json({ range: { fromMonth, fromYear, toMonth, toYear }, availableRange, ...data });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+};
+
+// Same bucket boundaries as the `aging` breakdown in getAdvanceAmountDashboard —
+// keyed so a breakdown row's bucket label can be passed straight back as a filter.
+const ADVANCE_AGING_BUCKETS = {
+  '0-7 days':   `(CURRENT_DATE - ${ADVANCE_IST_DATE}) BETWEEN 0 AND 7`,
+  '8-15 days':  `(CURRENT_DATE - ${ADVANCE_IST_DATE}) BETWEEN 8 AND 15`,
+  '16-30 days': `(CURRENT_DATE - ${ADVANCE_IST_DATE}) BETWEEN 16 AND 30`,
+  '31-60 days': `(CURRENT_DATE - ${ADVANCE_IST_DATE}) BETWEEN 31 AND 60`,
+  '60+ days':   `(CURRENT_DATE - ${ADVANCE_IST_DATE}) > 60`,
+};
+
+// Whitelist of headers the order browser exposes as Excel-style column filters —
+// covers everything the gateway tabs / status pills don't already filter on. `expr`
+// is the only thing that ever reaches raw SQL for a given key — never interpolate a
+// client-supplied column name directly.
+const ADVANCE_SHEET_COLUMNS = {
+  date: `to_char(${ADVANCE_IST_DATE}, 'YYYY-MM-DD')`,
+  order: `COALESCE(sale_order_number, '')`,
+  invoice: `COALESCE(invoice_number, '')`,
+  awb: `COALESCE(awb_number, '')`,
+  platform: `COALESCE(platform, '')`,
+};
+
+// Parses the `filters` query param (JSON object of column key -> selected values)
+// and appends a parameterized `AND <expr> = ANY($n::text[])` clause per column,
+// skipping unknown keys, empty arrays, and (if given) `excludeKey` itself — used by
+// the column-values endpoint so a column's own selection never narrows its own list.
+const buildAdvanceColumnFilterClause = (rawFilters, bind, excludeKey) => {
+  let filters = {};
+  if (rawFilters) {
+    try {
+      filters = JSON.parse(rawFilters);
+    } catch {
+      return '';
+    }
+  }
+  let clause = '';
+  for (const [key, values] of Object.entries(filters)) {
+    if (key === excludeKey) continue;
+    if (!(key in ADVANCE_SHEET_COLUMNS)) continue;
+    if (!Array.isArray(values) || !values.length) continue;
+    const cleanValues = values.filter((v) => typeof v === 'string').slice(0, 500);
+    if (!cleanValues.length) continue;
+    bind.push(cleanValues);
+    clause += ` AND ${ADVANCE_SHEET_COLUMNS[key]} = ANY($${bind.length}::text[])`;
+  }
+  return clause;
+};
+
+// Shared by getAdvanceAmountSheet and getAdvanceAmountSheetColumnValues — every
+// filter EXCEPT the column-filter clause itself, which callers append separately
+// (the column-values endpoint needs to exclude its own column's selection).
+const buildAdvanceSheetBaseWhere = (req, bind) => {
+  const gateway = req.query.gateway || 'all';
+  const status = req.query.status || 'all';
+  const agingBucket = req.query.agingBucket || '';
+  const search = (req.query.search || '').trim();
+
+  const gatewayClause = gateway === 'snapmint' ? `AND COALESCE(snapmint_settlement_value,0) > 0`
+    : gateway === 'bharatx' ? `AND COALESCE(bharatx_ledger_amount,0) > 0`
+    : gateway === 'razorpay' ? `AND COALESCE(razorpay_settlement_amount,0) > 0`
+    : '';
+  const agingClause = ADVANCE_AGING_BUCKETS[agingBucket] ? `AND ${ADVANCE_AGING_BUCKETS[agingBucket]}` : '';
+
+  // 'not_dispatched' is the UI's pseudo-value for a blank delivery_status; any
+  // other non-'all' value (e.g. 'partial', or a future status) is matched literally
+  // so a byStatus breakdown row's own label always round-trips as a filter here.
+  let statusClause = '';
+  if (status === 'not_dispatched') {
+    statusClause = `AND COALESCE(delivery_status,'') = ''`;
+  } else if (status && status !== 'all') {
+    bind.push(status);
+    statusClause = `AND delivery_status = $${bind.length}`;
+  }
+  let searchClause = '';
+  if (search) {
+    bind.push(`%${search}%`);
+    searchClause = `AND (sale_order_number ILIKE $${bind.length} OR invoice_number ILIKE $${bind.length} OR awb_number ILIKE $${bind.length})`;
+  }
+  return `${gatewayClause} ${statusClause} ${agingClause} ${searchClause}`;
+};
+
+/**
+ * GET /api/dashboard/advance-amount/:brandId/sheet
+ *   ?fromMonth&fromYear&toMonth&toYear&gateway=all|snapmint|bharatx|razorpay
+ *   &status=all|not_dispatched|<any delivery_status value>&agingBucket=<one of ADVANCE_AGING_BUCKETS>
+ *   &sort=recent|oldest&search=&filters=&page=&pageSize=
+ * Order-level rows behind the Advance Amount Dashboard's KPIs and every one of its
+ * breakdown tables — same ADVANCE_FILTER population, paginated, filterable by the
+ * exact dimension a breakdown row or trend-chart point represents so every number on
+ * the dashboard can be clicked through to the orders behind it. `filters` is a
+ * JSON-encoded { columnKey: [selectedValue, ...] } map driving the per-header
+ * Excel-style checkbox filters (see ADVANCE_SHEET_COLUMNS).
+ */
+const getAdvanceAmountSheet = async (req, res) => {
+  const { brandId } = req.params;
+  if (!brandId || brandId === 'demo') return res.status(400).json({ error: 'brandId required' });
+
+  const fromMonth = parseInt(req.query.fromMonth, 10);
+  const fromYear = parseInt(req.query.fromYear, 10);
+  const toMonth = parseInt(req.query.toMonth, 10);
+  const toYear = parseInt(req.query.toYear, 10);
+  if (!fromMonth || !fromYear || !toMonth || !toYear) {
+    return res.status(400).json({ error: 'fromMonth, fromYear, toMonth, toYear query params required' });
+  }
+  const sort = req.query.sort === 'oldest' ? 'oldest' : 'recent';
+  const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+  const pageSize = Math.min(200, Math.max(10, parseInt(req.query.pageSize, 10) || 50));
+
+  try {
+    const seq = await getBrandSeq(brandId);
+    const fromIdx = fromYear * 12 + fromMonth;
+    const toIdx = toYear * 12 + toMonth;
+
+    const data = await withBypass(seq, async (t) => {
+      const bind = [brandId, fromIdx, toIdx];
+      const baseClauses = buildAdvanceSheetBaseWhere(req, bind);
+      const columnFilterClause = buildAdvanceColumnFilterClause(req.query.filters, bind);
+      const whereSql = `WHERE brand_id = $1 AND ${ADVANCE_FILTER} AND ${ADVANCE_MONTH_INDEX} BETWEEN $2 AND $3
+        ${baseClauses} ${columnFilterClause}`;
+
+      const [[{ count }]] = await seq.query(
+        `SELECT COUNT(*) AS count FROM ${ADVANCE_TABLE} ${whereSql}`,
+        { bind, transaction: t }
+      );
+
+      bind.push(pageSize, (page - 1) * pageSize);
+      const [rows] = await seq.query(
+        `SELECT date, sale_order_number, invoice_number, awb_number, platform, shipping_partner,
+                COALESCE(NULLIF(delivery_status, ''), 'Not dispatched') AS delivery_status,
+                CASE
+                  WHEN COALESCE(snapmint_settlement_value,0) > 0 THEN 'Snapmint'
+                  WHEN COALESCE(bharatx_ledger_amount,0) > 0 THEN 'BharatX'
+                  WHEN COALESCE(razorpay_settlement_amount,0) > 0 THEN 'Razorpay'
+                  ELSE 'Unknown'
+                END AS gateway,
+                ${ADVANCE_GATEWAY_AMOUNT} AS gateway_amount,
+                total_amount, net_amount,
+                (CURRENT_DATE - ${ADVANCE_IST_DATE}) AS days_pending
+         FROM ${ADVANCE_TABLE} ${whereSql}
+         ORDER BY ${sort === 'oldest' ? 'days_pending DESC' : 'date DESC'}
+         LIMIT $${bind.length - 1} OFFSET $${bind.length}`,
+        { bind, transaction: t }
+      );
+      return { rows, total: Number(count) };
+    });
+
+    res.json({ page, pageSize, total: data.total, rows: data.rows });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+};
+
+const ADVANCE_COLUMN_VALUES_LIMIT = 500;
+
+/**
+ * GET /api/dashboard/advance-amount/:brandId/sheet/column-values
+ *   ?fromMonth&fromYear&toMonth&toYear&gateway=&status=&agingBucket=&search=&filters=&column=&q=
+ * Distinct values for one column of the order browser, scoped by every other
+ * currently-active filter (but NOT this column's own filter, so its popup always
+ * lists every option) — same cascading behaviour as Excel's AutoFilter. `q` narrows
+ * the list for the popup's own search box.
+ */
+const getAdvanceAmountSheetColumnValues = async (req, res) => {
+  const { brandId } = req.params;
+  if (!brandId || brandId === 'demo') return res.status(400).json({ error: 'brandId required' });
+
+  const fromMonth = parseInt(req.query.fromMonth, 10);
+  const fromYear = parseInt(req.query.fromYear, 10);
+  const toMonth = parseInt(req.query.toMonth, 10);
+  const toYear = parseInt(req.query.toYear, 10);
+  if (!fromMonth || !fromYear || !toMonth || !toYear) {
+    return res.status(400).json({ error: 'fromMonth, fromYear, toMonth, toYear query params required' });
+  }
+  const column = req.query.column;
+  if (!(column in ADVANCE_SHEET_COLUMNS)) return res.status(400).json({ error: `Unknown column "${column}"` });
+  const q = (req.query.q || '').trim();
+
+  try {
+    const seq = await getBrandSeq(brandId);
+    const fromIdx = fromYear * 12 + fromMonth;
+    const toIdx = toYear * 12 + toMonth;
+
+    const data = await withBypass(seq, async (t) => {
+      const bind = [brandId, fromIdx, toIdx];
+      const baseClauses = buildAdvanceSheetBaseWhere(req, bind);
+      const columnFilterClause = buildAdvanceColumnFilterClause(req.query.filters, bind, column);
+      const expr = ADVANCE_SHEET_COLUMNS[column];
+      let qClause = '';
+      if (q) {
+        bind.push(`%${q}%`);
+        qClause = `AND ${expr} ILIKE $${bind.length}`;
+      }
+      const whereSql = `WHERE brand_id = $1 AND ${ADVANCE_FILTER} AND ${ADVANCE_MONTH_INDEX} BETWEEN $2 AND $3
+        ${baseClauses} ${columnFilterClause} ${qClause}`;
+
+      bind.push(ADVANCE_COLUMN_VALUES_LIMIT + 1);
+      const [rows] = await seq.query(
+        `SELECT DISTINCT ${expr} AS value
+         FROM ${ADVANCE_TABLE} ${whereSql}
+         AND ${expr} IS NOT NULL AND ${expr} <> ''
+         ORDER BY 1
+         LIMIT $${bind.length}`,
+        { bind, transaction: t }
+      );
+      return rows.map((r) => r.value);
+    });
+
+    const truncated = data.length > ADVANCE_COLUMN_VALUES_LIMIT;
+    res.json({ column, values: truncated ? data.slice(0, ADVANCE_COLUMN_VALUES_LIMIT) : data, truncated });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+};
+
+module.exports = { getRecoHistory, getJobResults, getDashboardSummary, getJobById, getAdminToolAnalytics, getUserActivity, getToolDetails, getUsersOverview, getBrandActivity, getBrandAgentDetail, getReceivableDashboard, getReceivableJourney, getReceivableSheetRows, getReceivableSheetColumnValues, getAdvanceAmountDashboard, getAdvanceAmountSheet, getAdvanceAmountSheetColumnValues };

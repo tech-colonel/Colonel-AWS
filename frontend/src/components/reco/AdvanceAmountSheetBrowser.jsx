@@ -7,34 +7,34 @@ import ColumnFilterPopover from './ColumnFilterPopover';
 
 const MONTHS = ['', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
-const SHEET_TABS = ['Main Sheet', 'COD main sheet', 'Delivery', 'Ekart', 'Xpressbees', 'DTDC', 'Self shipping', 'Other COD'];
-
-// Mirrors RECEIVABLE_SHEET_COLUMNS in dashboardController.js — the per-header
-// Excel-style filter popovers, keyed to match the `filters` JSON the backend expects.
-const FILTER_COLUMNS = [
-  { key: 'date', label: 'Date' },
-  { key: 'invoice', label: 'Invoice #' },
-  { key: 'order', label: 'Order #' },
-  { key: 'awb', label: 'AWB' },
-  { key: 'channel', label: 'Channel' },
-  { key: 'payment', label: 'Payment' },
-  { key: 'total', label: 'Total' },
-  { key: 'collection', label: 'Collection' },
-  { key: 'return', label: 'Return' },
+const GATEWAY_TABS = [
+  { key: 'all', label: 'All gateways' },
+  { key: 'snapmint', label: 'Snapmint' },
+  { key: 'bharatx', label: 'BharatX' },
+  { key: 'razorpay', label: 'Razorpay' },
 ];
 
 const STATUS_FILTERS = [
   { key: 'all', label: 'All' },
-  { key: 'pending', label: 'Pending' },
-  { key: 'settled', label: 'Settled' },
-  { key: 'returned', label: 'Returned' },
+  { key: 'not_dispatched', label: 'Not dispatched' },
+  { key: 'partial', label: 'Partially delivered' },
 ];
 
-const COLOR_SALES = '#0748EE';
-const COLOR_RECEIVED = '#059669';
+// Mirrors ADVANCE_SHEET_COLUMNS in dashboardController.js — the per-header
+// Excel-style filter popovers, keyed to match the `filters` JSON the backend
+// expects. Gateway/Status already have their own tab/pill controls above, so
+// they're not duplicated here.
+const FILTER_COLUMNS = [
+  { key: 'date', label: 'Date' },
+  { key: 'order', label: 'Order #' },
+  { key: 'invoice', label: 'Invoice #' },
+  { key: 'awb', label: 'AWB' },
+  { key: 'platform', label: 'Platform' },
+];
+
 const COLOR_PENDING = '#D97706';
-const COLOR_RETURNED = '#E11D48';
 const COLOR_PRIMARY = '#4F46E5';
+const COLOR_SALES = '#0748EE';
 
 const cardStyle = {
   background: 'var(--surface)',
@@ -61,9 +61,9 @@ const Pill = ({ children, color, subtle }) => (
   </span>
 );
 
-const ReceivableSheetBrowser = ({ brandId, month, year }) => {
+const AdvanceAmountSheetBrowser = ({ brandId, range }) => {
   const [expanded, setExpanded] = useState(false);
-  const [sheet, setSheet] = useState('Main Sheet');
+  const [gateway, setGateway] = useState('all');
   const [status, setStatus] = useState('all');
   const [search, setSearch] = useState('');
   const [searchInput, setSearchInput] = useState('');
@@ -77,51 +77,51 @@ const ReceivableSheetBrowser = ({ brandId, month, year }) => {
   const filtersParam = hasColumnFilters ? JSON.stringify(columnFilters) : '';
 
   const load = useCallback(async () => {
+    if (!range) return;
     setLoading(true);
     setError(null);
     try {
       const params = new URLSearchParams({
-        month: String(month), year: String(year), sheet, status,
-        page: String(page), pageSize: String(PAGE_SIZE),
+        fromMonth: String(range.fromMonth), fromYear: String(range.fromYear),
+        toMonth: String(range.toMonth), toYear: String(range.toYear),
+        gateway, status, page: String(page), pageSize: String(PAGE_SIZE),
       });
       if (search) params.set('search', search);
       if (filtersParam) params.set('filters', filtersParam);
-      const res = await api.get(`/api/dashboard/receivables/${brandId}/sheet?${params.toString()}`);
+      const res = await api.get(`/api/dashboard/advance-amount/${brandId}/sheet?${params.toString()}`);
       setData(res.data);
     } catch (e) {
-      setError(e.response?.data?.error || 'Failed to load sheet data');
+      setError(e.response?.data?.error || 'Failed to load advance orders');
     } finally {
       setLoading(false);
     }
-  }, [brandId, month, year, sheet, status, page, search, filtersParam]);
+  }, [brandId, range, gateway, status, page, search, filtersParam]);
 
   useEffect(() => {
     if (expanded) load();
   }, [expanded, load]);
 
-  // Any filter/tab/month change resets to page 1.
-  useEffect(() => { setPage(1); }, [sheet, status, search, month, year, filtersParam]);
+  useEffect(() => { setPage(1); }, [gateway, status, search, filtersParam, range?.fromMonth, range?.fromYear, range?.toMonth, range?.toYear]);
 
   const setColumnFilter = (key, values) => {
     setColumnFilters((prev) => ({ ...prev, [key]: values }));
   };
 
   const fetchColumnValues = useCallback((column) => (q) => {
+    if (!range) return Promise.resolve({ values: [], truncated: false });
     const params = new URLSearchParams({
-      month: String(month), year: String(year), sheet, status, column,
+      fromMonth: String(range.fromMonth), fromYear: String(range.fromYear),
+      toMonth: String(range.toMonth), toYear: String(range.toYear),
+      gateway, status, column,
     });
     if (search) params.set('search', search);
     if (filtersParam) params.set('filters', filtersParam);
     if (q) params.set('q', q);
-    return api.get(`/api/dashboard/receivables/${brandId}/sheet/column-values?${params.toString()}`)
+    return api.get(`/api/dashboard/advance-amount/${brandId}/sheet/column-values?${params.toString()}`)
       .then((res) => res.data);
-  }, [brandId, month, year, sheet, status, search, filtersParam]);
+  }, [brandId, range, gateway, status, search, filtersParam]);
 
-  const formatColumnValue = (key, v) => {
-    if (key === 'date') return fmtDate(v);
-    if (key === 'total') return money(Number(v));
-    return v;
-  };
+  const formatColumnValue = (key, v) => (key === 'date' ? fmtDate(v) : v);
 
   const totalPages = data ? Math.max(1, Math.ceil(data.total / PAGE_SIZE)) : 1;
 
@@ -140,10 +140,10 @@ const ReceivableSheetBrowser = ({ brandId, month, year }) => {
           </div>
           <div className="text-left">
             <p className="text-sm font-black" style={{ color: 'var(--text-heading)', fontFamily: 'Barlow' }}>
-              View sheet data — {MONTHS[month]} {year}
+              View orders with advance received
             </p>
             <p className="text-xs mt-0.5" style={{ color: 'var(--text-muted)' }}>
-              Row-level Main Sheet / COD / per-courier breakdown, same as the Receivable Cycle workbook
+              Order-level rows behind the KPIs above — prepaid gateway amount received, order not yet delivered
             </p>
           </div>
         </div>
@@ -157,23 +157,23 @@ const ReceivableSheetBrowser = ({ brandId, month, year }) => {
 
       {expanded && (
         <div style={{ borderTop: '1px solid var(--card-border)' }}>
-          {/* Sheet tabs */}
+          {/* Gateway tabs */}
           <div className="flex flex-wrap gap-2 px-5 pt-4">
-            {SHEET_TABS.map((s) => (
+            {GATEWAY_TABS.map((g) => (
               <button
-                key={s}
-                onClick={() => setSheet(s)}
+                key={g.key}
+                onClick={() => setGateway(g.key)}
                 className="text-xs font-bold px-3 py-1.5 rounded-lg transition-all"
-                style={sheet === s
+                style={gateway === g.key
                   ? { background: COLOR_PRIMARY, color: '#fff' }
                   : { background: 'var(--page-bg)', color: 'var(--text-muted)', border: '1px solid var(--card-border)' }}
               >
-                {s}
+                {g.label}
               </button>
             ))}
           </div>
 
-          {/* Filter row: status pills + search */}
+          {/* Status pills + search */}
           <div className="flex flex-wrap items-center justify-between gap-3 px-5 pt-4 pb-2">
             <div className="flex items-center gap-1.5">
               {STATUS_FILTERS.map((f) => (
@@ -192,7 +192,7 @@ const ReceivableSheetBrowser = ({ brandId, month, year }) => {
                 <button
                   onClick={() => setColumnFilters({})}
                   className="text-xs font-semibold px-2.5 py-1 rounded-full flex items-center gap-1"
-                  style={{ background: `${COLOR_RETURNED}12`, color: COLOR_RETURNED, border: `1px solid ${COLOR_RETURNED}30` }}
+                  style={{ background: '#E11D4812', color: '#E11D48', border: '1px solid #E11D4830' }}
                 >
                   <X className="w-3 h-3" /> Clear column filters
                 </button>
@@ -205,7 +205,7 @@ const ReceivableSheetBrowser = ({ brandId, month, year }) => {
                   value={searchInput}
                   onChange={(e) => setSearchInput(e.target.value)}
                   onKeyDown={(e) => { if (e.key === 'Enter') setSearch(searchInput.trim()); }}
-                  placeholder="Search invoice / AWB / order no."
+                  placeholder="Search order / invoice / AWB"
                   className="text-xs pl-8 pr-3 py-1.5 rounded-lg w-56"
                   style={{ background: 'var(--page-bg)', border: '1px solid var(--card-border)', color: 'var(--text-heading)' }}
                 />
@@ -238,7 +238,7 @@ const ReceivableSheetBrowser = ({ brandId, month, year }) => {
               </div>
             )}
             {!loading && error && (
-              <p className="text-sm font-semibold py-8 text-center" style={{ color: COLOR_RETURNED }}>{error}</p>
+              <p className="text-sm font-semibold py-8 text-center" style={{ color: '#E11D48' }}>{error}</p>
             )}
             {!loading && !error && data && (
               <>
@@ -260,48 +260,32 @@ const ReceivableSheetBrowser = ({ brandId, month, year }) => {
                             </span>
                           </th>
                         ))}
+                        {['Gateway', 'Advance received', 'Order total', 'Status', 'Days pending'].map((h) => (
+                          <th key={h} className="px-3 py-2.5 text-left text-[11px] font-bold uppercase tracking-wide whitespace-nowrap" style={{ color: 'var(--text-muted)' }}>{h}</th>
+                        ))}
                       </tr>
                     </thead>
                     <tbody>
                       {data.rows.map((r, i) => (
-                        <tr key={`${r.awb}-${r.invoice_number}-${i}`} style={{ borderBottom: '1px solid var(--card-border)' }}>
-                          <td className="px-3 py-2.5 whitespace-nowrap" style={{ color: 'var(--text-body)' }}>{fmtDate(r.order_date)}</td>
-                          <td className="px-3 py-2.5 whitespace-nowrap font-medium" style={{ color: 'var(--text-heading)' }}>{r.invoice_number || '—'}</td>
-                          <td className="px-3 py-2.5 whitespace-nowrap" style={{ color: 'var(--text-muted)' }}>{r.sale_order_number || '—'}</td>
-                          <td className="px-3 py-2.5 whitespace-nowrap" style={{ color: 'var(--text-muted)' }}>{r.awb || '—'}</td>
-                          <td className="px-3 py-2.5 whitespace-nowrap" style={{ color: 'var(--text-body)' }}>{r.channel || '—'}</td>
+                        <tr key={`${r.sale_order_number}-${r.invoice_number}-${i}`} style={{ borderBottom: '1px solid var(--card-border)' }}>
+                          <td className="px-3 py-2.5 whitespace-nowrap" style={{ color: 'var(--text-body)' }}>{fmtDate(r.date)}</td>
+                          <td className="px-3 py-2.5 whitespace-nowrap font-medium" style={{ color: 'var(--text-heading)' }}>{r.sale_order_number || '—'}</td>
+                          <td className="px-3 py-2.5 whitespace-nowrap" style={{ color: 'var(--text-muted)' }}>{r.invoice_number || '—'}</td>
+                          <td className="px-3 py-2.5 whitespace-nowrap" style={{ color: 'var(--text-muted)' }}>{r.awb_number || '—'}</td>
+                          <td className="px-3 py-2.5 whitespace-nowrap" style={{ color: 'var(--text-body)' }}>{r.platform || '—'}</td>
+                          <td className="px-3 py-2.5 whitespace-nowrap"><Pill color={COLOR_SALES}>{r.gateway}</Pill></td>
+                          <td className="px-3 py-2.5 whitespace-nowrap font-semibold" style={{ color: COLOR_PENDING }}>{money(r.gateway_amount)}</td>
+                          <td className="px-3 py-2.5 whitespace-nowrap" style={{ color: 'var(--text-body)' }}>{money(r.total_amount)}</td>
                           <td className="px-3 py-2.5 whitespace-nowrap">
-                            <Pill color={r.payment_method === 'COD' ? COLOR_PENDING : COLOR_SALES}>{r.payment_method}</Pill>
+                            <Pill color={r.delivery_status === 'partial' ? COLOR_PENDING : '#64748B'} subtle={r.delivery_status !== 'partial'}>
+                              {r.delivery_status === 'partial' ? 'Partially delivered' : r.delivery_status}
+                            </Pill>
                           </td>
-                          <td className="px-3 py-2.5 whitespace-nowrap font-semibold" style={{ color: 'var(--text-heading)' }}>{money(r.total_amount)}</td>
-                          <td className="px-3 py-2.5 whitespace-nowrap">
-                            {r.settled_flag ? (
-                              <div>
-                                <Pill color={COLOR_RECEIVED}>Settled</Pill>
-                                <p className="text-[10px] mt-0.5 capitalize" style={{ color: 'var(--text-muted)' }}>
-                                  {r.settled_source} · {MONTHS[r.settled_month]} {r.settled_year}
-                                </p>
-                              </div>
-                            ) : (
-                              <Pill color={COLOR_PENDING}>Pending</Pill>
-                            )}
-                          </td>
-                          <td className="px-3 py-2.5 whitespace-nowrap">
-                            {r.returned_flag ? (
-                              <div>
-                                <Pill color={COLOR_RETURNED}>Returned</Pill>
-                                <p className="text-[10px] mt-0.5" style={{ color: 'var(--text-muted)' }}>
-                                  {money(r.returned_amount)} · {MONTHS[r.returned_month]} {r.returned_year}
-                                </p>
-                              </div>
-                            ) : (
-                              <Pill subtle>—</Pill>
-                            )}
-                          </td>
+                          <td className="px-3 py-2.5 whitespace-nowrap" style={{ color: 'var(--text-body)' }}>{Number(r.days_pending).toLocaleString('en-IN')}</td>
                         </tr>
                       ))}
                       {!data.rows.length && (
-                        <tr><td colSpan={9} className="px-3 py-10 text-center text-xs" style={{ color: 'var(--text-muted)' }}>No rows match this filter.</td></tr>
+                        <tr><td colSpan={10} className="px-3 py-10 text-center text-xs" style={{ color: 'var(--text-muted)' }}>No orders match this filter.</td></tr>
                       )}
                     </tbody>
                   </table>
@@ -309,7 +293,7 @@ const ReceivableSheetBrowser = ({ brandId, month, year }) => {
 
                 <div className="flex items-center justify-between mt-3">
                   <p className="text-xs" style={{ color: 'var(--text-muted)' }}>
-                    {data.total.toLocaleString('en-IN')} row{data.total === 1 ? '' : 's'} · page {page} of {totalPages}
+                    {data.total.toLocaleString('en-IN')} order{data.total === 1 ? '' : 's'} · page {page} of {totalPages}
                   </p>
                   <div className="flex items-center gap-1.5">
                     <button
@@ -339,4 +323,4 @@ const ReceivableSheetBrowser = ({ brandId, month, year }) => {
   );
 };
 
-export default ReceivableSheetBrowser;
+export default AdvanceAmountSheetBrowser;
