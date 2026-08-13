@@ -1,0 +1,12 @@
+{
+  "watch": ["server.js", "src", "seeders", "migrations", "scripts"],
+  "ext": "js,json",
+  "ignore": [
+    "**/*.bak-*",
+    "output/**",
+    "outputs/**",
+    "test input files/**",
+    "node_modules/**"
+  ],
+  "delay": "500"
+}
