@@ -22,33 +22,106 @@ def _num(s):
     except Exception:
         return 0.0
 
-# One line-item's FIRST text line, anchored on the deterministic numeric tail:
-#   SlNo  DESC...  HSN  QTY  UNIT  UNITPRICE  DISCOUNT  TAXABLE  GST + CESS  OTHER  TOTAL
-_ITEM_RE = re.compile(
-    r"^(?P<sl>\d+)\s+(?P<desc>.+?)\s+(?P<hsn>\d{6,8})\s+(?P<qty>\d+)\s+(?P<unit>[A-Za-z]+)\s+"
-    r"(?P<rate>[\d,]+\.?\d*)\s+(?P<disc>[\d,]+\.?\d*)\s+(?P<taxable>[\d,]+\.?\d*)\s+"
-    r"(?P<gst>[\d.]+)\s*\+\s*(?P<cess>[\d.]+)\s+(?P<other>[\d,]+\.?\d*)\s+(?P<total>[\d,]+\.?\d*)\s*$"
-)
+def _parse_item_line(s):
+    """Format-AGNOSTIC parse of ONE line-item row. Instead of a rigid positional
+    regex, it anchors on the few things every GST e-invoice guarantees:
+      • a leading SlNo, • a 6–8 digit HSN, • a "GST + Cess" rate group,
+      • the identity  total ≈ taxable × (1 + rate%).
+    Column separators (spaces, '|', '+', extra State-Cess sub-columns) can't fool
+    it, so it reads Click2Shop, Zepto, and other billing layouts unchanged.
+    Returns None if the line is not a line-item row (a 3% math-guard rejects
+    header/description/summary lines)."""
+    t = re.sub(r"\|", " ", s)
+    t = re.sub(r"\s+", " ", t).strip()
+    m = re.match(r"^(\d+)\s+(.+)$", t)
+    if not m:
+        return None
+    slno = int(m.group(1))
+    rest = m.group(2)
+    hm = re.search(r"(?<!\d)(\d{6,8})(?!\d)", rest)          # HSN / SAC
+    if not hm:
+        return None
+    desc = rest[:hm.start()].strip()
+    hsn = hm.group(1)
+    tail = rest[hm.end():].strip()
+    qm = re.match(r"(\d+)\s+([A-Za-z]+)\s+(.+)$", tail)      # Qty  Unit  <numbers>
+    if not qm:
+        return None
+    qty = _num(qm.group(1))
+    unit = qm.group(2).upper()
+    nums = qm.group(3)
+    tg = re.search(r"([\d.]+)\s*\+\s*([\d.]+)", nums)        # GST + Cess
+    if not tg:
+        return None
+    gst = _num(tg.group(1))
+    cess = _num(tg.group(2))
+    before = [_num(x) for x in re.findall(r"[\d,]+\.?\d*", nums[:tg.start()])]
+    after = [_num(x) for x in re.findall(r"[\d,]+\.?\d*", nums[tg.end():])]
+    if not before or not after:
+        return None
+    taxable = before[-1]                                     # number just before the tax group
+    rate = before[0]                                         # unit price
+    disc = before[1] if len(before) >= 3 else 0.0
+    expected = taxable * (1 + (gst + cess) / 100)
+    total = min(after, key=lambda x: abs(x - expected))     # the printed total, disambiguated by the math
+    if taxable <= 0 or abs(total - expected) > max(2.0, expected * 0.03):
+        return None                                          # not a real line-item row
+    return {
+        "slno": slno, "desc": desc, "hsn": hsn, "qty": qty, "unit": unit,
+        "rate": rate, "discount": disc, "taxable": taxable,
+        "gst_rate": gst, "cess_rate": cess, "other": 0.0, "total": round(total, 2),
+    }
+
+def _source_bytes(source):
+    if isinstance(source, (bytes, bytearray)):
+        return bytes(source)
+    try:
+        with open(source, "rb") as fh:
+            return fh.read()
+    except Exception:
+        return b""
+
+def _extract_text_bytes(pdf_bytes):
+    import pdfplumber
+    with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+        return "\n".join((p.extract_text() or "") for p in pdf.pages)
 
 def _pdf_text(source):
-    import pdfplumber
-    if isinstance(source, (bytes, bytearray)):
-        fh = io.BytesIO(source)
-    else:
-        fh = source
-    pages = []
-    with pdfplumber.open(fh) as pdf:
-        for p in pdf.pages:
-            pages.append(p.extract_text() or "")
-    text = "\n".join(pages)
-    if len(text.strip()) < 40:
-        # scanned PDF -> OCR fallback (tesseract), best-effort
+    """Digital text first (pdfplumber). If the PDF is a scan/flattened image
+    (almost no text), fall back through OCR: tesseract (local, free, private) →
+    iLovePDF (external, env-gated) as a last resort."""
+    pdf_bytes = _source_bytes(source)
+    text = _extract_text_bytes(pdf_bytes) if pdf_bytes else ""
+
+    if len(text.strip()) < 40 and pdf_bytes:
+        # 1) tesseract — OCR the scan into a searchable PDF, then re-extract text
         try:
-            import tesseract_ocr  # our engine module
-            text = tesseract_ocr.ocr_pdf(source)  # noqa
+            import tesseract_ocr
+            if tesseract_ocr.available():
+                ocr_pdf = tesseract_ocr.ocr_pdf(pdf_bytes)   # returns searchable-PDF bytes
+                if ocr_pdf:
+                    text = _extract_text_bytes(ocr_pdf)
         except Exception:
             pass
+        # 2) iLovePDF — external OCR, only if a key is configured (privacy/cost trade-off)
+        if len(text.strip()) < 40:
+            try:
+                alt = _ilovepdf_ocr_text(pdf_bytes)
+                if alt and len(alt.strip()) >= 40:
+                    text = alt
+            except Exception:
+                pass
     return text
+
+def _ilovepdf_ocr_text(pdf_bytes):
+    """Optional last-resort OCR via iLovePDF. Disabled unless ILOVEPDF_PUBLIC_KEY
+    is set — it sends the document to a third party (cost + data leaves the box),
+    so tesseract above is preferred. Wire the signed task flow here when a key is
+    provided; returns None when unavailable."""
+    import os
+    if not os.environ.get("ILOVEPDF_PUBLIC_KEY"):
+        return None
+    return None  # TODO: implement iLovePDF auth→start→upload→ocr→download when a key is supplied
 
 def _grab(text, label, stop=None):
     """Value after 'label :' up to the next label token or end of line."""
@@ -120,37 +193,27 @@ def parse_einvoice(source):
     H["supplier_name"] = top.group(2).strip() if top else ""
 
     # ---- Line items ----
+    # Gate on the "Details of Goods" header when present, but if a layout doesn't
+    # have that exact phrase, parse the whole doc — the math-guard in
+    # _parse_item_line keeps header/summary lines from being mistaken for items.
     items, cur = [], None
-    started = False
+    has_marker = any("Details of Goods" in l for l in lines)
+    started = not has_marker
     for ln in lines:
-        if "Details of Goods" in ln:
+        if has_marker and "Details of Goods" in ln:
             started = True
             continue
         if not started:
             continue
-        m = _ITEM_RE.match(ln.strip())
-        if m:
+        parsed = _parse_item_line(ln)
+        if parsed:
             if cur:
                 items.append(cur)
-            d = m.groupdict()
-            cur = {
-                "slno": int(d["sl"]),
-                "desc": d["desc"].strip(),
-                "hsn": d["hsn"],
-                "qty": _num(d["qty"]),
-                "unit": d["unit"].upper(),
-                "rate": _num(d["rate"]),
-                "discount": _num(d["disc"]),
-                "taxable": _num(d["taxable"]),
-                "gst_rate": _num(d["gst"]),
-                "cess_rate": _num(d["cess"]),
-                "other": _num(d["other"]),
-                "total": _num(d["total"]),
-            }
+            cur = parsed
         elif cur is not None:
             # continuation of description (skip the '0.00 + 0' state-cess line)
             s = ln.strip()
-            if s and not re.fullmatch(r"[\d.]+\s*\+\s*\d+", s):
+            if s and not re.fullmatch(r"[\d.]+\s*\+\s*[\d.]+", s):
                 cur["desc"] += " " + s
     if cur:
         items.append(cur)
