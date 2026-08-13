@@ -1,2 +1,5 @@
 # Real bank statements — never commit (PII)
 bank_pdf/
+
+# Real client GST data — never commit (PII / client confidential)
+gstr2b/

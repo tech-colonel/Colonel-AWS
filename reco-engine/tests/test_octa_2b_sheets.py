@@ -17,15 +17,33 @@ from recon.gstr_2b_books_multistate import (  # noqa: E402
     reconcile_gstr2b_vs_books_multistate,
 )
 
-DL = "/Users/dhavalchauhan/Downloads/"
+# Fixtures live in the repo (git-ignored — real client GST data), NOT in ~/Downloads.
+# macOS restricts Downloads access to whichever app owns the terminal, which silently
+# turned every file case into a SKIP. Downloads is kept only as a fallback so an
+# existing local setup keeps working.
+FIX = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures", "gstr2b") + "/"
+DL = os.path.expanduser("~/Downloads/")
+
+
+def _f(*names: str) -> str:
+    """Resolve a fixture by name: repo fixtures first, then ~/Downloads."""
+    for name in names:
+        for base in (FIX, DL):
+            if os.path.exists(base + name):
+                return base + name
+    return FIX + names[0]   # non-existent -> reported as SKIP
+
 
 CASES = [
-    ("DRIPS-octa",        DL + "GSTR2B-DRIPS FOODS PRIVATE LIMITED-Apr 2025-Mar 2026.xlsx"),
-    ("BIGLIL-octa",       DL + "GSTR2B-BIGLILPEOPLE PRIVATE LIMITED-Karnataka-Apr 2025-Mar 2026.xlsx"),
-    ("KYOREN-octa-cover", DL + "GSTR2B-KYOREN LABS PRIVATE LIMITED-Maharashtra-Apr 2025-Mar 2026.xlsx"),
-    ("PORTAL-HR",         DL + "GSTR1 Vs Books/HR102024_06AAECF7751Q1Z0_GSTR2B_21042025.xlsx"),
-    ("PORTAL-TN",         DL + "GSTR1 Vs Books/TN102024_33AAECF7751Q1Z3_GSTR2B_23042025.xlsx"),
-    ("PORTAL-UP",         DL + "GSTR1 Vs Books/UP102024_09AAECF7751Q1ZU_GSTR2B_23042025 (1).xlsx"),
+    ("DRIPS-octa",        _f("GSTR2B-DRIPS FOODS PRIVATE LIMITED-Apr 2025-Mar 2026.xlsx")),
+    ("BIGLIL-octa",       _f("GSTR2B-BIGLILPEOPLE PRIVATE LIMITED-Karnataka-Apr 2025-Mar 2026.xlsx")),
+    ("KYOREN-octa-cover", _f("GSTR2B-KYOREN LABS PRIVATE LIMITED-Maharashtra-Apr 2025-Mar 2026.xlsx")),
+    ("PORTAL-HR",         _f("HR102024_06AAECF7751Q1Z0_GSTR2B_21042025.xlsx",
+                             "GSTR1 Vs Books/HR102024_06AAECF7751Q1Z0_GSTR2B_21042025.xlsx")),
+    ("PORTAL-TN",         _f("TN102024_33AAECF7751Q1Z3_GSTR2B_23042025.xlsx",
+                             "GSTR1 Vs Books/TN102024_33AAECF7751Q1Z3_GSTR2B_23042025.xlsx")),
+    ("PORTAL-UP",         _f("UP102024_09AAECF7751Q1ZU_GSTR2B_23042025 (1).xlsx",
+                             "GSTR1 Vs Books/UP102024_09AAECF7751Q1ZU_GSTR2B_23042025 (1).xlsx")),
 ]
 
 
@@ -123,8 +141,8 @@ def check_books_hygiene():
     """
     from recon.gstr_2b_books_multistate import reconcile_gstr2b_vs_books_multistate
 
-    b2b = DL + "GSTR2B-KYOREN LABS PRIVATE LIMITED-Maharashtra-Apr 2025-Mar 2026.xlsx"
-    pr, dn = DL + "purchase register.xls", DL + "debit note.xls"
+    b2b = _f("GSTR2B-KYOREN LABS PRIVATE LIMITED-Maharashtra-Apr 2025-Mar 2026.xlsx")
+    pr, dn = _f("purchase register.xls"), _f("debit note.xls")
     for p in (b2b, pr, dn):
         if not os.path.exists(p):
             return ["  SKIP books-hygiene: missing " + os.path.basename(p)]
@@ -162,6 +180,30 @@ def check_books_hygiene():
         elif abs(r.purchase.taxable_value - 3000.0) > 1.0:
             bad.append(f"  {doc}: paired with the wrong Books row "
                        f"({r.purchase.supplier_name} {r.purchase.taxable_value}) — expected the 3000 row")
+
+    # 4. Pass 2.6 — a GSTR-2B debit note pairs with the Books debit note for the same
+    #    party and amount, despite unrelated document numbers and inverted signs.
+    for doc in ("272622BP08ABB705", "272622BP08ABC660"):
+        r = find(doc)
+        if not r or r.suggested_action != "Partially Matched":
+            bad.append(f"  {doc}: expected Partially Matched (DN-DN), got {r and r.suggested_action}")
+            continue
+        r2 = getattr(r, "suggested_action_2", "") or ""
+        if "DN-DN Match" not in r2:
+            bad.append(f"  {doc}: paired but the DN-DN remark is missing")
+        # The sign inversion is by design — it must NOT be reported as a discrepancy.
+        if "Mismatch" in r2:
+            bad.append(f"  {doc}: false amount-mismatch remark on a DN-DN pair -> {r2[:70]}")
+        if abs(abs(r.purchase.taxable_value) - abs(r.gstr2b.taxable_value)) > 1.0:
+            bad.append(f"  {doc}: paired with a different amount")
+
+    # A Books debit note with no GSTR-2B counterpart must stay unmatched.
+    stray = [r for r in res
+             if getattr(r, "purchase", None) and not getattr(r, "gstr2b", None)
+             and getattr(r.purchase, "doc_type", "") == "DBN"
+             and abs(r.purchase.taxable_value + 5900.0) < 1.0]
+    if not stray:
+        bad.append("  Books DN -5900 (no 2B counterpart) should have stayed unmatched")
     return bad
 
 

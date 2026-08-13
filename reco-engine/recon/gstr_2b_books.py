@@ -909,8 +909,15 @@ def reconcile_by_invoice_no(
 
     def _make_result(g_rec, b_rec, category_override=None):
         mismatches: list[str] = []
+        # A Debit Note is stored positive on the GSTR-2B side and negative on the Books
+        # side by design, so a DN<->DN pair must be compared on magnitude. Comparing the
+        # signed values would report every such pair as a mismatch of twice the amount.
+        _dn_pair = _get_val(g_rec, "doc_type", "") == "DBN" and _get_val(b_rec, "doc_type", "") == "DBN"
         for field in ("taxable_value", "igst", "cgst", "sgst"):
-            if not amount_equal(getattr(g_rec, field), getattr(b_rec, field), tolerance):
+            gv, bv = getattr(g_rec, field), getattr(b_rec, field)
+            if _dn_pair:
+                gv, bv = abs(gv), abs(bv)
+            if not amount_equal(gv, bv, tolerance):
                 mismatches.append(field)
         if category_override:
             category = category_override
@@ -1011,6 +1018,64 @@ def reconcile_by_invoice_no(
             used_books.add(best_b)
             results.append(_make_result(g_rec, books[best_b], category_override="Partially Matched"))
 
+    # Pass 2.6 — DN (GSTR-2B) ↔ DN (Books) match
+    # A supplier's Debit Note number and the buyer's Debit Note voucher no. (often a
+    # bare "1", "2") share nothing, so no invoice-number pass can link them. Unlike
+    # Pass 2.5 the Books rows usually carry a GSTIN by this point (back-filled from the
+    # GSTR-2B name map), so identity can be settled on GSTIN rather than name alone.
+    #
+    # The two sides are stored with OPPOSITE signs by design — parse_books negates a
+    # Books debit note, parse_gstr2b leaves a GSTR-2B one positive — so magnitudes are
+    # compared and the opposing sign is required explicitly, rather than relying on
+    # that convention holding forever.
+    #
+    # Date is deliberately NOT a filter: a note is often booked in a later period and
+    # that is legitimate. It is used only to choose BETWEEN otherwise-equal candidates
+    # (recurring charges repeat at identical amounts), so it can never cost a match —
+    # it only stops the pairing being arbitrary and keeps re-runs stable.
+    def _dn_date_gap(a, b) -> int:
+        """Days between two ISO dates; large sentinel when either is missing."""
+        try:
+            from datetime import date as _d
+            ya, ma, da = (int(x) for x in str(a)[:10].split("-"))
+            yb, mb, db = (int(x) for x in str(b)[:10].split("-"))
+            return abs((_d(ya, ma, da) - _d(yb, mb, db)).days)
+        except Exception:
+            return 10 ** 6
+
+    for g_idx, g_rec in enumerate(gstr2b):
+        if g_idx in used_gstr2b or g_rec.doc_type != "DBN":
+            continue
+        g_gstin = (g_rec.supplier_gstin or "").strip()
+        best_b, best_key = None, None
+        for b_idx, b_rec in enumerate(books):
+            if b_idx in used_books or b_rec.doc_type != "DBN":
+                continue
+            # Amount: equal in magnitude, and recorded on opposing sides.
+            if abs(abs(g_rec.taxable_value) - abs(b_rec.taxable_value)) > tolerance:
+                continue
+            if g_rec.taxable_value * b_rec.taxable_value > 0:
+                continue
+            # Identity: GSTIN is decisive when both sides have one; otherwise fall
+            # back to the party-name test used by Pass 2.5.
+            b_gstin = (b_rec.supplier_gstin or "").strip()
+            if g_gstin and b_gstin:
+                if g_gstin != b_gstin:
+                    continue
+                sim = 1.0
+            else:
+                sim = _party_sim(g_rec.supplier_name, b_rec.supplier_name)
+                if sim < 0.5:
+                    continue
+            # Rank: stronger identity first, then nearest date, then earliest row.
+            key = (sim, -_dn_date_gap(g_rec.doc_date, b_rec.doc_date), -b_idx)
+            if best_key is None or key > best_key:
+                best_b, best_key = b_idx, key
+        if best_b is not None:
+            used_gstr2b.add(g_idx)
+            used_books.add(best_b)
+            results.append(_make_result(g_rec, books[best_b], category_override="Partially Matched"))
+
     # Pass 3 — GSTR-2B records with no match in books
     for g_idx, g_rec in enumerate(gstr2b):
         if g_idx not in used_gstr2b:
@@ -1105,8 +1170,13 @@ def reconcile_by_invoice_no(
 
         # Scenario A: BOTH GSTR-2B and Books exist
         if g and b:
-            g_tax = round(g.igst + g.cgst + g.sgst + g.cess, 2)
-            b_tax = round(b.igst + b.cgst + b.sgst + b.cess, 2)
+            # DN<->DN pairs are stored with opposing signs by design (see _make_result),
+            # so the excess/mismatch remarks below compare magnitudes for those.
+            _dn_pair = (_get_val(g, "doc_type", "") == "DBN"
+                        and _get_val(b, "doc_type", "") == "DBN")
+            _sgn = (lambda v: abs(v)) if _dn_pair else (lambda v: v)
+            g_tax = round(_sgn(g.igst) + _sgn(g.cgst) + _sgn(g.sgst) + _sgn(g.cess), 2)
+            b_tax = round(_sgn(b.igst) + _sgn(b.cgst) + _sgn(b.sgst) + _sgn(b.cess), 2)
 
             sec_remarks = []
 
@@ -1128,11 +1198,21 @@ def reconcile_by_invoice_no(
                     f"verify the reference"
                 )
 
-            if _get_val(g, "doc_type", "") == "CRN" and _get_val(b, "doc_type", "") == "DBN":
+            _g_type, _b_type = _get_val(g, "doc_type", ""), _get_val(b, "doc_type", "")
+            if _g_type == "CRN" and _b_type == "DBN":
                 r.suggested_action = "Partially Matched"
                 r.category = "Partially Matched"
                 sec_remarks.insert(0,
                     f"CN-DN Match: {_get_val(g, 'doc_no', '')} ↔ {_get_val(b, 'doc_no', '')}"
+                )
+            elif (_g_type == "DBN" and _b_type == "DBN"
+                  and _get_val(g, "normalized_doc_no", "") != _get_val(b, "normalized_doc_no", "")):
+                # Paired by party + amount (Pass 2.6), not by a shared document number —
+                # flag it for review the same way the CN-DN pairing is flagged.
+                r.suggested_action = "Partially Matched"
+                r.category = "Partially Matched"
+                sec_remarks.insert(0,
+                    f"DN-DN Match: {_get_val(g, 'doc_no', '')} ↔ {_get_val(b, 'doc_no', '')}"
                 )
             else:
                 r.suggested_action = "Matched"
@@ -1144,10 +1224,11 @@ def reconcile_by_invoice_no(
                 r.category = "Amount Mismatch"
                 sec_remarks.append("Tax Amount Mismatch, Excess in Books")
 
-            if g.taxable_value - b.taxable_value > 1.0:
+            _g_taxable, _b_taxable = _sgn(g.taxable_value), _sgn(b.taxable_value)
+            if _g_taxable - _b_taxable > 1.0:
                 r.category = "Amount Mismatch"
                 sec_remarks.append("Taxable Value Mismatch, Excess in 2B")
-            elif b.taxable_value - g.taxable_value > 1.0:
+            elif _b_taxable - _g_taxable > 1.0:
                 r.category = "Amount Mismatch"
                 sec_remarks.append("Taxable Value Mismatch, Excess in Books")
 
