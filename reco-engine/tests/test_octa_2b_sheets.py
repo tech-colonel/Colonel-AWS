@@ -111,6 +111,60 @@ def check_party_sim():
     return bad
 
 
+def check_books_hygiene():
+    """Lock the three Books-side matching fixes.
+
+    All three are driven by real data-entry errors in Purchase Registers:
+      1. an invoice number typed into the GSTIN column must not be treated as a GSTIN
+      2. the buyer's voucher no. must stay usable as an alternate key when the
+         supplier invoice no. recorded in Books is wrong
+      3. when several Books rows share a number, the best candidate must win, not the
+         first one in file order
+    """
+    from recon.gstr_2b_books_multistate import reconcile_gstr2b_vs_books_multistate
+
+    b2b = DL + "GSTR2B-KYOREN LABS PRIVATE LIMITED-Maharashtra-Apr 2025-Mar 2026.xlsx"
+    pr, dn = DL + "purchase register.xls", DL + "debit note.xls"
+    for p in (b2b, pr, dn):
+        if not os.path.exists(p):
+            return ["  SKIP books-hygiene: missing " + os.path.basename(p)]
+
+    _, _, res = reconcile_gstr2b_vs_books_multistate(
+        [open(b2b, "rb").read()], [open(pr, "rb").read()], [open(dn, "rb").read()]
+    )
+
+    def find(doc):
+        for r in res:
+            d = getattr(r, "gstr2b", None) or getattr(r, "purchase", None)
+            if d and doc == (getattr(d, "doc_no", "") or ""):
+                return r
+        return None
+
+    bad = []
+    # 1. invalid GSTIN ignored -> IKEA rows now pair, and carry the warning remark
+    for doc in ("E57925A000794274", "E57925A000801437"):
+        r = find(doc)
+        if not r or r.suggested_action != "Matched":
+            bad.append(f"  {doc}: expected Matched, got {r and r.suggested_action}")
+        elif "not a valid GSTIN" not in (getattr(r, "suggested_action_2", "") or ""):
+            bad.append(f"  {doc}: matched but the bad-GSTIN remark is missing")
+
+    # 2. alternate (voucher) number is usable as a matching key
+    r = find("MH/25-26/104")
+    if not r or r.suggested_action != "Matched" or not getattr(r, "purchase", None):
+        bad.append(f"  MH/25-26/104: expected Matched via voucher no., got {r and r.suggested_action}")
+
+    # 3. best candidate wins over first-in-file when a number is shared
+    for doc in ("VDBSC/25-26/1422", "VDBSC/25-26/1223"):
+        r = find(doc)
+        if not r or not getattr(r, "purchase", None):
+            bad.append(f"  {doc}: expected a pairing")
+        elif abs(r.purchase.taxable_value - 3000.0) > 1.0:
+            bad.append(f"  {doc}: paired with the wrong Books row "
+                       f"({r.purchase.supplier_name} {r.purchase.taxable_value}) — expected the 3000 row")
+    return bad
+
+
 if __name__ == "__main__":
     res = run()
     for name, r in res.items():
@@ -124,6 +178,13 @@ if __name__ == "__main__":
             print("\n".join(party_bad))
             sys.exit(1)
         print("OK - party-name (CN<->DN) matching behaves")
+
+        books_bad = check_books_hygiene()
+        if books_bad:
+            print("BOOKS-SIDE MATCHING FAILURES:")
+            print("\n".join(books_bad))
+            sys.exit(1)
+        print("OK - books hygiene (bad GSTIN / alt voucher no / best candidate)")
 
     if "--check" in sys.argv and BASELINE:
         drift = []

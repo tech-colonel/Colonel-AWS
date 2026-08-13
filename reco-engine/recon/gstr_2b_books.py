@@ -595,13 +595,21 @@ def parse_books(purchase_data: bytes, debit_data: bytes) -> list[NormalizedInvoi
             if not str(date_raw).strip() or str(date_raw).strip() in ("nan", ""):
                 continue
 
-            # Supplier Invoice No. is the matching key
+            # Supplier Invoice No. is the primary matching key. Books exports carry TWO
+            # numbers though — the supplier's invoice no. and the buyer's own voucher
+            # no. — and when a wrong supplier ref is typed in, the voucher no. is often
+            # the one that actually corresponds to GSTR-2B. Keep BOTH: the first
+            # non-empty stays the primary (display unchanged), the other becomes an
+            # alternate matching key. Identical values collapse to no alternate.
             doc_no = ""
+            alt_doc_no = ""
             for col in ["Supplier Invoice No.", "Voucher Ref. No.", "Voucher No."]:
                 val = str(row.get(col, "") or "").strip()
                 if val and val not in ("nan", ""):
-                    doc_no = val
-                    break
+                    if not doc_no:
+                        doc_no = val
+                    elif val != doc_no and not alt_doc_no:
+                        alt_doc_no = val
 
             # Date
             doc_date = ""
@@ -680,13 +688,24 @@ def parse_books(purchase_data: bytes, debit_data: bytes) -> list[NormalizedInvoi
                 invoice_value = -invoice_value
                 taxable_breakdown = [(h, -a) for h, a in taxable_breakdown]
 
+            # GSTIN — validate the shape, don't just normalise it. Books exports
+            # regularly carry something other than a GSTIN in this column (an invoice
+            # number typed into the wrong field is the common case). An unvalidated
+            # value is worse than a blank one: it defeats the compound key, disqualifies
+            # the invoice-only pass (which requires NO gstin) and trips Pass 2's guard,
+            # so a row that matches perfectly by number and name is reported as missing
+            # on both sides. Both GSTR-2B parsers already validate the same way.
+            raw_gstin = _norm_gstin(
+                row.get("GSTIN/UIN") or row.get("GSTIN") or row.get("gstin/uin") or row.get("gstin") or ""
+            )
+            bad_gstin = raw_gstin if (raw_gstin and not _GSTIN_RE.match(raw_gstin)) else ""
+            gstin = "" if bad_gstin else raw_gstin
+
             index += 1
             rec = NormalizedInvoice(
                 source=source,
                 row_id=f"{source}-{index}",
-                supplier_gstin=_norm_gstin(
-                    row.get("GSTIN/UIN") or row.get("GSTIN") or row.get("gstin/uin") or row.get("gstin") or ""
-                ),
+                supplier_gstin=gstin,
                 supplier_name=supplier_name,
                 doc_type=default_type,
                 doc_no=doc_no,
@@ -706,6 +725,14 @@ def parse_books(purchase_data: bytes, debit_data: bytes) -> list[NormalizedInvoi
             rec.raw["_taxable_derived"] = taxable_derived
             if taxable_derived:
                 rec.raw["_taxable_breakdown"] = taxable_breakdown
+            # Alternate matching key (see doc_no selection above) and the rejected
+            # GSTIN, both carried for the matcher and the Remark 2 text. Stored on raw
+            # so NormalizedInvoice stays untouched for every other agent.
+            if alt_doc_no:
+                rec.raw["_alt_doc_no"] = alt_doc_no
+                rec.raw["_alt_normalized_doc_no"] = normalize_doc_no(alt_doc_no)
+            if bad_gstin:
+                rec.raw["_bad_gstin"] = bad_gstin
             records.append(rec)
 
     return records
@@ -838,13 +865,47 @@ def reconcile_by_invoice_no(
     for idx, rec in enumerate(books):
         books_by_no.setdefault(rec.normalized_doc_no, []).append(idx)
         books_by_core.setdefault(_core_digits(rec.normalized_doc_no), []).append(idx)
+        # Index the alternate number too (buyer's voucher no. when it differs from the
+        # supplier invoice no.). A mistyped supplier ref otherwise hides a row whose
+        # voucher no. matches GSTR-2B exactly. used_books still allows one pairing per
+        # row, and the candidate scorer below decides which key actually wins.
+        alt = rec.raw.get("_alt_normalized_doc_no") or ""
+        if alt and alt != rec.normalized_doc_no:
+            books_by_no.setdefault(alt, []).append(idx)
+            books_by_core.setdefault(_core_digits(alt), []).append(idx)
         if rec.normalized_doc_no and rec.supplier_gstin:
             key = (rec.normalized_doc_no, rec.supplier_gstin)
             books_by_compound.setdefault(key, []).append(idx)
+            if alt and alt != rec.normalized_doc_no:
+                books_by_compound.setdefault((alt, rec.supplier_gstin), []).append(idx)
 
     results: list[MatchResult] = []
     used_books: set[int] = set()
     used_gstr2b: set[int] = set()
+
+    def _candidate_score(g_rec, b_idx: int) -> tuple:
+        """Rank Books candidates that share an invoice number with a GSTR-2B row.
+
+        The same number legitimately appears against several Books rows — a supplier
+        ref typed onto the wrong party, or two vendors genuinely using the same
+        number. Taking the first row in file order then pairs GSTR-2B against whichever
+        happened to be entered first, which reports a confident 'Matched' against the
+        wrong party while the correct row is left showing as missing. Rank on identity
+        and value instead: GSTIN is decisive when both sides have one, then amount,
+        then date, then party name. Ordering is unchanged when there is one candidate."""
+        b = books[b_idx]
+        g_gstin = (g_rec.supplier_gstin or "").strip()
+        b_gstin = (b.supplier_gstin or "").strip()
+        return (
+            1 if (g_gstin and b_gstin and g_gstin == b_gstin) else 0,
+            1 if amount_equal(g_rec.taxable_value, b.taxable_value, tolerance) else 0,
+            1 if (g_rec.doc_date and g_rec.doc_date == b.doc_date) else 0,
+            round(_party_sim(g_rec.supplier_name, b.supplier_name), 3),
+            -b_idx,   # stable tie-break: earliest row wins, matching previous behaviour
+        )
+
+    def _best_candidate(g_rec, candidates: list[int]) -> int:
+        return max(candidates, key=lambda i: _candidate_score(g_rec, i))
 
     def _make_result(g_rec, b_rec, category_override=None):
         mismatches: list[str] = []
@@ -885,7 +946,7 @@ def reconcile_by_invoice_no(
         comp_candidates = [i for i in books_by_compound.get((inv, gstn), []) if i not in used_books]
         if not comp_candidates:
             continue
-        best_idx = comp_candidates[0]
+        best_idx = _best_candidate(g_rec, comp_candidates)
         used_gstr2b.add(g_idx)
         used_books.add(best_idx)
         results.append(_make_result(g_rec, books[best_idx]))
@@ -902,7 +963,7 @@ def reconcile_by_invoice_no(
                       if i not in used_books and not books[i].supplier_gstin]
         if not candidates:
             continue
-        best_idx = candidates[0]
+        best_idx = _best_candidate(g_rec, candidates)
         used_gstr2b.add(g_idx)
         used_books.add(best_idx)
         results.append(_make_result(g_rec, books[best_idx]))
@@ -1049,6 +1110,24 @@ def reconcile_by_invoice_no(
 
             sec_remarks = []
 
+            # Books data-entry flags. The matcher works around these, but the source
+            # error stays in Tally until someone is told about it, so surface it here.
+            _b_raw = _get_val(b, "raw", {}) or {}
+            _bad_gstin = _b_raw.get("_bad_gstin") or ""
+            if _bad_gstin:
+                sec_remarks.append(
+                    f"Books GSTIN column contains '{_bad_gstin}' — not a valid GSTIN "
+                    f"(an invoice/voucher number appears to have been entered in the GSTIN "
+                    f"field); ignored for matching — correct it in Books"
+                )
+            _alt_doc = _b_raw.get("_alt_doc_no") or ""
+            if _alt_doc and _b_raw.get("_alt_normalized_doc_no") == _get_val(g, "normalized_doc_no", ""):
+                sec_remarks.append(
+                    f"Matched on Books voucher no. '{_alt_doc}' — the Supplier Invoice No. "
+                    f"recorded in Books ('{_get_val(b, 'doc_no', '')}') does not match GSTR-2B; "
+                    f"verify the reference"
+                )
+
             if _get_val(g, "doc_type", "") == "CRN" and _get_val(b, "doc_type", "") == "DBN":
                 r.suggested_action = "Partially Matched"
                 r.category = "Partially Matched"
@@ -1149,6 +1228,15 @@ def reconcile_by_invoice_no(
             r.suggested_action = "Showing in Books but Not in 2B"
 
             sec_remarks_c = []
+            # Flag the same Books data-entry error on rows that stay unmatched — a bad
+            # GSTIN is often WHY the row never found its GSTR-2B counterpart.
+            _bad_gstin_c = (_get_val(b, "raw", {}) or {}).get("_bad_gstin") or ""
+            if _bad_gstin_c:
+                sec_remarks_c.append(
+                    f"Books GSTIN column contains '{_bad_gstin_c}' — not a valid GSTIN "
+                    f"(an invoice/voucher number appears to have been entered in the GSTIN "
+                    f"field); ignored for matching — correct it in Books"
+                )
             if b_dup_type == "dup":
                 sec_remarks_c.append("Invoice appears twice in Books — verify if duplicate booking")
             elif b_dup_type == "same_no_diff_party":
