@@ -488,6 +488,18 @@ def _is_round_off_col(c: str) -> bool:
     return "roundoff" in str(c).lower().replace(" ", "")
 
 
+def _is_discount_col(c: str) -> bool:
+    """True for a purchase-discount ledger column (e.g. 'Discount on Purchase@5%').
+
+    A discount is a reduction of the purchase, posted as a credit. The supplier
+    declares the value net of it in GSTR-2B, so the Books taxable must DEDUCT it —
+    adding it inflates that side by the discount, and merely skipping the column
+    still leaves the gross purchase ledger standing, which is short by the same
+    amount. Matched on the word alone so any rate/wording variant is covered, with
+    spaces collapsed the same way as Round Off."""
+    return "discount" in str(c).lower().replace(" ", "")
+
+
 def _find_value_col(row: dict[str, Any]) -> str | None:
     """Return the source header that holds the explicit taxable value.
 
@@ -658,6 +670,11 @@ def parse_books(purchase_data: bytes, debit_data: bytes) -> list[NormalizedInvoi
             #     amount on these files.
             #   • TDS columns                                      — _is_tds_col
             #   • Round Off (rounding adjustment, not an expense)  — _is_round_off_col
+            # Deducted from the sum (NOT excluded):
+            #   • Purchase discount — a credit reducing the purchase. The supplier
+            #     declares the value net of it in GSTR-2B and Tally charges tax on
+            #     the net, so Books must deduct it to reach the same taxable value.
+            #                                                      — _is_discount_col
             gross = round_money(row.get("Gross Total", 0))
             invoice_value = gross
 
@@ -667,15 +684,33 @@ def parse_books(purchase_data: bytes, debit_data: bytes) -> list[NormalizedInvoi
                 (i for i, k in enumerate(keys) if _norm(k) == "gross total"),
                 -1,
             )
-            running = 0.0
+            ledgers: list[tuple[str, float]] = []
             for k in keys[gt_pos + 1:]:
                 ks = str(k)
                 if _is_tax_col(ks) or _is_tds_col(ks) or _is_round_off_col(ks):
                     continue
                 amt = round_money(row.get(k))
                 if amt:
-                    running += amt
-                    taxable_breakdown.append((ks, round(amt, 2)))
+                    ledgers.append((ks, amt))
+
+            # A discount ledger is only a REDUCTION when the row also carries a real
+            # purchase/expense ledger for it to reduce. Tally posts the discount as a
+            # separate credit line rather than netting it into the purchase ledger, so
+            # that ledger stays GROSS — the discount must be SUBTRACTED (skipping it
+            # leaves the taxable gross; adding it overstates by the same amount again).
+            # When the discount ledger is the ONLY line on the row there is nothing to
+            # reduce: the "discount" IS the amount being billed (a marketplace invoicing
+            # the brand for funded discounts), so it counts positively, as any other
+            # expense would. Decided per row from the data — no ledger names hardcoded.
+            has_reducible = any(not _is_discount_col(h) for h, _ in ledgers)
+            running = 0.0
+            for ks, amt in ledgers:
+                if has_reducible and _is_discount_col(ks):
+                    # abs() so either export sign convention (positive, or already
+                    # negative) reduces the purchase rather than inflating it.
+                    amt = -abs(amt)
+                running += amt
+                taxable_breakdown.append((ks, round(amt, 2)))
             taxable = round(running, 2)
             taxable_derived = True
 
