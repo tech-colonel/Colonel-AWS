@@ -43,6 +43,7 @@ import RecoJobDashboard      from './pages/accountant/RecoJobDashboard';
 import ReceivableDashboard   from './pages/accountant/ReceivableDashboard';
 import AmazonReceivablesDashboard  from './pages/accountant/AmazonReceivablesDashboard';
 import ShopifyReceivablesDashboard from './pages/accountant/ShopifyReceivablesDashboard';
+import AdvanceAmountDashboard from './pages/accountant/AdvanceAmountDashboard';
 import ComplianceTracker     from './pages/accountant/ComplianceTracker';
 import StatutoryTracker      from './pages/accountant/StatutoryTracker';
 import StatutoryRedirect     from './pages/accountant/StatutoryRedirect';
@@ -327,6 +328,14 @@ function App() {
             element={
               <ProtectedRoute allowedRoles={['accountant', 'admin']}>
                 <ShopifyReceivablesDashboard />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/brands/:brandId/advance-amount"
+            element={
+              <ProtectedRoute allowedRoles={['accountant', 'admin']}>
+                <AdvanceAmountDashboard />
               </ProtectedRoute>
             }
           />

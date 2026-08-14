@@ -18,6 +18,12 @@ const { setPending, getPending, deletePending, computeSummary } = require('../se
 
 const OUTPUT_DIR = path.join(__dirname, '../../outputs');
 
+// item_description is VARCHAR(255); Flipkart's "Product Title/Description"
+// can run longer (e.g. bundle/pack listings), which fails the whole
+// bulkCreate batch on insert. Trim to fit the column instead of dropping rows.
+const truncate255 = value =>
+  typeof value === 'string' && value.length > 255 ? value.slice(0, 255) : value;
+
 /**
  * Shared logic for working file management across all agents
  */
@@ -472,7 +478,7 @@ const flipkart = {
         sku: row.sku,
         fg: row.fg || null,
         fsn: row.fsn,
-        item_description: row.product_title,
+        item_description: truncate255(row.product_title),
         hsn_code: row.hsn_code,
         quantity: Math.abs(parseInt(row.item_quantity)) || 0,
 
@@ -627,7 +633,7 @@ const flipkart = {
         sku: row.sku,
         fg: row.fg || null,
         fsn: row.fsn,
-        item_description: row.product_title,
+        item_description: truncate255(row.product_title),
         hsn_code: row.hsn_code,
         quantity: Math.abs(parseInt(row.item_quantity)) || 0,
         fulfilment_type: row.fulfilment_type,

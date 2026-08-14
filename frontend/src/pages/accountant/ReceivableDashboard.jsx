@@ -6,7 +6,7 @@ import {
 } from 'recharts';
 import {
   ArrowLeft, Wallet, TrendingUp, TrendingDown, RotateCcw, AlertTriangle,
-  LayoutDashboard, Bot, Loader2, X, ChevronLeft, ChevronRight, Info,
+  LayoutDashboard, Bot, Loader2, X, ChevronLeft, ChevronRight, Info, HandCoins,
 } from 'lucide-react';
 import api from '../../lib/api';
 import { sidebarFor } from '../../lib/adminNav';
@@ -76,11 +76,62 @@ const SectionCard = ({ title, icon: Icon, children, right }) => (
   </div>
 );
 
-const ReceivedSplitTable = ({ title, rows, keyField }) => {
+const ReceivedSplitTable = ({ title, subtitle, rows, keyField, onOpenJourney, simplified }) => {
   const total = rows.reduce((s, r) => s + Number(r.amount || 0), 0);
+  const dimType = keyField === 'source' ? 'source' : 'channel';
+  const j = (r, metricKey, label, color) => (onOpenJourney ? () => onOpenJourney({ metricKey, label: `${label} — ${r[keyField]}`, color, dimension: { type: dimType, value: r[keyField] } }) : undefined);
+
+  // Simplified layout — same shape as the "by origin month & partner" table above it
+  // (label | Orders | Amount | Share), so this table adds new information (which
+  // source/portal) instead of repeating that one's this-month/earlier-months split.
+  if (simplified) {
+    return (
+      <>
+        <p className="text-xs font-bold uppercase tracking-wide mb-2" style={{ color: 'var(--text-muted)' }}>{title}</p>
+        <div className="overflow-x-auto rounded-lg" style={{ border: '1px solid var(--card-border)' }}>
+          <table className="w-full text-sm">
+            <thead>
+              <tr style={{ background: 'var(--page-bg)', borderBottom: '1.5px solid var(--card-border)' }}>
+                {[keyField === 'source' ? 'Source' : 'Portal', 'Orders', 'Amount', 'Share'].map((h) => (
+                  <th key={h} className="px-2 py-2 text-left text-xs font-bold uppercase tracking-wide whitespace-nowrap" style={{ color: 'var(--text-muted)' }}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r) => (
+                <tr key={r[keyField]} style={{ borderBottom: '1px solid var(--card-border)' }}>
+                  <td className="px-2 py-2.5 font-semibold capitalize whitespace-nowrap" style={{ color: 'var(--text-heading)' }}>{r[keyField]}</td>
+                  <td className="px-2 py-2.5" style={{ color: 'var(--text-body)' }}>{Number(r.count).toLocaleString('en-IN')}</td>
+                  <td className="px-2 py-2.5 whitespace-nowrap font-semibold">
+                    <Num value={r.amount} color={COLOR_RECEIVED} onClick={j(r, 'received_this_month', 'Total received', COLOR_RECEIVED)} />
+                  </td>
+                  <td className="px-2 py-2.5" style={{ color: 'var(--text-muted)' }}>{pct(r.amount, total)}</td>
+                </tr>
+              ))}
+              {!rows.length && (
+                <tr><td colSpan={4} className="px-2 py-6 text-center text-xs" style={{ color: 'var(--text-muted)' }}>No collections recorded this month.</td></tr>
+              )}
+            </tbody>
+            <tfoot>
+              <tr>
+                <td className="px-2 py-3 font-black" style={{ color: 'var(--text-heading)' }}>Total</td>
+                <td className="px-2 py-3 font-black whitespace-nowrap" style={{ color: 'var(--text-body)' }}>
+                  {rows.reduce((s, r) => s + Number(r.count || 0), 0).toLocaleString('en-IN')}
+                </td>
+                <td className="px-2 py-3 font-black whitespace-nowrap" style={{ color: COLOR_RECEIVED }}>{money(total)}</td>
+                <td />
+              </tr>
+            </tfoot>
+          </table>
+        </div>
+      </>
+    );
+  }
+
   return (
     <>
-      <p className="text-xs font-bold uppercase tracking-wide mb-2" style={{ color: 'var(--text-muted)' }}>{title}</p>
+      <p className="text-xs font-bold uppercase tracking-wide mb-0.5" style={{ color: 'var(--text-muted)' }}>{title}</p>
+      {subtitle && <p className="text-[11px] mb-2" style={{ color: 'var(--text-muted)' }}>{subtitle}</p>}
       <div className="overflow-x-auto rounded-lg" style={{ border: '1px solid var(--card-border)' }}>
         <table className="w-full text-sm">
           <thead>
@@ -94,9 +145,9 @@ const ReceivedSplitTable = ({ title, rows, keyField }) => {
             {rows.map((r) => (
               <tr key={r[keyField]} style={{ borderBottom: '1px solid var(--card-border)' }}>
                 <td className="px-2 py-2.5 font-semibold capitalize whitespace-nowrap" style={{ color: 'var(--text-heading)' }}>{r[keyField]}</td>
-                <td className="px-2 py-2.5 whitespace-nowrap" style={{ color: COLOR_RECEIVED }}>{money(r.from_this_month)}</td>
-                <td className="px-2 py-2.5 whitespace-nowrap" style={{ color: Number(r.from_earlier_months) > 0 ? COLOR_PENDING : 'var(--text-muted)' }}>{money(r.from_earlier_months)}</td>
-                <td className="px-2 py-2.5 whitespace-nowrap font-semibold" style={{ color: 'var(--text-heading)' }}>{money(r.amount)}</td>
+                <td className="px-2 py-2.5 whitespace-nowrap"><Num value={r.from_this_month} color={COLOR_RECEIVED} onClick={j(r, 'received_from_own', 'Received: this month\'s sale', COLOR_RECEIVED)} /></td>
+                <td className="px-2 py-2.5 whitespace-nowrap"><Num value={r.from_earlier_months} color={Number(r.from_earlier_months) > 0 ? COLOR_PENDING : 'var(--text-muted)'} onClick={j(r, 'received_from_carried_forward', 'Received: earlier months\' sale', COLOR_PENDING)} /></td>
+                <td className="px-2 py-2.5 whitespace-nowrap font-semibold"><Num value={r.amount} color="var(--text-heading)" onClick={j(r, 'received_this_month', 'Total received', COLOR_PRIMARY)} /></td>
                 <td className="px-2 py-2.5" style={{ color: 'var(--text-muted)' }}>{pct(r.amount, total)}</td>
               </tr>
             ))}
@@ -120,6 +171,99 @@ const ReceivedSplitTable = ({ title, rows, keyField }) => {
         </table>
       </div>
     </>
+  );
+};
+
+// Prepaid always shows up as one lump row in a "by source" table (settled_source is
+// always the literal 'prepaid', so it has no courier to split by) — this renders the
+// same population split two ways instead, right under that row: by sales channel
+// (the Tally-tagged portal — Amazon/Flipkart/Shopify/etc.) AND, per channel, by the
+// actual payment gateway that financed it (Snapmint/BharatX/Razorpay), matched from
+// the Shopify Order Cycle agent's own settlement columns. That match only ever
+// exists for Shopify-side orders — every other channel legitimately shows "No
+// gateway match", which is a fact about the data (Amazon/Flipkart/Zepto prepaid
+// orders settle through the marketplace itself), not a missing join. Keeping both
+// dimensions as explicit columns (rather than folding "Snapmint" into one bucket)
+// is what stops a channel literally named "Snapmint" in Tally from being confused
+// with the Snapmint payment gateway — they're unrelated facts that happen to share
+// a name. `rows` is a flat [{channel, gateway, count, amount}] list, grouped by
+// channel here for display. Not wired into the "click for journey" drill-down:
+// NumberJourneyModal only filters by one dimension at a time (channel OR source),
+// so a combined "Prepaid + this channel + this gateway" journey isn't representable
+// without leaking in non-prepaid or other-channel orders.
+const PrepaidChannelBreakdown = ({ rows, amountLabel = 'Amount', color = COLOR_PRIMARY }) => {
+  if (!rows?.length) return null;
+  const total = rows.reduce((s, r) => s + Number(r.amount || 0), 0);
+
+  const byChannel = [];
+  const idxOf = new Map();
+  for (const r of rows) {
+    if (!idxOf.has(r.channel)) { idxOf.set(r.channel, byChannel.length); byChannel.push({ channel: r.channel, count: 0, amount: 0, gateways: [] }); }
+    const g = byChannel[idxOf.get(r.channel)];
+    g.count += Number(r.count || 0);
+    g.amount += Number(r.amount || 0);
+    g.gateways.push(r);
+  }
+  byChannel.sort((a, b) => b.amount - a.amount);
+  byChannel.forEach((g) => g.gateways.sort((a, b) => Number(b.amount || 0) - Number(a.amount || 0)));
+
+  return (
+    <div className="mt-2 mb-3 pl-3" style={{ borderLeft: `2px solid ${color}30` }}>
+      <p className="text-[11px] font-bold uppercase tracking-wide mb-0.5" style={{ color: 'var(--text-muted)' }}>
+        Prepaid — by sales channel &amp; payment gateway
+      </p>
+      <p className="text-[10px] mb-1.5 leading-relaxed" style={{ color: 'var(--text-muted)' }}>
+        "Channel" = the sales portal an order came from (Tally). "Gateway" = the payment processor that actually
+        financed it (Snapmint / BharatX / Razorpay), matched from the Shopify Order Cycle agent's settlement files —
+        only ever available for Shopify-side orders, so every other channel shows "No gateway match" by design, not
+        as a gap. A "Snapmint" or "Zepto" channel row here is a Tally channel tag, not the payment gateway.
+      </p>
+      <div className="overflow-x-auto rounded-lg" style={{ border: '1px solid var(--card-border)' }}>
+        <table className="w-full text-xs">
+          <thead>
+            <tr style={{ background: 'var(--page-bg)', borderBottom: '1px solid var(--card-border)' }}>
+              {['Channel', 'Gateway', 'Orders', amountLabel, 'Share of Prepaid'].map((h) => (
+                <th key={h} className="px-2 py-1.5 text-left font-bold uppercase tracking-wide whitespace-nowrap" style={{ color: 'var(--text-muted)' }}>{h}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {byChannel.map((g) => g.gateways.map((r, i) => (
+              <tr key={`${g.channel}-${r.gateway}`} style={{ borderBottom: i === g.gateways.length - 1 ? '1px solid var(--card-border)' : '1px dashed var(--card-border)' }}>
+                {i === 0 && (
+                  <td
+                    rowSpan={g.gateways.length}
+                    className="px-2 py-1.5 font-semibold whitespace-nowrap align-top"
+                    style={{ color: 'var(--text-heading)', borderRight: '1px solid var(--card-border)' }}
+                  >
+                    {g.channel}
+                  </td>
+                )}
+                <td
+                  className="px-2 py-1.5 whitespace-nowrap"
+                  style={{ color: r.gateway === 'No gateway match' ? 'var(--text-muted)' : 'var(--text-body)', fontStyle: r.gateway === 'No gateway match' ? 'italic' : 'normal' }}
+                >
+                  {r.gateway}
+                </td>
+                <td className="px-2 py-1.5" style={{ color: 'var(--text-body)' }}>{Number(r.count).toLocaleString('en-IN')}</td>
+                <td className="px-2 py-1.5 whitespace-nowrap font-semibold" style={{ color }}>{money(r.amount)}</td>
+                <td className="px-2 py-1.5" style={{ color: 'var(--text-muted)' }}>{pct(r.amount, total)}</td>
+              </tr>
+            )))}
+          </tbody>
+          <tfoot>
+            <tr>
+              <td colSpan={2} className="px-2 py-1.5 font-black" style={{ color: 'var(--text-heading)' }}>Total</td>
+              <td className="px-2 py-1.5 font-black whitespace-nowrap" style={{ color: 'var(--text-body)' }}>
+                {rows.reduce((s, r) => s + Number(r.count || 0), 0).toLocaleString('en-IN')}
+              </td>
+              <td className="px-2 py-1.5 font-black whitespace-nowrap" style={{ color }}>{money(total)}</td>
+              <td />
+            </tr>
+          </tfoot>
+        </table>
+      </div>
+    </div>
   );
 };
 
@@ -169,9 +313,10 @@ const CarriedForwardCollectionsTable = ({ rows }) => {
   );
 };
 
-const ReceivedBreakdownModal = ({ data, period, onClose }) => {
+const ReceivedBreakdownModal = ({ data, period, onOpenJourney, onClose }) => {
   const bySource = data?.receivedBySource || [];
   const byChannel = data?.receivedByChannel || [];
+  const prepaidByChannel = data?.receivedPrepaidByChannel || [];
   const carriedForward = data?.carriedForwardCollections || [];
   const k = data?.kpis || {};
   return (
@@ -203,16 +348,22 @@ const ReceivedBreakdownModal = ({ data, period, onClose }) => {
 
         <div className="px-6 py-4 overflow-y-auto space-y-5">
           <div className="flex items-stretch gap-2">
-            <SummaryStat label={`Received — for ${MONTHS[period.month]} ${period.year}'s own sale`} value={k.received_from_this_months_sales} color={COLOR_RECEIVED} />
+            <SummaryStat label={`Received — for ${MONTHS[period.month]} ${period.year}'s own sale`} value={k.received_from_this_months_sales} color={COLOR_RECEIVED} onClick={onOpenJourney ? () => onOpenJourney({ metricKey: 'received_from_own', label: "Received — this month's own sale", color: COLOR_RECEIVED }) : undefined} />
             <Operator symbol="+" />
-            <SummaryStat label="Received — for earlier months' sale" value={k.received_from_carried_forward} color={COLOR_PENDING} />
+            <SummaryStat label="Received — for earlier months' sale" value={k.received_from_carried_forward} color={COLOR_PENDING} onClick={onOpenJourney ? () => onOpenJourney({ metricKey: 'received_from_carried_forward', label: "Received — earlier months' sale", color: COLOR_PENDING }) : undefined} />
             <Operator symbol="=" />
-            <SummaryStat label="Total received" value={k.received_this_month} color={COLOR_PRIMARY} big />
+            <SummaryStat label="Total received" value={k.received_this_month} color={COLOR_PRIMARY} big onClick={onOpenJourney ? () => onOpenJourney({ metricKey: 'received_this_month', label: 'Cash collected', color: COLOR_PRIMARY }) : undefined} />
           </div>
 
           <CarriedForwardCollectionsTable rows={carriedForward} />
-          <ReceivedSplitTable title="By source (courier / prepaid)" rows={bySource} keyField="source" />
-          <ReceivedSplitTable title="By portal / channel" rows={byChannel} keyField="channel" />
+          <ReceivedSplitTable title="Received this month" rows={bySource} keyField="source" onOpenJourney={onOpenJourney} simplified />
+          <PrepaidChannelBreakdown rows={prepaidByChannel} amountLabel="Received" />
+          <ReceivedSplitTable
+            title="How the totals above split — by source"
+            subtitle="Ties the summary strip to the two tables above: This month's sale + Earlier months' sale = the Amount in the table right above; Earlier months' sale here is that same source's rows in Table 1 combined."
+            rows={bySource} keyField="source" onOpenJourney={onOpenJourney}
+          />
+          <ReceivedSplitTable title="By portal / channel" rows={byChannel} keyField="channel" onOpenJourney={onOpenJourney} />
         </div>
       </div>
     </div>
@@ -241,7 +392,7 @@ const SummaryStat = ({ label, value, color, big, onClick }) => (
 // which calendar month the settlement itself happened in. Not the same table as
 // "Received → by source" (ReceivedSplitTable), which is filtered by settled_month
 // instead of order_month — see RECEIVABLES_CYCLE.md §4/§5 for the distinction.
-const SettledToDateModal = ({ rows, period, total, onClose }) => (
+const SettledToDateModal = ({ rows, prepaidByChannel, period, total, onOpenJourney, onClose }) => (
   <div
     className="fixed inset-0 z-50 flex items-center justify-center p-4"
     style={{ background: 'rgba(15,23,42,0.45)' }}
@@ -281,7 +432,9 @@ const SettledToDateModal = ({ rows, period, total, onClose }) => (
               <tr key={r.source} style={{ borderBottom: '1px solid var(--card-border)' }}>
                 <td className="px-2 py-2.5 font-semibold capitalize whitespace-nowrap" style={{ color: 'var(--text-heading)' }}>{r.source}</td>
                 <td className="px-2 py-2.5" style={{ color: 'var(--text-body)' }}>{Number(r.count).toLocaleString('en-IN')}</td>
-                <td className="px-2 py-2.5 whitespace-nowrap font-semibold" style={{ color: COLOR_RECEIVED }}>{money(r.amount)}</td>
+                <td className="px-2 py-2.5 whitespace-nowrap font-semibold">
+                  <Num value={r.amount} color={COLOR_RECEIVED} onClick={onOpenJourney ? () => onOpenJourney({ metricKey: 'settled_of_own', label: `Settled — ${r.source}`, color: COLOR_RECEIVED, dimension: { type: 'source', value: r.source } }) : undefined} />
+                </td>
                 <td className="px-2 py-2.5" style={{ color: 'var(--text-muted)' }}>{pct(r.amount, total)}</td>
               </tr>
             ))}
@@ -292,12 +445,17 @@ const SettledToDateModal = ({ rows, period, total, onClose }) => (
           <tfoot>
             <tr>
               <td className="px-2 py-3 font-black" style={{ color: 'var(--text-heading)' }}>Total</td>
-              <td />
-              <td className="px-2 py-3 font-black whitespace-nowrap" style={{ color: COLOR_RECEIVED }}>{money(total)}</td>
+              <td className="px-2 py-3 font-black whitespace-nowrap" style={{ color: 'var(--text-body)' }}>
+                {rows.reduce((s, r) => s + Number(r.count || 0), 0).toLocaleString('en-IN')}
+              </td>
+              <td className="px-2 py-3 font-black whitespace-nowrap">
+                <Num value={total} color={COLOR_RECEIVED} onClick={onOpenJourney ? () => onOpenJourney({ metricKey: 'settled_of_own', label: 'Settled to date', color: COLOR_RECEIVED }) : undefined} />
+              </td>
               <td />
             </tr>
           </tfoot>
         </table>
+        <PrepaidChannelBreakdown rows={prepaidByChannel} amountLabel="Settled" />
         <FormulaNote>
           <strong>Formula:</strong> for every order sold in {MONTHS[period.month]} {period.year}, this sums
           <code> total_amount</code> where it is settled and not returned — grouped by <code>settled_source</code>
@@ -315,10 +473,42 @@ const Operator = ({ symbol }) => (
   </div>
 );
 
+// Numeric opening -> movements -> closing bridge — the actual rupee-by-rupee
+// transformation behind a KPI, in place of prose. `rows` are the movements
+// (each optionally signed "−"); the final band is the reconciled result.
+const MovementBridge = ({ title, rows, resultLabel, resultValue, resultColor, resultJourney, onOpenJourney }) => (
+  <div className="mb-5">
+    {title && (
+      <p className="text-xs font-bold uppercase tracking-wide mb-2" style={{ color: 'var(--text-muted)' }}>{title}</p>
+    )}
+    <div className="rounded-xl overflow-hidden" style={{ border: '1px solid var(--card-border)' }}>
+      {rows.map((r, i) => (
+        <div
+          key={r.label}
+          className="flex items-center justify-between gap-3 px-4 py-2.5"
+          style={{ borderBottom: '1px solid var(--card-border)', background: i % 2 ? 'var(--page-bg)' : 'transparent' }}
+        >
+          <span className="text-xs font-semibold" style={{ color: 'var(--text-body)' }}>{r.label}</span>
+          <span className="text-sm font-bold whitespace-nowrap">
+            {r.sign ? `${r.sign} ` : ''}
+            <Num value={r.value} color={r.color || 'var(--text-heading)'} onClick={r.journey && onOpenJourney ? () => onOpenJourney(r.journey) : undefined} />
+          </span>
+        </div>
+      ))}
+      <div className="flex items-center justify-between gap-3 px-4 py-3" style={{ background: `${resultColor}12` }}>
+        <span className="text-xs font-black uppercase tracking-wide" style={{ color: resultColor }}>{resultLabel}</span>
+        <span className="text-base font-black whitespace-nowrap" style={{ fontFamily: 'Barlow' }}>
+          <Num value={resultValue} color={resultColor} bold onClick={resultJourney && onOpenJourney ? () => onOpenJourney(resultJourney) : undefined} />
+        </span>
+      </div>
+    </div>
+  </div>
+);
+
 // Generic "by origin month" breakdown — reused by both the "Total receivable" card
 // (arithmetic summary + a by-partner table, no month table) and the "Carried forward"
 // card (just the by-month table for earlier months, no summary, no partner table).
-const ReceivableByMonthModal = ({ title, subtitle, rows, total, summary, showMonthTable = true, partnerRows, movementNote, onClose }) => (
+const ReceivableByMonthModal = ({ title, subtitle, rows, total, summary, showMonthTable = true, partnerRows, bridges, onOpenJourney, onClose }) => (
   <div
     className="fixed inset-0 z-50 flex items-center justify-center p-4"
     style={{ background: 'rgba(15,23,42,0.45)' }}
@@ -350,15 +540,7 @@ const ReceivableByMonthModal = ({ title, subtitle, rows, total, summary, showMon
           </div>
         )}
 
-        {movementNote && (
-          <div
-            className="mb-5 px-3 py-2.5 rounded-lg flex items-start gap-2"
-            style={{ background: `${COLOR_RECEIVED}0a`, border: `1px solid ${COLOR_RECEIVED}35` }}
-          >
-            <Info className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" style={{ color: COLOR_RECEIVED }} />
-            <p className="text-[11px] leading-relaxed" style={{ color: 'var(--text-body)' }}>{movementNote}</p>
-          </div>
-        )}
+        {bridges && bridges.map((b) => <MovementBridge key={b.resultLabel} {...b} onOpenJourney={onOpenJourney} />)}
 
         {showMonthTable && (
           <>
@@ -373,16 +555,20 @@ const ReceivableByMonthModal = ({ title, subtitle, rows, total, summary, showMon
                   </tr>
                 </thead>
                 <tbody>
-                  {rows.map((r) => (
-                    <tr key={`${r.year}-${r.month}`} style={{ borderBottom: '1px solid var(--card-border)' }}>
-                      <td className="px-2 py-2.5 font-semibold whitespace-nowrap" style={{ color: 'var(--text-heading)' }}>{MONTHS[r.month]} {r.year}</td>
-                      <td className="px-2 py-2.5 whitespace-nowrap" style={{ color: 'var(--text-body)' }}>{money(r.cod_sales)}</td>
-                      <td className="px-2 py-2.5 whitespace-nowrap" style={{ color: COLOR_RECEIVED }}>{money(r.settled_amount)}</td>
-                      <td className="px-2 py-2.5 whitespace-nowrap" style={{ color: Number(r.returned_amount) > 0 ? COLOR_RETURNED : 'var(--text-muted)' }}>{money(r.returned_amount)}</td>
-                      <td className="px-2 py-2.5 whitespace-nowrap font-semibold" style={{ color: Number(r.pending) > 0 ? COLOR_PENDING : 'var(--text-muted)' }}>{money(r.pending)}</td>
-                      <td className="px-2 py-2.5" style={{ color: 'var(--text-muted)' }}>{pct(r.pending, r.cod_sales)}</td>
-                    </tr>
-                  ))}
+                  {rows.map((r) => {
+                    const origin = { month: r.month, year: r.year };
+                    const j = (metricKey, label, color) => (onOpenJourney ? () => onOpenJourney({ metricKey, label, color, origin }) : undefined);
+                    return (
+                      <tr key={`${r.year}-${r.month}`} style={{ borderBottom: '1px solid var(--card-border)' }}>
+                        <td className="px-2 py-2.5 font-semibold whitespace-nowrap" style={{ color: 'var(--text-heading)' }}>{MONTHS[r.month]} {r.year}</td>
+                        <td className="px-2 py-2.5 whitespace-nowrap"><Num value={r.cod_sales} color="var(--text-body)" onClick={j('sales', `${MONTHS[r.month]} ${r.year} — COD sales`, COLOR_SALES)} /></td>
+                        <td className="px-2 py-2.5 whitespace-nowrap"><Num value={r.settled_amount} color={COLOR_RECEIVED} onClick={j('settled_of_own', `${MONTHS[r.month]} ${r.year} — settled`, COLOR_RECEIVED)} /></td>
+                        <td className="px-2 py-2.5 whitespace-nowrap"><Num value={r.returned_amount} color={Number(r.returned_amount) > 0 ? COLOR_RETURNED : 'var(--text-muted)'} onClick={j('returned_of_own', `${MONTHS[r.month]} ${r.year} — returned`, COLOR_RETURNED)} /></td>
+                        <td className="px-2 py-2.5 whitespace-nowrap font-semibold"><Num value={r.pending} color={Number(r.pending) > 0 ? COLOR_PENDING : 'var(--text-muted)'} onClick={j('this_month_own_receivable', `${MONTHS[r.month]} ${r.year} — still pending`, COLOR_PENDING)} /></td>
+                        <td className="px-2 py-2.5" style={{ color: 'var(--text-muted)' }}>{pct(r.pending, r.cod_sales)}</td>
+                      </tr>
+                    );
+                  })}
                   {!rows.length && (
                     <tr><td colSpan={6} className="px-2 py-6 text-center text-xs" style={{ color: 'var(--text-muted)' }}>No COD data yet.</td></tr>
                   )}
@@ -431,7 +617,12 @@ const ReceivableByMonthModal = ({ title, subtitle, rows, total, summary, showMon
                     <tr key={r.courier} style={{ borderBottom: '1px solid var(--card-border)' }}>
                       <td className="px-2 py-2.5 font-semibold whitespace-nowrap" style={{ color: 'var(--text-heading)' }}>{r.courier || 'Uncategorized'}</td>
                       <td className="px-2 py-2.5" style={{ color: 'var(--text-body)' }}>{Number(r.pending_orders).toLocaleString('en-IN')}</td>
-                      <td className="px-2 py-2.5 whitespace-nowrap font-semibold" style={{ color: COLOR_PENDING }}>{money(r.pending_amount)}</td>
+                      <td className="px-2 py-2.5 whitespace-nowrap font-semibold">
+                        <Num
+                          value={r.pending_amount} color={COLOR_PENDING}
+                          onClick={onOpenJourney && r.courier ? () => onOpenJourney({ metricKey: 'total_receivable_as_of', label: `Total receivable — ${r.courier}`, color: COLOR_PENDING, dimension: { type: 'courier', value: r.courier } }) : undefined}
+                        />
+                      </td>
                       <td className="px-2 py-2.5" style={{ color: 'var(--text-muted)' }}>{pct(r.pending_amount, total)}</td>
                     </tr>
                   ))}
@@ -448,7 +639,7 @@ const ReceivableByMonthModal = ({ title, subtitle, rows, total, summary, showMon
   </div>
 );
 
-const ThisMonthByCourierModal = ({ rows, period, total, onClose }) => {
+const ThisMonthByCourierModal = ({ rows, period, total, onOpenJourney, onClose }) => {
   const codSales = rows.reduce((s, r) => s + Number(r.total_amount || 0), 0);
   const codSettled = rows.reduce((s, r) => s + Number(r.settled_amount || 0), 0);
   const codReturned = rows.reduce((s, r) => s + Number(r.returned_amount || 0), 0);
@@ -485,7 +676,10 @@ const ThisMonthByCourierModal = ({ rows, period, total, onClose }) => {
           <Operator symbol="−" />
           <SummaryStat label="Returned" value={codReturned} color={COLOR_RETURNED} />
           <Operator symbol="=" />
-          <SummaryStat label="Pending (this card's number)" value={total} color={COLOR_PENDING} big />
+          <SummaryStat
+            label="Pending (this card's number)" value={total} color={COLOR_PENDING} big
+            onClick={onOpenJourney ? () => onOpenJourney({ metricKey: 'this_month_own_receivable', label: "This month's own receivable", color: COLOR_PENDING }) : undefined}
+          />
         </div>
       </div>
       <div className="px-6 pb-4 overflow-x-auto">
@@ -498,17 +692,20 @@ const ThisMonthByCourierModal = ({ rows, period, total, onClose }) => {
             </tr>
           </thead>
           <tbody>
-            {rows.map((r) => (
-              <tr key={r.courier} style={{ borderBottom: '1px solid var(--card-border)' }}>
-                <td className="px-2 py-2.5 font-semibold whitespace-nowrap" style={{ color: 'var(--text-heading)' }}>{r.courier || 'Uncategorized'}</td>
-                <td className="px-2 py-2.5" style={{ color: 'var(--text-body)' }}>{Number(r.total_orders).toLocaleString('en-IN')}</td>
-                <td className="px-2 py-2.5 whitespace-nowrap" style={{ color: 'var(--text-body)' }}>{money(r.total_amount)}</td>
-                <td className="px-2 py-2.5 whitespace-nowrap" style={{ color: COLOR_RECEIVED }}>{money(r.settled_amount)}</td>
-                <td className="px-2 py-2.5 whitespace-nowrap" style={{ color: Number(r.returned_amount) > 0 ? COLOR_RETURNED : 'var(--text-muted)' }}>{money(r.returned_amount)}</td>
-                <td className="px-2 py-2.5 whitespace-nowrap font-semibold" style={{ color: Number(r.pending_amount) > 0 ? COLOR_PENDING : COLOR_RECEIVED }}>{money(r.pending_amount)}</td>
-                <td className="px-2 py-2.5" style={{ color: 'var(--text-muted)' }}>{pct(r.pending_amount, r.total_amount)}</td>
-              </tr>
-            ))}
+            {rows.map((r) => {
+              const j = (metricKey, label, color) => (onOpenJourney && r.courier ? () => onOpenJourney({ metricKey, label: `${label} — ${r.courier}`, color, dimension: { type: 'courier', value: r.courier } }) : undefined);
+              return (
+                <tr key={r.courier} style={{ borderBottom: '1px solid var(--card-border)' }}>
+                  <td className="px-2 py-2.5 font-semibold whitespace-nowrap" style={{ color: 'var(--text-heading)' }}>{r.courier || 'Uncategorized'}</td>
+                  <td className="px-2 py-2.5" style={{ color: 'var(--text-body)' }}>{Number(r.total_orders).toLocaleString('en-IN')}</td>
+                  <td className="px-2 py-2.5 whitespace-nowrap"><Num value={r.total_amount} color="var(--text-body)" onClick={j('sales', 'Sales', COLOR_SALES)} /></td>
+                  <td className="px-2 py-2.5 whitespace-nowrap"><Num value={r.settled_amount} color={COLOR_RECEIVED} onClick={j('settled_of_own', 'Settled', COLOR_RECEIVED)} /></td>
+                  <td className="px-2 py-2.5 whitespace-nowrap"><Num value={r.returned_amount} color={Number(r.returned_amount) > 0 ? COLOR_RETURNED : 'var(--text-muted)'} onClick={j('returned_of_own', 'Returned', COLOR_RETURNED)} /></td>
+                  <td className="px-2 py-2.5 whitespace-nowrap font-semibold"><Num value={r.pending_amount} color={Number(r.pending_amount) > 0 ? COLOR_PENDING : COLOR_RECEIVED} onClick={j('this_month_own_receivable', 'Pending', COLOR_PENDING)} /></td>
+                  <td className="px-2 py-2.5" style={{ color: 'var(--text-muted)' }}>{pct(r.pending_amount, r.total_amount)}</td>
+                </tr>
+              );
+            })}
             {!rows.length && (
               <tr><td colSpan={7} className="px-2 py-6 text-center text-xs" style={{ color: 'var(--text-muted)' }}>No COD sales this month.</td></tr>
             )}
@@ -516,8 +713,12 @@ const ThisMonthByCourierModal = ({ rows, period, total, onClose }) => {
           <tfoot>
             <tr>
               <td className="px-2 py-3 font-black" style={{ color: 'var(--text-heading)' }}>Total</td>
-              <td />
-              <td />
+              <td className="px-2 py-3 font-black whitespace-nowrap" style={{ color: 'var(--text-body)' }}>
+                {rows.reduce((s, r) => s + Number(r.total_orders || 0), 0).toLocaleString('en-IN')}
+              </td>
+              <td className="px-2 py-3 font-black whitespace-nowrap" style={{ color: COLOR_SALES }}>
+                {money(rows.reduce((s, r) => s + Number(r.total_amount || 0), 0))}
+              </td>
               <td className="px-2 py-3 font-black whitespace-nowrap" style={{ color: COLOR_RECEIVED }}>
                 {money(rows.reduce((s, r) => s + Number(r.settled_amount || 0), 0))}
               </td>
@@ -558,7 +759,7 @@ const FormulaNote = ({ children }) => (
   </div>
 );
 
-const SalesByChannelModal = ({ rows, period, total, returnedOfThisMonth, onClose }) => {
+const SalesByChannelModal = ({ rows, period, total, returnedOfThisMonth, onOpenJourney, onClose }) => {
   const net = Number(total || 0) - Number(returnedOfThisMonth || 0);
   return (
   <div
@@ -586,9 +787,9 @@ const SalesByChannelModal = ({ rows, period, total, returnedOfThisMonth, onClose
       </div>
       <div className="px-6 pt-4">
         <div className="flex items-stretch gap-2 mb-5">
-          <SummaryStat label={`Total sales (${MONTHS[period.month]} ${period.year})`} value={total} color={COLOR_SALES} />
+          <SummaryStat label={`Total sales (${MONTHS[period.month]} ${period.year})`} value={total} color={COLOR_SALES} onClick={onOpenJourney ? () => onOpenJourney({ metricKey: 'sales', label: 'Sales', color: COLOR_SALES }) : undefined} />
           <Operator symbol="−" />
-          <SummaryStat label="Returns of this month's sales" value={returnedOfThisMonth} color={COLOR_RETURNED} />
+          <SummaryStat label="Returns of this month's sales" value={returnedOfThisMonth} color={COLOR_RETURNED} onClick={onOpenJourney ? () => onOpenJourney({ metricKey: 'returned_of_own', label: "Returns — this month's own sale", color: COLOR_RETURNED }) : undefined} />
           <Operator symbol="=" />
           <SummaryStat label="Net sales this month" value={net} color={COLOR_PRIMARY} big />
         </div>
@@ -607,7 +808,9 @@ const SalesByChannelModal = ({ rows, period, total, returnedOfThisMonth, onClose
               <tr key={r.channel} style={{ borderBottom: '1px solid var(--card-border)' }}>
                 <td className="px-2 py-2.5 font-semibold whitespace-nowrap" style={{ color: 'var(--text-heading)' }}>{r.channel}</td>
                 <td className="px-2 py-2.5" style={{ color: 'var(--text-body)' }}>{Number(r.count).toLocaleString('en-IN')}</td>
-                <td className="px-2 py-2.5 whitespace-nowrap font-semibold" style={{ color: COLOR_SALES }}>{money(r.amount)}</td>
+                <td className="px-2 py-2.5 whitespace-nowrap font-semibold">
+                  <Num value={r.amount} color={COLOR_SALES} onClick={onOpenJourney ? () => onOpenJourney({ metricKey: 'sales', label: `Sales — ${r.channel}`, color: COLOR_SALES, dimension: { type: 'channel', value: r.channel } }) : undefined} />
+                </td>
                 <td className="px-2 py-2.5" style={{ color: 'var(--text-muted)' }}>{pct(r.amount, total)}</td>
               </tr>
             ))}
@@ -618,8 +821,12 @@ const SalesByChannelModal = ({ rows, period, total, returnedOfThisMonth, onClose
           <tfoot>
             <tr>
               <td className="px-2 py-3 font-black" style={{ color: 'var(--text-heading)' }}>Total</td>
-              <td />
-              <td className="px-2 py-3 font-black whitespace-nowrap" style={{ color: COLOR_SALES }}>{money(total)}</td>
+              <td className="px-2 py-3 font-black whitespace-nowrap" style={{ color: 'var(--text-body)' }}>
+                {rows.reduce((s, r) => s + Number(r.count || 0), 0).toLocaleString('en-IN')}
+              </td>
+              <td className="px-2 py-3 font-black whitespace-nowrap">
+                <Num value={total} color={COLOR_SALES} onClick={onOpenJourney ? () => onOpenJourney({ metricKey: 'sales', label: 'Sales', color: COLOR_SALES }) : undefined} />
+              </td>
               <td />
             </tr>
           </tfoot>
@@ -647,14 +854,20 @@ const SalesByChannelModal = ({ rows, period, total, returnedOfThisMonth, onClose
 
 const ReturnsByMonthTable = ({ rows, period, total }) => (
   <>
-    <p className="text-xs font-bold uppercase tracking-wide mb-2" style={{ color: 'var(--text-muted)' }}>
+    <p className="text-xs font-bold uppercase tracking-wide mb-0.5" style={{ color: 'var(--text-muted)' }}>
       By origin month — which month's sale is actually being returned
+    </p>
+    <p className="text-[11px] mb-2" style={{ color: 'var(--text-muted)' }}>
+      A "carried forward" row's returns split into orders that were <strong>still open</strong> (not yet settled,
+      still part of that month's carried-forward balance) vs orders the courier had <strong>already settled</strong> and
+      only got reversed this month — only the "still open" amount is what the Carried Forward card's "Returned"
+      movement shows, since the other bucket had already left that balance.
     </p>
     <div className="overflow-x-auto rounded-lg" style={{ border: '1px solid var(--card-border)' }}>
       <table className="w-full text-sm">
         <thead>
           <tr style={{ background: 'var(--page-bg)', borderBottom: '1.5px solid var(--card-border)' }}>
-            {['Origin month', 'Returns', 'Amount', 'Share'].map((h) => (
+            {['Origin month', 'Returns', 'Still open', 'Already settled', 'Amount', 'Share'].map((h) => (
               <th key={h} className="px-2 py-2 text-left text-xs font-bold uppercase tracking-wide whitespace-nowrap" style={{ color: 'var(--text-muted)' }}>{h}</th>
             ))}
           </tr>
@@ -673,19 +886,35 @@ const ReturnsByMonthTable = ({ rows, period, total }) => (
                   )}
                 </td>
                 <td className="px-2 py-2.5" style={{ color: 'var(--text-body)' }}>{Number(r.count).toLocaleString('en-IN')}</td>
+                <td className="px-2 py-2.5 whitespace-nowrap">
+                  <div className="font-semibold" style={{ color: COLOR_PENDING }}>{money(r.still_open_amount)}</div>
+                  <div className="text-[10px] mt-0.5" style={{ color: 'var(--text-muted)' }}>{Number(r.still_open_count).toLocaleString('en-IN')} orders</div>
+                </td>
+                <td className="px-2 py-2.5 whitespace-nowrap">
+                  <div className="font-semibold" style={{ color: 'var(--text-body)' }}>{money(r.already_settled_amount)}</div>
+                  <div className="text-[10px] mt-0.5" style={{ color: 'var(--text-muted)' }}>{Number(r.already_settled_count).toLocaleString('en-IN')} orders</div>
+                </td>
                 <td className="px-2 py-2.5 whitespace-nowrap font-semibold" style={{ color: COLOR_RETURNED }}>{money(r.amount)}</td>
                 <td className="px-2 py-2.5" style={{ color: 'var(--text-muted)' }}>{pct(r.amount, total)}</td>
               </tr>
             );
           })}
           {!rows.length && (
-            <tr><td colSpan={4} className="px-2 py-6 text-center text-xs" style={{ color: 'var(--text-muted)' }}>No returns this month.</td></tr>
+            <tr><td colSpan={6} className="px-2 py-6 text-center text-xs" style={{ color: 'var(--text-muted)' }}>No returns this month.</td></tr>
           )}
         </tbody>
         <tfoot>
           <tr>
             <td className="px-2 py-3 font-black" style={{ color: 'var(--text-heading)' }}>Total</td>
-            <td />
+            <td className="px-2 py-3 font-black whitespace-nowrap" style={{ color: 'var(--text-body)' }}>
+              {rows.reduce((s, r) => s + Number(r.count || 0), 0).toLocaleString('en-IN')}
+            </td>
+            <td className="px-2 py-3 font-black whitespace-nowrap" style={{ color: COLOR_PENDING }}>
+              {money(rows.reduce((s, r) => s + Number(r.still_open_amount || 0), 0))}
+            </td>
+            <td className="px-2 py-3 font-black whitespace-nowrap" style={{ color: 'var(--text-body)' }}>
+              {money(rows.reduce((s, r) => s + Number(r.already_settled_amount || 0), 0))}
+            </td>
             <td className="px-2 py-3 font-black whitespace-nowrap" style={{ color: COLOR_RETURNED }}>{money(total)}</td>
             <td />
           </tr>
@@ -706,7 +935,7 @@ const ReturnsByMonthTable = ({ rows, period, total }) => (
   </>
 );
 
-const ReturnsBySourceModal = ({ rows, byMonth, period, total, count, onClose }) => (
+const ReturnsBySourceModal = ({ rows, byMonth, prepaidByChannel, period, total, count, onOpenJourney, onClose }) => (
   <div
     className="fixed inset-0 z-50 flex items-center justify-center p-4"
     style={{ background: 'rgba(15,23,42,0.45)' }}
@@ -758,11 +987,14 @@ const ReturnsBySourceModal = ({ rows, byMonth, period, total, count, onClose }) 
             <tr>
               <td className="px-2 py-3 font-black" style={{ color: 'var(--text-heading)' }}>Total</td>
               <td />
-              <td className="px-2 py-3 font-black whitespace-nowrap" style={{ color: COLOR_RETURNED }}>{money(total)}</td>
+              <td className="px-2 py-3 font-black whitespace-nowrap">
+                <Num value={total} color={COLOR_RETURNED} onClick={onOpenJourney ? () => onOpenJourney({ metricKey: 'returns_this_month', label: 'Returns (SRN)', color: COLOR_RETURNED }) : undefined} />
+              </td>
               <td />
             </tr>
           </tfoot>
         </table>
+        <PrepaidChannelBreakdown rows={prepaidByChannel} amountLabel="Returned" color={COLOR_RETURNED} />
       </div>
     </div>
   </div>
@@ -778,6 +1010,176 @@ const TrendTooltip = ({ active, payload, label }) => {
           {p.name}: <span className="font-semibold">{money(p.value)}</span>
         </p>
       ))}
+    </div>
+  );
+};
+
+// Any rupee figure on this dashboard, made clickable — opens that figure's
+// month-by-month journey (see NumberJourneyModal). Plain text when no onClick.
+const Num = ({ value, color, onClick, bold, className = '' }) => (
+  <span
+    onClick={onClick}
+    className={`${className} ${onClick ? 'cursor-pointer hover:underline underline-offset-2' : ''}`}
+    style={{ color, fontWeight: bold ? 900 : undefined }}
+    role={onClick ? 'button' : undefined}
+    title={onClick ? 'Click for the complete month-by-month journey' : undefined}
+  >
+    {money(value)}
+  </span>
+);
+
+// Ledger-mode journey field name -> origin-mode's equivalent field name (origin
+// mode fixes the ORDER population to one specific month and only tracks that
+// month's own settle/return progress, so it has no cumulative-as-of columns).
+const ORIGIN_FIELD_MAP = {
+  sales: 'origin_sales',
+  settled_of_own: 'origin_settled_as_of',
+  returned_of_own: 'origin_returned_as_of',
+  this_month_own_receivable: 'origin_pending_as_of',
+  total_receivable_as_of: 'origin_pending_as_of',
+  carried_forward_as_of: 'origin_pending_as_of',
+};
+
+const JourneyTooltip = ({ active, payload, label, color }) => {
+  if (!active || !payload?.length) return null;
+  return (
+    <div className="rounded-lg px-3 py-2 text-xs" style={{ background: 'var(--surface)', border: '1px solid var(--card-border)', boxShadow: '0 4px 16px rgba(0,0,0,0.12)' }}>
+      <p className="font-bold mb-1" style={{ color: 'var(--text-heading)' }}>{label}</p>
+      <p style={{ color }}>{money(payload[0].value)}</p>
+    </div>
+  );
+};
+
+// The "click any number, see its complete journey" drill-down — every calendar
+// month from the ledger's own start (or the cycle start) through the selected
+// month, re-evaluating the SAME figure at each month's own close, as a chart +
+// table with the month-over-month change made explicit. No prose, just numbers.
+const NumberJourneyModal = ({ brandId, period, cycleStart, metricKey, label, color, origin, dimension, onClose }) => {
+  const [resp, setResp] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+    const params = new URLSearchParams({ month: String(period.month), year: String(period.year) });
+    if (cycleStart) {
+      params.set('startMonth', String(cycleStart.month));
+      params.set('startYear', String(cycleStart.year));
+    }
+    if (origin) {
+      params.set('originMonth', String(origin.month));
+      params.set('originYear', String(origin.year));
+    }
+    if (dimension) params.set(dimension.type, dimension.value);
+    api.get(`/api/dashboard/receivables/${brandId}/journey?${params.toString()}`)
+      .then((res) => { if (!cancelled) setResp(res.data); })
+      .catch((e) => { if (!cancelled) setError(e.response?.data?.error || 'Failed to load journey'); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [brandId, period.month, period.year, cycleStart?.month, cycleStart?.year, origin?.month, origin?.year, dimension?.type, dimension?.value]);
+
+  const field = resp?.mode === 'origin' ? ORIGIN_FIELD_MAP[metricKey] : metricKey;
+  const series = (resp?.months || []).map((r, i, arr) => ({
+    key: `${r.year}-${r.month}`,
+    label: `${MONTHS[r.month]} ${r.year}`,
+    month: r.month,
+    year: r.year,
+    value: Number(r[field] || 0),
+    change: i > 0 ? Number(r[field] || 0) - Number(arr[i - 1][field] || 0) : null,
+  }));
+  const isCurrent = (r) => r.month === period.month && r.year === period.year;
+
+  return (
+    <div
+      className="fixed inset-0 z-[60] flex items-center justify-center p-4"
+      style={{ background: 'rgba(15,23,42,0.55)' }}
+      onClick={onClose}
+    >
+      <div
+        className="w-fit min-w-[30rem] max-w-[92vw] rounded-2xl overflow-hidden flex flex-col"
+        style={{ background: 'var(--surface)', border: '1px solid var(--card-border)', maxHeight: '88vh' }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between px-6 py-4 flex-shrink-0" style={{ borderBottom: '1px solid var(--card-border)' }}>
+          <div>
+            <h3 className="text-base font-black" style={{ color: 'var(--text-heading)', fontFamily: 'Barlow' }}>
+              {label} — complete journey
+            </h3>
+            <p className="text-xs mt-0.5" style={{ color: 'var(--text-muted)' }}>
+              {origin ? `${MONTHS[origin.month]} ${origin.year}'s own sale, ` : ''}
+              {dimension ? `${dimension.type} = ${dimension.value}, ` : ''}
+              every month from the start through {MONTHS[period.month]} {period.year}
+            </p>
+          </div>
+          <button onClick={onClose} aria-label="Close" className="p-1.5 rounded-lg" style={{ color: 'var(--text-muted)' }}>
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+
+        <div className="px-6 py-4 overflow-y-auto">
+          {loading && (
+            <div className="flex items-center justify-center py-16">
+              <Loader2 className="w-6 h-6 animate-spin" style={{ color }} />
+            </div>
+          )}
+          {!loading && error && (
+            <p className="text-sm font-semibold py-8 text-center" style={{ color: COLOR_RETURNED }}>{error}</p>
+          )}
+          {!loading && !error && (
+            <>
+              <div style={{ width: '100%', height: 220 }} className="mb-5">
+                <ResponsiveContainer>
+                  <LineChart data={series} margin={{ top: 8, right: 16, left: 8, bottom: 0 }}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="var(--card-border)" vertical={false} />
+                    <XAxis dataKey="label" tick={{ fontSize: 11, fill: 'var(--text-muted)' }} axisLine={{ stroke: 'var(--card-border)' }} tickLine={false} />
+                    <YAxis tick={{ fontSize: 11, fill: 'var(--text-muted)' }} axisLine={false} tickLine={false}
+                      tickFormatter={(v) => `₹${(v / 100000).toFixed(0)}L`} />
+                    <Tooltip content={<JourneyTooltip color={color} />} />
+                    <Line type="monotone" dataKey="value" stroke={color} strokeWidth={2.5} dot={{ r: 3 }} name={label} />
+                  </LineChart>
+                </ResponsiveContainer>
+              </div>
+
+              <div className="overflow-x-auto rounded-lg" style={{ border: '1px solid var(--card-border)' }}>
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr style={{ background: 'var(--page-bg)', borderBottom: '1.5px solid var(--card-border)' }}>
+                      {['Month', label, 'Change'].map((h) => (
+                        <th key={h} className="px-3 py-2 text-left text-xs font-bold uppercase tracking-wide whitespace-nowrap" style={{ color: 'var(--text-muted)' }}>{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {series.map((r) => (
+                      <tr
+                        key={r.key}
+                        style={{
+                          borderBottom: '1px solid var(--card-border)',
+                          background: isCurrent(r) ? `${color}0c` : 'transparent',
+                        }}
+                      >
+                        <td className="px-3 py-2.5 font-semibold whitespace-nowrap" style={{ color: 'var(--text-heading)' }}>
+                          {r.label}{isCurrent(r) ? ' (selected)' : ''}
+                        </td>
+                        <td className="px-3 py-2.5 whitespace-nowrap font-semibold" style={{ color }}>{money(r.value)}</td>
+                        <td className="px-3 py-2.5 whitespace-nowrap" style={{ color: r.change == null ? 'var(--text-muted)' : r.change > 0 ? COLOR_SALES : r.change < 0 ? COLOR_RETURNED : 'var(--text-muted)' }}>
+                          {r.change == null ? '—' : `${r.change > 0 ? '+' : ''}${money(r.change)}`}
+                        </td>
+                      </tr>
+                    ))}
+                    {!series.length && (
+                      <tr><td colSpan={3} className="px-3 py-8 text-center text-xs" style={{ color: 'var(--text-muted)' }}>No data yet.</td></tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </>
+          )}
+        </div>
+      </div>
     </div>
   );
 };
@@ -804,6 +1206,8 @@ const ReceivableDashboard = () => {
   const [showCarriedForwardModal, setShowCarriedForwardModal] = useState(false);
   const [showReturnsModal, setShowReturnsModal] = useState(false);
   const [showSettledToDateModal, setShowSettledToDateModal] = useState(false);
+  const [journeyRequest, setJourneyRequest] = useState(null);
+  const openJourney = useCallback((req) => setJourneyRequest(req), []);
 
   const sidebarItems = sidebarFor([
     { path: `/brands/${brandId}/dashboard`, label: 'Dashboard', icon: LayoutDashboard },
@@ -870,6 +1274,38 @@ const ReceivableDashboard = () => {
   const dq = data?.dataQuality || { unmatched_count: 0, unmatched_amount: 0, bySource: [] };
   const k = data?.kpis || {};
   const netSalesThisMonth = Number(k.sales_this_month || 0) - Number(k.returned_of_this_months_sales || 0);
+  const prevPeriod = data?.previousPeriod;
+  const prevLabel = prevPeriod ? `${MONTHS[prevPeriod.month]} ${prevPeriod.year}` : 'earlier';
+  const cycleStart = (startMonth && startYear) ? { month: startMonth, year: startYear } : null;
+
+  // Opening balance -> collected -> returned -> closing balance, in real rupees —
+  // the exact transformation behind why "Carried forward" shrinks each time a
+  // later month re-reads the same earlier orders (see receivableByMonth / kpis
+  // fields added in dashboardController.js's getReceivableDashboard).
+  const carriedForwardBridge = {
+    title: `Carried forward — how ${prevLabel}'s balance became this`,
+    rows: [
+      { label: `Opening — as of ${prevLabel}'s close`, value: k.total_receivable_as_of_previous_month, journey: { metricKey: 'total_receivable_as_of', label: 'Total receivable', color: COLOR_PRIMARY } },
+      { label: `Collected in ${MONTHS[month]} ${year}`, value: k.received_from_carried_forward, sign: '−', color: COLOR_RECEIVED, journey: { metricKey: 'received_from_carried_forward', label: "Collected — earlier months' sale", color: COLOR_RECEIVED } },
+      { label: `Returned in ${MONTHS[month]} ${year}`, value: k.returned_of_carried_forward_this_month, sign: '−', color: COLOR_RETURNED, journey: { metricKey: 'returned_of_carried_forward', label: "Returned — earlier months' sale", color: COLOR_RETURNED } },
+    ],
+    resultLabel: `Carried forward into ${MONTHS[month]} ${year}`,
+    resultValue: k.carried_forward_receivable,
+    resultColor: COLOR_PENDING,
+    resultJourney: { metricKey: 'carried_forward_as_of', label: 'Carried forward', color: COLOR_PENDING },
+  };
+  const thisMonthOwnBridge = {
+    title: `This month's own — ${MONTHS[month]} ${year}'s sale, start to finish`,
+    rows: [
+      { label: `New sales — ${MONTHS[month]} ${year}`, value: k.sales_this_month, journey: { metricKey: 'sales', label: 'Sales', color: COLOR_SALES } },
+      { label: `Collected in ${MONTHS[month]} ${year}`, value: k.settled_of_this_months_sales, sign: '−', color: COLOR_RECEIVED, journey: { metricKey: 'settled_of_own', label: "Collected — this month's own sale", color: COLOR_RECEIVED } },
+      { label: `Returned in ${MONTHS[month]} ${year}`, value: k.returned_of_this_months_sales, sign: '−', color: COLOR_RETURNED, journey: { metricKey: 'returned_of_own', label: "Returned — this month's own sale", color: COLOR_RETURNED } },
+    ],
+    resultLabel: `Still pending — ${MONTHS[month]} ${year}'s own`,
+    resultValue: k.this_month_own_receivable,
+    resultColor: COLOR_PENDING,
+    resultJourney: { metricKey: 'this_month_own_receivable', label: "This month's own receivable", color: COLOR_PENDING },
+  };
 
   return (
     <DashboardLayout sidebarItems={sidebarItems}>
@@ -960,7 +1396,16 @@ const ReceivableDashboard = () => {
           </div>
 
           {/* Month/year picker */}
-          <div className="flex items-center gap-1.5">
+          <div className="flex items-center gap-3 flex-wrap">
+            <button
+              onClick={() => navigate(`/brands/${brandId}/advance-amount`)}
+              className="flex items-center gap-1.5 text-xs font-bold px-3 py-2 rounded-lg transition-colors"
+              style={{ background: `${COLOR_PENDING}12`, color: COLOR_PENDING, border: `1px solid ${COLOR_PENDING}30` }}
+            >
+              <HandCoins className="w-3.5 h-3.5" />
+              Advance Amount Dashboard →
+            </button>
+            <div className="flex items-center gap-1.5">
             <button
               onClick={() => shiftMonth(-1)}
               aria-label="Previous month"
@@ -995,6 +1440,7 @@ const ReceivableDashboard = () => {
             >
               <ChevronRight className="w-4 h-4" />
             </button>
+            </div>
           </div>
         </div>
 
@@ -1222,7 +1668,7 @@ const ReceivableDashboard = () => {
       </div>
 
       {showReceivedModal && (
-        <ReceivedBreakdownModal data={data} period={{ month, year }} onClose={() => setShowReceivedModal(false)} />
+        <ReceivedBreakdownModal data={data} period={{ month, year }} onOpenJourney={openJourney} onClose={() => setShowReceivedModal(false)} />
       )}
       {showReceivableByMonthModal && (
         <ReceivableByMonthModal
@@ -1231,11 +1677,13 @@ const ReceivableDashboard = () => {
           total={k.total_receivable_as_of_date}
           showMonthTable={false}
           summary={[
-            { label: 'Carried forward (earlier months)', value: k.carried_forward_receivable, color: COLOR_PENDING },
-            { label: `This month's own (${MONTHS[month]} ${year})`, value: k.this_month_own_receivable, color: COLOR_PENDING },
-            { label: 'Total receivable', value: k.total_receivable_as_of_date, color: COLOR_PRIMARY },
+            { label: 'Carried forward (earlier months)', value: k.carried_forward_receivable, color: COLOR_PENDING, onClick: () => openJourney({ metricKey: 'carried_forward_as_of', label: 'Carried forward', color: COLOR_PENDING }) },
+            { label: `This month's own (${MONTHS[month]} ${year})`, value: k.this_month_own_receivable, color: COLOR_PENDING, onClick: () => openJourney({ metricKey: 'this_month_own_receivable', label: "This month's own receivable", color: COLOR_PENDING }) },
+            { label: 'Total receivable', value: k.total_receivable_as_of_date, color: COLOR_PRIMARY, onClick: () => openJourney({ metricKey: 'total_receivable_as_of', label: 'Total receivable', color: COLOR_PRIMARY }) },
           ]}
+          bridges={[carriedForwardBridge, thisMonthOwnBridge]}
           partnerRows={data?.receivableByCourierAsOfDate || []}
+          onOpenJourney={openJourney}
           onClose={() => setShowReceivableByMonthModal(false)}
         />
       )}
@@ -1245,11 +1693,8 @@ const ReceivableDashboard = () => {
           subtitle={`Orders sold BEFORE this month, still uncollected as of ${MONTHS[month]} ${year}'s close — excludes this month's own sales (COD+Prepaid combined; Prepaid nets to ₹0)`}
           rows={(data?.receivableByMonth || []).filter((r) => !(r.month === month && r.year === year))}
           total={k.carried_forward_receivable}
-          movementNote={
-            Number(k.received_from_carried_forward || 0) > 0
-              ? `${money(k.received_from_carried_forward)} of this backlog was already collected in ${MONTHS[month]} ${year} (see the "Received" card's earlier-months breakdown) — it's already excluded from the ${money(k.carried_forward_receivable)} below, since those orders are now marked settled. Don't subtract it again; the figure below is the balance AFTER that collection, not before it.`
-              : null
-          }
+          bridges={[carriedForwardBridge]}
+          onOpenJourney={openJourney}
           onClose={() => setShowCarriedForwardModal(false)}
         />
       )}
@@ -1258,14 +1703,17 @@ const ReceivableDashboard = () => {
           rows={data?.thisMonthPendingByCourier || []}
           total={k.this_month_own_receivable}
           period={{ month, year }}
+          onOpenJourney={openJourney}
           onClose={() => setShowThisMonthByCourierModal(false)}
         />
       )}
       {showSettledToDateModal && (
         <SettledToDateModal
           rows={data?.settledOfThisMonthsSalesBySource || []}
+          prepaidByChannel={data?.settledPrepaidByChannel || []}
           total={k.settled_of_this_months_sales}
           period={{ month, year }}
+          onOpenJourney={openJourney}
           onClose={() => setShowSettledToDateModal(false)}
         />
       )}
@@ -1275,6 +1723,7 @@ const ReceivableDashboard = () => {
           total={k.sales_this_month}
           returnedOfThisMonth={k.returned_of_this_months_sales}
           period={{ month, year }}
+          onOpenJourney={openJourney}
           onClose={() => setShowSalesByChannelModal(false)}
         />
       )}
@@ -1282,10 +1731,21 @@ const ReceivableDashboard = () => {
         <ReturnsBySourceModal
           rows={data?.returnsBySource || []}
           byMonth={data?.returnsByMonth || []}
+          prepaidByChannel={data?.returnsPrepaidByChannel || []}
           total={k.returns_this_month_amount}
           count={k.returns_this_month_count}
           period={{ month, year }}
+          onOpenJourney={openJourney}
           onClose={() => setShowReturnsModal(false)}
+        />
+      )}
+      {journeyRequest && (
+        <NumberJourneyModal
+          brandId={brandId}
+          period={{ month, year }}
+          cycleStart={cycleStart}
+          {...journeyRequest}
+          onClose={() => setJourneyRequest(null)}
         />
       )}
     </DashboardLayout>

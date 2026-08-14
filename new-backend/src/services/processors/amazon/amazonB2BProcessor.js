@@ -55,14 +55,16 @@ async function amazonB2BProcessor(
     if (!quantityColumn) throw new Error('Quantity column not found');
     if (!sellerGstinColumn) throw new Error('Seller Gstin column not found');
 
-    // Prefer Bill From/To State for the IGST/CGST/SGST split; fall back to
-    // Ship From/To State when the report doesn't carry Bill columns.
+    // IGST/CGST/SGST split (and everything derived from it — invoice numbering,
+    // Tally ledger naming, the tax formulas below) uses Ship From State vs
+    // Bill To State; fall back to Bill From / Ship To State when the report
+    // doesn't carry those columns.
     const findHeader = name => headers.find(h => h.toLowerCase().trim() === name);
 
-    const fromStateCol = findHeader('bill from state') || findHeader('ship from state');
+    const fromStateCol = findHeader('ship from state') || findHeader('bill from state');
     const toStateCol = findHeader('bill to state') || findHeader('ship to state');
 
-    if (!fromStateCol) throw new Error('Bill From State / Ship From State column not found');
+    if (!fromStateCol) throw new Error('Ship From State / Bill From State column not found');
     if (!toStateCol) throw new Error('Bill To State / Ship To State column not found');
 
     // ================================
@@ -849,9 +851,9 @@ async function amazonB2BProcessor(
     const getRowGstRate = row => Number(row['Cgst Rate'] || 0) + Number(row['Sgst Rate'] || 0) + Number(row['Igst Rate'] || 0);
 
     // Intra/Inter-State for the Debtor ledger name and Vch No must match Ship From/To State
-    // (place of supply for goods), not Bill From/To State (this processor's `fromStateCol` /
-    // `toStateCol` prefer Bill state) — verified against the reference file: rows with
-    // matching Ship states but differing Bill states are still labelled "Intra-State".
+    // (place of supply for goods), not Ship From/Bill To State (this processor's `fromStateCol` /
+    // `toStateCol` — used for the CGST/SGST/IGST split) — verified against the reference file:
+    // rows with matching Ship states but a differing Bill To state are still "Intra-State" here.
     const x2betaShipFromCol = findHeader('ship from state');
     const x2betaShipToCol = findHeader('ship to state');
     const isRowIntraState = row => row[x2betaShipFromCol] === row[x2betaShipToCol];
