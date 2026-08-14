@@ -444,8 +444,9 @@ function applyMultiSheetWorkflow(sheets, fileBufferOrMap, masterData = {}, fileI
     fileRSMs[fid] || fileRSMs[defaultFileId] || fileRSMs['file_0'] || Object.values(fileRSMs)[0] || {};
 
 
-  const outBook      = XLSX.utils.book_new();
-  const sheetResults = []; // sheetResults[i] = allRowsData (pre-grouped) for cross-sheet refs
+  const outBook       = XLSX.utils.book_new();
+  const sheetResults  = []; // sheetResults[i] = allRowsData (pre-grouped) for cross-sheet refs
+  const sheetOutputs  = []; // sheetOutputs[i]  = finalRows (post-grouped) for whole-sheet chaining
 
   for (let sheetIdx = 0; sheetIdx < sheets.length; sheetIdx++) {
     const wfSheet       = sheets[sheetIdx];
@@ -461,6 +462,7 @@ function applyMultiSheetWorkflow(sheets, fileBufferOrMap, masterData = {}, fileI
     if (wfSheet.type === 'merge') {
       const mergeRows = applyMerge(wfSheet.mergeConfig || {}, rawSheetMap, sheetResults, sheets);
       sheetResults.push(mergeRows);
+      sheetOutputs.push(mergeRows);
       XLSX.utils.book_append_sheet(
         outBook,
         XLSX.utils.json_to_sheet(mergeRows.length ? mergeRows : [{}]),
@@ -474,7 +476,7 @@ function applyMultiSheetWorkflow(sheets, fileBufferOrMap, masterData = {}, fileI
     let sourceRows;
     if (wfSheet.sourceType === 'prev_sheet' && wfSheet.prevSheetName) {
       const prevIdx = sheets.slice(0, sheetIdx).findIndex(s => s.name === wfSheet.prevSheetName);
-      sourceRows = prevIdx >= 0 && sheetResults[prevIdx] ? sheetResults[prevIdx] : sheetDefaultRows;
+      sourceRows = prevIdx >= 0 && sheetOutputs[prevIdx] ? sheetOutputs[prevIdx] : sheetDefaultRows;
     } else {
       sourceRows = rawSheetMap[wfSheet.rawSheetName] || sheetDefaultRows;
     }
@@ -523,6 +525,7 @@ function applyMultiSheetWorkflow(sheets, fileBufferOrMap, masterData = {}, fileI
     sheetResults.push(allRowsData); // preserve pre-grouped for cross-sheet refs
 
     const finalRows = applyGroupBy(outputRows, wfSheet.groupBy);
+    sheetOutputs.push(finalRows);
     XLSX.utils.book_append_sheet(outBook, XLSX.utils.json_to_sheet(finalRows), safeSheetName);
   }
 
