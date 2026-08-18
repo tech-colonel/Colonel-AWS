@@ -176,6 +176,12 @@ const isInvalidInvoice = (invoice) => {
 
 const needsAccountantReview = (invoice) => {
   if (!invoice || isInvalidInvoice(invoice)) return false;
+  // Once the accountant has explicitly acted (Approved/Disapproved), the row is no
+  // longer "needs review" — respect that action even if the Tally vendor/category are
+  // still blank, so Approve moves the row Needs Review → Done and the count decrements.
+  const status = String(invoice.status || '').trim();
+  if (status === 'Approved' || status === 'Disapproved') return false;
+  // Otherwise it needs review until the Tally vendor name + category are filled.
   // vendor_name_tally isn't stored yet, so this reduces to "category missing" today,
   // and stays correct if a Tally-vendor column is added later. "N/A"/"Missing"
   // placeholders count as missing.
