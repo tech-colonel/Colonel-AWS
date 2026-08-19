@@ -282,30 +282,34 @@ def test_reconcile_end_to_end():
     print("test_reconcile_end_to_end OK")
 
 def test_workbook_has_live_formulas():
-    # PO-first column layout (30 cols, after the 5-column task added Credit
-    # Note No): PO is col A, invoice_number is col C, total_invoice_amt is
-    # col F. The 4 live formula strings (pending/gross/net/status) are
-    # re-pointed to the shifted columns (U..W -> V..X).
-    from recon.zepto_receivables import build_zepto_workbook
-    results = [{k: "" for k in __import__("recon.zepto_receivables", fromlist=["COLUMN_KEYS"]).COLUMN_KEYS}]
+    # Columns are resolved through _KEYCOL, so the 4 live formulas (pending /
+    # gross / net / status) must always point at the right letters no matter how
+    # the layout shifts (e.g. the Month column insertion). Resolve expected
+    # letters dynamically and assert the formula strings match.
+    from recon.zepto_receivables import build_zepto_workbook, COLUMN_KEYS, _KEYCOL
+    results = [{k: "" for k in COLUMN_KEYS}]
     r = results[0]
     r.update({"po":"P100","invoice_number":"INV26-27/000007","total_invoice_amt":56685.0,
-              "payment_received_incl_tds":51380.92,"debit_note_issued":-5299.82,
+              "payment_received_incl_tds":51380.92,"debit_note_issued":5299.82,
               "pending_amount":56685.0,"gross_outstanding":5304.08,"net_outstanding":4.26,"status":"Not Paid"})
     wb = build_zepto_workbook(results)
     ws = wb["1. Invoice Tracker"]
-    assert ws["A3"].value == "P100"                    # po (col A)
-    assert ws["C3"].value == "INV26-27/000007"          # invoice_number (col C)
-    assert ws["F3"].value == 56685.0                    # total_invoice_amt (col F)
-    assert ws["T2"].value == "Credit Note No"                                          # header (shifted by DN-status merge)
-    assert ws["M3"].value == "=F3"                                                     # pending_amount
-    assert ws["U3"].value == "=M3-O3"                                                  # gross = Pending - Pay(excl TDS)  (#00004)
-    assert ws["V3"].value == "=M3-O3-S3-Q3"                                            # net = Gross - CreditNote(S) - DebitNote(Q) (#00004)
-    assert ws["W3"].value == '=IF(V3<=10,"Paid","Not Paid")'                            # status (net-only, col W -> net col V)
-    # No #REF!/formula-error leakage -- the 4 live formula strings above are
-    # the exact, complete set and none of them reference a shifted-away cell.
-    for cell_ref in ("M3", "U3", "V3", "W3"):
-        assert "REF" not in str(ws[cell_ref].value)
+    K = _KEYCOL
+    assert ws[f"{K['po']}3"].value == "P100"
+    assert ws[f"{K['invoice_number']}3"].value == "INV26-27/000007"
+    assert ws[f"{K['total_invoice_amt']}3"].value == 56685.0
+    assert ws[f"{K['credit_note_no']}2"].value == "Credit Note No"
+    assert ws[f"{K['pending_amount']}3"].value == f"={K['total_invoice_amt']}3"
+    assert ws[f"{K['gross_outstanding']}3"].value == f"={K['pending_amount']}3-{K['payment_received_excl_tds']}3"
+    assert ws[f"{K['net_outstanding']}3"].value == (
+        f"={K['pending_amount']}3-{K['payment_received_excl_tds']}3"
+        f"-{K['credit_note_issued']}3-{K['debit_note_issued']}3")
+    assert ws[f"{K['status']}3"].value == f'=IF({K["net_outstanding"]}3<=10,"Paid","Not Paid")'
+    for key in ("pending_amount", "gross_outstanding", "net_outstanding", "status"):
+        assert "REF" not in str(ws[f"{K[key]}3"].value)
+    # Month column is present, right after Date.
+    assert ws[f"{K['month']}2"].value == "Month"
+    assert COLUMN_KEYS[COLUMN_KEYS.index("date") + 1] == "month"
     print("test_workbook_has_live_formulas OK")
 
 
@@ -330,10 +334,11 @@ def test_status_signed_threshold_negative_net_is_paid():
 
     # Force gross~17 by setting payment received to make gross = 50000 - 49983 = 17
     by_inv["INV1"]["payment_received_incl_tds"] = 49983.0
-    # Force net~-2058 via a large debit note: net = gross + dn = 17 + (-2075) = -2058
-    by_inv["INV1"]["debit_note_issued"] = -2075.0
+    # Force net~-2058 via a large debit note: DN stored POSITIVE and SUBTRACTED
+    # -> net = gross - dn = 17 - 2075 = -2058
+    by_inv["INV1"]["debit_note_issued"] = 2075.0
     gross1 = by_inv["INV1"]["total_invoice_amt"] - by_inv["INV1"]["payment_received_incl_tds"]
-    net1 = gross1 + by_inv["INV1"]["debit_note_issued"]
+    net1 = gross1 - by_inv["INV1"]["debit_note_issued"]
     status1 = "Paid" if net1 <= 10 else "Not Paid"   # net-only rule, threshold 10
     assert round(gross1, 2) == 17.0
     assert round(net1, 2) == -2058.0
@@ -362,8 +367,8 @@ def test_reconcile_zepto_signed_status_direct():
 
 
 def test_status_column_has_conditional_formatting():
-    from recon.zepto_receivables import build_zepto_workbook
-    results = [{k: "" for k in __import__("recon.zepto_receivables", fromlist=["COLUMN_KEYS"]).COLUMN_KEYS}]
+    from recon.zepto_receivables import build_zepto_workbook, COLUMN_KEYS, _KEYCOL
+    results = [{k: "" for k in COLUMN_KEYS}]
     results[0].update({"invoice_number": "INV1", "total_invoice_amt": 1000.0, "status": "Paid"})
     wb = build_zepto_workbook(results)
     ws = wb["1. Invoice Tracker"]
@@ -371,7 +376,7 @@ def test_status_column_has_conditional_formatting():
     # Status column (formula-driven cell -> CF is the only way to color it).
     cf_ranges = [str(rng) for rng in ws.conditional_formatting]
     assert len(cf_ranges) >= 1
-    assert any("W3" in rng for rng in cf_ranges)   # Status is col W after the DN-status merge
+    assert any(f"{_KEYCOL['status']}3" in rng for rng in cf_ranges)   # Status column, resolved dynamically
     print("test_status_column_has_conditional_formatting OK")
 
 def test_universe_includes_invoice_with_no_po_mapping_at_all():
@@ -566,7 +571,7 @@ def test_reconcile_zepto_real_fixtures_dn_fallback_and_pmddn():
 
     row = by_inv["INV26-27/000039/"]
     assert row["debit_note_issued"] != 0.0
-    assert round(row["debit_note_issued"], 2) == -224.24
+    assert round(row["debit_note_issued"], 2) == 224.24   # stored POSITIVE (the amount)
     assert round(row["payment_received_incl_tds"], 2) == 29843.58
 
     # The unrelated, differently-amounted invoice must NOT receive the DN.
@@ -625,7 +630,6 @@ def test_build_zepto_workbook_fills_pmddn_summary_line():
 
     # Amount Received in Bank is auto (0 with no advices); other manual lines blank.
     assert _find_summary_amount(ws, "Amount Received in Bank") == 0
-    assert _find_summary_amount(ws, "Previous Year Marketing Exp. Invoices") in (None, "")
     assert _find_summary_amount(ws, "Debit Note Accepted") in (None, "")
     assert _find_summary_amount(ws, "Debit Note Not Accepted") in (None, "")
     print("test_build_zepto_workbook_fills_pmddn_summary_line OK")
@@ -683,11 +687,14 @@ def test_build_zepto_workbook_has_summary_tab():
     assert _find_summary_amount(ws, "Not Due") == round(5000.0 + 700.0, 2)   # INV2 + INV4
     assert _find_summary_amount(ws, "Due") == 300.0                          # INV3
     assert _find_summary_amount(ws, "Overdue") == 16735.0                    # INV1
-    # The breakdown sits right after Net Receivables, under its own sub-header.
+    assert _find_summary_amount(ws, "Excess Paid") == 0                      # no Paid+overpaid rows
+    # The ageing block (in the "Summary -3" section) lists the four buckets in
+    # order under its own sub-header.
     labels = [c.value for c in ws["A"] if c.value]
-    i = labels.index("Net Receivables")
-    assert labels[i+1] == "Ageing of Net Receivables (by Due Status)"
-    assert labels[i+2:i+5] == ["Not Due", "Due", "Overdue"]
+    i = labels.index("Ageing of Net Receivables (by Due Status)")
+    assert labels[i+1:i+5] == ["Not Due", "Due", "Overdue", "Excess Paid"]
+    # 3-section layout is present.
+    assert "Summary-2" in labels and "Summary -3" in labels
     print("test_build_zepto_workbook_has_summary_tab OK")
 
 
@@ -780,16 +787,16 @@ def test_due_date_and_status():
     assert by["INV-E"]["due_status"] == "Not Due"
     assert "Missing GRN" in by["INV-E"]["remark"]
 
-    # Column placement (after DN Accepted/Not-Accepted -> single DN Status merge):
-    # Status=W, Due Date=X, Due Status=Y, GRN No.=Z.
-    from recon.zepto_receivables import build_zepto_workbook
+    # Column placement resolved dynamically via _KEYCOL (robust to layout shifts
+    # like the Month column insertion).
+    from recon.zepto_receivables import build_zepto_workbook, _KEYCOL as K
     ws = build_zepto_workbook(res)["1. Invoice Tracker"]
-    assert ws["W2"].value == "Status"
-    assert ws["X2"].value == "Due Date"
-    assert ws["Y2"].value == "Due Status"
-    assert ws["Z2"].value == "GRN No."
-    assert ws["AE2"].value == "Payment Date"   # last col (shifted left by the DN-status merge)
-    assert ws["W3"].value == '=IF(V3<=10,"Paid","Not Paid")'   # status col W, net col V
+    assert ws[f"{K['status']}2"].value == "Status"
+    assert ws[f"{K['due_date']}2"].value == "Due Date"
+    assert ws[f"{K['due_status']}2"].value == "Due Status"
+    assert ws[f"{K['grn_no']}2"].value == "GRN No."
+    assert ws[f"{K['payment_date']}2"].value == "Payment Date"
+    assert ws[f"{K['status']}3"].value == f'=IF({K["net_outstanding"]}3<=10,"Paid","Not Paid")'
     print("test_due_date_and_status OK")
 
 
@@ -803,7 +810,7 @@ def test_detail_tabs_and_hyperlinks():
                   "debit_note_issued": dn, "credit_note_issued": cn, "credit_note_no": cnno,
                   "gross_outstanding": 0.0, "net_outstanding": 0.0, "status": "Not Paid"})
         return r
-    results = _RecoRows([mk("INV26-27/000039/", 900.0, -50.0, 0.0, ""),
+    results = _RecoRows([mk("INV26-27/000039/", 900.0, 50.0, 0.0, ""),
                          mk("INV26-27/000200", 0.0, 0.0, 100.0, "CN/26-27/0099")])
     results.pmdn_adjustment = -123.45
     results.details = {
@@ -821,17 +828,22 @@ def test_detail_tabs_and_hyperlinks():
     assert wb["Payments"]["A3"].value == "INV26-27/000039/"
     assert wb["Debit Notes"]["A3"].value == "INV26-27/000039/"   # resolved from "26-27/000039/"
     assert wb["Debit Notes"]["B3"].value == "26-27/000039/_QD"    # original ref preserved
+    assert wb["Debit Notes"]["C3"].value == 50.0                 # raw -50 source -> stored POSITIVE
     assert wb["Credit Notes"]["A3"].value == "INV26-27/000200"
     assert wb["PMDD"]["A3"].value == "PMDDN-1"
     assert wb["AP-AR & Manual Adj"]["A3"].value == "APAR-1"
     # hyperlinks from the main sheet point into the right tabs (row-level).
+    # Columns resolved via _KEYCOL (robust to the Month column shift).
+    from recon.zepto_receivables import _KEYCOL as K
     ws = wb["1. Invoice Tracker"]
-    assert ws["O3"].hyperlink and ws["O3"].hyperlink.location == "'Payments'!A3"
-    assert ws["Q3"].hyperlink and ws["Q3"].hyperlink.location == "'Debit Notes'!A3"   # canon match despite missing INV
-    assert ws["S4"].hyperlink and ws["S4"].hyperlink.location == "'Credit Notes'!A3"  # credit_note_issued -> col S
-    assert ws["T4"].hyperlink and ws["T4"].hyperlink.location == "'Credit Notes'!A3"  # credit_note_no -> col T
+    pay_c, dn_c, cn_c, cnno_c = (K["payment_received_excl_tds"], K["debit_note_issued"],
+                                 K["credit_note_issued"], K["credit_note_no"])
+    assert ws[f"{pay_c}3"].hyperlink and ws[f"{pay_c}3"].hyperlink.location == "'Payments'!A3"
+    assert ws[f"{dn_c}3"].hyperlink and ws[f"{dn_c}3"].hyperlink.location == "'Debit Notes'!A3"
+    assert ws[f"{cn_c}4"].hyperlink and ws[f"{cn_c}4"].hyperlink.location == "'Credit Notes'!A3"
+    assert ws[f"{cnno_c}4"].hyperlink and ws[f"{cnno_c}4"].hyperlink.location == "'Credit Notes'!A3"
     # a cell with no matching detail has no link
-    assert ws["Q4"].hyperlink is None
+    assert ws[f"{dn_c}4"].hyperlink is None
     print("test_detail_tabs_and_hyperlinks OK")
 
 
@@ -921,7 +933,7 @@ def test_summary_and_consolidate_and_detail_columns():
     from recon.zepto_receivables import build_zepto_workbook, COLUMN_KEYS, _RecoRows
     row = {k: "" for k in COLUMN_KEYS}
     row.update({"invoice_number": "INV1", "total_invoice_amt": 1000.0, "credit_note_issued": 100.0,
-                "debit_note_issued": -50.0, "tds": 10.0, "payment_received_incl_tds": 400.0,
+                "debit_note_issued": 50.0, "tds": 10.0, "payment_received_incl_tds": 400.0,
                 "net_outstanding": 440.0, "status": "Not Paid"})
     results = _RecoRows([row])
     results.pmdn_adjustment = -200.0
@@ -940,11 +952,12 @@ def test_summary_and_consolidate_and_detail_columns():
     }
     wb = build_zepto_workbook(results)
     ws = wb["Summary"]
-    assert _find_summary_amount(ws, "Debit Note Issued") == 50.0            # positive
-    assert _find_summary_amount(ws, "Net Sales") == 840.0                   # 1000-100-50-10
-    assert _find_summary_amount(ws, "Net Receivables") == 440.0             # 840-400
+    assert _find_summary_amount(ws, "Debit Note Issued - Issued by Zepto") == 50.0   # positive
+    assert _find_summary_amount(ws, "Net Sales") == 850.0                   # 1000-100-50 (TDS not in Net Sales)
+    assert _find_summary_amount(ws, "Net Receivables") == 440.0            # 850 - 400 - 10(TDS)
     assert _find_summary_amount(ws, "Amount Received in Bank") == 299.0     # 399 + (-100)
-    assert _find_summary_amount(ws, "Net Receivables - 2") == 240.0         # 440 + (-200)
+    # "Net Receivables - 2" row was removed from the Summary.
+    assert not any(c.value == "Net Receivables - 2" for c in ws["A"] if c.value)
     # new detail columns
     assert (wb["Payments"]["F2"].value, wb["Payments"]["G2"].value) == ("Payment Date", "Payment Advice No")
     assert (wb["Payments"]["F3"].value, wb["Payments"]["G3"].value) == ("02/07/2026", "ADV-1")
@@ -1076,6 +1089,173 @@ def test_multi_month_accumulation():
     assert round(by["INV26-27/000010"]["credit_note_issued"], 2) == 150.0   # summed across both CN files
     assert round(by["INV26-27/000050"]["credit_note_issued"], 2) == 25.0
     print("test_multi_month_accumulation OK")
+
+
+def test_due_status_excess_paid():
+    # New "Excess Paid" state: Paid AND Net Outstanding more negative than -10.
+    import datetime as dt
+    from recon.zepto_receivables import _due_status
+    today = dt.date(2026, 7, 15)
+    future = dt.date(2026, 8, 1)
+    past = dt.date(2026, 7, 1)
+    assert _due_status(future, True, today, net_outstanding=-500.0) == "Excess Paid"
+    assert _due_status(None, True, today, net_outstanding=-10.01) == "Excess Paid"
+    assert _due_status(future, True, today, net_outstanding=-5.0) == ""        # within -10 -> settled
+    assert _due_status(None, True, today, net_outstanding=0.0) == ""
+    # Unpaid rows keep normal ageing regardless of net.
+    assert _due_status(future, False, today, net_outstanding=1000.0) == "Not Due"
+    assert _due_status(today, False, today, net_outstanding=1000.0) == "Due"
+    assert _due_status(past, False, today, net_outstanding=1000.0) == "Overdue"
+    print("test_due_status_excess_paid OK")
+
+
+def test_advance_adjusted_and_catchall_routing():
+    # "Advance Adjusted" is a KNOWN adjustment (routed, not flagged); any OTHER
+    # money-bearing type is caught by the catch-all (routed + flagged); a no-money
+    # junk row is skipped.
+    from recon.zepto_receivables import _extract_line_items_from_table
+    details = {"payments": [], "debit_notes": [], "pmdd": [], "ap_ar": [],
+               "consolidate": [], "unknown_types": []}
+    payments = {}; debit_notes = {}; pmdn = [0.0]
+    table = [
+        ["Sr", "Type of Document", "Doc No", "Ref", "Amount", "CCY", "TDS", "Payment Amt"],  # header
+        ["1", "Invoice Payment", "D1", "INV26-27/000007", "1000", "INR", "10", "990"],
+        ["2", "Advance Adjusted", "D2", "KK10016488", "-618000", "INR", "0", "-618000"],
+        ["3", "Sausage Adjustment", "D3", "XX1", "-200", "INR", "0", "-200"],  # unknown -> catch-all
+        ["4", "Letterhead line", None, None, None, None, None, None],          # no money -> skip
+    ]
+    _extract_line_items_from_table(table, payments, debit_notes, pmdn, details,
+                                   advice_no="ADV-1", payment_date="02/07/2026")
+    assert round(pmdn[0], 2) == round(-618000 + -200, 2)          # both non-invoice adjustments
+    apar_refs = [x["ref"] for x in details["ap_ar"]]
+    assert "KK10016488" in apar_refs and "XX1" in apar_refs
+    types = [x["type"] for x in details["consolidate"]]
+    assert "Advance Adjusted" in types and "Sausage Adjustment" in types and "Invoice Payment" in types
+    assert "Letterhead line" not in types                        # junk row skipped
+    assert details["unknown_types"] == ["Sausage Adjustment"]    # only the truly-unknown flagged
+    print("test_advance_adjusted_and_catchall_routing OK")
+
+
+def test_payment_advice_reject_on_header_mismatch():
+    # Real fixture whose line items don't sum to its header Amount (off by 3.71):
+    # accepted within tolerance, REJECTED (and excluded from every total) below it.
+    from recon.zepto_receivables import parse_payment_advice_pdf
+    b = open(os.path.join(_FIXTURE_DIR_ALL, "02_2026-07-03_69e6fe644a54a012_2000008712.pdf"), "rb").read()
+    d1 = {k: [] for k in ("payments", "debit_notes", "pmdd", "ap_ar", "consolidate", "unknown_types")}
+    rej1 = []
+    pay1, _, _ = parse_payment_advice_pdf([b], d1, advice_tolerance=100.0, rejected=rej1)
+    assert rej1 == [] and len(pay1) > 0                           # within Rs 100 -> accepted
+    d2 = {k: [] for k in ("payments", "debit_notes", "pmdd", "ap_ar", "consolidate", "unknown_types")}
+    rej2 = []
+    pay2, _, _ = parse_payment_advice_pdf([b], d2, advice_tolerance=1.0, rejected=rej2)
+    assert len(rej2) == 1 and rej2[0]["doc"] == "2000008712" and abs(rej2[0]["diff"]) > 1
+    assert pay2 == {} and d2["consolidate"] == []                 # nothing leaks from a rejected advice
+    print("test_payment_advice_reject_on_header_mismatch OK")
+
+
+def test_canonical_invoice_resolution_exact_first_and_ambiguity_safe():
+    # Payments/CNs are matched to the invoice universe: EXACT first (keeps the
+    # slash-distinct invoices apart), then UNIQUE canonical (tolerates missing
+    # I/IN, 2425 vs 24-25, trailing slash, _PD). Ambiguous slash-pairs and
+    # non-invoice refs (VRC) are never canonically matched.
+    from recon.zepto_receivables import _canon_invoice, _build_canon_index, _resolve_invoice_key
+    universe = {
+        "INV25-26/000782", "INV24-25/000639/", "INV24-25/000300", "INV25-26/000940",
+        "INV26-27/000009", "INV26-27/000192/", "INV25-26/000127", "INV24-25/000356",
+        # an ambiguous trailing-slash PAIR (two distinct invoices, same canon):
+        "INV26-27/000039", "INV26-27/000039/",
+    }
+    idx = _build_canon_index(universe)
+    R = lambda ref: _resolve_invoice_key(ref, universe, idx)
+    # format variants resolve to the right single invoice
+    assert R("INV-25/26-000782") == "INV25-26/000782"        # extra dash
+    assert R("INV2425/000300") == "INV24-25/000300"          # 2425 -> 24-25
+    assert R("INV25/26/000940") == "INV25-26/000940"         # slash-in-year
+    assert R("INV26-27/000009/") == "INV26-27/000009"        # stray trailing slash
+    assert R("INV26-27/000192") == "INV26-27/000192/"        # tracker HAS the slash
+    assert R("NV25-26/000127") == "INV25-26/000127"          # missing I
+    assert R("V24-25/000356_PD") == "INV24-25/000356"        # missing IN + _PD
+    assert R("INV24-25/000639") == "INV24-25/000639/"        # tracker has slash
+    # EXACT wins for the ambiguous pair (both distinct invoices keep their own)
+    assert R("INV26-27/000039") == "INV26-27/000039"
+    assert R("INV26-27/000039/") == "INV26-27/000039/"
+    # a canonical-ONLY ref for the ambiguous pair is NOT guessed
+    assert R("INV2627/000039") is None
+    # genuinely non-invoice refs never match
+    assert _canon_invoice("VRC") is None
+    assert R("VRC") is None
+    assert _canon_invoice("PMDDN-79939") is None
+    print("test_canonical_invoice_resolution_exact_first_and_ambiguity_safe OK")
+
+
+def test_credit_notes_deduped_across_overlapping_files():
+    # The monthly Credit Note file and a running to-date file overlap; a CN
+    # present in BOTH must be counted ONCE (double-counting inflated Sale Return
+    # ~8L on real data). Dedup is by credit-note number across files.
+    from recon.zepto_receivables import _merge_credit_notes
+    hdr = ["creditnote_number", "bcy_total", "invoice_number"]
+    file_a = _xlsx({"Credit Note Details": [["title"], hdr,
+        ["CN-1", 1000.0, "INV1"],
+        ["CN-2", 500.0, "INV1"],
+    ]})
+    file_b = _xlsx({"Credit Note Details": [["title"], hdr,
+        ["CN-2", 500.0, "INV1"],   # overlap (same CN# as file_a) -> must NOT double
+        ["CN-3", 300.0, "INV2"],   # new
+    ]})
+    merged = _merge_credit_notes([file_a, file_b])
+    assert round(merged["INV1"]["amount"], 2) == 1500.0   # 1000 + 500 (CN-2 once)
+    assert round(merged["INV2"]["amount"], 2) == 300.0
+    assert merged["INV1"]["numbers"] == ["CN-1", "CN-2"]
+    print("test_credit_notes_deduped_across_overlapping_files OK")
+
+
+def test_payments_tab_shows_unmatched_and_reconciles():
+    # Invoice payments for invoices NOT in the tracker are shown in a flagged
+    # section so the Payments tab reconciles to the Consolidate's Invoice-Payment
+    # total (no silent gap). Matched subtotal stays = "Payment Received".
+    from recon.zepto_receivables import build_zepto_workbook, COLUMN_KEYS, _RecoRows
+    r = {k: "" for k in COLUMN_KEYS}
+    r.update({"invoice_number": "INV1", "total_invoice_amt": 1000.0,
+              "status": "Not Paid", "net_outstanding": 100.0})
+    results = _RecoRows([r])
+    results.details = {"payments": [
+        {"invoice": "INV1", "ref": "P1", "incl": 900.0, "excl": 901.0, "tds": 1.0,
+         "payment_date": "", "advice_no": "ADV1"},   # matched (INV1 in universe)
+        {"invoice": "INVX", "ref": "P2", "incl": 250.0, "excl": 251.0, "tds": 1.0,
+         "payment_date": "", "advice_no": "ADV2"},   # NOT in universe
+    ], "debit_notes": [], "credit_notes": [], "pmdd": [], "ap_ar": [],
+        "consolidate": [], "unknown_types": []}
+    wb = build_zepto_workbook(results)
+    pw = wb["Payments"]
+    colA = [pw.cell(row, 1).value for row in range(1, pw.max_row + 1)]
+    assert any(v and "PAYMENTS NOT IN TRACKER" in str(v) for v in colA)
+    assert "INVX" in colA                                     # unmatched payment shown
+    grand = next(pw.cell(row, 5).value for row in range(pw.max_row, 0, -1)
+                 if pw.cell(row, 1).value and "GRAND TOTAL" in str(pw.cell(row, 1).value))
+    assert grand == round(900.0 + 250.0, 2)                   # matched + unmatched reconcile
+    print("test_payments_tab_shows_unmatched_and_reconciles OK")
+
+
+def test_summary_excess_paid_bucket_and_dynamic_brand():
+    from recon.zepto_receivables import build_zepto_workbook, COLUMN_KEYS, _RecoRows
+    def row(inv, total, net, status, due_status):
+        r = {k: "" for k in COLUMN_KEYS}
+        r.update({"invoice_number": inv, "total_invoice_amt": total, "net_outstanding": net,
+                  "status": status, "due_status": due_status})
+        return r
+    results = _RecoRows([
+        row("INV1", 1000.0, 500.0, "Not Paid", "Overdue"),
+        row("INV2", 1000.0, -750.0, "Paid", "Excess Paid"),
+        row("INV3", 1000.0, -800.0, "Paid", "Excess Paid"),
+    ])
+    wb = build_zepto_workbook(results, payload={"brand_name": "Koparo"})
+    ws = wb["Summary"]
+    assert _find_summary_amount(ws, "Excess Paid") == round(-750.0 + -800.0, 2)
+    assert _find_summary_amount(ws, "Overdue") == 500.0
+    labels = [c.value for c in ws["A"] if c.value]
+    assert any(str(l).startswith("Sale Return (Credit Notes) - Issued by Koparo") for l in labels)
+    assert "Debit Note Issued - Issued by Zepto" in labels
+    print("test_summary_excess_paid_bucket_and_dynamic_brand OK")
 
 
 if __name__ == "__main__":
