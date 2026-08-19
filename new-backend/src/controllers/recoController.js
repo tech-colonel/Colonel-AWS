@@ -1052,9 +1052,20 @@ const runReco = async (req, res) => {
       if (!Object.values(grouped).some(a => Array.isArray(a) && a.length)) {
         return res.status(400).json({ error: 'No files to reconcile — add files to the slots first.' });
       }
+      // Resolve the brand name (multi-brand) so the engine's Summary shows
+      // "Issued by <Brand>". Prefer an explicit body field, else look it up.
+      let zBrandName = (req.body.brand_name || '').trim();
+      if (!zBrandName && brandId && brandId !== 'demo' && brandId !== 'other') {
+        try {
+          const { Brand } = require('../models/master');
+          const zb = await Brand.findByPk(brandId);
+          if (zb) zBrandName = zb.name || '';
+        } catch (_) {}
+      }
       const form = new FormData();
       form.append('reco_type', 'zepto_receivables');
       form.append('tolerance', String(req.body.tolerance || 100));
+      if (zBrandName) form.append('brand_name', zBrandName);
       for (const [type, arr] of Object.entries(grouped)) {
         for (const { filename, buffer } of arr) {
           form.append(type, buffer, { filename });   // multi files -> engine reads as list

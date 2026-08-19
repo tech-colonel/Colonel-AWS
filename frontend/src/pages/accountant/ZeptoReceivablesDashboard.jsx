@@ -45,7 +45,7 @@ function tableToText(cols, data) {
   return [line(cols), sep, ...data.map((r) => line(cols.map((c) => r[c])))].join('\n');
 }
 
-function buildTickets(rows) {
+function buildTickets(rows, rejectedAdvices = []) {
   const notPaid = rows.filter((r) => r.status === 'Not Paid');
   const overdue = (r) => r.due_status === 'Overdue';
   const realGrn = (r) => has(r.grn_no);
@@ -138,34 +138,66 @@ function buildTickets(rows) {
     });
   }
 
+  // 5) Payment advices excluded (header total didn't reconcile within tolerance).
+  // These are NOT in any figure above — flag so the accountant can reshare/fix.
+  if (rejectedAdvices && rejectedAdvices.length) {
+    const cols = ['Payment Advice No', 'Doc No', 'Payment Date', 'Header Total', 'Extracted', 'Difference'];
+    const data = rejectedAdvices.map((r) => ({
+      'Payment Advice No': r.advice_no || '', 'Doc No': r.doc || '',
+      'Payment Date': r.payment_date || '', 'Header Total': inr(r.header_total),
+      Extracted: inr(r.extracted), Difference: inr(r.diff),
+    }));
+    const total = Math.round(rejectedAdvices.reduce((a, r) => a + num(r.header_total), 0));
+    tickets.push({
+      id: 'rejected_advices', priority: 'HIGH', amount: total, count: rejectedAdvices.length,
+      title: `${rejectedAdvices.length} payment advice${rejectedAdvices.length > 1 ? 's' : ''} EXCLUDED — total didn't reconcile`,
+      desc: `The line items in these payment-advice PDFs don't add up to the advice's own header total (beyond the ₹100 tolerance), so they were left OUT of every figure to avoid a false total. Reshare / check these advices with Zepto.`,
+      cols, data,
+      subject: `${rejectedAdvices.length} Zepto payment advice(s) not reconciling`,
+      body:
+        `Dear Zepto Payments Team,\n\nThe following payment advice(s) do not reconcile — the line items do ` +
+        `not sum to the advice's stated total. Please re-share the corrected advice(s):\n\n` +
+        tableToText(cols, data) + `\n\nRegards,\nAccounts Team`,
+    });
+  }
+
   return tickets;
 }
 
-function analyze(rows) {
+function analyze(rows, rejectedAdvices = []) {
   const notPaid = rows.filter((r) => r.status === 'Not Paid');
   const sumNet = (arr) => Math.round(arr.reduce((a, r) => a + num(r.net_outstanding), 0));
   const hasPo = (r) => has(r.po), realGrn = (r) => has(r.grn_no), hasPod = (r) => has(r.pod_no);
+  const hasGrnDate = (r) => has(r.grn_date);
 
   const aging = ['Overdue', 'Due', 'Not Due'].map((b) => ({
     name: b,
     value: Math.max(0, sumNet(notPaid.filter((r) => r.due_status === b))),
   })).filter((d) => d.value > 0);
 
+  // Excess Paid = invoices settled with MORE than owed (Zepto overpaid): net < 0.
+  // Negative, so it can't be a pie slice — shown as its own tile + legend line.
+  const excessPaid = sumNet(rows.filter((r) => r.due_status === 'Excess Paid'));
+
   const gaps = [
     { name: 'Missing PO', value: rows.filter((r) => !hasPo(r)).length },
     { name: 'Missing GRN', value: rows.filter((r) => hasPo(r) && !realGrn(r)).length },
+    { name: 'Missing GRN Date', value: rows.filter((r) => realGrn(r) && !hasGrnDate(r)).length },
     { name: 'Missing POD', value: rows.filter((r) => !hasPod(r)).length },
   ];
 
   const tiles = {
     total: rows.length,
     paid: rows.filter((r) => r.status === 'Paid').length,
-    toCollect: sumNet(notPaid),
+    // "To collect" = NET receivable (= Excel Net Receivables): nets the overpaid
+    // (Excess Paid) invoices, so it no longer over-states by ignoring them.
+    toCollect: sumNet(rows),
     overdue: sumNet(notPaid.filter((r) => r.due_status === 'Overdue')),
-    gaps: rows.filter((r) => !hasPo(r) || (hasPo(r) && !realGrn(r)) || !hasPod(r)).length,
+    excessPaid,
+    gaps: rows.filter((r) => !hasPo(r) || (hasPo(r) && !realGrn(r)) || (realGrn(r) && !hasGrnDate(r)) || !hasPod(r)).length,
   };
 
-  return { tiles, aging, gaps, tickets: buildTickets(rows) };
+  return { tiles, aging, gaps, tickets: buildTickets(rows, rejectedAdvices) };
 }
 
 // ── small UI atoms ───────────────────────────────────────────────────────────
@@ -291,7 +323,9 @@ function TicketCard({ t }) {
 // ── main ─────────────────────────────────────────────────────────────────────
 export default function ZeptoReceivablesDashboard({ result }) {
   const rows = result?.results || [];
-  const { tiles, aging, gaps, tickets } = useMemo(() => analyze(rows), [rows]);
+  const rejectedAdvices = result?.rejected_advices || [];
+  const unknownTypes = result?.unknown_types || [];
+  const { tiles, aging, gaps, tickets } = useMemo(() => analyze(rows, rejectedAdvices), [rows, rejectedAdvices]);
   if (!rows.length) return null;
   const highCount = tickets.filter((t) => t.priority === 'HIGH').length;
 
@@ -300,12 +334,25 @@ export default function ZeptoReceivablesDashboard({ result }) {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      {/* New payment-advice document type detected (catch-all) — review its treatment */}
+      {unknownTypes.length > 0 && (
+        <div style={{
+          background: '#FEF3C7', border: '1.5px solid #FCD34D', borderRadius: 12,
+          padding: '10px 14px', color: '#92400E', fontSize: 13, fontFamily: 'DM Sans', fontWeight: 600,
+        }}>
+          ⚠ New payment-advice document type{unknownTypes.length > 1 ? 's' : ''} seen: {unknownTypes.join(', ')}.
+          These were routed to Adjustments (not dropped) — review how they should be treated.
+        </div>
+      )}
       {/* KPI tiles */}
       <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
         <Tile label="Total invoices" value={tiles.total} />
         <Tile label="Paid" value={tiles.paid} accent="#16A34A" />
         <Tile label="To collect" value={inr(tiles.toCollect)} accent="#0748EE" />
         <Tile label="Overdue" value={inr(tiles.overdue)} accent="#DC2626" />
+        {tiles.excessPaid !== 0 && (
+          <Tile label="Excess paid" value={inr(tiles.excessPaid)} accent="#7C3AED" />
+        )}
         <Tile label="Data gaps" value={tiles.gaps} accent={tiles.gaps ? '#D97706' : '#16A34A'} />
       </div>
 
@@ -324,6 +371,8 @@ export default function ZeptoReceivablesDashboard({ result }) {
             </ResponsiveContainer>
           ) : <Empty />}
           <Legend2 items={aging.map((d) => ({ name: d.name, color: AGING_COLORS[d.name], value: inr(d.value) }))} />
+          {/* Excess Paid is a NEGATIVE offset (Zepto overpaid) — it can't be a pie
+              slice, so it lives in its own "Excess paid" tile above, not here. */}
         </div>
 
         <div style={{ ...card, flex: '1 1 300px', minWidth: 280 }}>

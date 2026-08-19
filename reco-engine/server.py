@@ -804,16 +804,26 @@ class ReconciliationHandler(BaseHTTPRequestHandler):
                 from recon.zepto_receivables import (
                     reconcile_zepto, summarize_zepto, build_zepto_workbook,
                 )
-                results = reconcile_zepto(files)
-                wb = build_zepto_workbook(results)
+                # brand_name (dynamic, multi-brand) drives the Summary labels; the
+                # backend resolves it from the brand and passes it in. Tolerance
+                # (default 100) is the per-advice header-reconciliation threshold.
+                brand_name = (fields.get("brand_name") or "").strip()
+                _adv_tol = float(fields.get("tolerance", "100") or 100)
+                results = reconcile_zepto(files, advice_tolerance=_adv_tol)
+                wb = build_zepto_workbook(results, {"brand_name": brand_name})
                 _buf = BytesIO(); wb.save(_buf)
                 job_id = uuid4().hex
+                _details = getattr(results, "details", {}) or {}
                 payload = {
                     "job_id": job_id,
                     "reco_type": reco_type,
                     "summary": summarize_zepto(results),
                     "counts": {"result_rows": len(results)},
                     "results": results,
+                    # Stage 2A: surface these to the UI (dashboard tickets/banners).
+                    "rejected_advices": getattr(results, "rejected_advices", []) or [],
+                    "unknown_types": _details.get("unknown_types", []) or [],
+                    "brand_name": brand_name,
                     "_xlsx_bytes": _buf.getvalue(),
                 }
                 JOBS[job_id] = payload
