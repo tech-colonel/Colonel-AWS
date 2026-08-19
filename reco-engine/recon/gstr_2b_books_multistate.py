@@ -23,6 +23,7 @@ from .gstr_2b_books import (
     build_gstr2b_books_workbook,
     GST_STATE_CODES,
     ALLOWED_SHEETS,
+    IMS_SHEETS,
     _name_sim,
     _get_val,
     _extract_gstin,
@@ -280,7 +281,9 @@ def _merge_state_into_sheets(wb, file_bytes: bytes, label_prefix: str) -> None:
     label_prefix is "2B", "PR", or "DN" — mirrors _copy_workbook_sheets() naming convention."""
     import openpyxl
     from io import BytesIO
-    _allowed_2b = {s.upper() for s in ALLOWED_SHEETS}
+    # Portal tabs plus the IMS note tabs (B2B-CN/B2B-DN and their amendments), so a
+    # multi-state run whose states export from IMS keeps its note sheets as sources.
+    _allowed_2b = {s.upper() for s in ALLOWED_SHEETS | IMS_SHEETS}
     pfx = f"{label_prefix} - "
     try:
         xlsx_bytes = _ensure_xlsx(file_bytes)

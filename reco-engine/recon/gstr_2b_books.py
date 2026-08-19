@@ -40,6 +40,28 @@ ALLOWED_SHEETS = {"B2B", "B2BA", "B2B-CDNR", "B2B-CDNRA"}
 # first in Pass 1 — leaving the amendment entry (B2BA/B2B-CDNRA) unmatched as expected.
 ALLOWED_SHEETS_ORDER = ["B2B", "B2B-CDNR", "B2BA", "B2B-CDNRA"]
 
+# ── IMS (Invoice Management System) export ───────────────────────────────────
+# The third recognised 2B layout, after the GST portal and OCTA. Its rows carry the
+# same two-row header and the same columns as the portal, so B2B/B2BA already parse
+# unchanged — but credit/debit notes live on their OWN sheets (B2B-CN / B2B-DN)
+# rather than a shared B2B-CDNR, and are named per note type:
+#   • the portal's B2B-CDNR holds both, distinguished by a "Note type" column;
+#   • IMS splits them, so there is NO such column — its type column reads the SUPPLY
+#     type ("Regular"), which would otherwise be read as an ordinary invoice and
+#     leave every credit note positive instead of negative.
+# The sheet name is therefore the authority for doc_type on these sheets, and each
+# is reported under the canonical portal label so Pass 5 and the amendment/original
+# pairing keep working untouched.
+IMS_SHEET_DOC_TYPE = {"B2B-CN": "CRN", "B2B-CNA": "CRN",
+                      "B2B-DN": "DBN", "B2B-DNA": "DBN"}
+IMS_SHEET_CANONICAL = {"B2B-CN": "B2B-CDNR", "B2B-CNA": "B2B-CDNRA",
+                       "B2B-DN": "B2B-CDNR", "B2B-DNA": "B2B-CDNRA"}
+# Originals before amendments, matching ALLOWED_SHEETS_ORDER's reasoning.
+IMS_SHEETS_ORDER = ["B2B-CN", "B2B-DN", "B2B-CNA", "B2B-DNA"]
+IMS_SHEETS = set(IMS_SHEETS_ORDER)
+# Summary/dashboard tabs — record counts only, no invoice rows. Never parsed.
+IMS_SUMMARY_SHEETS = {"All other ITC", "Import of Goods"}
+
 GST_STATE_CODES: dict[str, str] = {
     "01": "Jammu & Kashmir",        "02": "Himachal Pradesh",
     "03": "Punjab",                 "04": "Chandigarh",
@@ -140,15 +162,23 @@ def _build_getter(row: dict[str, Any], col_map: dict[str, list[str]]):
 GSTR2B_COL_MAP: dict[str, list[str]] = {
     "supplier_gstin":  ["gstin of supplier", "gstin"],
     "supplier_name":   ["trade/legal name", "trade name", "legal name"],
-    "doc_no":          ["invoice number", "note number", "invoice no", "note no"],
+    # IMS names its note columns in full ("Credit Note number") where the portal
+    # says "Note number", so both spellings are listed. Portal aliases stay FIRST so
+    # a portal file keeps resolving exactly as before.
+    "doc_no":          ["invoice number", "note number", "invoice no", "note no",
+                        "credit note number", "debit note number"],
     "doc_type":        ["invoice type", "note type", "type"],
-    "doc_date":        ["invoice date", "note date", "date"],
+    "doc_date":        ["invoice date", "note date", "date",
+                        "credit note date", "debit note date"],
     "taxable_value":   ["taxable value (₹)", "taxable value"],
     "igst":            ["integrated tax (₹)", "integrated tax(₹)", "integrated tax"],
     "cgst":            ["central tax (₹)", "central tax(₹)", "central tax"],
     "sgst":            ["state/ut tax (₹)", "state/ut tax(₹)", "state/ut tax"],
     "cess":            ["cess (₹)", "cess(₹)", "cess"],
-    "invoice_value":   ["invoice value (₹)", "invoice value(₹)", "invoice value"],
+    "invoice_value":   ["invoice value (₹)", "invoice value(₹)", "invoice value",
+                        "note value (₹)", "note value(₹)",
+                        "credit note value(₹)", "credit note value (₹)",
+                        "debit note value(₹)", "debit note value (₹)"],
 }
 
 
@@ -387,11 +417,20 @@ def parse_gstr2b(data: bytes) -> list[NormalizedInvoice]:
     records: list[NormalizedInvoice] = []
     index = 0
 
-    for sheet in ALLOWED_SHEETS_ORDER:
+    # Portal sheets first, then the IMS note sheets. A portal file simply has no
+    # B2B-CN/B2B-DN tabs and an IMS file no B2B-CDNR, so the extra names cost a
+    # failed lookup and change nothing for either.
+    for sheet in ALLOWED_SHEETS_ORDER + IMS_SHEETS_ORDER:
         try:
             rows = _read_gstr2b_sheet(data, sheet)
         except Exception:
             continue
+
+        # On an IMS note sheet the sheet name IS the document type (there is no
+        # "Note type" column to read), and the row is reported under the portal's
+        # sheet label so downstream sheet-name logic needs no IMS special case.
+        forced_type = IMS_SHEET_DOC_TYPE.get(sheet)
+        sheet_label = IMS_SHEET_CANONICAL.get(sheet, sheet)
 
         for row in rows:
             get = _build_getter(row, GSTR2B_COL_MAP)
@@ -408,13 +447,19 @@ def parse_gstr2b(data: bytes) -> list[NormalizedInvoice]:
             if not gstin and not doc_no:
                 continue
 
-            doc_type_raw = str(get("doc_type") or "").upper()
-            if "CREDIT" in doc_type_raw or "CN" in doc_type_raw:
-                doc_type = "CRN"
-            elif "DEBIT" in doc_type_raw or "DN" in doc_type_raw:
-                doc_type = "DBN"
+            if forced_type:
+                # IMS note sheet — the sheet name decides. Its type column carries the
+                # SUPPLY type ("Regular"), which would otherwise fall through to INV
+                # and leave the note positive instead of negative.
+                doc_type = forced_type
             else:
-                doc_type = "INV"
+                doc_type_raw = str(get("doc_type") or "").upper()
+                if "CREDIT" in doc_type_raw or "CN" in doc_type_raw:
+                    doc_type = "CRN"
+                elif "DEBIT" in doc_type_raw or "DN" in doc_type_raw:
+                    doc_type = "DBN"
+                else:
+                    doc_type = "INV"
 
             taxable = round_money(get("taxable_value"))
             igst = round_money(get("igst"))
@@ -434,7 +479,7 @@ def parse_gstr2b(data: bytes) -> list[NormalizedInvoice]:
             index += 1
             records.append(NormalizedInvoice(
                 source="GSTR-2B",
-                row_id=f"GSTR2B-{sheet}-{index}",
+                row_id=f"GSTR2B-{sheet}-{index}",   # keeps the true source tab for tracing
                 supplier_gstin=gstin,
                 supplier_name=str(get("supplier_name") or "").strip(),
                 doc_type=doc_type,
@@ -447,7 +492,9 @@ def parse_gstr2b(data: bytes) -> list[NormalizedInvoice]:
                 sgst=sgst,
                 cess=cess,
                 invoice_value=invoice_value,
-                sheet_name=sheet,
+                # Canonical portal label (IMS B2B-CN -> B2B-CDNR) so Pass 5's
+                # original-vs-amendment pairing needs no IMS-specific branch.
+                sheet_name=sheet_label,
                 raw={str(k): v for k, v in row.items() if not str(k).startswith("_")},
             ))
 
@@ -2024,8 +2071,11 @@ def _copy_workbook_sheets(src_bytes: bytes, target_wb: Any, title_prefix: str) -
                     if name != octa_sheet:
                         continue
                 else:
+                    # Portal tabs plus the IMS note tabs. IMS also ships two summary
+                    # dashboards ("All other ITC", "Import of Goods") that hold record
+                    # counts rather than invoices — excluded, like OCTA's Overview/ISD.
                     name_clean = str(name).strip().upper()
-                    allowed_clean = {s.upper() for s in ALLOWED_SHEETS}
+                    allowed_clean = {s.upper() for s in ALLOWED_SHEETS | IMS_SHEETS}
                     if name_clean not in allowed_clean:
                         continue
 
