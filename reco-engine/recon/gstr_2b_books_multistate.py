@@ -12,6 +12,7 @@ All core matching logic (Passes 1–5 in reconcile_by_invoice_no) is UNCHANGED.
 """
 from __future__ import annotations
 
+import hashlib
 from typing import Any
 
 from .core import NormalizedInvoice, MatchResult
@@ -37,6 +38,7 @@ def reconcile_gstr2b_vs_books_multistate(
     debit_files: list[bytes],
     tolerance: float = 1.0,
     entity_gstins: list[str] | None = None,
+    books_combined: bool = False,
 ) -> tuple[list[NormalizedInvoice], list[NormalizedInvoice], list[MatchResult]]:
     """
     Phase 1 — parse all files, tag each record with _file_idx, merge into single pools,
@@ -67,7 +69,39 @@ def reconcile_gstr2b_vs_books_multistate(
     purchase_list = list(purchase_files or []) + [b""] * (max_len - len(purchase_files or []))
     debit_list    = list(debit_files    or []) + [b""] * (max_len - len(debit_files    or []))
 
+    # GSTR-2B is always per state — one file per GSTIN. Books need not be: a single
+    # Tally register commonly covers every state at once. That combined register is
+    # parsed ONCE and matched against all states' 2B.
+    #
+    # It reaches us three ways, all handled here:
+    #   1. books_combined — the caller said so explicitly (the UI toggle);
+    #   2. the same register submitted in several state slots — the UI asks for a file
+    #      per state, so accountants upload the identical file twice. Parsing the same
+    #      bytes again duplicated every purchase row and doubled the Books totals;
+    #   3. fewer Books files than 2B files — one register, several states.
+    #
+    # Either way the rows carry no state of their own, so the file-index-based
+    # cross-state remarks in Phase 2 cannot apply to them (they would report every
+    # match against a later state's 2B as a booking error) and are suppressed below.
+    seen_pr: set[str] = set()
+    seen_dn: set[str] = set()
+    books_shared = bool(books_combined)
+
     for idx, (pr_data, dn_data) in enumerate(zip(purchase_list, debit_list)):
+        if pr_data:
+            digest = hashlib.sha256(pr_data).hexdigest()
+            if digest in seen_pr:
+                pr_data = b""          # already parsed — same register, another slot
+                books_shared = True
+            else:
+                seen_pr.add(digest)
+        if dn_data:
+            digest = hashlib.sha256(dn_data).hexdigest()
+            if digest in seen_dn:
+                dn_data = b""
+                books_shared = True
+            else:
+                seen_dn.add(digest)
         if not pr_data and not dn_data:
             continue
         recs = parse_books(pr_data or b"", dn_data or b"")
@@ -77,6 +111,13 @@ def reconcile_gstr2b_vs_books_multistate(
             if entity_gstin:
                 r.raw["_entity_gstin"] = entity_gstin
         all_books.extend(recs)
+
+    # One register spanning several 2B files is combined even if nothing was deduped.
+    if len([d for d in (gstr2b_files or []) if d]) > 1 and len(seen_pr) <= 1:
+        books_shared = True
+    if books_shared:
+        for r in all_books:
+            r.raw["_books_shared"] = True
 
     # Enrich Books records with GSTIN from GSTR-2B (same as single-state engine)
     name_to_gstin: dict[str, str] = {}
@@ -104,6 +145,15 @@ def reconcile_gstr2b_vs_books_multistate(
             b_by_doc.setdefault(rec.normalized_doc_no, []).append(rec)
 
     UNMATCHED = {"Showing in 2B but Not in Books", "Showing in Books but Not in 2B"}
+
+    # Every Remark 3 below answers "which state FILE was this booked in?" by comparing
+    # file indices. A combined register has no per-state files, so each comparison is
+    # against an arbitrary index and produces false findings — e.g. every Odisha 2B row
+    # matched to the one shared register was reported as "Cross-state entry ... Verify
+    # Tally state allocation". Skip Phase 2 entirely in that case; Passes 1-5 already
+    # matched these rows correctly on their own merits.
+    if books_shared:
+        return all_gstr2b, all_books, results
 
     for r in results:
         g = _get_val(r, "gstr2b", None)

@@ -20,6 +20,9 @@ const COLOR  = '#7C3AED';
 const PAGE_SIZE = 100;
 
 const storageKey = (brandId) => `colonel_multistate_slots_${brandId}`;
+// Books mode + the shared register, persisted alongside the per-state slots.
+const combinedKey = (brandId) => `colonel_multistate_combined_${brandId}`;
+const sharedKey   = (brandId) => `colonel_multistate_shared_${brandId}`;
 
 // The full reco result (with every row's raw source dict) is ~18MB for a large
 // multi-state job — far over sessionStorage's ~5MB quota, so caching it whole
@@ -57,6 +60,18 @@ const loadSlotsFromStorage = (brandId) => {
       purchase: slot.purchase ? b64ToFile(slot.purchase) : null,
       debit:    slot.debit    ? b64ToFile(slot.debit)    : null,
     }));
+  } catch { return null; }
+};
+
+const loadSharedFromStorage = (brandId) => {
+  try {
+    const raw = localStorage.getItem(sharedKey(brandId));
+    if (!raw) return null;
+    const s = JSON.parse(raw);
+    return {
+      purchase: s.purchase ? b64ToFile(s.purchase) : null,
+      debit:    s.debit    ? b64ToFile(s.debit)    : null,
+    };
   } catch { return null; }
 };
 
@@ -258,6 +273,16 @@ const RecoMultiStateWorkspace = () => {
   const [stateSlots, setStateSlots] = useState(
     () => loadSlotsFromStorage(brandId) || Array.from({ length: 4 }, () => ({ gstr2b: null, purchase: null, debit: null }))
   );
+  // Books mode. GSTR-2B is always one file per state/GSTIN, but Tally commonly exports
+  // a SINGLE Purchase/Debit register covering every state. Feeding that same register
+  // into each state slot parsed it once per slot and doubled every Books total, so in
+  // combined mode it gets one shared pair of dropzones instead.
+  const [combinedBooks, setCombinedBooks] = useState(
+    () => localStorage.getItem(combinedKey(brandId)) === 'true'
+  );
+  const [sharedBooks, setSharedBooks] = useState(
+    () => loadSharedFromStorage(brandId) || { purchase: null, debit: null }
+  );
   const [tolerance, setTolerance] = useState('1.0');
   const [driveStates, setDriveStates] = useState(null); // [{gstr2b,purchase,debit}] from Drive once confirmed
   const [running, setRunning] = useState(false);
@@ -288,6 +313,22 @@ const RecoMultiStateWorkspace = () => {
     };
     persist();
   }, [stateSlots, brandId]);
+
+  // Same treatment for the combined register so a refresh keeps the chosen mode.
+  useEffect(() => {
+    localStorage.setItem(combinedKey(brandId), String(combinedBooks));
+  }, [combinedBooks, brandId]);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        localStorage.setItem(sharedKey(brandId), JSON.stringify({
+          purchase: sharedBooks.purchase ? await fileToB64(sharedBooks.purchase) : null,
+          debit:    sharedBooks.debit    ? await fileToB64(sharedBooks.debit)    : null,
+        }));
+      } catch {}
+    })();
+  }, [sharedBooks, brandId]);
 
   // Admin demo: auto-load the 2-state sample set so Anshul can run with one click.
   useEffect(() => {
@@ -321,8 +362,17 @@ const RecoMultiStateWorkspace = () => {
 
   const handleRun = async () => {
     const useDrive = !!(driveStates && driveStates.length > 0);
-    if (!useDrive && stateSlots.some(s => !s.gstr2b || !s.purchase)) {
-      toast.error('Each state needs a GSTR-2B file and a Purchase Register.'); return;
+    if (!useDrive) {
+      if (combinedBooks) {
+        if (stateSlots.some(s => !s.gstr2b)) {
+          toast.error('Each state needs its own GSTR-2B file.'); return;
+        }
+        if (!sharedBooks.purchase) {
+          toast.error('Add the combined Purchase Register that covers all states.'); return;
+        }
+      } else if (stateSlots.some(s => !s.gstr2b || !s.purchase)) {
+        toast.error('Each state needs a GSTR-2B file and a Purchase Register.'); return;
+      }
     }
     setRunning(true); setResult(null); setActiveTab('All'); setSearch(''); setPage(0); setUploadProgress(0);
     setPhase('uploading');
@@ -335,6 +385,17 @@ const RecoMultiStateWorkspace = () => {
       if (useDrive) {
         // Files come from Drive, grouped per state — backend downloads via the SA.
         formData.append('drive_states', JSON.stringify(driveStates));
+      } else if (combinedBooks) {
+        // One register for every state: 2B still goes per state, Books goes ONCE.
+        // The engine is told so it can skip the per-state cross-state remarks, which
+        // compare Books file numbers that a shared register does not have.
+        formData.append('books_combined', 'true');
+        for (const slot of stateSlots) {
+          if (slot.gstr2b) formData.append('gstr2b', slot.gstr2b);
+        }
+        formData.append('purchase', sharedBooks.purchase);
+        if (sharedBooks.debit) formData.append('debit', sharedBooks.debit);
+        else                   formData.append('debit', new Blob([]), 'empty.xlsx');
       } else {
         for (const slot of stateSlots) {
           if (slot.gstr2b)   formData.append('gstr2b',   slot.gstr2b);
@@ -399,8 +460,10 @@ const RecoMultiStateWorkspace = () => {
   const handleClearFiles = () => {
     if (!window.confirm('Clear all uploaded state files? This cannot be undone.')) return;
     localStorage.removeItem(storageKey(brandId));
+    localStorage.removeItem(sharedKey(brandId));
     try { sessionStorage.removeItem(resultKey); } catch (_) {}
     setStateSlots(Array.from({ length: 4 }, () => ({ gstr2b: null, purchase: null, debit: null })));
+    setSharedBooks({ purchase: null, debit: null });
     setResult(null);
     toast.success('All files cleared');
   };
@@ -662,6 +725,94 @@ const RecoMultiStateWorkspace = () => {
               </div>
             </div>
 
+            {/* ── Books mode switch ──────────────────────────────────────────
+                GSTR-2B is always per state. The Purchase / Debit registers may be
+                one combined export covering every state — uploading that into each
+                state slot double-counted it, so it gets a single shared card. */}
+            <div className="glass-card" style={{
+              display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+              gap: 16, padding: '13px 18px', marginBottom: 20,
+            }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
+                <Layers style={{ width: 15, height: 15, color: COLOR, flexShrink: 0 }} />
+                <div style={{ minWidth: 0 }}>
+                  <p style={{
+                    fontSize: 13, fontWeight: 700, fontFamily: 'Barlow',
+                    color: 'var(--text-heading)', margin: 0, marginBottom: 2,
+                  }}>
+                    Combined Purchase / Debit Register
+                  </p>
+                  <p style={{ fontSize: 11.5, color: 'var(--text-muted)', margin: 0, lineHeight: 1.5 }}>
+                    {combinedBooks
+                      ? 'One register covers every state — upload it once. GSTR-2B stays per state.'
+                      : 'Each state has its own register. Turn on if one Tally export covers all states.'}
+                  </p>
+                </div>
+              </div>
+
+              {/* Track + knob. Whole control is the button so the label is clickable. */}
+              <button
+                role="switch"
+                aria-checked={combinedBooks}
+                aria-label="Combined Purchase and Debit Register for all states"
+                data-testid="toggle-combined-books"
+                onClick={() => setCombinedBooks(v => !v)}
+                style={{
+                  position: 'relative', flexShrink: 0,
+                  width: 46, height: 26, borderRadius: 999, padding: 0, cursor: 'pointer',
+                  background: combinedBooks ? COLOR : 'var(--card-border)',
+                  border: `1px solid ${combinedBooks ? COLOR : 'var(--card-border)'}`,
+                  transition: 'background 0.28s cubic-bezier(0.4,0,0.2,1), border-color 0.28s',
+                }}
+              >
+                <span style={{
+                  position: 'absolute', top: 2, left: 2,
+                  width: 20, height: 20, borderRadius: '50%', background: '#fff',
+                  boxShadow: '0 1px 3px rgba(0,0,0,0.25)',
+                  transform: combinedBooks ? 'translateX(20px)' : 'translateX(0)',
+                  transition: 'transform 0.28s cubic-bezier(0.4,0,0.2,1)',
+                }} />
+              </button>
+            </div>
+
+            {/* Shared register — collapses/expands with the switch */}
+            <div style={{
+              overflow: 'hidden',
+              maxHeight: combinedBooks ? 240 : 0,
+              opacity: combinedBooks ? 1 : 0,
+              transform: combinedBooks ? 'translateY(0)' : 'translateY(-6px)',
+              marginBottom: combinedBooks ? 20 : 0,
+              transition: 'max-height 0.32s cubic-bezier(0.4,0,0.2,1), opacity 0.24s ease, transform 0.28s ease, margin-bottom 0.32s',
+            }}>
+              <div className="glass-card" style={{ padding: 18 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
+                  <div style={{
+                    width: 26, height: 26, borderRadius: 6, flexShrink: 0,
+                    background: 'rgba(124,58,237,0.1)', border: '1px solid rgba(124,58,237,0.2)',
+                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  }}>
+                    <Layers style={{ width: 13, height: 13, color: COLOR }} />
+                  </div>
+                  <h3 style={{ fontFamily: 'Barlow', fontWeight: 800, fontSize: 14, color: 'var(--text-heading)', margin: 0 }}>
+                    Books — All States
+                  </h3>
+                  {sharedBooks.purchase && (
+                    <span style={{
+                      fontSize: 10, fontWeight: 700, padding: '1px 6px', borderRadius: 4,
+                      background: 'rgba(5,150,105,0.08)', color: '#059669',
+                      border: '1px solid rgba(5,150,105,0.2)', fontFamily: 'DM Sans',
+                    }}>READY</span>
+                  )}
+                </div>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 10 }}>
+                  <MiniDropzone label="Purchase Register" hint=".xlsx / .xls" required stepIndex={1}
+                    file={sharedBooks.purchase} onChange={f => setSharedBooks(p => ({ ...p, purchase: f }))} />
+                  <MiniDropzone label="Debit Note Register" hint=".xlsx (optional)" stepIndex={2}
+                    file={sharedBooks.debit} onChange={f => setSharedBooks(p => ({ ...p, debit: f }))} />
+                </div>
+              </div>
+            </div>
+
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 300px', gap: 20, marginBottom: 28 }}>
 
               {/* State slots */}
@@ -682,7 +833,7 @@ const RecoMultiStateWorkspace = () => {
                         <h3 style={{ fontFamily: 'Barlow', fontWeight: 800, fontSize: 14, color: 'var(--text-heading)', margin: 0 }}>
                           State {idx + 1}
                         </h3>
-                        {slot.gstr2b && slot.purchase && (
+                        {slot.gstr2b && (combinedBooks ? sharedBooks.purchase : slot.purchase) && (
                           <span style={{
                             fontSize: 10, fontWeight: 700, padding: '1px 6px', borderRadius: 4,
                             background: 'rgba(5,150,105,0.08)', color: '#059669',
@@ -702,14 +853,34 @@ const RecoMultiStateWorkspace = () => {
                       )}
                     </div>
 
-                    {/* File dropzones in a row */}
-                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 10 }}>
+                    {/* File dropzones. In combined mode only GSTR-2B stays per state —
+                        the columns animate from three to one as the switch flips. */}
+                    <div style={{
+                      display: 'grid',
+                      gridTemplateColumns: combinedBooks ? '1fr 0fr 0fr' : '1fr 1fr 1fr',
+                      gap: combinedBooks ? 0 : 10,
+                      transition: 'grid-template-columns 0.32s cubic-bezier(0.4,0,0.2,1), gap 0.32s',
+                    }}>
                       <MiniDropzone label="GSTR-2B" hint=".xlsx / .xls" required stepIndex={0}
                         file={slot.gstr2b} onChange={f => setSlotFile(idx, 'gstr2b', f)} />
-                      <MiniDropzone label="Purchase Register" hint=".xlsx / .xls" required stepIndex={1}
-                        file={slot.purchase} onChange={f => setSlotFile(idx, 'purchase', f)} />
-                      <MiniDropzone label="Debit Note Register" hint=".xlsx (optional)" stepIndex={2}
-                        file={slot.debit} onChange={f => setSlotFile(idx, 'debit', f)} />
+                      <div style={{
+                        overflow: 'hidden', minWidth: 0,
+                        opacity: combinedBooks ? 0 : 1,
+                        pointerEvents: combinedBooks ? 'none' : 'auto',
+                        transition: 'opacity 0.2s ease',
+                      }} aria-hidden={combinedBooks}>
+                        <MiniDropzone label="Purchase Register" hint=".xlsx / .xls" required stepIndex={1}
+                          file={slot.purchase} onChange={f => setSlotFile(idx, 'purchase', f)} />
+                      </div>
+                      <div style={{
+                        overflow: 'hidden', minWidth: 0,
+                        opacity: combinedBooks ? 0 : 1,
+                        pointerEvents: combinedBooks ? 'none' : 'auto',
+                        transition: 'opacity 0.2s ease',
+                      }} aria-hidden={combinedBooks}>
+                        <MiniDropzone label="Debit Note Register" hint=".xlsx (optional)" stepIndex={2}
+                          file={slot.debit} onChange={f => setSlotFile(idx, 'debit', f)} />
+                      </div>
                     </div>
                   </div>
                 ))}

@@ -500,6 +500,32 @@ def _is_discount_col(c: str) -> bool:
     return "discount" in str(c).lower().replace(" ", "")
 
 
+def _is_summary_col(c: str) -> bool:
+    """True for a column that RESTATES the taxable value rather than posting to it.
+
+    Some registers carry accountant-added summary columns after the ledgers —
+    'Taxable Value', 'Taxable Amount', alongside 'Total CGST/SGST/IGST'. They repeat
+    a figure already present in the expense ledgers, so summing them double-counts
+    the invoice (a register with one ledger of 58,251 and a 'Taxable Value' of 58,251
+    reported 116,502 in Books against 58,251 in GSTR-2B). The tax totals are already
+    caught by _is_tax_col; this covers the taxable restatement.
+
+    Matched on the exact normalised name so a real expense ledger that merely
+    contains the word (e.g. 'Taxable Purchases 5%') is never swallowed."""
+    return _norm(c) in {"taxable value", "taxable amount", "total taxable value",
+                        "total taxable amount", "total taxable"}
+
+
+def _is_total_tax_col(c: str) -> bool:
+    """True for a 'Total CGST/SGST/IGST/Cess' roll-up rather than an input-tax ledger.
+
+    The same registers that restate the taxable value also restate the tax, next to
+    the real ledgers ('Input CGST_OD' 5,242.59 AND 'Total CGST' 5,242.59). Counting
+    both reports exactly twice the tax the supplier declared. Only a leading 'Total'
+    marks the roll-up — an ordinary ledger keeps its own name."""
+    return _norm(c).startswith("total ")
+
+
 def _find_value_col(row: dict[str, Any]) -> str | None:
     """Return the source header that holds the explicit taxable value.
 
@@ -643,21 +669,32 @@ def parse_books(purchase_data: bytes, debit_data: bytes) -> list[NormalizedInvoi
             if not doc_no and not supplier_name:
                 continue
 
-            igst = 0.0
-            cgst = 0.0
-            sgst = 0.0
-            cess = 0.0
+            # Input-tax ledgers and 'Total CGST/SGST/IGST' roll-ups are collected apart.
+            # A register carrying both would count each tax twice, so the roll-up is used
+            # only for a head with no ledger of its own on this row — the same row-aware
+            # rule as the taxable-value restatement below.
+            _tax_led = {"igst": 0.0, "cgst": 0.0, "sgst": 0.0, "cess": 0.0}
+            _tax_tot = {"igst": 0.0, "cgst": 0.0, "sgst": 0.0, "cess": 0.0}
 
             for k, v in row.items():
                 k_lower = str(k).lower().strip()
                 if "igst" in k_lower:
-                    igst += round_money(v)
+                    head = "igst"
                 elif "cgst" in k_lower:
-                    cgst += round_money(v)
+                    head = "cgst"
                 elif "sgst" in k_lower or "utgst" in k_lower:
-                    sgst += round_money(v)
+                    head = "sgst"
                 elif "cess" in k_lower and "process" not in k_lower:
-                    cess += round_money(v)
+                    head = "cess"
+                else:
+                    continue
+                bucket = _tax_tot if _is_total_tax_col(k) else _tax_led
+                bucket[head] += round_money(v)
+
+            igst = _tax_led["igst"] or _tax_tot["igst"]
+            cgst = _tax_led["cgst"] or _tax_tot["cgst"]
+            sgst = _tax_led["sgst"] or _tax_tot["sgst"]
+            cess = _tax_led["cess"] or _tax_tot["cess"]
 
             # ── Books taxable value ──────────────────────────────────────────
             # ALWAYS the sum of the purchase/expense ledger columns positioned
@@ -685,13 +722,27 @@ def parse_books(purchase_data: bytes, debit_data: bytes) -> list[NormalizedInvoi
                 -1,
             )
             ledgers: list[tuple[str, float]] = []
+            summaries: list[tuple[str, float]] = []
             for k in keys[gt_pos + 1:]:
                 ks = str(k)
                 if _is_tax_col(ks) or _is_tds_col(ks) or _is_round_off_col(ks):
                     continue
                 amt = round_money(row.get(k))
-                if amt:
+                if not amt:
+                    continue
+                if _is_summary_col(ks):
+                    summaries.append((ks, amt))
+                else:
                     ledgers.append((ks, amt))
+
+            # A 'Taxable Value' summary column repeats what the ledgers already say, so
+            # it is dropped whenever this row HAS ledgers — counting both doubles the
+            # invoice. If the row carries nothing but the summary (a register that lists
+            # no expense ledgers at all), it is the only figure available, so use it
+            # rather than reporting the row as zero. Same row-aware shape as the
+            # discount rule above: decided from the data, no ledger names hardcoded.
+            if not ledgers and summaries:
+                ledgers = summaries
 
             # A discount ledger is only a REDUCTION when the row also carries a real
             # purchase/expense ledger for it to reduce. Tally posts the discount as a

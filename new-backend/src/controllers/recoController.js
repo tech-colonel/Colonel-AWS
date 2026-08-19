@@ -1696,6 +1696,13 @@ const runReco = async (req, res) => {
     // PDF → Bank Statement: optional password for locked/encrypted PDFs (from the UI field).
     if (req.body.pdf_password) form.append('pdf_password', String(req.body.pdf_password));
 
+    // 2B vs Books Multi-State: the Books side may be ONE combined register covering
+    // every state (GSTR-2B is always per state). Tells the engine to parse it once
+    // and to skip the per-state-file cross-state remarks, which cannot apply to it.
+    if (recoType === 'gstr_2b_books_multistate' && req.body.books_combined) {
+      form.append('books_combined', String(req.body.books_combined));
+    }
+
     // Receivable Cycle: forward the selected period so the engine's Receivable
     // Amount calc knows which SRN/return rows fall inside this run's month(s).
     if (recoType === 'receivable_cycle') {

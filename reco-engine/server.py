@@ -5,6 +5,7 @@ logging.basicConfig(level=logging.INFO, format="%(name)s %(levelname)s: %(messag
 
 from email.parser import BytesParser
 from email.policy import default
+import hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
@@ -526,11 +527,33 @@ class ReconciliationHandler(BaseHTTPRequestHandler):
                     self.write_json({"error": "Upload at least one GSTR-2B and one Purchase Register file."}, 400)
                     return
 
+                # "Combined books" — one Purchase/Debit register covering every state,
+                # rather than one per state. GSTR-2B stays per state either way.
+                books_combined = str(fields.get("books_combined", "")).strip().lower() in ("1", "true", "yes")
+
                 gstr2b_recs, books_recs, results = reconcile_gstr2b_vs_books_multistate(
                     gstr2b_list, purchase_list, debit_list or [b""] * len(purchase_list),
                     tolerance=tolerance,
                     entity_gstins=entity_gstins,
+                    books_combined=books_combined,
                 )
+
+                # The workbook copies a source sheet per Books file. A combined register
+                # submitted once per state slot would be copied in that many times, so
+                # the PR sheet repeated the whole register. Keep only distinct content.
+                def _distinct(blobs):
+                    seen, out = set(), []
+                    for blob in blobs:
+                        if not blob:
+                            continue
+                        digest = hashlib.sha256(blob).hexdigest()
+                        if digest not in seen:
+                            seen.add(digest)
+                            out.append(blob)
+                    return out
+
+                purchase_sheets = _distinct(purchase_list)
+                debit_sheets    = _distinct(debit_list)
 
                 import base64
                 job_id  = uuid4().hex
@@ -551,8 +574,8 @@ class ReconciliationHandler(BaseHTTPRequestHandler):
                     "_debit_b64":    base64.b64encode(debit_list[0]).decode("utf-8") if debit_list else "",
                     # All state files (for adding per-state source sheets to the workbook)
                     "_all_gstr2b_b64":   [base64.b64encode(f).decode("utf-8") for f in gstr2b_list],
-                    "_all_purchase_b64": [base64.b64encode(f).decode("utf-8") for f in purchase_list if f],
-                    "_all_debit_b64":    [base64.b64encode(f).decode("utf-8") for f in debit_list   if f],
+                    "_all_purchase_b64": [base64.b64encode(f).decode("utf-8") for f in purchase_sheets],
+                    "_all_debit_b64":    [base64.b64encode(f).decode("utf-8") for f in debit_sheets],
                     # Stash MatchResult objects so export_job can rebuild Remark 3
                     "_results_obj":  results,
                 }
