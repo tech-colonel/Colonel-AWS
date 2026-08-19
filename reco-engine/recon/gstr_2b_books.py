@@ -182,36 +182,76 @@ GSTR2B_COL_MAP: dict[str, list[str]] = {
 }
 
 
+_DATE_CELL_RE = re.compile(r"^\d{1,2}[-/]\d{1,2}[-/]\d{2,4}$")
+_MONEY_CELL_RE = re.compile(r"^-?[\d,]*\d\.\d{1,2}$")
+
+
+def _find_header_band_end(raw: Any) -> int:
+    """Return the 0-based index of the first DATA row.
+
+    Most 2B tabs carry two header rows (4 and 5) with data from row 6. The
+    AMENDMENT tabs do not: B2BA / B2B-CDNRA (portal) and B2B-CNA / B2B-DNA (IMS)
+    add a third row, because an 'Original Details' / 'Revised Details' band sits
+    ABOVE the real column labels. Assuming two rows there made the genuine
+    sub-header row look like data, and pushed every tax column under a generic
+    'Revised Details_N' key that the column map cannot resolve — so amended
+    invoices were reported with their taxable value but ZERO tax.
+
+    The depth is read from the data rather than hardcoded: the first row holding a
+    GSTIN, a date or a money value is the first data row. Header rows carry only
+    labels, so this leaves the ordinary two-row tabs at 6 exactly as before."""
+    for i in range(4, min(len(raw), 10)):
+        for v in raw.iloc[i]:
+            s = str(v).strip()
+            if not s or s.lower() == "nan":
+                continue
+            if _GSTIN_RE.match(s.upper()) or _DATE_CELL_RE.match(s) or _MONEY_CELL_RE.match(s):
+                return i
+    return 6
+
+
 def _read_gstr2b_sheet(data: bytes, sheet_name: str) -> list[dict[str, Any]]:
     """
-    GSTR-2B sheets have two merged header rows at index 4 and 5 (0-based).
-    Data starts from row index 6.
+    GSTR-2B sheets carry a merged header band starting at row index 4 — two rows on
+    the ordinary tabs, three on the amendment tabs. Data starts after it.
     """
     raw = pd.read_excel(BytesIO(data), sheet_name=sheet_name, header=None, dtype=object)
     if len(raw) < 7:
         return []
 
-    row4 = [str(v).strip() if str(v) != "nan" else "" for v in raw.iloc[4]]
-    row5 = [str(v).strip() if str(v) != "nan" else "" for v in raw.iloc[5]]
+    band_end = _find_header_band_end(raw)
+    header_rows = [
+        [str(v).strip() if str(v) != "nan" else "" for v in raw.iloc[i]]
+        for i in range(4, max(band_end, 5))
+    ]
 
-    # Forward-fill group headers
+    # Forward-fill the TOP row only — group headers span merged cells.
     last = ""
     row4_filled = []
-    for v in row4:
+    for v in header_rows[0]:
         if v:
             last = v
         row4_filled.append(last)
 
-    # Prefer sub-header; make columns unique by appending index if duplicate
+    # Name each column by its DEEPEST label, falling back to the group header.
+    # On a two-row tab this is the old "prefer sub-header" rule unchanged; on a
+    # three-row amendment tab it reaches past the Original/Revised band to the real
+    # label ('Central Tax(₹)') instead of stopping at it.
     combined = []
     seen: dict[str, int] = {}
-    for top, sub in zip(row4_filled, row5):
-        name = sub if (sub and sub != top) else top
+    for col in range(len(row4_filled)):
+        name = ""
+        for depth in range(len(header_rows) - 1, 0, -1):
+            if col < len(header_rows[depth]) and header_rows[depth][col]:
+                name = header_rows[depth][col]
+                break
+        if not name:
+            name = row4_filled[col]
         count = seen.get(name, 0)
         seen[name] = count + 1
         combined.append(f"{name}_{count}" if count else name)
 
-    data_rows = raw.iloc[6:].copy()
+    data_rows = raw.iloc[band_end:].copy()
     data_rows.columns = combined
     data_rows = data_rows.dropna(how="all")
 
