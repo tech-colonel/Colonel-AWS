@@ -694,7 +694,78 @@ def _read_tally_sheet(data: bytes) -> list[dict[str, Any]]:
     data_rows = raw.iloc[header_idx + 1:].copy()
     data_rows.columns = headers
     data_rows = data_rows.dropna(how="all")
-    return data_rows.fillna("").to_dict(orient="records")
+
+    # Keep each row's position in the source sheet. The output workbook copies the
+    # register verbatim, cell for cell, so this index is what lets the audit columns
+    # be written back onto the very row the figures came from — and what lets a row
+    # the parser never turned into a record be spotted as genuinely missed.
+    out: list[dict[str, Any]] = []
+    for src_idx, record in zip(data_rows.index, data_rows.fillna("").to_dict(orient="records")):
+        record["_src_row"] = int(src_idx)      # 0-based pandas row; Excel row = +1
+        out.append(record)
+    return out
+
+
+def audit_row_figures(row: dict[str, Any], default_type: str) -> dict[str, float]:
+    """Re-derive one register row's figures straight from its raw cells.
+
+    Written as a SECOND, standalone reading of the row so the workbook can show the
+    accountant an independent check of what the engine stored, rather than echoing
+    the engine's own answer back at them. It shares only the column classifiers
+    (_is_tax_col and friends) — the row walk, the sign handling and the arithmetic
+    are separate, so a plumbing fault in parse_books (wrong column picked up, a sign
+    dropped, a row skipped) shows as a difference instead of hiding.
+
+    Applies exactly the rules parse_books applies, or every discount and summary row
+    would report a false difference: tax/TDS/Round Off excluded, purchase discount
+    SUBTRACTED where a real ledger exists, a restated 'Taxable Value' used only when
+    the row has no ledger of its own, and 'Total CGST/SGST/IGST' roll-ups used only
+    for a head with no input-tax ledger. Debit-note rows are negated."""
+    keys = [k for k in row.keys() if not str(k).startswith("_")]
+    gt_pos = next((i for i, k in enumerate(keys) if _norm(k) == "gross total"), -1)
+
+    ledgers: list[float] = []
+    summaries: list[float] = []
+    for k in keys[gt_pos + 1:]:
+        ks = str(k)
+        if _is_tax_col(ks) or _is_tds_col(ks) or _is_round_off_col(ks):
+            continue
+        amt = round_money(row.get(k))
+        if not amt:
+            continue
+        (summaries if _is_summary_col(ks) else ledgers).append(
+            -abs(amt) if _is_discount_col(ks) else amt
+        )
+    # A discount with no real ledger beside it IS the amount billed, not a reduction.
+    if not any(a > 0 for a in ledgers) and len(ledgers) == 1 and ledgers[0] < 0:
+        ledgers = [abs(ledgers[0])]
+    taxable = round(sum(ledgers) if ledgers else sum(summaries), 2)
+
+    led = {"igst": 0.0, "cgst": 0.0, "sgst": 0.0, "cess": 0.0}
+    tot = {"igst": 0.0, "cgst": 0.0, "sgst": 0.0, "cess": 0.0}
+    for k in keys:
+        kl = str(k).lower().strip()
+        if "igst" in kl:
+            head = "igst"
+        elif "cgst" in kl:
+            head = "cgst"
+        elif "sgst" in kl or "utgst" in kl:
+            head = "sgst"
+        elif "cess" in kl and "process" not in kl:
+            head = "cess"
+        else:
+            continue
+        (tot if _is_total_tax_col(k) else led)[head] += round_money(row.get(k))
+
+    out = {
+        "taxable_value": taxable,
+        "igst": led["igst"] or tot["igst"],
+        "cgst": led["cgst"] or tot["cgst"],
+        "sgst": led["sgst"] or tot["sgst"],
+    }
+    if default_type == "DBN":
+        out = {k: -v for k, v in out.items()}
+    return {k: round(v, 2) for k, v in out.items()}
 
 
 def parse_books(purchase_data: bytes, debit_data: bytes) -> list[NormalizedInvoice]:
@@ -715,6 +786,9 @@ def parse_books(purchase_data: bytes, debit_data: bytes) -> list[NormalizedInvoi
             continue
 
         for row in rows:
+            # Which register this row came from — needed to write the audit columns
+            # back onto the right copied sheet.
+            row["_src_sheet"] = source
             # Skip if no date (summary rows)
             date_raw = row.get("Date", "")
             if not str(date_raw).strip() or str(date_raw).strip() in ("nan", ""):
@@ -812,6 +886,11 @@ def parse_books(purchase_data: bytes, debit_data: bytes) -> list[NormalizedInvoi
             summaries: list[tuple[str, float]] = []
             for k in keys[gt_pos + 1:]:
                 ks = str(k)
+                # Internal bookkeeping keys (_src_row, _src_sheet) sit after the last
+                # real column and are NOT ledgers — summing them would corrupt the
+                # taxable value with a row number.
+                if ks.startswith("_"):
+                    continue
                 if _is_tax_col(ks) or _is_tds_col(ks) or _is_round_off_col(ks):
                     continue
                 amt = round_money(row.get(k))
@@ -2164,6 +2243,133 @@ def _copy_workbook_sheets(src_bytes: bytes, target_wb: Any, title_prefix: str) -
         print(f"Error copying sheets for prefix {title_prefix}: {e}")
 
 
+#: Remark wording — kept here so the sheet and any future summary agree.
+AUDIT_OK      = "Books and Tool amount match"
+AUDIT_MISSED  = "Missed — not picked up by the tool"
+AUDIT_DIFF    = "Amount differs — Books vs Tool"
+
+
+def append_books_audit_columns(wb: Any, src_bytes: bytes, book_records: list[Any],
+                               sheet_title: str, default_type: str,
+                               file_idx: int = 0) -> int:
+    """Append the accountant's check-point columns to a copied register sheet.
+
+    The output already reproduces the register the accountant uploaded; this writes
+    four figure columns plus a remark to the RIGHT of it, so the real invoice row and
+    what the tool took from it sit side by side and can be scanned by colour instead
+    of cross-checked by hand.
+
+      Taxable Value / IGST / CGST / SGST  — as the tool recorded them
+      Remark  — green  the tool's figures equal an independent re-reading of the row
+                red    the row is in the register but the tool produced NO record
+                yellow the tool recorded the row but the figures differ
+
+    Rows the parser deliberately ignores (no Date — Tally's grand total, blanks) are
+    left blank, never red: flagging those would put a false alarm at the foot of
+    every register and cost exactly the trust this is meant to build.
+
+    Returns the number of rows flagged red or yellow."""
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    from openpyxl.utils import get_column_letter
+
+    ws = wb[sheet_title] if sheet_title in wb.sheetnames else None
+    if ws is None:
+        return 0
+    try:
+        rows = _read_tally_sheet(_ensure_xlsx(src_bytes))
+    except Exception:
+        return 0
+    if not rows:
+        return 0
+
+    # The copier reproduces the register cell for cell, so a row's pandas index maps
+    # to the same Excel row (+1). The header sits directly above the first data row.
+    # Records reach here as dataclasses on one path and plain dicts on another —
+    # _get_val reads both.
+    #
+    # The row index alone is NOT unique: in a multi-state run each register is parsed
+    # separately and they all start numbering near row 5, so keying on it alone made
+    # state 1's rows look up state 2's records and report false differences. The
+    # multi-state parser tags every record with _file_idx, so match on the pair.
+    want_sheet = sheet_title.split(" - ")[-1]
+    stored = {}
+    for r in book_records:
+        raw = _get_val(r, "raw", {}) or {}
+        if raw.get("_src_sheet") != want_sheet or raw.get("_src_row") is None:
+            continue
+        if int(raw.get("_file_idx", 0) or 0) != file_idx:
+            continue
+        stored[raw["_src_row"]] = r
+    first_data = min(r["_src_row"] for r in rows)
+    header_xl = first_data                      # Excel row of the header
+    start_col = ws.max_column + 2               # leave one blank spacer column
+
+    GREEN  = PatternFill("solid", fgColor="D5F5E3")
+    RED    = PatternFill("solid", fgColor="F9C9C4")
+    YELLOW = PatternFill("solid", fgColor="FDEBD0")
+    HDR    = PatternFill("solid", fgColor="1F4E78")
+    thin   = Side(style="thin", color="B0B0B0")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+    titles = ["Taxable Value (Tool)", "IGST (Tool)", "CGST (Tool)", "SGST (Tool)", "Check"]
+    band = ws.cell(row=max(header_xl - 1, 1), column=start_col,
+                   value="Tool Check-Point (for verification)")
+    band.font = Font(bold=True, color="FFFFFF", size=10)
+    band.fill = HDR
+    band.alignment = Alignment(horizontal="center")
+    try:
+        ws.merge_cells(start_row=max(header_xl - 1, 1), start_column=start_col,
+                       end_row=max(header_xl - 1, 1), end_column=start_col + 4)
+    except Exception:
+        pass
+    for i, t in enumerate(titles):
+        c = ws.cell(row=header_xl, column=start_col + i, value=t)
+        c.font = Font(bold=True, color="FFFFFF", size=9)
+        c.fill = HDR
+        c.alignment = Alignment(horizontal="center", wrap_text=True)
+        c.border = border
+
+    flagged = 0
+    for row in rows:
+        xl = row["_src_row"] + 1
+        rec = stored.get(row["_src_row"])
+        # Deliberately-skipped row (no Date): leave the strip blank.
+        date_raw = str(row.get("Date", "") or "").strip()
+        if not date_raw or date_raw == "nan":
+            continue
+
+        if rec is None:
+            ws.cell(row=xl, column=start_col + 4, value=AUDIT_MISSED)
+            for i in range(5):
+                cc = ws.cell(row=xl, column=start_col + i)
+                cc.fill = RED
+                cc.border = border
+            flagged += 1
+            continue
+
+        derived = audit_row_figures(row, default_type)
+        vals = [float(_get_val(rec, "taxable_value", 0) or 0), float(_get_val(rec, "igst", 0) or 0),
+                float(_get_val(rec, "cgst", 0) or 0), float(_get_val(rec, "sgst", 0) or 0)]
+        same = all(abs(a - b) <= 0.01 for a, b in zip(
+            vals, [derived["taxable_value"], derived["igst"], derived["cgst"], derived["sgst"]]))
+        for i, v in enumerate(vals):
+            cc = ws.cell(row=xl, column=start_col + i, value=round(v, 2))
+            cc.number_format = "#,##0.00"
+            cc.fill = GREEN if same else YELLOW
+            cc.border = border
+        rc = ws.cell(row=xl, column=start_col + 4,
+                     value=AUDIT_OK if same else
+                     f"{AUDIT_DIFF}: register {derived['taxable_value']:,.2f} vs tool {vals[0]:,.2f}")
+        rc.fill = GREEN if same else YELLOW
+        rc.border = border
+        if not same:
+            flagged += 1
+
+    for i, w in enumerate([16, 13, 13, 13, 46]):
+        ws.column_dimensions[get_column_letter(start_col + i)].width = w
+    return flagged
+
+
 def _build_month_summary_sheet(wb: Any, results: list[Any]) -> None:
     """Add a 'Month Summary' sheet when results span ≥ 2 distinct invoice months.
     Groups by YYYY-MM (preferring 2B date, falling back to Books date).
@@ -2481,7 +2687,22 @@ def build_gstr2b_books_workbook(results: list[dict], payload: dict | None = None
                 _copy_workbook_sheets(debit_bytes, wb, "DN")
             except Exception as e:
                 print(f"Failed to copy Debit Note sheets: {e}")
-                
+
+        # Accountant check-point: show, beside each register row, what the tool took
+        # from it. Purely additive — a failure here must never cost the workbook.
+        _books = [b for b in (_get_val(r, "purchase", None) for r in results) if b is not None]
+        for _key, _title, _dt in (("_purchase_b64", "PR - Purchase Register", "INV"),
+                                  ("_debit_b64",    "DN - Debit Note Register", "DBN")):
+            # Per sheet, so a failure on one register cannot silently cost the other
+            # its check-point (an early version lost the whole DN strip this way).
+            if payload.get(_key):
+                try:
+                    append_books_audit_columns(
+                        wb, base64.b64decode(payload[_key]), _books, _title, _dt)
+                except Exception as e:
+                    print(f"Failed to add audit columns to {_title}: {e}")
+
+
     # 2. Add RCM entries sheet
     if payload and "_gstr2b_b64" in payload:
         import base64
