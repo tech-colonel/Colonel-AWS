@@ -2005,7 +2005,7 @@ const WorkflowBuilder = ({ agent, workflow, onSaved, onCancel }) => {
 
 // ─── Main Modal ────────────────────────────────────────────────────────────────
 
-const WorkflowManagerModal = ({ agent, open, onClose, inline = false }) => {
+const WorkflowManagerModal = ({ agent, open, onClose, inline = false, initialEditWorkflow = null }) => {
   const [workflows,   setWorkflows]   = useState([]);
   const [loading,     setLoading]     = useState(false);
   const [view,        setView]        = useState('list');
@@ -2016,10 +2016,15 @@ const WorkflowManagerModal = ({ agent, open, onClose, inline = false }) => {
   useEffect(() => {
     if (!agent) return;
     if (!inline && !open) return;
-    setView('list');
-    setEditTarget(null);
+    if (initialEditWorkflow) {
+      setView('build');
+      setEditTarget(initialEditWorkflow);
+    } else {
+      setView('list');
+      setEditTarget(null);
+    }
     fetchWorkflows();
-  }, [open, agent]);
+  }, [open, agent, initialEditWorkflow]);
 
   const fetchWorkflows = async () => {
     setLoading(true);

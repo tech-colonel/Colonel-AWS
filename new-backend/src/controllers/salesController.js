@@ -215,6 +215,28 @@ const getMasterDataAny = async (req, res, next) => {
   }
 };
 
+// Append a single, arbitrary-shaped SKU/Ledger master row — used by the "missing master data"
+// popup to resolve a value on the spot, regardless of which column headers that brand's master
+// happens to use.
+const addMasterEntry = async (req, res, next) => {
+  try {
+    const { brandId, agentId, type } = req.params;
+    if (!['sku', 'ledger'].includes(type)) {
+      return res.status(400).json({ error: 'type must be "sku" or "ledger"' });
+    }
+    const { fields } = req.body;
+    if (!fields || typeof fields !== 'object' || Object.keys(fields).length === 0) {
+      return res.status(400).json({ error: 'fields object is required' });
+    }
+
+    const result = await salesService.addMasterEntry(brandId, agentId, type, fields);
+    res.json({ message: `${type === 'sku' ? 'SKU' : 'Ledger'} entry added successfully`, ...result });
+  } catch (error) {
+    if (error.status === 400) return res.status(400).json({ error: error.message });
+    next(error);
+  }
+};
+
 // Delete a single SKU/Ledger master row by its index — precise regardless of column naming.
 const deleteMasterEntry = async (req, res, next) => {
   try {
@@ -437,6 +459,10 @@ const flipkart = {
         return res.status(400).json({ error: 'Processor Error: No data returned' });
       }
 
+      if (processedData.missingMasterValues?.length > 0 && req.body.proceedWithoutMaster !== 'true') {
+        return res.status(400).json({ error: 'Missing master data values', missingMasterValues: processedData.missingMasterValues });
+      }
+
       // 3. ✅ UNIQUE FILE NAME
       const fileId = uuidv4();
       const fileName = `flipkart_${brand.name}_${fileId}.xlsx`;
@@ -603,6 +629,10 @@ const flipkart = {
         return res.status(400).json({ error: 'Processor Error: No data returned' });
       }
 
+      if (processedData.missingMasterValues?.length > 0 && req.body.proceedWithoutMaster !== 'true') {
+        return res.status(400).json({ error: 'Missing master data values', missingMasterValues: processedData.missingMasterValues });
+      }
+
       const taskId = uuidv4();
       const fileName = `flipkart_${brand.name}_${taskId}.xlsx`;
       const processPath = path.join(OUTPUT_DIR, fileName);
@@ -751,6 +781,7 @@ module.exports = {
   deleteWorkingFile,
   downloadWorkingFile,
   addSkuMasterSingle,
+  addMasterEntry,
   deleteSkuMasterSingle,
   getMasterDataAny,
   deleteMasterEntry,

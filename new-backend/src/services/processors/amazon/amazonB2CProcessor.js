@@ -1,6 +1,7 @@
 const XLSX = require('xlsx-js-style');
 const ExcelJS = require('exceljs');
 const { getStateCodeFromName, getStateAbbr } = require('../../../utils/gstStateCodes');
+const { createMissingMasterTracker } = require('../../../utils/missingMasterTracker');
 
 async function amazonB2CProcessor(
   rawFileBuffer,
@@ -14,6 +15,7 @@ async function amazonB2CProcessor(
   formYear,
   multiStateSale
 ) {
+  const missingMasterTracker = createMissingMasterTracker();
   try {
     if (!rawFileBuffer) {
       throw new Error('Raw file buffer is required');
@@ -273,6 +275,7 @@ async function amazonB2CProcessor(
 
             row['Ship To State Tally Ledger'] = null;
             row['Final Invoice No.'] = null;
+            missingMasterTracker.track({ masterType: 'ledger', matchField: 'State', value: shipState });
 
           }
 
@@ -367,6 +370,9 @@ async function amazonB2CProcessor(
           mappedCount++;
         } else {
           unmappedCount++;
+          if (rawSKU) {
+            missingMasterTracker.track({ masterType: 'sku', matchField: 'SKU', value: rawSKU });
+          }
         }
 
         row['FG'] = fg || null;
@@ -1139,7 +1145,8 @@ async function amazonB2CProcessor(
       x2betaData: {
         headers: x2betaHeaders,
         rows: filteredRows.map(row => x2betaColumns.map(c => c.get(row)))
-      }
+      },
+      missingMasterValues: missingMasterTracker.list()
     };
 
   } catch (error) {

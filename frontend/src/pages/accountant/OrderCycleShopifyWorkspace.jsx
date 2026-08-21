@@ -1,11 +1,11 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { useParams } from 'react-router-dom';
+import { useParams, useNavigate } from 'react-router-dom';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '../../components/ui/modal';
 import {
     Loader2, Plus, Download, Trash2, FileText, RefreshCw,
     ChevronRight, ChevronLeft, CheckCircle2, Package, CreditCard,
     ShoppingBag, UploadCloud, AlertCircle, Calendar, BarChart2,
-    ArrowLeft, Eye, TrendingDown, TrendingUp, XCircle,
+    ArrowLeft, Eye, TrendingDown, TrendingUp, XCircle, HandCoins, RotateCcw,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { format } from 'date-fns';
@@ -930,6 +930,7 @@ function ReconciliationView({ file, brandId, agentId, onBack, onDownload }) {
 // ─── Main Component ───────────────────────────────────────────────────────────
 const OrderCycleShopifyWorkspace = ({ agent }) => {
     const { brandId, agentId } = useParams();
+    const navigate = useNavigate();
 
     const [modal, setModal]               = useState(initModal());
     const [isGenerating, setIsGenerating] = useState(false);
@@ -1077,6 +1078,14 @@ const OrderCycleShopifyWorkspace = ({ agent }) => {
                     <p className="text-sm text-slate-500 mt-0.5">{agent?.name} · Shopify Order Cycle</p>
                 </div>
                 <div className="flex items-center gap-2">
+                    <button onClick={() => navigate(`/brands/${brandId}/advance-amount`)}
+                        className="inline-flex items-center gap-1.5 px-3 py-2 text-sm border border-amber-200 rounded-lg bg-amber-50 hover:bg-amber-100 text-amber-700 font-semibold transition-colors">
+                        <HandCoins className="h-4 w-4" /> Advance Amount Dashboard
+                    </button>
+                    <button onClick={() => navigate(`/brands/${brandId}/payables`)}
+                        className="inline-flex items-center gap-1.5 px-3 py-2 text-sm border border-rose-200 rounded-lg bg-rose-50 hover:bg-rose-100 text-rose-700 font-semibold transition-colors">
+                        <RotateCcw className="h-4 w-4" /> Payables Dashboard
+                    </button>
                     <button onClick={fetchFiles} disabled={filesLoading}
                         className="inline-flex items-center gap-1.5 px-3 py-2 text-sm border border-slate-200 rounded-lg bg-white hover:bg-slate-50 text-slate-600 transition-colors">
                         <RefreshCw className={`h-4 w-4 ${filesLoading ? 'animate-spin' : ''}`} /> Refresh

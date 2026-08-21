@@ -5,6 +5,7 @@ import { Badge } from '../../components/ui/badge';
 import { GitBranch, Upload, Download, Loader2, Check, ChevronRight, TableIcon, GitMerge } from 'lucide-react';
 import api from '../../lib/api';
 import { toast } from 'sonner';
+import MissingMasterDataModal from '../../components/reco/MissingMasterDataModal';
 
 // ─── Step 1: Select workflow ──────────────────────────────────────────────────
 
@@ -115,6 +116,9 @@ const ApplyStep = ({ workflow, agentId, brandId, onBack, onClose }) => {
   const [applying,       setApplying]       = useState(false);
   const [outputFilename, setOutputFilename] = useState(null);
   const [downloading,    setDownloading]    = useState(false);
+  const [showMissingMasterModal, setShowMissingMasterModal] = useState(false);
+  const [missingMasterValues,    setMissingMasterValues]    = useState([]);
+  const [masterData,             setMasterData]             = useState({ sku_master: [], ledger_master: [] });
 
   const sheets           = workflow.sheets || [];
   const allFilesSelected = fileInputs.every(fi => !!files[fi.id]);
@@ -124,7 +128,14 @@ const ApplyStep = ({ workflow, agentId, brandId, onBack, onClose }) => {
     setOutputFilename(null);
   };
 
-  const handleApply = async () => {
+  const fetchMasterData = () => {
+    if (!brandId || !agentId) return;
+    api.get(`/api/brands/${brandId}/agents/${agentId}/master`)
+      .then(res => setMasterData(res.data || { sku_master: [], ledger_master: [] }))
+      .catch(() => {});
+  };
+
+  const handleApply = async (proceedWithoutMaster = false) => {
     if (!allFilesSelected) { toast.error('Please select all required files'); return; }
     setApplying(true);
     setOutputFilename(null);
@@ -137,13 +148,23 @@ const ApplyStep = ({ workflow, agentId, brandId, onBack, onClose }) => {
       } else {
         fileInputs.forEach((fi, i) => fd.append(`file_${i}`, files[fi.id]));
       }
+      if (proceedWithoutMaster) {
+        fd.append('proceedWithoutMaster', 'true');
+      }
       const res = await api.post(`/api/workflows/${workflow.id}/apply`, fd, {
         headers: { 'Content-Type': 'multipart/form-data' }
       });
       setOutputFilename(res.data.filename);
       toast.success('Workflow applied! Output ready to download.');
     } catch (err) {
-      toast.error(err.response?.data?.error || 'Failed to apply workflow');
+      const missing = err.response?.data?.missingMasterValues;
+      if (missing?.length > 0) {
+        fetchMasterData();
+        setMissingMasterValues(missing);
+        setShowMissingMasterModal(true);
+      } else {
+        toast.error(err.response?.data?.error || 'Failed to apply workflow');
+      }
     } finally {
       setApplying(false);
     }
@@ -278,12 +299,26 @@ const ApplyStep = ({ workflow, agentId, brandId, onBack, onClose }) => {
       {/* Actions */}
       <div className="flex gap-3">
         <Button variant="secondary" onClick={onClose} className="flex-1">Close</Button>
-        <Button onClick={handleApply} disabled={!allFilesSelected || applying} className="flex-1">
+        <Button onClick={() => handleApply(false)} disabled={!allFilesSelected || applying} className="flex-1">
           {applying
             ? <><Loader2 className="h-4 w-4 animate-spin mr-2" />Applying...</>
             : 'Apply Workflow'}
         </Button>
       </div>
+
+      <MissingMasterDataModal
+        open={showMissingMasterModal}
+        onOpenChange={setShowMissingMasterModal}
+        missingValues={missingMasterValues}
+        brandId={brandId}
+        agentId={agentId}
+        masterData={masterData}
+        onResolved={fetchMasterData}
+        onProceed={() => {
+          setShowMissingMasterModal(false);
+          handleApply(true);
+        }}
+      />
     </div>
   );
 };

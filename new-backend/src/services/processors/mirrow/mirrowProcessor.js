@@ -1,5 +1,6 @@
 const XLSX = require('xlsx-js-style');
 const { getStateCodeFromName, getStateAbbr } = require('../../../utils/gstStateCodes');
+const { createMissingMasterTracker } = require('../../../utils/missingMasterTracker');
 
 function safeNumber(value) {
   if (value === null || value === undefined || value === '') return 0;
@@ -59,6 +60,9 @@ async function mirrowProcessor(
 
   console.log(`Processing ${rawData.length} rows from Mirrow raw file`);
 
+  // Track raw SKU/state values that aren't found in this brand's SKU/Ledger master
+  const missingMasterTracker = createMissingMasterTracker();
+
   // SKU Map: Sales Portal SKU -> { fg, rate }
   const skuMap = {};
   skuData.forEach(item => {
@@ -104,8 +108,15 @@ async function mirrowProcessor(
     const fg = skuEntry.fg || '';
     const taxRate = safeNumber(skuEntry.rate || 0);
 
+    if (withInventory && !skuEntry.fg && (sku || productName)) {
+      missingMasterTracker.track({ masterType: 'sku', matchField: 'SKU', value: sku || productName });
+    }
+
     // Ledger lookup - try state first, then city
     const ledgerEntry = ledgerMap[rawState.toLowerCase()] || ledgerMap[city.toLowerCase()] || {};
+    if (!ledgerEntry.ledger && (rawState || city)) {
+      missingMasterTracker.track({ masterType: 'ledger', matchField: 'State', value: rawState || city });
+    }
     const state = ledgerEntry.states || rawState;
     const tallyLedger = ledgerEntry.ledger || '';
     const baseInvoice = ledgerEntry.invoiceNo || '';
@@ -191,7 +202,7 @@ async function mirrowProcessor(
   const x2betaSheet = buildX2betaSheet(workingData, month, year, sellingState);
   XLSX.utils.book_append_sheet(outputWorkbook, x2betaSheet, 'x2beta working');
 
-  return { outputWorkbook, workingData, pivotData };
+  return { outputWorkbook, workingData, pivotData, missingMasterValues: missingMasterTracker.list() };
 }
 
 // ============================================================

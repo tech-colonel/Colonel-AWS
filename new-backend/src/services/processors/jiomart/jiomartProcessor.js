@@ -1,5 +1,6 @@
 const XLSX = require('xlsx-js-style');
 const { getStateAbbr } = require('../../../utils/gstStateCodes');
+const { createMissingMasterTracker } = require('../../../utils/missingMasterTracker');
 
 const num = v => Number(v || 0);
 
@@ -154,6 +155,9 @@ async function jiomartProcessor(
 
   const wb = XLSX.utils.book_new();
 
+  // Track raw SKU values that aren't found in this brand's SKU master
+  const missingMasterTracker = createMissingMasterTracker();
+
   /* -------------------------
      STEP 1 RAW SHEET
   -------------------------- */
@@ -213,8 +217,13 @@ async function jiomartProcessor(
     working = working.map(r => {
 
       const sku = r['SKU'];
+      const fg = skuMap[sku];
 
-      r['FG'] = skuMap[sku] || '';
+      if (!fg && sku) {
+        missingMasterTracker.track({ masterType: 'sku', matchField: 'SKU', value: sku });
+      }
+
+      r['FG'] = fg || '';
 
       return r;
 
@@ -333,7 +342,8 @@ async function jiomartProcessor(
     gstrB2C: gstrB2C,
     gstrHSN: gstrHSN,
     gstrHsnBySellerGstin: gstrHsnBySellerGstin,
-    uniqueProductIds: []
+    uniqueProductIds: [],
+    missingMasterValues: missingMasterTracker.list()
 
   };
 

@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { authenticateToken, authorize } = require('../middleware/authMiddleware');
-const { getRecoHistory, getJobResults, getDashboardSummary, getJobById, getAdminToolAnalytics, getUserActivity, getToolDetails, getUsersOverview, getBrandActivity, getBrandAgentDetail, getReceivableDashboard, getReceivableJourney, getReceivableSheetRows, getReceivableSheetColumnValues, getAdvanceAmountDashboard, getAdvanceAmountSheet, getAdvanceAmountSheetColumnValues } = require('../controllers/dashboardController');
+const { getRecoHistory, getJobResults, getDashboardSummary, getJobById, getAdminToolAnalytics, getUserActivity, getToolDetails, getUsersOverview, getBrandActivity, getBrandAgentDetail, getReceivableDashboard, getReceivableJourney, getReceivableSheetRows, getReceivableSheetColumnValues, getAdvanceAmountDashboard, getAdvanceAmountSheet, getAdvanceAmountSheetColumnValues, getAdvanceOrderStatus, getPayablesDashboard, getPayablesSheet } = require('../controllers/dashboardController');
 
 const flexibleAuth = (req, res, next) => {
   const token = req.headers['authorization']?.split(' ')[1];
@@ -24,6 +24,10 @@ router.get('/dashboard/receivables/:brandId/sheet/column-values', flexibleAuth, 
 router.get('/dashboard/advance-amount/:brandId',        flexibleAuth, authorize('accountant','admin'), getAdvanceAmountDashboard);
 router.get('/dashboard/advance-amount/:brandId/sheet',   flexibleAuth, authorize('accountant','admin'), getAdvanceAmountSheet);
 router.get('/dashboard/advance-amount/:brandId/sheet/column-values', flexibleAuth, authorize('accountant','admin'), getAdvanceAmountSheetColumnValues);
+router.get('/dashboard/advance-amount/:brandId/order-status', flexibleAuth, authorize('accountant','admin'), getAdvanceOrderStatus);
+
+router.get('/dashboard/payables/:brandId',        flexibleAuth, authorize('accountant','admin'), getPayablesDashboard);
+router.get('/dashboard/payables/:brandId/sheet',  flexibleAuth, authorize('accountant','admin'), getPayablesSheet);
 
 // Accountant Analysis page (per-brand, brand-access gated)
 router.get('/dashboard/activity/:brandId',              flexibleAuth, authorize('accountant','admin'), getBrandActivity);

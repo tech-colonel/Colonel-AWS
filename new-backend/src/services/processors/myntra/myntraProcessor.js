@@ -1,5 +1,6 @@
 const XLSX = require('xlsx-js-style');
 const { getStateAbbr } = require('../../../utils/gstStateCodes');
+const { createMissingMasterTracker } = require('../../../utils/missingMasterTracker');
 
 /**
  * Safe number conversion
@@ -561,8 +562,8 @@ async function myntraProcessor(fileBuffers, skuData, stateConfigData, brandName,
   console.log(`Packed data: ${packedData.length} rows`);
   console.log(`RT data: ${rtData.length} rows`);
 
-  // Track missing SKUs
-  const missingSKUs = new Set();
+  // Track raw SKU/state values that aren't found in this brand's SKU/Ledger master
+  const missingMasterTracker = createMissingMasterTracker();
 
   // ==========================
   // Working for Accounting - Merge all 3 reports
@@ -579,7 +580,7 @@ async function myntraProcessor(fileBuffers, skuData, stateConfigData, brandName,
     if (withInventory && skuId) {
       fg = skuMap[skuId.toLowerCase()] || '';
       if (!fg && skuId) {
-        missingSKUs.add(skuId);
+        missingMasterTracker.track({ masterType: 'sku', matchField: 'Sales portal SKU', value: skuId });
       }
     }
 
@@ -596,6 +597,9 @@ async function myntraProcessor(fileBuffers, skuData, stateConfigData, brandName,
     // Lookup Tally Ledger and Invoice No from state config
     const normalizedState = normalizeStateName(shipToState);
     const stateConfig = stateConfigMap[normalizedState] || {};
+    if (!stateConfig.tallyLedger && normalizedState) {
+      missingMasterTracker.track({ masterType: 'ledger', matchField: 'State', value: shipToState });
+    }
     const debtorLedger = stateConfig.tallyLedger || '';
     const finalInvoiceNo = stateConfig.invoiceNo || '';
 
@@ -813,12 +817,6 @@ async function myntraProcessor(fileBuffers, skuData, stateConfigData, brandName,
   }
 
 
-  // Check for missing SKUs
-  if (withInventory && missingSKUs.size > 0) {
-    const error = new Error(`Some SKUs are missing from the database: ${Array.from(missingSKUs).join(', ')}`);
-    error.missingSKUs = Array.from(missingSKUs);
-    throw error;
-  }
 
   console.log(`Working file data: ${workingFileData.length} rows`);
 
@@ -1354,7 +1352,8 @@ async function myntraProcessor(fileBuffers, skuData, stateConfigData, brandName,
     workingFileData,
     pivotData,
     afterPivotData: netPivotData,
-    outputWorkbook
+    outputWorkbook,
+    missingMasterValues: missingMasterTracker.list()
   };
 }
 

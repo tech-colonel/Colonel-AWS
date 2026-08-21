@@ -174,8 +174,9 @@ const ReceivedSplitTable = ({ title, subtitle, rows, keyField, onOpenJourney, si
   );
 };
 
-// Prepaid always shows up as one lump row in a "by source" table (settled_source is
-// always the literal 'prepaid', so it has no courier to split by) — this renders the
+// A settled Prepaid order shows up as one lump row in a "by source" table
+// (settled_source is the literal 'delivered' once a delivery_status upload
+// confirms it, so it has no courier to split by) — this renders the
 // same population split two ways instead, right under that row: by sales channel
 // (the Tally-tagged portal — Amazon/Flipkart/Shopify/etc.) AND, per channel, by the
 // actual payment gateway that financed it (Snapmint/BharatX/Razorpay), matched from
@@ -336,9 +337,9 @@ const ReceivedBreakdownModal = ({ data, period, onOpenJourney, onClose }) => {
               Received in {MONTHS[period.month]} {period.year} — by source & portal
             </h3>
             <p className="text-xs mt-0.5" style={{ color: 'var(--text-muted)' }}>
-              Cash actually collected this month, not sales — includes prepaid (Razorpay-equivalent, always
-              same-month) and courier COD settlements, net of any of those orders later returned by this
-              month's own close
+              Cash actually collected this month, not sales — includes prepaid (settled once a delivery_status
+              upload confirms delivery) and courier COD settlements, net of any of those orders later returned by
+              this month's own close
             </p>
           </div>
           <button onClick={onClose} aria-label="Close" className="p-1.5 rounded-lg" style={{ color: 'var(--text-muted)' }}>
@@ -660,8 +661,8 @@ const ThisMonthByCourierModal = ({ rows, period, total, onOpenJourney, onClose }
             {MONTHS[period.month]} {period.year}'s own receivable — by partner
           </h3>
           <p className="text-xs mt-0.5" style={{ color: 'var(--text-muted)' }}>
-            By courier/partner — COD only (Prepaid has no courier and always settles same-month, so it contributes
-            ₹0 here; see the dashboard's reconciliation strip for the full COD+Prepaid identity)
+            By courier/partner — COD only (Prepaid has no courier to group by, so it never appears in this table
+            regardless of settlement status; see the dashboard's reconciliation strip for the full COD+Prepaid identity)
           </p>
         </div>
         <button onClick={onClose} aria-label="Close" className="p-1.5 rounded-lg" style={{ color: 'var(--text-muted)' }}>
@@ -935,7 +936,140 @@ const ReturnsByMonthTable = ({ rows, period, total }) => (
   </>
 );
 
-const ReturnsBySourceModal = ({ rows, byMonth, prepaidByChannel, period, total, count, onOpenJourney, onClose }) => (
+// A return only creates a refund liability on the Payables Dashboard if cash had
+// already landed before the return — courier remittance for COD; for non-Shopify
+// Prepaid, cash is always considered collected, unconditionally (exact same
+// predicate as PAYABLE_LEDGER_COLLECTED_THEN_RETURNED in dashboardController.js).
+// A plain RTO
+// before collection never touches Payables, by design. Without this strip a
+// return can look like it "vanished" between the two dashboards; this makes the
+// split (and the link to where the collected slice actually shows up) explicit
+// instead of leaving it to be discovered by digging into the data. Covers every
+// source here — COD couriers AND non-Shopify Prepaid (Amazon/Flipkart/Zepto/etc,
+// which flow to Payables as 'Marketplace Prepaid') — Shopify Prepaid is a
+// separate leg entirely, tracked in shopify_order_cycle, not this table.
+const ReturnsPayablesBridge = ({ rows, brandId, period, onOpenJourney }) => {
+  const navigate = useNavigate();
+  const collected = rows.reduce((s, r) => s + Number(r.collected_amount || 0), 0);
+  const collectedCount = rows.reduce((s, r) => s + Number(r.collected_count || 0), 0);
+  const rto = rows.reduce((s, r) => s + Number(r.rto_amount || 0), 0);
+  const rtoCount = rows.reduce((s, r) => s + Number(r.rto_count || 0), 0);
+  if (!rows.length || (collected + rto) <= 0) return null;
+
+  // Any source where every return this month shows as RTO (nothing collected)
+  // is worth a nudge — could be genuine RTOs, or could be that courier's
+  // settlement file for this period just hasn't been uploaded yet, which would
+  // silently masquerade as "nothing collected" the same way a data gap does
+  // elsewhere on this dashboard (see courierAging's near-100%-pending case).
+  const allRto = rows.filter((r) => Number(r.rto_count || 0) > 0 && Number(r.collected_count || 0) === 0);
+
+  return (
+    <div className="mb-5">
+      <p className="text-xs font-bold uppercase tracking-wide mb-2" style={{ color: 'var(--text-muted)' }}>
+        Returns — where the liability actually sits
+      </p>
+      <div className="flex items-stretch gap-2 mb-2">
+        <SummaryStat
+          label="Cash already collected — now a refund liability"
+          value={collected}
+          color={COLOR_RETURNED}
+          onClick={collected > 0 ? () => navigate(`/brands/${brandId}/payables?fromMonth=${period.month}&fromYear=${period.year}&toMonth=${period.month}&toYear=${period.year}`) : undefined}
+        />
+        <Operator symbol="+" />
+        <SummaryStat label="RTO before collection — no liability" value={rto} color="var(--text-muted)" />
+        <Operator symbol="=" />
+        <SummaryStat label="Total returns (COD + Marketplace Prepaid)" value={collected + rto} color={COLOR_RETURNED} big />
+      </div>
+      {collected > 0 && (
+        <p className="text-[11px]" style={{ color: 'var(--text-muted)' }}>
+          {collectedCount} of these {collectedCount + rtoCount} return(s) had cash already in hand — that
+          {collectedCount === 1 ? ' order is' : ' amount is'} what shows up on the{' '}
+          <button
+            onClick={() => navigate(`/brands/${brandId}/payables?fromMonth=${period.month}&fromYear=${period.year}&toMonth=${period.month}&toYear=${period.year}`)}
+            className="font-bold underline"
+            style={{ color: COLOR_RETURNED }}
+          >
+            Payables Dashboard
+          </button> for {MONTHS[period.month]} {period.year}.
+        </p>
+      )}
+      {allRto.length > 0 && (
+        <div className="mt-2 px-3 py-2 rounded-lg flex items-start gap-2" style={{ background: `${COLOR_PENDING}0c`, border: `1px solid ${COLOR_PENDING}30` }}>
+          <Info className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" style={{ color: COLOR_PENDING }} />
+          <p className="text-[11px] leading-relaxed" style={{ color: 'var(--text-heading)' }}>
+            <strong>{allRto.map((r) => r.source).join(', ')}</strong> shows every return this month as RTO with
+            nothing collected first. That can be genuine — or it can mean that source's settlement file for this
+            period hasn't been uploaded yet, which would look identical (no matched settlement → treated as never
+            collected). Worth double-checking before trusting ₹0 payable liability from {allRto.length === 1 ? 'it' : 'them'}.
+          </p>
+        </div>
+      )}
+    </div>
+  );
+};
+
+// Same "By source" table as before, plus a Collected/RTO split per row so a
+// courier's (or non-Shopify Prepaid channel's) returns are legible without
+// opening the bridge strip's aggregate — "Collected" links straight through to
+// that same source's slice on Payables (as 'COD' or 'Marketplace Prepaid' there).
+const ReturnsBySourceTable = ({ rows, brandId, period, total, onOpenJourney }) => {
+  const navigate = useNavigate();
+  return (
+    <>
+      <p className="text-xs font-bold uppercase tracking-wide mb-2" style={{ color: 'var(--text-muted)' }}>By source (courier / prepaid)</p>
+      <table className="w-full text-sm">
+        <thead>
+          <tr style={{ borderBottom: '1.5px solid var(--card-border)' }}>
+            {['Source', 'Returns', 'Amount', 'Collected → Payables', 'RTO (no liability)', 'Share'].map((h) => (
+              <th key={h} className="px-2 py-2 text-left text-xs font-bold uppercase tracking-wide whitespace-nowrap" style={{ color: 'var(--text-muted)' }}>{h}</th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((r) => (
+              <tr key={r.source} style={{ borderBottom: '1px solid var(--card-border)' }}>
+                <td className="px-2 py-2.5 font-semibold whitespace-nowrap" style={{ color: 'var(--text-heading)' }}>{r.source}</td>
+                <td className="px-2 py-2.5" style={{ color: 'var(--text-body)' }}>{Number(r.count).toLocaleString('en-IN')}</td>
+                <td className="px-2 py-2.5 whitespace-nowrap font-semibold" style={{ color: COLOR_RETURNED }}>{money(r.amount)}</td>
+                <td className="px-2 py-2.5 whitespace-nowrap">
+                  <Num
+                    value={r.collected_amount}
+                    color={Number(r.collected_amount) > 0 ? COLOR_RETURNED : 'var(--text-muted)'}
+                    onClick={Number(r.collected_amount) > 0 ? () => navigate(`/brands/${brandId}/payables?fromMonth=${period.month}&fromYear=${period.year}&toMonth=${period.month}&toYear=${period.year}`) : undefined}
+                  />
+                </td>
+                <td className="px-2 py-2.5 whitespace-nowrap" style={{ color: 'var(--text-muted)' }}>
+                  {money(r.rto_amount)}
+                </td>
+                <td className="px-2 py-2.5" style={{ color: 'var(--text-muted)' }}>{pct(r.amount, total)}</td>
+              </tr>
+          ))}
+          {!rows.length && (
+            <tr><td colSpan={6} className="px-2 py-6 text-center text-xs" style={{ color: 'var(--text-muted)' }}>No returns this month.</td></tr>
+          )}
+        </tbody>
+        <tfoot>
+          <tr>
+            <td className="px-2 py-3 font-black" style={{ color: 'var(--text-heading)' }}>Total</td>
+            <td />
+            <td className="px-2 py-3 font-black whitespace-nowrap">
+              <Num value={total} color={COLOR_RETURNED} onClick={onOpenJourney ? () => onOpenJourney({ metricKey: 'returns_this_month', label: 'Returns (SRN)', color: COLOR_RETURNED }) : undefined} />
+            </td>
+            <td className="px-2 py-3 font-black whitespace-nowrap" style={{ color: COLOR_RETURNED }}>
+              {money(rows.reduce((s, r) => s + Number(r.collected_amount || 0), 0))}
+            </td>
+            <td className="px-2 py-3 font-black whitespace-nowrap" style={{ color: 'var(--text-muted)' }}>
+              {money(rows.reduce((s, r) => s + Number(r.rto_amount || 0), 0))}
+            </td>
+            <td />
+          </tr>
+        </tfoot>
+      </table>
+    </>
+  );
+};
+
+const ReturnsBySourceModal = ({ rows, byMonth, prepaidByChannel, brandId, period, total, count, onOpenJourney, onClose }) => (
   <div
     className="fixed inset-0 z-50 flex items-center justify-center p-4"
     style={{ background: 'rgba(15,23,42,0.45)' }}
@@ -960,40 +1094,9 @@ const ReturnsBySourceModal = ({ rows, byMonth, prepaidByChannel, period, total, 
         </button>
       </div>
       <div className="px-6 py-4 overflow-y-auto space-y-5">
+        <ReturnsPayablesBridge rows={rows} brandId={brandId} period={period} onOpenJourney={onOpenJourney} />
         <ReturnsByMonthTable rows={byMonth || []} period={period} total={total} />
-        <p className="text-xs font-bold uppercase tracking-wide mb-2" style={{ color: 'var(--text-muted)' }}>By source (courier / prepaid)</p>
-        <table className="w-full text-sm">
-          <thead>
-            <tr style={{ borderBottom: '1.5px solid var(--card-border)' }}>
-              {['Source', 'Returns', 'Amount', 'Share'].map((h) => (
-                <th key={h} className="px-2 py-2 text-left text-xs font-bold uppercase tracking-wide whitespace-nowrap" style={{ color: 'var(--text-muted)' }}>{h}</th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((r) => (
-              <tr key={r.source} style={{ borderBottom: '1px solid var(--card-border)' }}>
-                <td className="px-2 py-2.5 font-semibold whitespace-nowrap" style={{ color: 'var(--text-heading)' }}>{r.source}</td>
-                <td className="px-2 py-2.5" style={{ color: 'var(--text-body)' }}>{Number(r.count).toLocaleString('en-IN')}</td>
-                <td className="px-2 py-2.5 whitespace-nowrap font-semibold" style={{ color: COLOR_RETURNED }}>{money(r.amount)}</td>
-                <td className="px-2 py-2.5" style={{ color: 'var(--text-muted)' }}>{pct(r.amount, total)}</td>
-              </tr>
-            ))}
-            {!rows.length && (
-              <tr><td colSpan={4} className="px-2 py-6 text-center text-xs" style={{ color: 'var(--text-muted)' }}>No returns this month.</td></tr>
-            )}
-          </tbody>
-          <tfoot>
-            <tr>
-              <td className="px-2 py-3 font-black" style={{ color: 'var(--text-heading)' }}>Total</td>
-              <td />
-              <td className="px-2 py-3 font-black whitespace-nowrap">
-                <Num value={total} color={COLOR_RETURNED} onClick={onOpenJourney ? () => onOpenJourney({ metricKey: 'returns_this_month', label: 'Returns (SRN)', color: COLOR_RETURNED }) : undefined} />
-              </td>
-              <td />
-            </tr>
-          </tfoot>
-        </table>
+        <ReturnsBySourceTable rows={rows} brandId={brandId} period={period} total={total} onOpenJourney={onOpenJourney} />
         <PrepaidChannelBreakdown rows={prepaidByChannel} amountLabel="Returned" color={COLOR_RETURNED} />
       </div>
     </div>
@@ -1405,6 +1508,14 @@ const ReceivableDashboard = () => {
               <HandCoins className="w-3.5 h-3.5" />
               Advance Amount Dashboard →
             </button>
+            <button
+              onClick={() => navigate(`/brands/${brandId}/payables`)}
+              className="flex items-center gap-1.5 text-xs font-bold px-3 py-2 rounded-lg transition-colors"
+              style={{ background: `${COLOR_RETURNED}12`, color: COLOR_RETURNED, border: `1px solid ${COLOR_RETURNED}30` }}
+            >
+              <RotateCcw className="w-3.5 h-3.5" />
+              Payables Dashboard →
+            </button>
             <div className="flex items-center gap-1.5">
             <button
               onClick={() => shiftMonth(-1)}
@@ -1673,7 +1784,7 @@ const ReceivableDashboard = () => {
       {showReceivableByMonthModal && (
         <ReceivableByMonthModal
           title={`Total receivable as of ${MONTHS[month]} ${year} — how it's made up`}
-          subtitle={`Carried forward from earlier months + this month's own sales, still uncollected as of ${MONTHS[month]} ${year}'s close (COD+Prepaid combined — Prepaid always nets to ₹0 since it settles same-month; the partner breakdown below is COD only because Prepaid has no courier)`}
+          subtitle={`Carried forward from earlier months + this month's own sales, still uncollected as of ${MONTHS[month]} ${year}'s close (COD+Prepaid combined — a Prepaid order stays here until a delivery_status upload confirms it was actually delivered; the partner breakdown below is COD only because Prepaid has no courier)`}
           total={k.total_receivable_as_of_date}
           showMonthTable={false}
           summary={[
@@ -1690,7 +1801,7 @@ const ReceivableDashboard = () => {
       {showCarriedForwardModal && (
         <ReceivableByMonthModal
           title={`Carried forward as of ${MONTHS[month]} ${year} — by origin month`}
-          subtitle={`Orders sold BEFORE this month, still uncollected as of ${MONTHS[month]} ${year}'s close — excludes this month's own sales (COD+Prepaid combined; Prepaid nets to ₹0)`}
+          subtitle={`Orders sold BEFORE this month, still uncollected as of ${MONTHS[month]} ${year}'s close — excludes this month's own sales (COD+Prepaid combined — a Prepaid order stays here until a delivery_status upload confirms delivery)`}
           rows={(data?.receivableByMonth || []).filter((r) => !(r.month === month && r.year === year))}
           total={k.carried_forward_receivable}
           bridges={[carriedForwardBridge]}
@@ -1732,6 +1843,7 @@ const ReceivableDashboard = () => {
           rows={data?.returnsBySource || []}
           byMonth={data?.returnsByMonth || []}
           prepaidByChannel={data?.returnsPrepaidByChannel || []}
+          brandId={brandId}
           total={k.returns_this_month_amount}
           count={k.returns_this_month_count}
           period={{ month, year }}

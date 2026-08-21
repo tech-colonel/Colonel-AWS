@@ -99,6 +99,7 @@ export const RECO_AGENT_SPECS = [
       { key: 'ekart',        label: 'Ekart COD Settlement (opt.)',     hint: '.xlsx / .xls', required: false },
       { key: 'xpressbees',   label: 'Xpressbees COD Settlement (opt.)', hint: '.xlsx / .xls', required: false },
       { key: 'srn',          label: 'Combined SRN Report (opt.)',      hint: '.xlsx / .xls', required: false },
+      { key: 'delivery_status', label: 'Prepaid Delivery Status (opt.)', hint: '.xlsx / .xls — settles Prepaid orders once delivered', required: false },
     ],
   },
 ];

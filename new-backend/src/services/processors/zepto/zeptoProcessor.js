@@ -1,5 +1,6 @@
 const XLSX = require('xlsx-js-style');
 const { getStateCodeFromName, getStateAbbr } = require('../../../utils/gstStateCodes');
+const { createMissingMasterTracker } = require('../../../utils/missingMasterTracker');
 
 function safeNumber(value) {
   if (value === null || value === undefined || value === '') return 0;
@@ -68,6 +69,9 @@ async function zeptoProcessor(
 
   console.log(`Processing ${rawData.length} rows from Zepto raw file`);
 
+  // Track raw SKU/City values that aren't found in this brand's SKU/Ledger master
+  const missingMasterTracker = createMissingMasterTracker();
+
   // SKU map: Sales Portal SKU → { fg, rate }
   const skuMap = {};
   skuData.forEach(item => {
@@ -101,10 +105,16 @@ async function zeptoProcessor(
     const cityKey = safeString(row['City'] || '').toLowerCase();
 
     const skuEntry = withInventory ? (skuMap[skuName] || {}) : {};
+    if (withInventory && !skuMap[skuName] && skuName) {
+      missingMasterTracker.track({ masterType: 'sku', matchField: 'SKU', value: row['SKU Name'] });
+    }
     const fg = skuEntry.fg || '';
     const taxRate = safeNumber(skuEntry.rate || 0);
 
     const ledgerEntry = ledgerMap[cityKey] || {};
+    if (!ledgerMap[cityKey] && cityKey) {
+      missingMasterTracker.track({ masterType: 'ledger', matchField: 'City', value: row['City'] });
+    }
     const state = ledgerEntry.states || '';
     const tallyLedger = ledgerEntry.ledger || '';
     const baseInvoice = ledgerEntry.invoiceNo || '';
@@ -198,7 +208,7 @@ async function zeptoProcessor(
   const x2betaSheet = buildX2betaSheet(workingData, month, year, sellingState);
   XLSX.utils.book_append_sheet(outputWorkbook, x2betaSheet, 'x2beta working');
 
-  return { outputWorkbook, workingData, pivotData };
+  return { outputWorkbook, workingData, pivotData, missingMasterValues: missingMasterTracker.list() };
 }
 
 // ============================================================

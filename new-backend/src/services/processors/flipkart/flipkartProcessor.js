@@ -1,5 +1,6 @@
 const XLSX = require('xlsx-js-style');
 const { getStateAbbr } = require('../../../utils/gstStateCodes');
+const { createMissingMasterTracker } = require('../../../utils/missingMasterTracker');
 
 /**
  * GST State Code to State Name mapping
@@ -673,8 +674,8 @@ async function flipkartProcessor(rawFileBuffer, skuData, stateConfigData, brandN
   }
 
 
-  // Track missing SKUs
-  const missingSKUs = new Set();
+  // Track raw SKU/state values that aren't found in this brand's SKU/Ledger master
+  const missingMasterTracker = createMissingMasterTracker();
 
   // Process working file data
   const workingFileData = [];
@@ -737,6 +738,10 @@ async function flipkartProcessor(rawFileBuffer, skuData, stateConfigData, brandN
       }
     }
 
+    if (withInventory && !fg && cleanedSku) {
+      missingMasterTracker.track({ masterType: 'sku', matchField: 'Sales portal SKU', value: rawSku });
+    }
+
     // Get Seller State from GSTIN
     const sellerGstin = String(row['Seller GSTIN'] || '').trim();
     const sellerState = getStateFromGSTIN(sellerGstin);
@@ -747,6 +752,9 @@ async function flipkartProcessor(rawFileBuffer, skuData, stateConfigData, brandN
     // Lookup Tally Ledger and Invoice No from state config
     const normalizedDeliveryState = normalizeStateName(customerDeliveryState);
     const stateConfig = stateConfigMap[normalizedDeliveryState] || {};
+    if (!stateConfig.tallyLedger && normalizedDeliveryState) {
+      missingMasterTracker.track({ masterType: 'ledger', matchField: 'State', value: customerDeliveryState });
+    }
     const tallyLedgers = stateConfig.tallyLedger || '';
     const baseInvoiceNo = stateConfig.invoiceNo || '';
     // Insert the seller GSTIN's 2-digit state code before the month suffix so
@@ -1016,12 +1024,6 @@ async function flipkartProcessor(rawFileBuffer, skuData, stateConfigData, brandN
 
   }
 
-  // Check for missing SKUs
-  if (withInventory && missingSKUs.size > 0 && console.log("withinventory some", withInventory)) {
-    const error = new Error(`Some SKUs are missing from the database: ${Array.from(missingSKUs).join(', ')}`);
-    error.missingSKUs = Array.from(missingSKUs);
-    throw error;
-  }
   console.log(`Working file data: ${workingFileData.length} rows`);
 
   // ==========================
@@ -1629,7 +1631,8 @@ async function flipkartProcessor(rawFileBuffer, skuData, stateConfigData, brandN
     workingFileData,
     pivotData,
     afterPivotData,
-    outputWorkbook
+    outputWorkbook,
+    missingMasterValues: missingMasterTracker.list()
   };
 }
 

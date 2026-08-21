@@ -437,6 +437,10 @@ const generate = async (req, res, next) => {
             return res.status(400).json({ error: 'Invalid processor output' });
         }
 
+        if (processedData.missingMasterValues?.length > 0 && req.body.proceedWithoutMaster !== 'true') {
+            return res.status(400).json({ error: 'Missing master data values', missingMasterValues: processedData.missingMasterValues });
+        }
+
         // =====================================================
         // ✅ FILE GENERATION
         // =====================================================
@@ -563,6 +567,10 @@ const generatePreview = async (req, res, next) => {
         }
 
         if (!processedData?.process1Json) return res.status(400).json({ error: 'Invalid processor output' });
+
+        if (processedData.missingMasterValues?.length > 0 && req.body.proceedWithoutMaster !== 'true') {
+            return res.status(400).json({ error: 'Missing master data values', missingMasterValues: processedData.missingMasterValues });
+        }
 
         // Prepare finalData (will be used on commit)
         const monthMapping = { "January":1,"February":2,"March":3,"April":4,"May":5,"June":6,"July":7,"August":8,"September":9,"October":10,"November":11,"December":12 };

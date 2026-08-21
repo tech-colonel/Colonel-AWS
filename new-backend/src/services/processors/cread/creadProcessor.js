@@ -1,5 +1,6 @@
 const XLSX = require('xlsx-js-style');
 const { getStateCodeFromName, getStateAbbr } = require('../../../utils/gstStateCodes');
+const { createMissingMasterTracker } = require('../../../utils/missingMasterTracker');
 
 function safeNumber(value) {
   if (value === null || value === undefined || value === '') return 0;
@@ -73,6 +74,9 @@ async function creadProcessor(
 
   console.log(`Cread: ${finalData.length} total rows`);
 
+  // Track raw SKU/state values that aren't found in this brand's SKU/Ledger master
+  const missingMasterTracker = createMissingMasterTracker();
+
   // SKU map: portal SKU (lowercase) → Final SKU (Tally Item Name)
   const skuMap = {};
   skuData.forEach(item => {
@@ -122,12 +126,20 @@ async function creadProcessor(
     const shippingState = safeString(row['Shipping State'] || '');
 
     // SKU master lookup for Final SKU
+    const misSku = safeString(row['MIS SKU'] || '');
     const finalSku = withInventory
-      ? (skuMap[sku.toLowerCase()] || skuMap[safeString(row['MIS SKU'] || '').toLowerCase()] || '')
+      ? (skuMap[sku.toLowerCase()] || skuMap[misSku.toLowerCase()] || '')
       : '';
+
+    if (withInventory && !finalSku && (sku || misSku)) {
+      missingMasterTracker.track({ masterType: 'sku', matchField: 'SKU', value: sku || misSku });
+    }
 
     // Ledger master lookup for Party Name and Invoice No.
     const ledgerEntry = ledgerMap[shippingState.toLowerCase()] || {};
+    if (!ledgerEntry.partyName && shippingState) {
+      missingMasterTracker.track({ masterType: 'ledger', matchField: 'State', value: shippingState });
+    }
     const normalizedState = ledgerEntry.states || shippingState;
     const partyName = ledgerEntry.partyName || '';
     const invoiceNo = ledgerEntry.invoicePrefix && monthNum
@@ -244,7 +256,7 @@ async function creadProcessor(
   const x2betaSheet = buildX2betaSheet(workingData, month, year, sellingState);
   XLSX.utils.book_append_sheet(outputWorkbook, x2betaSheet, 'x2beta working');
 
-  return { outputWorkbook, workingData, pivotData };
+  return { outputWorkbook, workingData, pivotData, missingMasterValues: missingMasterTracker.list() };
 }
 
 // ============================================================

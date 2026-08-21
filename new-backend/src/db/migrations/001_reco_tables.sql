@@ -413,10 +413,14 @@ CREATE TABLE IF NOT EXISTS receivable_cycle_imports (
     sheet_name   VARCHAR(64) NOT NULL,
     row_index    INTEGER NOT NULL,
     row_data     JSON NOT NULL,
+    -- 022: which parser this row feeds ('tally' | 'delhivery' | 'ekart' | 'xpressbees' | 'srn') —
+    -- lets receivableLedgerBuilder.js source rows by role instead of a hardcoded literal filename.
+    role         VARCHAR(16),
     created_at   TIMESTAMPTZ DEFAULT NOW()
 );
 
 CREATE INDEX IF NOT EXISTS receivable_cycle_imports_brand_source_idx ON receivable_cycle_imports (brand_id, source_file, sheet_name);
+CREATE INDEX IF NOT EXISTS receivable_cycle_imports_brand_role_idx ON receivable_cycle_imports (brand_id, role);
 
 ALTER TABLE receivable_cycle_imports ENABLE ROW LEVEL SECURITY;
 ALTER TABLE receivable_cycle_imports FORCE ROW LEVEL SECURITY;
