@@ -702,6 +702,36 @@ def _read_tally_sheet(data: bytes) -> list[dict[str, Any]]:
 
     # Make column names unique
     raw_headers = [str(v).strip() if str(v) != "nan" else f"_col{i}" for i, v in enumerate(raw.iloc[header_idx])]
+
+    # Tally writes the REPORT TITLE into the header row's first cell — "Purchase
+    # Register", "Debit Note Register" — so the date column arrives with no usable
+    # label. Everything downstream looks the date up by the name "Date", so on such
+    # an export every single row failed that lookup and was discarded as a summary
+    # row: a 1,074-row register parsed to ZERO records while the reco still reported
+    # success, because the debit note (a normal export) supplied a handful.
+    #
+    # So identify the column by what it CONTAINS rather than what it is called: if
+    # the first column is not already labelled as a date but its values parse as
+    # dates, it is the date column. Renaming here rather than at each call site
+    # keeps the fix in one place. Done before the uniquifying pass below, so a
+    # register that genuinely has its own "Date" elsewhere still gets a distinct
+    # name and the positional column keeps priority.
+    if raw_headers:
+        first_label = raw_headers[0].strip().lower()
+        if "date" not in first_label:
+            sampled = parsed_ok = 0
+            for value in raw.iloc[header_idx + 1:, 0]:
+                if value is None or str(value).strip() in ("", "nan"):
+                    continue
+                sampled += 1
+                if parse_date(value):
+                    parsed_ok += 1
+                if sampled >= 30:
+                    break
+            # A clear majority, so a stray date in a text column cannot rename it.
+            if sampled and parsed_ok >= max(1, int(sampled * 0.6)):
+                raw_headers[0] = "Date"
+
     seen: dict[str, int] = {}
     headers = []
     for h in raw_headers:
@@ -722,6 +752,22 @@ def _read_tally_sheet(data: bytes) -> list[dict[str, Any]]:
         record["_src_row"] = int(src_idx)      # 0-based pandas row; Excel row = +1
         out.append(record)
     return out
+
+
+def _is_embedded_header_row(row: dict[str, Any]) -> bool:
+    """True when a data row is really a SECOND header band inside the register.
+
+    Registers reach us with another export pasted into them, so a sheet can carry
+    more than one header row. The parser locks onto the first and the rest sail
+    through as data — one became an invoice numbered "Voucher No.".
+
+    No supplier is called "Particulars", so a row carrying that as a VALUE is a
+    header. Kept as one function because parse_books skips these and the Proof
+    sheet has to count them: if the two ever disagreed, Control B would report the
+    register as not reconciling for a row the engine dropped on purpose.
+    """
+    return any(str(v).strip().lower() == "particulars"
+               for k, v in row.items() if not str(k).startswith("_"))
 
 
 def _state_from_voucher_type(voucher_type: Any) -> str:
@@ -833,6 +879,10 @@ def parse_books(purchase_data: bytes, debit_data: bytes) -> list[NormalizedInvoi
             continue
 
         for row in rows:
+            # A second header band pasted into the data — never an invoice.
+            if _is_embedded_header_row(row):
+                continue
+
             # Which register this row came from — needed to write the audit columns
             # back onto the right copied sheet.
             row["_src_sheet"] = source
@@ -2612,7 +2662,7 @@ def build_proof_sheet(wb: Any, results: list[Any], payload: dict) -> None:
 
     # ── B. Books ─────────────────────────────────────────────────────────────
     title("B.  Books — was every register row read?")
-    head(["Register", "Rows in file", "Records parsed", "Skipped (no date)", "Taxable value", "Control"])
+    head(["Register", "Rows in file", "Records parsed", "Skipped (no date / header)", "Taxable value", "Control"])
     books_recs = [b for b in (_get_val(x, "purchase", None) for x in results) if b is not None]
     b_tot_file = b_tot_parsed = b_tot_skipped = 0
     b_tot_val = 0.0
@@ -2626,9 +2676,12 @@ def build_proof_sheet(wb: Any, results: list[Any], payload: dict) -> None:
                 rows = _read_tally_sheet(_ensure_xlsx(_b64.b64decode(b64s)))
             except Exception:
                 continue
+            # Must mirror parse_books exactly, or Control B reports the register as
+            # not reconciling for rows the engine dropped deliberately.
             skipped = sum(1 for x in rows
                           if not str(x.get("Date", "") or "").strip()
-                          or str(x.get("Date", "")).strip() == "nan")
+                          or str(x.get("Date", "")).strip() == "nan"
+                          or _is_embedded_header_row(x))
             got = [x for x in books_recs
                    if (_get_val(x, "raw", {}) or {}).get("_src_sheet") == reg_name
                    and int((_get_val(x, "raw", {}) or {}).get("_file_idx", 0) or 0) == fi]
@@ -2642,7 +2695,8 @@ def build_proof_sheet(wb: Any, results: list[Any], payload: dict) -> None:
     ok_b = (b_tot_parsed + b_tot_skipped) == b_tot_file
     checks.append(ok_b)
     line(["TOTAL", b_tot_file, b_tot_parsed, b_tot_skipped, round(b_tot_val, 2)], bold=True, verdict=ok_b)
-    line(["Skipped rows are summary/blank lines with no date (e.g. Tally's grand total) — expected."])
+    line(["Skipped rows are summary/blank lines with no date (e.g. Tally's grand total), or a second "
+          "header band pasted into the register — expected."])
     blank()
 
     # ── C. Reconciliation ────────────────────────────────────────────────────
