@@ -158,6 +158,10 @@ const generate = async (req, res, next) => {
             useInventory
         );
 
+        if (processedData.missingMasterValues?.length > 0 && req.body.proceedWithoutMaster !== 'true') {
+            return res.status(400).json({ error: 'Missing master data values', missingMasterValues: processedData.missingMasterValues });
+        }
+
         const brandDb = getBrandConnection(brand.db_name);
         const tableName = agent.name.replace(/[^a-zA-Z0-9]/g, '_').toLowerCase();
         const Model = getDynamicModel(brandDb, tableName, agent.columns);
@@ -245,6 +249,10 @@ const generatePreview = async (req, res, next) => {
 
         if (!processedData || !processedData.workingFileData) {
             return res.status(400).json({ error: 'Processor Error: No data returned' });
+        }
+
+        if (processedData.missingMasterValues?.length > 0 && req.body.proceedWithoutMaster !== 'true') {
+            return res.status(400).json({ error: 'Missing master data values', missingMasterValues: processedData.missingMasterValues });
         }
 
         // 4. Prepare for Pending Store

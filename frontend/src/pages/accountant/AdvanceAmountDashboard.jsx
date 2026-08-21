@@ -6,11 +6,12 @@ import {
 } from 'recharts';
 import {
   ArrowLeft, HandCoins, TrendingUp, Clock, PackageX, LayoutDashboard, Bot, Loader2,
-  X, Info, ChevronLeft, ChevronRight,
+  X, Info, ChevronLeft, ChevronRight, Search, RotateCcw, Wallet,
 } from 'lucide-react';
 import api from '../../lib/api';
 import { sidebarFor } from '../../lib/adminNav';
 import AdvanceAmountSheetBrowser from '../../components/reco/AdvanceAmountSheetBrowser';
+import { OrderJourneyCard } from '../../components/reco/OrderJourney';
 
 const MONTHS = ['', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 const MONTH_NAMES = ['', 'January', 'February', 'March', 'April', 'May', 'June',
@@ -175,8 +176,6 @@ const TrendTooltip = ({ active, payload, label }) => {
   );
 };
 
-const DELIVERY_STATUS_LABEL = (s) => (s === 'partial' ? 'Partially delivered' : s);
-
 const fmtDate = (d) => {
   if (!d) return '—';
   const dt = new Date(d);
@@ -206,7 +205,6 @@ const FilteredOrdersModal = ({ brandId, range, filters, title, subtitle, sort, o
       page: String(page), pageSize: String(MODAL_PAGE_SIZE),
     });
     if (filters?.gateway) params.set('gateway', filters.gateway);
-    if (filters?.status) params.set('status', filters.status);
     if (filters?.agingBucket) params.set('agingBucket', filters.agingBucket);
     if (sort) params.set('sort', sort);
     api.get(`/api/dashboard/advance-amount/${brandId}/sheet?${params.toString()}`)
@@ -215,9 +213,9 @@ const FilteredOrdersModal = ({ brandId, range, filters, title, subtitle, sort, o
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [brandId, range?.fromMonth, range?.fromYear, range?.toMonth, range?.toYear, filters?.gateway, filters?.status, filters?.agingBucket, sort, page]);
+  }, [brandId, range?.fromMonth, range?.fromYear, range?.toMonth, range?.toYear, filters?.gateway, filters?.agingBucket, sort, page]);
 
-  useEffect(() => { setPage(1); }, [filters?.gateway, filters?.status, filters?.agingBucket]);
+  useEffect(() => { setPage(1); }, [filters?.gateway, filters?.agingBucket]);
 
   const totalPages = data ? Math.max(1, Math.ceil(data.total / MODAL_PAGE_SIZE)) : 1;
 
@@ -253,7 +251,7 @@ const FilteredOrdersModal = ({ brandId, range, filters, title, subtitle, sort, o
                 <table className="w-full text-sm">
                   <thead>
                     <tr style={{ background: 'var(--page-bg)', borderBottom: '1.5px solid var(--card-border)' }}>
-                      {['Date', 'Order #', 'Invoice #', 'Gateway', 'Advance received', 'Status', 'Days pending'].map((h) => (
+                      {['Date', 'Order #', 'Invoice #', 'Gateway', 'Advance received', 'Days pending'].map((h) => (
                         <th key={h} className="px-3 py-2 text-left text-xs font-bold uppercase tracking-wide whitespace-nowrap" style={{ color: 'var(--text-muted)' }}>{h}</th>
                       ))}
                     </tr>
@@ -266,12 +264,11 @@ const FilteredOrdersModal = ({ brandId, range, filters, title, subtitle, sort, o
                         <td className="px-3 py-2.5 whitespace-nowrap" style={{ color: 'var(--text-muted)' }}>{r.invoice_number || '—'}</td>
                         <td className="px-3 py-2.5 whitespace-nowrap" style={{ color: 'var(--text-body)' }}>{r.gateway}</td>
                         <td className="px-3 py-2.5 whitespace-nowrap font-semibold" style={{ color: COLOR_PENDING }}>{money(r.gateway_amount)}</td>
-                        <td className="px-3 py-2.5 whitespace-nowrap" style={{ color: 'var(--text-muted)' }}>{DELIVERY_STATUS_LABEL(r.delivery_status)}</td>
                         <td className="px-3 py-2.5 whitespace-nowrap" style={{ color: 'var(--text-body)' }}>{Number(r.days_pending).toLocaleString('en-IN')}</td>
                       </tr>
                     ))}
                     {!data.rows.length && (
-                      <tr><td colSpan={7} className="px-3 py-10 text-center text-xs" style={{ color: 'var(--text-muted)' }}>No orders match this filter.</td></tr>
+                      <tr><td colSpan={6} className="px-3 py-10 text-center text-xs" style={{ color: 'var(--text-muted)' }}>No orders match this filter.</td></tr>
                     )}
                   </tbody>
                 </table>
@@ -308,10 +305,9 @@ const FilteredOrdersModal = ({ brandId, range, filters, title, subtitle, sort, o
 };
 
 // Backs the "Advance received" and "Orders" KPI cards — the same total, broken down
-// two ways (by gateway, by delivery status), each row clickable through to its orders.
+// by gateway, each row clickable through to its orders.
 const AdvanceBreakdownModal = ({ data, k, period, onOpenOrders, onClose }) => {
   const byGateway = data?.byGateway || [];
-  const byStatus = data?.byStatus || [];
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: 'rgba(15,23,42,0.45)' }} onClick={onClose}>
       <div
@@ -322,10 +318,10 @@ const AdvanceBreakdownModal = ({ data, k, period, onOpenOrders, onClose }) => {
         <div className="flex items-center justify-between px-6 py-4 flex-shrink-0" style={{ borderBottom: '1px solid var(--card-border)' }}>
           <div>
             <h3 className="text-base font-black" style={{ color: 'var(--text-heading)', fontFamily: 'Barlow' }}>
-              Advance received — not yet delivered, {period}
+              Advance received — not yet delivered as of {period}
             </h3>
             <p className="text-xs mt-0.5" style={{ color: 'var(--text-muted)' }}>
-              Prepaid-gateway cash sitting against orders with no delivery confirmation — by gateway and by status
+              Prepaid-gateway cash received for orders not yet resolved in the Sales Order Combined file as of this range's end — by gateway
             </p>
           </div>
           <button onClick={onClose} aria-label="Close" className="p-1.5 rounded-lg" style={{ color: 'var(--text-muted)' }}>
@@ -359,25 +355,16 @@ const AdvanceBreakdownModal = ({ data, k, period, onOpenOrders, onClose }) => {
             />
           </div>
 
-          <div>
-            <p className="text-xs font-bold uppercase tracking-wide mb-2" style={{ color: 'var(--text-muted)' }}>By delivery status</p>
-            <BreakdownTable
-              columns={['Status', 'Orders', 'Amount', 'Share']}
-              rows={byStatus} keyField="status" labelFormatter={DELIVERY_STATUS_LABEL}
-              total={k.total_advance_amount}
-              emptyLabel="No advance received in this range."
-              onRowClick={(r) => onOpenOrders(
-                { status: r.status === 'Not dispatched' ? 'not_dispatched' : r.status },
-                `${DELIVERY_STATUS_LABEL(r.status)} — advance received`,
-              )}
-            />
-          </div>
-
           <FormulaNote>
             <strong>Formula:</strong> Advance received = Snapmint settlement + BharatX settlement + Razorpay
-            settlement, summed only for orders whose <code>delivery_status</code> is not <code>DELIVERED</code>
-            (blank/not-dispatched, partial, or any other non-delivered status), dispatched within the selected date
-            range. An order can appear in more than one gateway row if more than one gateway shows money against it.
+            settlement, summed for every Shopify Prepaid order whose gateway amount was received in the selected
+            range <strong>and</strong> that is still not resolved in the Sales Order Combined file as of this
+            range's end — either no entry was ever found there, or one was found but its own delivery/dispatch/
+            cancellation date falls after the range you're viewing. Worked example: an order's cash arrives 25 May
+            2024, it's delivered 3 June 2024. Viewing May 2024 → May 2024, it's still Advance (delivery hasn't
+            happened as of the range's end). Viewing May 2024 → June 2024, it's no longer Advance (delivery now
+            falls inside the range) — same order, same data, different as-of date. An order can appear in more
+            than one gateway row if more than one gateway shows money against it.
           </FormulaNote>
         </div>
       </div>
@@ -419,7 +406,7 @@ const AgingModal = ({ brandId, range, aging, total, period, onOpenOrders, onClos
               Aging — how long this cash has been sitting, {period}
             </h3>
             <p className="text-xs mt-0.5" style={{ color: 'var(--text-muted)' }}>
-              Days since dispatch, as of today — not marked delivered, advance still outstanding
+              Days since the gateway amount was received, as of this range's end — still not resolved in the Sales Order Combined file
             </p>
           </div>
           <button onClick={onClose} aria-label="Close" className="p-1.5 rounded-lg" style={{ color: 'var(--text-muted)' }}>
@@ -448,7 +435,7 @@ const AgingModal = ({ brandId, range, aging, total, period, onOpenOrders, onClos
                 <table className="w-full text-sm">
                   <thead>
                     <tr style={{ background: 'var(--page-bg)', borderBottom: '1.5px solid var(--card-border)' }}>
-                      {['Date', 'Order #', 'Gateway', 'Advance received', 'Status', 'Days pending'].map((h) => (
+                      {['Date', 'Order #', 'Gateway', 'Advance received', 'Days pending'].map((h) => (
                         <th key={h} className="px-2 py-2 text-left text-xs font-bold uppercase tracking-wide whitespace-nowrap" style={{ color: 'var(--text-muted)' }}>{h}</th>
                       ))}
                     </tr>
@@ -460,12 +447,11 @@ const AgingModal = ({ brandId, range, aging, total, period, onOpenOrders, onClos
                         <td className="px-2 py-2.5 whitespace-nowrap font-medium" style={{ color: 'var(--text-heading)' }}>{r.sale_order_number || '—'}</td>
                         <td className="px-2 py-2.5 whitespace-nowrap" style={{ color: 'var(--text-body)' }}>{r.gateway}</td>
                         <td className="px-2 py-2.5 whitespace-nowrap font-semibold" style={{ color: COLOR_PENDING }}>{money(r.gateway_amount)}</td>
-                        <td className="px-2 py-2.5 whitespace-nowrap" style={{ color: 'var(--text-muted)' }}>{DELIVERY_STATUS_LABEL(r.delivery_status)}</td>
                         <td className="px-2 py-2.5 whitespace-nowrap font-semibold" style={{ color: COLOR_RETURNED }}>{Number(r.days_pending).toLocaleString('en-IN')}</td>
                       </tr>
                     ))}
                     {!(oldest || []).length && (
-                      <tr><td colSpan={6} className="px-2 py-6 text-center text-xs" style={{ color: 'var(--text-muted)' }}>No advance received in this range.</td></tr>
+                      <tr><td colSpan={5} className="px-2 py-6 text-center text-xs" style={{ color: 'var(--text-muted)' }}>No advance received in this range.</td></tr>
                     )}
                   </tbody>
                 </table>
@@ -474,13 +460,92 @@ const AgingModal = ({ brandId, range, aging, total, period, onOpenOrders, onClos
           </div>
 
           <FormulaNote>
-            <strong>Formula:</strong> Days pending = today minus the order's dispatch date. Avg. days pending
+            <strong>Formula:</strong> Days pending = the end of the selected range's "To" month (capped at today)
+            minus the date the gateway amount was received — so picking Mar 2024 → Mar 2024 ages every row against
+            31 Mar 2024, not the real calendar date; a same-month order tops out around 30 days. Avg. days pending
             averages this across every order in the selected range; Oldest advance is the single largest value.
-            Buckets above use the same day counts as the "Days pending" column in the order browser.
           </FormulaNote>
         </div>
       </div>
     </div>
+  );
+};
+
+// Lookup-by-order/invoice/AWB card for the Advance Amount Dashboard — deliberately
+// NOT scoped to the dashboard's date range or its no-fulfillment-record-found filter
+// (see getAdvanceOrderStatus), so it finds any order that took a gateway advance
+// regardless of whether it was later found in the Sales Order Combined file.
+const OrderTrackerCard = ({ brandId }) => {
+  const [inputValue, setInputValue] = useState('');
+  const [query, setQuery] = useState('');
+  const [results, setResults] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    if (!query) { setResults(null); setError(null); return; }
+    setLoading(true);
+    setError(null);
+    api.get(`/api/dashboard/advance-amount/${brandId}/order-status?${new URLSearchParams({ q: query })}`)
+      .then((res) => setResults(res.data.results || []))
+      .catch((e) => setError(e.response?.data?.error || 'Lookup failed'))
+      .finally(() => setLoading(false));
+  }, [brandId, query]);
+
+  const submit = () => setQuery(inputValue.trim());
+
+  return (
+    <SectionCard title="Track an order" icon={Search}>
+      <p className="text-xs mb-3" style={{ color: 'var(--text-muted)' }}>
+        Search an order number, invoice number, or AWB to see its gateway advance details — only finds orders
+        that received a Snapmint/BharatX/Razorpay advance. An order paid another way won't turn up here even if
+        the number matches.
+      </p>
+      <div className="flex items-center gap-2 mb-4">
+        <div className="relative flex-1 max-w-sm">
+          <Search className="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2" style={{ color: 'var(--text-muted)' }} />
+          <input
+            value={inputValue}
+            onChange={(e) => setInputValue(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter') submit(); }}
+            placeholder="Order #, invoice #, or AWB"
+            className="text-sm pl-8 pr-3 py-2 rounded-lg w-full"
+            style={{ background: 'var(--page-bg)', border: '1px solid var(--card-border)', color: 'var(--text-heading)' }}
+          />
+        </div>
+        <button
+          onClick={submit}
+          className="text-xs font-bold px-4 py-2 rounded-lg flex-shrink-0"
+          style={{ background: `${COLOR_PRIMARY}12`, color: COLOR_PRIMARY }}
+        >
+          Track
+        </button>
+      </div>
+
+      {loading && (
+        <div className="flex items-center gap-2 text-xs" style={{ color: 'var(--text-muted)' }}>
+          <Loader2 className="w-3.5 h-3.5 animate-spin" /> Searching…
+        </div>
+      )}
+      {!loading && error && <p className="text-xs font-semibold" style={{ color: COLOR_RETURNED }}>{error}</p>}
+      {!loading && !error && query && results && results.length === 0 && (
+        <p className="text-xs" style={{ color: 'var(--text-muted)' }}>No order found matching "{query}".</p>
+      )}
+      {!loading && !error && results && results.length > 0 && (
+        <div className="space-y-4">
+          {results.map((order, i) => (
+            <OrderJourneyCard key={`${order.sale_order_number}-${order.awb_number}-${i}`} order={order} />
+          ))}
+        </div>
+      )}
+
+      <FormulaNote>
+        This lookup shows every order that ever took a Snapmint/BharatX/Razorpay advance, whether or not it was
+        later resolved in the Sales Order Combined file — it's a general search, not scoped to the selected date
+        range or the Advance list below. To see only the orders still counting as Advance as of a given range, use
+        the order browser instead.
+      </FormulaNote>
+    </SectionCard>
   );
 };
 
@@ -551,7 +616,6 @@ const AdvanceAmountDashboard = () => {
 
   const k = data?.kpis || {};
   const byGateway = data?.byGateway || [];
-  const byStatus = data?.byStatus || [];
   const aging = data?.aging || [];
   const range = (fromMonth && fromYear && toMonth && toYear) ? { fromMonth, fromYear, toMonth, toYear } : null;
 
@@ -604,13 +668,29 @@ const AdvanceAmountDashboard = () => {
                 Advance Amount Dashboard
               </h1>
               <p className="text-xs mt-0.5" style={{ color: 'var(--text-muted)' }}>
-                Prepaid amounts received via BharatX, Razorpay &amp; Snapmint for orders not yet delivered
+                Prepaid amounts received via BharatX, Razorpay &amp; Snapmint for orders not yet delivered as of the selected range
               </p>
             </div>
           </div>
 
           {/* Date range picker */}
           <div className="flex items-center gap-1.5 flex-wrap">
+            <button
+              onClick={() => navigate(`/brands/${brandId}/receivables`)}
+              className="flex items-center gap-1.5 text-xs font-bold px-3 py-2 rounded-lg transition-colors mr-1"
+              style={{ background: `${COLOR_SALES}12`, color: COLOR_SALES, border: `1px solid ${COLOR_SALES}30` }}
+            >
+              <Wallet className="w-3.5 h-3.5" />
+              Receivable Dashboard →
+            </button>
+            <button
+              onClick={() => navigate(`/brands/${brandId}/payables`)}
+              className="flex items-center gap-1.5 text-xs font-bold px-3 py-2 rounded-lg transition-colors mr-1"
+              style={{ background: `${COLOR_RETURNED}12`, color: COLOR_RETURNED, border: `1px solid ${COLOR_RETURNED}30` }}
+            >
+              <RotateCcw className="w-3.5 h-3.5" />
+              Payables Dashboard →
+            </button>
             <span className="text-xs font-bold" style={{ color: 'var(--text-muted)' }}>From</span>
             <select
               value={fromMonth ?? ''}
@@ -652,6 +732,8 @@ const AdvanceAmountDashboard = () => {
           </div>
         </div>
 
+        <OrderTrackerCard brandId={brandId} />
+
         {loading && (
           <div className="flex items-center justify-center h-64">
             <Loader2 className="w-8 h-8 animate-spin" style={{ color: COLOR_PENDING }} />
@@ -665,8 +747,8 @@ const AdvanceAmountDashboard = () => {
         {!loading && !error && !data?.kpis && (
           <div className="p-8 text-center" style={cardStyle}>
             <p className="text-sm font-semibold" style={{ color: 'var(--text-muted)' }}>
-              No advance-received-but-not-delivered orders found for this brand yet — check that the Order Cycle
-              (Shopify) agent has been run with the Snapmint / BharatX / Razorpay gateway files loaded.
+              No orders with a Snapmint / BharatX / Razorpay advance found for this brand yet — check that the
+              Receivable Cycle agent has been run with the Snapmint/Razorpay/BharatX gateway files loaded.
             </p>
           </div>
         )}
@@ -674,7 +756,7 @@ const AdvanceAmountDashboard = () => {
         {!loading && !error && data?.kpis && (
           <>
             <p className="text-xs font-bold uppercase tracking-wide" style={{ color: 'var(--text-muted)' }}>
-              {rangeLabel} — orders sold in this range
+              {rangeLabel} — orders whose prepaid amount was received in this range and not yet delivered as of this range's end
             </p>
 
             {/* ── KPI row ───────────────────────────────────────────── */}
@@ -682,21 +764,21 @@ const AdvanceAmountDashboard = () => {
               <KpiCard
                 label="Advance received — not yet delivered"
                 value={money(k.total_advance_amount)}
-                sub="Cash collected via a prepaid gateway that isn't earned revenue yet. Click for breakdown by gateway & status"
+                sub="Gateway amount received in the selected range for orders not yet resolved in the Sales Order Combined file as of this range's end. Once its own delivered/dispatched/cancelled date falls inside a range you're viewing, it drops off this figure — for that range and any later one. Click for breakdown by gateway"
                 icon={HandCoins} color={COLOR_PENDING} highlight
                 onClick={() => setShowBreakdownModal(true)}
               />
               <KpiCard
                 label="Orders"
                 value={Number(k.total_orders || 0).toLocaleString('en-IN')}
-                sub="Orders with an advance and no delivery confirmation. Click for breakdown"
+                sub="Orders with an advance received in this range, not yet resolved in the Sales Order Combined file as of this range's end. Click for breakdown"
                 icon={PackageX} color={COLOR_SALES}
                 onClick={() => setShowBreakdownModal(true)}
               />
               <KpiCard
                 label="Avg. days pending"
                 value={Number(k.avg_days_pending || 0).toFixed(0)}
-                sub="Average age of outstanding advance, in days. Click for aging breakdown"
+                sub="Average age of this cash, in days since received, as of this range's end. Click for aging breakdown"
                 icon={Clock} color={COLOR_PRIMARY}
                 onClick={() => setShowAgingModal(true)}
               />
@@ -710,7 +792,7 @@ const AdvanceAmountDashboard = () => {
             </div>
 
             {/* ── Trend chart ─────────────────────────────────────────── */}
-            <SectionCard title="Advance outstanding — by month" icon={TrendingUp}>
+            <SectionCard title="Advance received — by month" icon={TrendingUp}>
               <div style={{ width: '100%', height: 280 }}>
                 <ResponsiveContainer>
                   <LineChart data={trend} margin={{ top: 8, right: 16, left: 8, bottom: 0 }}>
@@ -736,40 +818,26 @@ const AdvanceAmountDashboard = () => {
                 </ResponsiveContainer>
               </div>
               <p className="text-[11px] mt-2" style={{ color: 'var(--text-muted)' }}>
-                Sum of prepaid-gateway amount received for orders (dispatched in that month) that are still not
-                marked delivered, as of today. Click any point to see that month's orders.
+                Sum of prepaid-gateway amount received in that month, for orders not yet delivered as of the
+                overall selected range's end. Click any point to see that month's orders.
               </p>
             </SectionCard>
 
             {/* ── Breakdowns ───────────────────────────────────────────── */}
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-              <SectionCard title="By gateway" icon={HandCoins}>
-                <BreakdownTable
-                  columns={['Gateway', 'Orders', 'Amount', 'Share']}
-                  rows={byGateway} keyField="gateway"
-                  total={k.total_advance_amount}
-                  emptyLabel="No advance received in this range."
-                  onRowClick={(r) => openOrders({ gateway: r.gateway.toLowerCase() }, `${r.gateway} — advance received`)}
-                />
-              </SectionCard>
-              <SectionCard title="By delivery status" icon={PackageX}>
-                <BreakdownTable
-                  columns={['Status', 'Orders', 'Amount', 'Share']}
-                  rows={byStatus} keyField="status" labelFormatter={DELIVERY_STATUS_LABEL}
-                  total={k.total_advance_amount}
-                  emptyLabel="No advance received in this range."
-                  onRowClick={(r) => openOrders(
-                    { status: r.status === 'Not dispatched' ? 'not_dispatched' : r.status },
-                    `${DELIVERY_STATUS_LABEL(r.status)} — advance received`,
-                  )}
-                />
-              </SectionCard>
-            </div>
+            <SectionCard title="By gateway" icon={HandCoins}>
+              <BreakdownTable
+                columns={['Gateway', 'Orders', 'Amount', 'Share']}
+                rows={byGateway} keyField="gateway"
+                total={k.total_advance_amount}
+                emptyLabel="No advance received in this range."
+                onRowClick={(r) => openOrders({ gateway: r.gateway.toLowerCase() }, `${r.gateway} — advance received`)}
+              />
+            </SectionCard>
 
             <SectionCard
               title="Aging — how long has this cash been sitting"
               icon={Clock}
-              right={<span className="text-[11px]" style={{ color: 'var(--text-muted)' }}>Days since dispatch, as of today</span>}
+              right={<span className="text-[11px]" style={{ color: 'var(--text-muted)' }}>Days since the gateway amount was received</span>}
             >
               <BreakdownTable
                 columns={['Age', 'Orders', 'Amount', 'Share']}

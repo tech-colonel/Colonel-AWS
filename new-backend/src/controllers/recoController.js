@@ -674,6 +674,114 @@ const saveReceivableCycleResults = async (sequelize, jobId, brandId, mainRows, c
   }
 };
 
+// Which upload field feeds which receivableLedgerBuilder.js role. 'sales_order' has no
+// role — it isn't consumed anywhere in the ledger ETL (confirmed: only tally_gst/
+// delhivery/ekart/xpressbees/srn/delivery_status feed receivable_ledger; see
+// RECEIVABLES_CYCLE.md §3). 'delivery_status' is the delivery-confirmation feed that
+// settles marketplace Prepaid orders (Amazon/Flipkart/Myntra/etc) — Prepaid no longer
+// auto-settles same-month as the sale (see receivableLedgerBuilder.js), so without this
+// upload a brand's Prepaid orders simply stay unsettled until one is provided.
+const RECEIVABLE_CYCLE_FILE_ROLES = {
+  tally_gst: 'tally',
+  delhivery: 'delhivery',
+  ekart: 'ekart',
+  xpressbees: 'xpressbees',
+  srn: 'srn',
+  delivery_status: 'delivery_status',
+};
+
+// Column signatures used to pick the right sheet out of a workbook when a role's
+// source file has multiple sheets (title/pivot sheets, legacy vs current-year sheets,
+// etc — the raw courier/SRN exports seen in practice are rarely a single clean sheet).
+// 'delivery_status' has no real-world sample yet (new upload type) — the signature and
+// the column aliases in receivableLedgerBuilder.js's parser are a best guess at common
+// header names and should be tightened once a real file is seen.
+const ROLE_SHEET_SIGNATURES = {
+  tally: ['Invoice number', 'Total', 'AWB num'],
+  delhivery: ['waybill_num'],
+  ekart: ['TRACKING_ID', 'COD_AMOUNT'],
+  xpressbees: ['Net Payment'],
+  srn: ['Original Invoice No', 'Total'],
+  delivery_status: ['AWB', 'Delivery Status'],
+};
+
+function pickBestSheet(workbook, XLSX, signature) {
+  let best = null;
+  let bestScore = 0;
+  for (const sheetName of workbook.SheetNames) {
+    const rows = XLSX.utils.sheet_to_json(workbook.Sheets[sheetName], { defval: null, range: 0 });
+    if (!rows.length) continue;
+    const headers = Object.keys(rows[0]);
+    const score = signature.filter((col) => headers.includes(col)).length;
+    if (score > bestScore) { bestScore = score; best = { sheetName, rows }; }
+  }
+  return bestScore > 0 ? best : null;
+}
+
+/**
+ * Additive persistence for the Receivable Cycle agent's global (cross-month) ledger.
+ * Parses the RAW uploaded files (independent of the per-job Python engine's own
+ * matching, which is untouched — see recon/receivable_cycle.py) into
+ * receivable_cycle_imports tagged by role, then rebuilds receivable_ledger for this
+ * brand from whatever role-tagged rows now exist. Never throws into the caller —
+ * this runs fire-and-forget after the job's own response has already been sent.
+ */
+const saveReceivableCycleImportsAndRebuildLedger = async (sequelize, brandId, files) => {
+  try {
+    const XLSX = require('xlsx');
+    const roleFiles = (files || []).filter((f) => RECEIVABLE_CYCLE_FILE_ROLES[f.fieldname]);
+    if (!roleFiles.length) return;
+
+    for (const file of roleFiles) {
+      const role = RECEIVABLE_CYCLE_FILE_ROLES[file.fieldname];
+      let workbook;
+      try {
+        workbook = XLSX.read(file.buffer, { type: 'buffer' });
+      } catch (e) {
+        console.error(`[RECO-DB] receivable_cycle import: could not parse ${file.originalname}:`, e.message);
+        continue;
+      }
+      const picked = pickBestSheet(workbook, XLSX, ROLE_SHEET_SIGNATURES[role]);
+      if (!picked) {
+        console.log(`[RECO-DB] receivable_cycle import: no sheet in ${file.originalname} matched the '${role}' column signature, skipped`);
+        continue;
+      }
+
+      // A re-upload of the same file name replaces its own prior import rows rather
+      // than accumulating duplicates (mirrors buildReceivableLedger.js's own
+      // "batch rebuild from scratch" philosophy, just scoped to one file).
+      await sequelize.query(
+        `DELETE FROM receivable_cycle_imports WHERE brand_id = $1 AND source_file = $2 AND role = $3`,
+        { bind: [brandId, file.originalname, role] }
+      );
+
+      const CHUNK = 500;
+      for (let i = 0; i < picked.rows.length; i += CHUNK) {
+        const batch = picked.rows.slice(i, i + CHUNK);
+        const placeholders = [];
+        const bind = [];
+        batch.forEach((row, idx) => {
+          const base = bind.length;
+          placeholders.push(`($${base + 1},$${base + 2},$${base + 3},$${base + 4},$${base + 5}::json,$${base + 6})`);
+          bind.push(brandId, file.originalname, picked.sheetName, i + idx, JSON.stringify(row), role);
+        });
+        await sequelize.query(
+          `INSERT INTO receivable_cycle_imports (brand_id, source_file, sheet_name, row_index, row_data, role)
+           VALUES ${placeholders.join(',')}`,
+          { bind }
+        );
+      }
+      console.log(`[RECO-DB] receivable_cycle import: ${file.originalname} :: ${picked.sheetName} -> ${picked.rows.length} rows tagged role=${role}`);
+    }
+
+    const { rebuildReceivableLedgerForBrand } = require('../services/receivableLedgerBuilder');
+    const result = await rebuildReceivableLedgerForBrand(sequelize, brandId);
+    console.log(`[RECO-DB] receivable_ledger rebuilt for brand ${brandId}: ${result.ledgerRows} orders, settlements=${JSON.stringify(result.settlementSummary)}, prepaidDeliveries=${JSON.stringify(result.prepaidDeliverySummary)}, srn=${JSON.stringify(result.srnSummary)}`);
+  } catch (err) {
+    console.error('[RECO-DB] saveReceivableCycleImportsAndRebuildLedger error:', err.message, err.stack?.split('\n')[1]);
+  }
+};
+
 // Frontend reco types that use the gstr_2b_books Python engine → persist to gstr_2b_results
 const GST_2B_FRONTEND_TYPES = new Set([
   'gstr_2b_books', 'gstr_2a_vs_2b_vs_books', 'gstr_2b_vs_purchase',
@@ -1868,6 +1976,9 @@ const runReco = async (req, res) => {
             await saveReceivableCycleResults(seq, savedJobId, brandId, pyResults,
               response.data?.cod_sheets, response.data?.main_sheet_columns, response.data?.cod_sheet_columns,
               response.data?.receivable_summary);
+            // Additive: also feeds the global cross-month Receivable Dashboard
+            // (receivable_ledger), separate from this job's own per-run Excel output above.
+            await saveReceivableCycleImportsAndRebuildLedger(seq, brandId, req.files);
           } else {
             console.log(`[RECO-DB] Skipping GST rows: savedJobId=${savedJobId} isGST=${GST_2B_FRONTEND_TYPES.has(recoType)}`);
           }

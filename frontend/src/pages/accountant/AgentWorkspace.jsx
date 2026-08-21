@@ -23,8 +23,10 @@ import OrderCycleShopifyWorkspace from './OrderCycleShopifyWorkspace';
 import SettlementAmazonWorkspace from './SettlementAmazonWorkspace';
 import TotalSalesAnalyzerModal from './TotalSalesAnalyzerModal';
 import NykaaWorkspace from './NykaaWorkspace';
+import PepperfryWorkspace from './PepperfryWorkspace';
 import WorkflowApplyModal from './WorkflowApplyModal';
 import WorkflowManagerModal from '../admin/WorkflowManagerModal';
+import MissingMasterDataModal from '../../components/reco/MissingMasterDataModal';
 
 const AgentWorkspace = () => {
   const { brandId, agentId } = useParams();
@@ -76,6 +78,8 @@ const AgentWorkspace = () => {
   const [showTotalSalesAnalyzer, setShowTotalSalesAnalyzer] = useState(false);
   const [showWorkflowModal, setShowWorkflowModal] = useState(false);
   const [showWorkflowManager, setShowWorkflowManager] = useState(false);
+  const [showMissingMasterModal, setShowMissingMasterModal] = useState(false);
+  const [missingMasterValues, setMissingMasterValues] = useState([]);
 
   // MIS Modal States
   const [showConfigMISModal, setShowConfigMISModal] = useState(false);
@@ -177,10 +181,13 @@ const AgentWorkspace = () => {
       if (name.includes('zepto')) return 'zepto';
       if (name.includes('firstcry')) return 'firstcry';
       if (name.includes('jiomart')) return 'jiomart';
+      if (name.includes('tatacliq')) return 'tatacliq';
       if (name.includes('cread')) return 'cread';
       if (name.includes('limeroad')) return 'limeroad';
       if (name.includes('mirrow')) return 'mirrow';
       if (name.includes('nykaa')) return 'nykaa';
+      if (name.includes('pepperfry')) return 'pepperfry';
+      if (name.includes('varee')) return 'varee';
       if (name.includes('total-sales')) return 'total-sales-analyzer';
       if (name.includes('shopify')) return 'shopify';
       return 'amazon';
@@ -371,7 +378,7 @@ const AgentWorkspace = () => {
   };
 
   // Phase 1: call /preview — runs processor, returns summary, does NOT save yet
-  const confirmAndGenerate = async () => {
+  const confirmAndGenerate = async (proceedWithoutMaster = false) => {
     const data = new FormData();
     if (isMyntra) {
       if (formData.rtoFile) data.append('rtoFile', formData.rtoFile);
@@ -390,6 +397,9 @@ const AgentWorkspace = () => {
     if (isAmazon) {
       data.append('multi_state_sale', formData.multi_state_sale);
     }
+    if (proceedWithoutMaster) {
+      data.append('proceedWithoutMaster', 'true');
+    }
 
     setIsGenerating(true);
     setShowInvoicePreviewModal(false);
@@ -404,7 +414,13 @@ const AgentWorkspace = () => {
       setVerificationData(res.data); // { taskId, rowCount, summary }
       setShowVerificationModal(true);
     } catch (error) {
-      toast.error(error.response?.data?.error || 'Failed to process file');
+      const missing = error.response?.data?.missingMasterValues;
+      if (missing?.length > 0) {
+        setMissingMasterValues(missing);
+        setShowMissingMasterModal(true);
+      } else {
+        toast.error(error.response?.data?.error || 'Failed to process file');
+      }
     } finally {
       setIsGenerating(false);
     }
@@ -552,6 +568,7 @@ const AgentWorkspace = () => {
   const isSettlement = agent?.name?.toLowerCase().includes('settlement');
   const isTotalSalesAnalyzer = agent?.name?.toLowerCase().includes('total-sales');
   const isNykaa = agent?.name?.toLowerCase().includes('nykaa');
+  const isPepperfry = agent?.name?.toLowerCase().includes('pepperfry');
   const isMirrow = agent?.name?.toLowerCase().includes('mirrow');
   const isCread = agent?.name?.toLowerCase().includes('cread');
   const isLimeroad = agent?.name?.toLowerCase().includes('limeroad');
@@ -670,6 +687,33 @@ const AgentWorkspace = () => {
             </Button>
           </div>
           <NykaaWorkspace agent={agent} />
+        </div>
+      ) : isPepperfry ? (
+        <div className="p-6" data-testid="pepperfry-workspace">
+          <div className="mb-8 flex justify-between items-start">
+            <div>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => navigate(`/brands/${brandId}/agents`)}
+                className="mb-4"
+                data-testid="back-button"
+              >
+                ← Back to Agents
+              </Button>
+              <h1 className="text-3xl font-bold text-slate-900 tracking-tight">{agent?.name}</h1>
+              <p className="text-slate-600 mt-1">{agent?.description}</p>
+            </div>
+            <Button
+              onClick={() => setShowWorkflowModal(true)}
+              variant="outline"
+              className="border-indigo-200 text-indigo-700 hover:bg-indigo-50"
+            >
+              <GitBranch className="mr-2 h-4 w-4" />
+              Workflows
+            </Button>
+          </div>
+          <PepperfryWorkspace agent={agent} />
         </div>
       ) : isSettlement ? (
         <div className="p-6" data-testid="settlement-amazon-workspace">
@@ -1442,7 +1486,7 @@ const AgentWorkspace = () => {
                     type="button"
                     className="flex-1 bg-green-600 hover:bg-green-700 text-white"
                     disabled={isGenerating}
-                    onClick={confirmAndGenerate}
+                    onClick={() => confirmAndGenerate()}
                   >
                     {isGenerating ? (
                       <><Loader2 className="mr-2 h-4 w-4 animate-spin" /> Generating...</>
@@ -1819,6 +1863,19 @@ const AgentWorkspace = () => {
         brandId={brandId}
         open={showWorkflowModal}
         onClose={() => setShowWorkflowModal(false)}
+      />
+      <MissingMasterDataModal
+        open={showMissingMasterModal}
+        onOpenChange={setShowMissingMasterModal}
+        missingValues={missingMasterValues}
+        brandId={brandId}
+        agentId={agentId}
+        masterData={masterData}
+        onResolved={fetchData}
+        onProceed={() => {
+          setShowMissingMasterModal(false);
+          confirmAndGenerate(true);
+        }}
       />
       {/* Render the manager the proven way the friend uses it: inline=true inside a
           PLAIN overlay (no Radix Dialog). Radix's focus-trap prevents the file

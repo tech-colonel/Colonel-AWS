@@ -5,6 +5,7 @@ const fs = require('fs');
 const { AgentWorkflow, Agent, Brand, BrandAgent } = require('../models/master');
 const { getBrandConnection } = require('../config/database');
 const { getBrandAgentModel } = require('../models/brand');
+const { createMissingMasterTracker } = require('../utils/missingMasterTracker');
 
 const upload = multer({ storage: multer.memoryStorage() });
 
@@ -179,9 +180,10 @@ function findMasterField(obj, fieldName) {
 
 // ─── Master Data Lookup ───────────────────────────────────────────────────────
 
-function resolveMasterLookup(col, row, masterData) {
+function resolveMasterLookup(col, row, masterData, missingTracker) {
   const { masterType, lookupColumn, matchField, returnField } = col;
-  const lookupValue = String(row[lookupColumn] || '').trim().toLowerCase();
+  const rawLookupValue = String(row[lookupColumn] || '').trim();
+  const lookupValue = rawLookupValue.toLowerCase();
   if (!lookupValue) return '';
 
   const master = masterType === 'sku'
@@ -195,16 +197,20 @@ function resolveMasterLookup(col, row, masterData) {
     return entryVal === lookupValue;
   });
 
-  if (!match) return '';
+  if (!match) {
+    if (missingTracker) missingTracker.track({ masterType, matchField: keyField, value: rawLookupValue });
+    return '';
+  }
   const val = findMasterField(match, returnField);
   return val !== undefined ? val : '';
 }
 
 // ─── Master Data Validate ─────────────────────────────────────────────────────
 
-function resolveMasterValidate(col, row, masterData) {
+function resolveMasterValidate(col, row, masterData, missingTracker) {
   const { masterType, lookupColumn, matchField, matchLabel = 'Matched', noMatchLabel = 'Not Matched' } = col;
-  const lookupValue = String(row[lookupColumn] || '').trim().toLowerCase();
+  const rawLookupValue = String(row[lookupColumn] || '').trim();
+  const lookupValue = rawLookupValue.toLowerCase();
   if (!lookupValue) return noMatchLabel;
 
   const master = masterType === 'sku'
@@ -217,7 +223,11 @@ function resolveMasterValidate(col, row, masterData) {
     String(findMasterField(entry, keyField) ?? '').trim().toLowerCase() === lookupValue
   );
 
-  return found ? matchLabel : noMatchLabel;
+  if (!found) {
+    if (missingTracker) missingTracker.track({ masterType, matchField: keyField, value: rawLookupValue });
+    return noMatchLabel;
+  }
+  return matchLabel;
 }
 
 // ─── File Header Extraction (all sheets) ─────────────────────────────────────
@@ -412,6 +422,8 @@ function buildFormulaReferenceSheet(sheets) {
 
 // fileBufferOrMap: Buffer (legacy / single-file) OR { [fileInputId]: Buffer } (multi-file)
 function applyMultiSheetWorkflow(sheets, fileBufferOrMap, masterData = {}, fileInputs = []) {
+  const missingTracker = createMissingMasterTracker();
+
   const normalizeRow = (row) => {
     const out = {};
     for (const [k, v] of Object.entries(row)) {
@@ -444,9 +456,9 @@ function applyMultiSheetWorkflow(sheets, fileBufferOrMap, masterData = {}, fileI
     fileRSMs[fid] || fileRSMs[defaultFileId] || fileRSMs['file_0'] || Object.values(fileRSMs)[0] || {};
 
 
-  const outBook       = XLSX.utils.book_new();
-  const sheetResults  = []; // sheetResults[i] = allRowsData (pre-grouped) for cross-sheet refs
-  const sheetOutputs  = []; // sheetOutputs[i]  = finalRows (post-grouped) for whole-sheet chaining
+  const outBook      = XLSX.utils.book_new();
+  const sheetResults = []; // sheetResults[i] = allRowsData (pre-grouped, row-aligned) for {Sheet.Col} cross-refs
+  const sheetOutputs = []; // sheetOutputs[i] = this sheet's actual written rows (post-groupBy) for prev_sheet sourcing
 
   for (let sheetIdx = 0; sheetIdx < sheets.length; sheetIdx++) {
     const wfSheet       = sheets[sheetIdx];
@@ -460,7 +472,7 @@ function applyMultiSheetWorkflow(sheets, fileBufferOrMap, masterData = {}, fileI
 
     // ── Merge sheet ───────────────────────────────────────────────────────────
     if (wfSheet.type === 'merge') {
-      const mergeRows = applyMerge(wfSheet.mergeConfig || {}, rawSheetMap, sheetResults, sheets);
+      const mergeRows = applyMerge(wfSheet.mergeConfig || {}, rawSheetMap, sheetOutputs, sheets);
       sheetResults.push(mergeRows);
       sheetOutputs.push(mergeRows);
       XLSX.utils.book_append_sheet(
@@ -497,9 +509,9 @@ function applyMultiSheetWorkflow(sheets, fileBufferOrMap, masterData = {}, fileI
         if (col.type === 'source') {
           row[col.label] = rawRow[col.key] !== undefined ? rawRow[col.key] : '';
         } else if (col.type === 'master_lookup') {
-          row[col.label] = resolveMasterLookup(col, rawRow, masterData);
+          row[col.label] = resolveMasterLookup(col, rawRow, masterData, missingTracker);
         } else if (col.type === 'master_validate') {
-          row[col.label] = resolveMasterValidate(col, rawRow, masterData);
+          row[col.label] = resolveMasterValidate(col, rawRow, masterData, missingTracker);
         }
       }
       return row;
@@ -525,12 +537,13 @@ function applyMultiSheetWorkflow(sheets, fileBufferOrMap, masterData = {}, fileI
     sheetResults.push(allRowsData); // preserve pre-grouped for cross-sheet refs
 
     const finalRows = applyGroupBy(outputRows, wfSheet.groupBy);
-    sheetOutputs.push(finalRows);
+    sheetOutputs.push(finalRows); // this sheet's actual output rows, for downstream prev_sheet sourcing
     XLSX.utils.book_append_sheet(outBook, XLSX.utils.json_to_sheet(finalRows), safeSheetName);
   }
 
   XLSX.utils.book_append_sheet(outBook, buildFormulaReferenceSheet(sheets), 'Formula Reference');
-  return XLSX.write(outBook, { type: 'buffer', bookType: 'xlsx' });
+  const buffer = XLSX.write(outBook, { type: 'buffer', bookType: 'xlsx' });
+  return { buffer, missingMasterValues: missingTracker.list() };
 }
 
 function applyLegacyWorkflow(columns, fileBuffer) {
@@ -765,14 +778,18 @@ const applyWorkflow = [
       const agentId = req.body.agentId;
       const masterData = await fetchMasterData(brandId, agentId);
 
-      let outputBuffer;
+      let outputBuffer, missingMasterValues;
       if (workflow.sheets && workflow.sheets.length > 0) {
-        outputBuffer = applyMultiSheetWorkflow(workflow.sheets, fileBufferOrMap, masterData, fileInputs);
+        ({ buffer: outputBuffer, missingMasterValues } = applyMultiSheetWorkflow(workflow.sheets, fileBufferOrMap, masterData, fileInputs));
       } else if (workflow.columns && workflow.columns.length > 0) {
         const singleBuf = Buffer.isBuffer(fileBufferOrMap) ? fileBufferOrMap : Object.values(fileBufferOrMap)[0];
-        outputBuffer = applyLegacyWorkflow(workflow.columns, singleBuf);
+        ({ buffer: outputBuffer, missingMasterValues } = applyLegacyWorkflow(workflow.columns, singleBuf));
       } else {
         return res.status(400).json({ error: 'Workflow has no sheets defined' });
+      }
+
+      if (missingMasterValues && missingMasterValues.length > 0 && req.body.proceedWithoutMaster !== 'true') {
+        return res.status(400).json({ error: 'Missing master data values', missingMasterValues });
       }
 
       const outputDir = path.join(__dirname, '../../outputs');

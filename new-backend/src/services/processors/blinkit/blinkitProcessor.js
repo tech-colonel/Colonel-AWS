@@ -1,5 +1,6 @@
 const XLSX = require('xlsx-js-style');
 const { getStateCodeFromName, getStateAbbr } = require('../../../utils/gstStateCodes');
+const { createMissingMasterTracker } = require('../../../utils/missingMasterTracker');
 
 /**
  * Safe number conversion
@@ -71,6 +72,9 @@ async function blinkitProcessor(
 
   console.log(`Processing ${rawData.length} rows from Blinkit raw file`);
 
+  // Track raw SKU values that aren't found in this brand's SKU master
+  const missingMasterTracker = createMissingMasterTracker();
+
   // Create SKU lookup map
   const skuMap = {};
   if (skuData && skuData.length > 0) {
@@ -120,6 +124,8 @@ async function blinkitProcessor(
       const upc = safeString(row['UPC'] || row['upc']);
       if (upc && skuMap[upc]) {
         processedRow['FG'] = skuMap[upc];
+      } else if (upc) {
+        missingMasterTracker.track({ masterType: 'sku', matchField: 'SKU', value: row['UPC'] || row['upc'] });
       }
     }
 
@@ -264,7 +270,8 @@ async function blinkitProcessor(
     outputWorkbook,
     rawDataJson: rawData,
     uniqueSKUs: Array.from(uniqueSKUs),
-    uniqueStates: Array.from(uniqueStates)
+    uniqueStates: Array.from(uniqueStates),
+    missingMasterValues: missingMasterTracker.list()
   };
 }
 

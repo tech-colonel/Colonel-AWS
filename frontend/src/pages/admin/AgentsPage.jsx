@@ -2,10 +2,11 @@ import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import DashboardLayout from '../../components/layout/DashboardLayout';
 import { channelLogoSrc } from '../../components/ChannelLogo';
-import { Building2, Bot, Plus, TrendingUp, ChevronRight, Activity, FileSpreadsheet, Target, Layers, PieChart as PieIcon, GitBranch } from 'lucide-react';
+import { Building2, Bot, Plus, TrendingUp, ChevronRight, Activity, FileSpreadsheet, Target, Layers, PieChart as PieIcon, GitBranch, Edit2 } from 'lucide-react';
 import { Button } from '../../components/ui/button';
 import { Input } from '../../components/ui/input';
 import { Label } from '../../components/ui/label';
+import { Select } from '../../components/ui/select';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../../components/ui/modal';
 import { ResponsiveContainer, AreaChart, Area, PieChart, Pie, Cell, XAxis, YAxis, Tooltip, CartesianGrid, Legend } from 'recharts';
 import api from '../../lib/api';
@@ -13,6 +14,7 @@ import { toast } from 'sonner';
 import { ADMIN_SIDEBAR } from '../../lib/adminNav';
 import ToolDetails from './ToolDetails';
 import WorkflowApplyModal from '../accountant/WorkflowApplyModal';
+import WorkflowManagerModal from './WorkflowManagerModal';
 
 const nfmt = (n) => (n ?? 0).toLocaleString('en-IN');
 const fmtDate = (s) => { try { return new Date(s).toLocaleDateString('en-IN', { day: '2-digit', month: 'short' }); } catch { return '—'; } };
@@ -52,7 +54,7 @@ const sectionOf = (agent) => {
   if (/invoice/.test(n)) return 'invoice';
   if (/bank/.test(n)) return 'bank';
   if (/gstr|reco|tally|2b|3b/.test(n)) return 'reco';
-  if (/amazon|flipkart|meesho|myntra|nykaa|ajio|jiomart|firstcry|shopify|blinkit|zepto|seller|marketplace|mtr|sales|settlement|cread|mirrow|limeroad|total|order|receivable/.test(n)) return 'marketplace';
+  if (/amazon|flipkart|meesho|myntra|nykaa|ajio|jiomart|firstcry|shopify|blinkit|zepto|tatacliq|pepperfry|seller|marketplace|mtr|sales|settlement|cread|mirrow|limeroad|total|order|receivable/.test(n)) return 'marketplace';
   return 'other';
 };
 
@@ -67,7 +69,7 @@ const SECTION_STYLE = {
 const CHANNEL_ICON = {
   amazon: '🛒', flipkart: '🛍️', myntra: '👗', nykaa: '💄', zepto: '⚡', blinkit: '🛒',
   jiomart: '🏬', firstcry: '🧸', shopify: '🛍️', mirrow: '🪞', cread: '📦', limeroad: '👜',
-  settlement: '💰', total: '📊', meesho: '🏷️', ajio: '👕',
+  settlement: '💰', total: '📊', meesho: '🏷️', ajio: '👕', tatacliq: '🛒', pepperfry: '🛋️',
 };
 const channelIcon = (name) => {
   const n = (name || '').toLowerCase();
@@ -92,6 +94,8 @@ const CHANNEL_BRAND = {
   limeroad:   { bg: '#8CC63F', fg: '#1A1A1A', label: 'LR' },
   mirrow:     { bg: '#334155', fg: '#FFFFFF', label: 'Mi' },
   cread:      { bg: '#475569', fg: '#FFFFFF', label: 'Cr' },
+  tatacliq:   { bg: '#E31E24', fg: '#FFFFFF', label: 'TC' },
+  pepperfry:  { bg: '#8B4513', fg: '#FFFFFF', label: 'Pf' },
 };
 const channelBrand = (name) => {
   const n = (name || '').toLowerCase();
@@ -213,38 +217,49 @@ const MyntraCard = ({ onClick }) => (
 );
 
 // ── Workflow card — saved multi-sheet transform recipes, scoped to a parent agent ──
-const WorkflowCard = ({ workflow, onClick }) => {
+const WorkflowCard = ({ workflow, onClick, onEdit }) => {
   const sheets = workflow.sheets || [];
   const accent = { color: '#4F46E5', bg: '#EEF2FF', border: '#C7D2FE' };
   return (
-    <button onClick={onClick}
-      className="text-left w-full rounded-2xl border bg-white p-5 transition-shadow hover:shadow-md group"
+    <div className="relative rounded-2xl border bg-white p-5 transition-shadow hover:shadow-md group"
       style={{ borderColor: accent.border }}>
-      <div className="flex items-start justify-between mb-3">
-        <div className="w-11 h-11 rounded-xl flex items-center justify-center flex-shrink-0"
-          style={{ background: accent.bg, border: `1px solid ${accent.border}` }}>
-          <GitBranch className="w-5 h-5" style={{ color: accent.color }} />
+      <button
+        type="button"
+        onClick={(e) => { e.stopPropagation(); onEdit(); }}
+        title="Edit workflow"
+        data-testid="edit-workflow-button"
+        className="absolute top-3 right-3 z-10 inline-flex items-center justify-center w-7 h-7 rounded-lg border bg-white text-slate-500 hover:text-indigo-600 hover:border-indigo-300 transition-colors"
+        style={{ borderColor: accent.border }}
+      >
+        <Edit2 className="w-3.5 h-3.5" />
+      </button>
+      <button onClick={onClick} className="text-left w-full">
+        <div className="flex items-start justify-between mb-3 pr-8">
+          <div className="w-11 h-11 rounded-xl flex items-center justify-center flex-shrink-0"
+            style={{ background: accent.bg, border: `1px solid ${accent.border}` }}>
+            <GitBranch className="w-5 h-5" style={{ color: accent.color }} />
+          </div>
+          <span className="text-xs font-bold px-2 py-0.5 rounded-full"
+            style={{ background: accent.bg, color: accent.color, border: `1px solid ${accent.border}` }}>
+            {sheets.length} sheet{sheets.length !== 1 ? 's' : ''}
+          </span>
         </div>
-        <span className="text-xs font-bold px-2 py-0.5 rounded-full"
-          style={{ background: accent.bg, color: accent.color, border: `1px solid ${accent.border}` }}>
-          {sheets.length} sheet{sheets.length !== 1 ? 's' : ''}
-        </span>
-      </div>
-      <h3 className="text-sm font-bold mb-1.5 text-slate-900">{workflow.name}</h3>
-      <p className="text-xs leading-relaxed mb-4 text-slate-500 line-clamp-2">
-        {workflow.description || 'Saved multi-sheet transform workflow'}
-      </p>
-      <div className="flex items-center justify-between">
-        <span className="text-xs font-semibold px-2 py-0.5 rounded-full truncate max-w-[60%]"
-          style={{ background: accent.bg, color: accent.color, border: `1px solid ${accent.border}` }}
-          title={workflow.agentName}>
-          {workflow.agentName || 'Workflow'}
-        </span>
-        <span className="flex items-center gap-1 text-xs font-semibold transition-all group-hover:gap-1.5 shrink-0" style={{ color: accent.color }}>
-          Run <ChevronRight className="w-3.5 h-3.5 group-hover:translate-x-0.5 transition-transform" />
-        </span>
-      </div>
-    </button>
+        <h3 className="text-sm font-bold mb-1.5 text-slate-900">{workflow.name}</h3>
+        <p className="text-xs leading-relaxed mb-4 text-slate-500 line-clamp-2">
+          {workflow.description || 'Saved multi-sheet transform workflow'}
+        </p>
+        <div className="flex items-center justify-between">
+          <span className="text-xs font-semibold px-2 py-0.5 rounded-full truncate max-w-[60%]"
+            style={{ background: accent.bg, color: accent.color, border: `1px solid ${accent.border}` }}
+            title={workflow.agentName}>
+            {workflow.agentName || 'Workflow'}
+          </span>
+          <span className="flex items-center gap-1 text-xs font-semibold transition-all group-hover:gap-1.5 shrink-0" style={{ color: accent.color }}>
+            Run <ChevronRight className="w-3.5 h-3.5 group-hover:translate-x-0.5 transition-transform" />
+          </span>
+        </div>
+      </button>
+    </div>
   );
 };
 
@@ -425,6 +440,10 @@ const AgentsPage = () => {
   const [showModal, setShowModal] = useState(false);
   const [formData, setFormData] = useState({ name: '', description: '', useBasicColumns: true });
   const [runningWorkflow, setRunningWorkflow] = useState(null);
+  const [showWorkflowPicker, setShowWorkflowPicker] = useState(false);
+  const [pickerAgentId, setPickerAgentId] = useState('');
+  const [workflowModalAgent, setWorkflowModalAgent] = useState(null);
+  const [editWorkflowTarget, setEditWorkflowTarget] = useState(null);
 
   useEffect(() => { fetchAgents(); fetchWorkflows(); }, []);
 
@@ -502,10 +521,21 @@ const AgentsPage = () => {
             </p>
           </div>
           {tab === 'agents' && (
-            <Button onClick={() => setShowModal(true)} data-testid="create-agent-button">
-              <Plus className="mr-2 h-4 w-4" />
-              Create Agent
-            </Button>
+            <div className="flex gap-2">
+              <Button
+                variant="secondary"
+                onClick={() => { setPickerAgentId(''); setShowWorkflowPicker(true); }}
+                disabled={agents.length === 0}
+                data-testid="create-workflow-button"
+              >
+                <GitBranch className="mr-2 h-4 w-4" />
+                Create Workflow
+              </Button>
+              <Button onClick={() => setShowModal(true)} data-testid="create-agent-button">
+                <Plus className="mr-2 h-4 w-4" />
+                Create Agent
+              </Button>
+            </div>
           )}
         </div>
 
@@ -563,7 +593,16 @@ const AgentsPage = () => {
                 </div>
                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
                   {workflows.map(wf => (
-                    <WorkflowCard key={wf.id} workflow={wf} onClick={() => setRunningWorkflow(wf)} />
+                    <WorkflowCard
+                      key={wf.id}
+                      workflow={wf}
+                      onClick={() => setRunningWorkflow(wf)}
+                      onEdit={() => {
+                        const agent = agents.find(a => a.id === wf.agent_id);
+                        setEditWorkflowTarget(wf);
+                        setWorkflowModalAgent(agent || { id: wf.agent_id, name: wf.agentName });
+                      }}
+                    />
                   ))}
                 </div>
               </div>
@@ -578,6 +617,56 @@ const AgentsPage = () => {
         agentId={runningWorkflow?.agent_id}
         brandId={SANDBOX_BRAND_ID}
         initialWorkflow={runningWorkflow}
+      />
+
+      <Dialog open={showWorkflowPicker} onOpenChange={setShowWorkflowPicker}>
+        <DialogContent onClose={() => setShowWorkflowPicker(false)}>
+          <DialogHeader>
+            <DialogTitle>Create Workflow</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div>
+              <Label htmlFor="workflow-agent-select">Agent</Label>
+              <Select
+                id="workflow-agent-select"
+                value={pickerAgentId}
+                onChange={(e) => setPickerAgentId(e.target.value)}
+                data-testid="workflow-agent-select"
+              >
+                <option value="">Select an agent…</option>
+                {agents.map(a => (
+                  <option key={a.id} value={a.id}>{RICH_META[a.name]?.displayName || a.name}</option>
+                ))}
+              </Select>
+              <p className="text-xs text-slate-500 mt-1.5">A workflow runs against one agent's file inputs and columns.</p>
+            </div>
+            <div className="flex gap-3 pt-2">
+              <Button type="button" variant="secondary" onClick={() => setShowWorkflowPicker(false)} className="flex-1">
+                Cancel
+              </Button>
+              <Button
+                type="button"
+                className="flex-1"
+                disabled={!pickerAgentId}
+                data-testid="workflow-picker-continue"
+                onClick={() => {
+                  const agent = agents.find(a => a.id === pickerAgentId);
+                  setShowWorkflowPicker(false);
+                  setWorkflowModalAgent(agent);
+                }}
+              >
+                Continue
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <WorkflowManagerModal
+        agent={workflowModalAgent}
+        open={!!workflowModalAgent}
+        initialEditWorkflow={editWorkflowTarget}
+        onClose={() => { setWorkflowModalAgent(null); setEditWorkflowTarget(null); fetchWorkflows(); }}
       />
 
       <Dialog open={showModal} onOpenChange={setShowModal}>

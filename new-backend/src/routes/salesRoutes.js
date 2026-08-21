@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const multer = require('multer');
-const { flipkart, getWorkingFiles, deleteWorkingFile, downloadWorkingFile, addSkuMasterSingle, deleteSkuMasterSingle, getMasterDataAny, deleteMasterEntry, clearMasterEntries } = require('../controllers/salesController');
+const { flipkart, getWorkingFiles, deleteWorkingFile, downloadWorkingFile, addSkuMasterSingle, addMasterEntry, deleteSkuMasterSingle, getMasterDataAny, deleteMasterEntry, clearMasterEntries } = require('../controllers/salesController');
 const salesAmazonController = require('../controllers/agents/sales-amazon/salesAmazonController');
 const salesMyntraController = require('../controllers/agents/sales-myntra/salesMyntraController');
 const salesShopifyController = require('../controllers/agents/sales-shopify/salesShopifyController');
@@ -23,6 +23,7 @@ router.delete('/brands/:brandId/agents/:agentId/master/sku/delete', authenticate
 // Used by the admin Brand Overview page to list + delete individual SKU/Ledger
 // master rows, regardless of which portal-specific slug the agent uses.
 router.get('/brands/:brandId/agents/:agentId/master', authenticateToken, getMasterDataAny);
+router.post('/brands/:brandId/agents/:agentId/master/:type/add-entry', authenticateToken, addMasterEntry);
 router.delete('/brands/:brandId/agents/:agentId/master/entry/:type/:index', authenticateToken, deleteMasterEntry);
 router.delete('/brands/:brandId/agents/:agentId/master/:type/clear-all', authenticateToken, clearMasterEntries);
 
@@ -109,6 +110,18 @@ router.post('/brands/:brandId/agents/:agentId/jiomart/generate/preview', authent
 router.post('/brands/:brandId/agents/:agentId/jiomart/generate/commit', authenticateToken, salesJiomartController.generateCommit);
 router.post('/brands/:brandId/agents/:agentId/jiomart/generate/discard', authenticateToken, salesJiomartController.generateDiscard);
 
+const salesTatacliqController = require('../controllers/agents/sales-tatacliq/salesTatacliqController');
+
+// ─── Tata Cliq Routes ──────────────────────────────────────────────────────────
+router.get('/brands/:brandId/agents/:agentId/tatacliq/master', authenticateToken, salesTatacliqController.getMasterData);
+router.post('/brands/:brandId/agents/:agentId/tatacliq/master/sku', authenticateToken, upload.single('file'), reattachUserContext, salesTatacliqController.uploadSkuMaster);
+router.post('/brands/:brandId/agents/:agentId/tatacliq/master/ledger', authenticateToken, upload.single('file'), reattachUserContext, salesTatacliqController.uploadLedgerMaster);
+router.post('/brands/:brandId/agents/:agentId/tatacliq/generate', authenticateToken, upload.single('file'), reattachUserContext, salesTatacliqController.generate);
+
+router.post('/brands/:brandId/agents/:agentId/tatacliq/generate/preview', authenticateToken, upload.single('file'), reattachUserContext, salesTatacliqController.generatePreview);
+router.post('/brands/:brandId/agents/:agentId/tatacliq/generate/commit', authenticateToken, salesTatacliqController.generateCommit);
+router.post('/brands/:brandId/agents/:agentId/tatacliq/generate/discard', authenticateToken, salesTatacliqController.generateDiscard);
+
 // ─── Shopify Routes ───────────────────────────────────────────────────────────
 router.get('/brands/:brandId/agents/:agentId/shopify/master', authenticateToken, salesShopifyController.getMasterData);
 router.post('/brands/:brandId/agents/:agentId/shopify/master/sku', authenticateToken, upload.single('file'), reattachUserContext, salesShopifyController.uploadSkuMaster);
@@ -144,6 +157,21 @@ router.post('/brands/:brandId/agents/:agentId/nykaa/generate/preview', authentic
 router.post('/brands/:brandId/agents/:agentId/nykaa/generate/commit',  authenticateToken, salesNykaaController.generateCommit);
 router.post('/brands/:brandId/agents/:agentId/nykaa/generate/discard', authenticateToken, salesNykaaController.generateDiscard);
 
+const salesPepperfryController = require('../controllers/agents/sales-pepperfry/salesPepperfryController');
+
+// ─── Pepperfry Routes ──────────────────────────────────────────────────────────
+router.get('/brands/:brandId/agents/:agentId/pepperfry/master', authenticateToken, salesPepperfryController.getMasterData);
+router.post('/brands/:brandId/agents/:agentId/pepperfry/master/sku', authenticateToken, upload.single('file'), reattachUserContext, salesPepperfryController.uploadSkuMaster);
+router.post('/brands/:brandId/agents/:agentId/pepperfry/master/ledger', authenticateToken, upload.single('file'), reattachUserContext, salesPepperfryController.uploadLedgerMaster);
+
+// Two-phase generation: upload salesFile (GSTR-1 Sales) + refundFile (GSTR-1 Refunds) → preview → commit/discard
+router.post('/brands/:brandId/agents/:agentId/pepperfry/generate/preview', authenticateToken, upload.fields([
+    { name: 'salesFile', maxCount: 1 },
+    { name: 'refundFile', maxCount: 1 },
+]), reattachUserContext, salesPepperfryController.generatePreview);
+router.post('/brands/:brandId/agents/:agentId/pepperfry/generate/commit',  authenticateToken, salesPepperfryController.generateCommit);
+router.post('/brands/:brandId/agents/:agentId/pepperfry/generate/discard', authenticateToken, salesPepperfryController.generateDiscard);
+
 const totalSalesController = require('../controllers/agents/total-sales/totalSalesController');
 
 // ─── Total Sales Routes ────────────────────────────────────────────────────────
@@ -160,6 +188,7 @@ router.post('/brands/:brandId/agents/:agentId/total-sales-analyzer/dashboard', a
 const salesMirrowController = require('../controllers/agents/sales-mirrow/salesMirrowController');
 const salesCreadController = require('../controllers/agents/sales-cread/salesCreadController');
 const salesLimeroadController = require('../controllers/agents/sales-limeroad/salesLimeroadController');
+const salesVareeController = require('../controllers/agents/sales-varee/salesVareeController');
 
 // ─── Mirrow Routes ─────────────────────────────────────────────────────────────
 router.get('/brands/:brandId/agents/:agentId/mirrow/master', authenticateToken, salesMirrowController.getMasterData);
@@ -188,5 +217,15 @@ router.post('/brands/:brandId/agents/:agentId/limeroad/master/ledger', authentic
 router.post('/brands/:brandId/agents/:agentId/limeroad/generate/preview', authenticateToken, upload.single('file'), reattachUserContext, salesLimeroadController.generatePreview);
 router.post('/brands/:brandId/agents/:agentId/limeroad/generate/commit',  authenticateToken, salesLimeroadController.generateCommit);
 router.post('/brands/:brandId/agents/:agentId/limeroad/generate/discard', authenticateToken, salesLimeroadController.generateDiscard);
+
+// ─── Vaaree Routes ─────────────────────────────────────────────────────────────
+router.get('/brands/:brandId/agents/:agentId/varee/master', authenticateToken, salesVareeController.getMasterData);
+router.post('/brands/:brandId/agents/:agentId/varee/master/sku', authenticateToken, upload.single('file'), reattachUserContext, salesVareeController.uploadSkuMaster);
+router.post('/brands/:brandId/agents/:agentId/varee/master/ledger', authenticateToken, upload.single('file'), reattachUserContext, salesVareeController.uploadLedgerMaster);
+router.post('/brands/:brandId/agents/:agentId/varee/generate', authenticateToken, upload.single('file'), reattachUserContext, salesVareeController.generate);
+
+router.post('/brands/:brandId/agents/:agentId/varee/generate/preview', authenticateToken, upload.single('file'), reattachUserContext, salesVareeController.generatePreview);
+router.post('/brands/:brandId/agents/:agentId/varee/generate/commit', authenticateToken, salesVareeController.generateCommit);
+router.post('/brands/:brandId/agents/:agentId/varee/generate/discard', authenticateToken, salesVareeController.generateDiscard);
 
 module.exports = router;

@@ -4,6 +4,7 @@ import {
 } from 'lucide-react';
 import api from '../../lib/api';
 import ColumnFilterPopover from './ColumnFilterPopover';
+import { OrderJourneyModal } from './OrderJourney';
 
 const MONTHS = ['', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
@@ -14,16 +15,11 @@ const GATEWAY_TABS = [
   { key: 'razorpay', label: 'Razorpay' },
 ];
 
-const STATUS_FILTERS = [
-  { key: 'all', label: 'All' },
-  { key: 'not_dispatched', label: 'Not dispatched' },
-  { key: 'partial', label: 'Partially delivered' },
-];
-
 // Mirrors ADVANCE_SHEET_COLUMNS in dashboardController.js — the per-header
 // Excel-style filter popovers, keyed to match the `filters` JSON the backend
-// expects. Gateway/Status already have their own tab/pill controls above, so
-// they're not duplicated here.
+// expects. Gateway already has its own tab control above, so it's not
+// duplicated here. No status filter — every row in this population has
+// delivery_status IS NULL by definition (never found in Sales Order Combined).
 const FILTER_COLUMNS = [
   { key: 'date', label: 'Date' },
   { key: 'order', label: 'Order #' },
@@ -64,7 +60,6 @@ const Pill = ({ children, color, subtle }) => (
 const AdvanceAmountSheetBrowser = ({ brandId, range }) => {
   const [expanded, setExpanded] = useState(false);
   const [gateway, setGateway] = useState('all');
-  const [status, setStatus] = useState('all');
   const [search, setSearch] = useState('');
   const [searchInput, setSearchInput] = useState('');
   const [columnFilters, setColumnFilters] = useState({});
@@ -72,6 +67,7 @@ const AdvanceAmountSheetBrowser = ({ brandId, range }) => {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
+  const [selectedOrder, setSelectedOrder] = useState(null);
 
   const hasColumnFilters = Object.values(columnFilters).some((v) => v && v.length);
   const filtersParam = hasColumnFilters ? JSON.stringify(columnFilters) : '';
@@ -84,7 +80,7 @@ const AdvanceAmountSheetBrowser = ({ brandId, range }) => {
       const params = new URLSearchParams({
         fromMonth: String(range.fromMonth), fromYear: String(range.fromYear),
         toMonth: String(range.toMonth), toYear: String(range.toYear),
-        gateway, status, page: String(page), pageSize: String(PAGE_SIZE),
+        gateway, page: String(page), pageSize: String(PAGE_SIZE),
       });
       if (search) params.set('search', search);
       if (filtersParam) params.set('filters', filtersParam);
@@ -95,13 +91,13 @@ const AdvanceAmountSheetBrowser = ({ brandId, range }) => {
     } finally {
       setLoading(false);
     }
-  }, [brandId, range, gateway, status, page, search, filtersParam]);
+  }, [brandId, range, gateway, page, search, filtersParam]);
 
   useEffect(() => {
     if (expanded) load();
   }, [expanded, load]);
 
-  useEffect(() => { setPage(1); }, [gateway, status, search, filtersParam, range?.fromMonth, range?.fromYear, range?.toMonth, range?.toYear]);
+  useEffect(() => { setPage(1); }, [gateway, search, filtersParam, range?.fromMonth, range?.fromYear, range?.toMonth, range?.toYear]);
 
   const setColumnFilter = (key, values) => {
     setColumnFilters((prev) => ({ ...prev, [key]: values }));
@@ -112,14 +108,14 @@ const AdvanceAmountSheetBrowser = ({ brandId, range }) => {
     const params = new URLSearchParams({
       fromMonth: String(range.fromMonth), fromYear: String(range.fromYear),
       toMonth: String(range.toMonth), toYear: String(range.toYear),
-      gateway, status, column,
+      gateway, column,
     });
     if (search) params.set('search', search);
     if (filtersParam) params.set('filters', filtersParam);
     if (q) params.set('q', q);
     return api.get(`/api/dashboard/advance-amount/${brandId}/sheet/column-values?${params.toString()}`)
       .then((res) => res.data);
-  }, [brandId, range, gateway, status, search, filtersParam]);
+  }, [brandId, range, gateway, search, filtersParam]);
 
   const formatColumnValue = (key, v) => (key === 'date' ? fmtDate(v) : v);
 
@@ -143,7 +139,7 @@ const AdvanceAmountSheetBrowser = ({ brandId, range }) => {
               View orders with advance received
             </p>
             <p className="text-xs mt-0.5" style={{ color: 'var(--text-muted)' }}>
-              Order-level rows behind the KPIs above — prepaid gateway amount received, order not yet delivered
+              Order-level rows behind the KPIs above — prepaid gateway amount received, order never found in the Sales Order Combined file
             </p>
           </div>
         </div>
@@ -173,21 +169,9 @@ const AdvanceAmountSheetBrowser = ({ brandId, range }) => {
             ))}
           </div>
 
-          {/* Status pills + search */}
+          {/* Column filters + search */}
           <div className="flex flex-wrap items-center justify-between gap-3 px-5 pt-4 pb-2">
             <div className="flex items-center gap-1.5">
-              {STATUS_FILTERS.map((f) => (
-                <button
-                  key={f.key}
-                  onClick={() => setStatus(f.key)}
-                  className="text-xs font-semibold px-2.5 py-1 rounded-full transition-all"
-                  style={status === f.key
-                    ? { background: 'var(--text-heading)', color: 'var(--surface)' }
-                    : { background: 'var(--page-bg)', color: 'var(--text-muted)', border: '1px solid var(--card-border)' }}
-                >
-                  {f.label}
-                </button>
-              ))}
               {hasColumnFilters && (
                 <button
                   onClick={() => setColumnFilters({})}
@@ -260,14 +244,22 @@ const AdvanceAmountSheetBrowser = ({ brandId, range }) => {
                             </span>
                           </th>
                         ))}
-                        {['Gateway', 'Advance received', 'Order total', 'Status', 'Days pending'].map((h) => (
+                        {['Gateway', 'Advance received', 'Advance date', 'Order total', 'Days pending'].map((h) => (
                           <th key={h} className="px-3 py-2.5 text-left text-[11px] font-bold uppercase tracking-wide whitespace-nowrap" style={{ color: 'var(--text-muted)' }}>{h}</th>
                         ))}
                       </tr>
                     </thead>
                     <tbody>
                       {data.rows.map((r, i) => (
-                        <tr key={`${r.sale_order_number}-${r.invoice_number}-${i}`} style={{ borderBottom: '1px solid var(--card-border)' }}>
+                        <tr
+                          key={`${r.sale_order_number}-${r.invoice_number}-${i}`}
+                          onClick={() => setSelectedOrder(r)}
+                          className="cursor-pointer transition-colors"
+                          style={{ borderBottom: '1px solid var(--card-border)' }}
+                          onMouseEnter={(e) => { e.currentTarget.style.background = 'var(--page-bg)'; }}
+                          onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent'; }}
+                          title="Click to see this order's journey"
+                        >
                           <td className="px-3 py-2.5 whitespace-nowrap" style={{ color: 'var(--text-body)' }}>{fmtDate(r.date)}</td>
                           <td className="px-3 py-2.5 whitespace-nowrap font-medium" style={{ color: 'var(--text-heading)' }}>{r.sale_order_number || '—'}</td>
                           <td className="px-3 py-2.5 whitespace-nowrap" style={{ color: 'var(--text-muted)' }}>{r.invoice_number || '—'}</td>
@@ -275,12 +267,8 @@ const AdvanceAmountSheetBrowser = ({ brandId, range }) => {
                           <td className="px-3 py-2.5 whitespace-nowrap" style={{ color: 'var(--text-body)' }}>{r.platform || '—'}</td>
                           <td className="px-3 py-2.5 whitespace-nowrap"><Pill color={COLOR_SALES}>{r.gateway}</Pill></td>
                           <td className="px-3 py-2.5 whitespace-nowrap font-semibold" style={{ color: COLOR_PENDING }}>{money(r.gateway_amount)}</td>
+                          <td className="px-3 py-2.5 whitespace-nowrap" style={{ color: 'var(--text-muted)' }}>{fmtDate(r.advance_received_date)}</td>
                           <td className="px-3 py-2.5 whitespace-nowrap" style={{ color: 'var(--text-body)' }}>{money(r.total_amount)}</td>
-                          <td className="px-3 py-2.5 whitespace-nowrap">
-                            <Pill color={r.delivery_status === 'partial' ? COLOR_PENDING : '#64748B'} subtle={r.delivery_status !== 'partial'}>
-                              {r.delivery_status === 'partial' ? 'Partially delivered' : r.delivery_status}
-                            </Pill>
-                          </td>
                           <td className="px-3 py-2.5 whitespace-nowrap" style={{ color: 'var(--text-body)' }}>{Number(r.days_pending).toLocaleString('en-IN')}</td>
                         </tr>
                       ))}
@@ -318,6 +306,14 @@ const AdvanceAmountSheetBrowser = ({ brandId, range }) => {
             )}
           </div>
         </div>
+      )}
+
+      {selectedOrder && (
+        <OrderJourneyModal
+          order={selectedOrder}
+          title={`Order #${selectedOrder.sale_order_number}`}
+          onClose={() => setSelectedOrder(null)}
+        />
       )}
     </div>
   );

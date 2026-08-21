@@ -2,6 +2,7 @@
 const ExcelJS = require('exceljs');
 const { Readable } = require('stream');
 const { getStateCodeFromName, getStateAbbr } = require('../../../utils/gstStateCodes');
+const { createMissingMasterTracker } = require('../../../utils/missingMasterTracker');
 
 /**
  * Normalize SKU
@@ -53,6 +54,9 @@ const shopifyProcessor = async (
 ) => {
     try {
         console.log(`Starting Shopify processing for ${brandName} (${monthYear})`);
+
+        // Track raw SKU/State values that aren't found in this brand's SKU/Ledger master
+        const missingMasterTracker = createMissingMasterTracker();
 
         const { month, year } = parseMonthYear(monthYear);
 
@@ -213,6 +217,8 @@ const shopifyProcessor = async (
                 // If it's empty in Shopify (no SKU), it's a shipping row
                 finalFg = `11. Shipping Charges (Sales) ${shippingState}`.trim();
                 finalGst = 5;
+            } else {
+                missingMasterTracker.track({ masterType: 'sku', matchField: 'SKU', value: rawSku });
             }
 
             // -------------------------
@@ -223,6 +229,9 @@ const shopifyProcessor = async (
             const normShippingState = normalizeState(shippingState);
 
             const stateObj = stateMap[normBillingState] || {};
+            if (!stateMap[normBillingState] && billingRegion) {
+                missingMasterTracker.track({ masterType: 'ledger', matchField: 'State', value: billingRegion });
+            }
 
             const tallyLedger = stateObj.ledger || '';
             const baseInvoice = stateObj.invoice || '';
@@ -399,7 +408,8 @@ const shopifyProcessor = async (
 
         return {
             salesReportData,
-            outputWorkbook
+            outputWorkbook,
+            missingMasterValues: missingMasterTracker.list()
         };
 
     } catch (error) {

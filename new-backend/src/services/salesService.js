@@ -170,6 +170,41 @@ const addSkuMasterSingle = async (brandId, agentId, skuData) => {
   return { success: true, count: updatedSkuMaster.length };
 };
 
+/**
+ * Append a single, arbitrary-shaped entry to a brand-agent's sku_master or ledger_master.
+ * Unlike addSkuMasterSingle (which hardcodes the SKU field names), this accepts whatever
+ * key/value fields the caller provides — used to resolve a "missing master value" popup for
+ * either master type, matching whatever column headers that brand's uploaded master used.
+ */
+const addMasterEntry = async (brandId, agentId, type, fields) => {
+  const brand = await Brand.findByPk(brandId);
+  if (!brand) throw new Error('Brand not found');
+  if (type !== 'sku' && type !== 'ledger') {
+    const err = new Error('type must be "sku" or "ledger"');
+    err.status = 400;
+    throw err;
+  }
+  if (!fields || typeof fields !== 'object' || Array.isArray(fields) || Object.keys(fields).length === 0) {
+    const err = new Error('fields object is required');
+    err.status = 400;
+    throw err;
+  }
+
+  const brandDb = getBrandConnection(brand.db_name);
+  const BrandAgentModel = getBrandAgentModel(brandDb);
+
+  const [brandAgent] = await BrandAgentModel.findOrCreate({
+    where: { brand_id: brandId, agent_id: agentId }
+  });
+
+  const field = type === 'sku' ? 'sku_master' : 'ledger_master';
+  const current = brandAgent[field] || [];
+  const updated = [...current, fields];
+
+  await brandAgent.update({ [field]: updated });
+  return { success: true, count: updated.length };
+};
+
 const deleteSkuMasterSingle = async (brandId, agentId, tallySku) => {
   const brand = await Brand.findByPk(brandId);
   if (!brand) throw new Error('Brand not found');
@@ -248,6 +283,7 @@ module.exports = {
   getMasterData,
   generateAmazonWorkingFile,
   addSkuMasterSingle,
+  addMasterEntry,
   deleteSkuMasterSingle,
   deleteMasterEntryAtIndex,
   clearMasterData

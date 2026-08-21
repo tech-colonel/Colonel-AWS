@@ -1,5 +1,6 @@
 const XLSX = require('xlsx-js-style');
 const moment = require('moment');
+const { createMissingMasterTracker } = require('../../../utils/missingMasterTracker');
 
 /**
  * Safe date conversion for DB (returns JS Date or null)
@@ -54,6 +55,9 @@ async function firstcryProcessor(
   }
 
   console.log(`Processing ${rawData.length} rows from FirstCry raw file`);
+
+  // Track raw SKU values that aren't found in this brand's SKU master
+  const missingMasterTracker = createMissingMasterTracker();
 
   // SKU Map
   const skuMap = {};
@@ -126,6 +130,8 @@ async function firstcryProcessor(
       );
       if (productId && skuMap[productId]) {
         processedRow['FG'] = skuMap[productId];
+      } else if (productId) {
+        missingMasterTracker.track({ masterType: 'sku', matchField: 'Product ID', value: productId });
       }
     }
 
@@ -188,7 +194,8 @@ async function firstcryProcessor(
     outputWorkbook,
     rawDataJson: rawData,
     uniqueProductIds: Array.from(uniqueProductIds),
-    uniqueStates: []
+    uniqueStates: [],
+    missingMasterValues: missingMasterTracker.list()
   };
 }
 
