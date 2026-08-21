@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import logging
 import re
-from collections import defaultdict
+from collections import Counter, defaultdict
 from datetime import datetime
 from io import BytesIO
 
@@ -105,6 +105,10 @@ _TALLY_TOTAL_LABELS = {
     "grand total", "total", "sub total", "subtotal", "sub-total",
     "opening balance", "closing balance", "carried over", "brought forward",
 }
+
+# How many amount-agreeing invoices it takes before a books-series → GSTR-1-series
+# renaming is trusted enough to match on the trailing serial alone
+_SERIES_MAP_MIN_HITS = 3
 
 # Derived Books total columns, in the exact names an accountant hand-adds
 _TALLY_DERIVED_COLS = {
@@ -182,6 +186,28 @@ def _f(v) -> float:
 def _norm_inv(v) -> str:
     """Normalise invoice number for matching — strip non-alphanumeric, uppercase."""
     return re.sub(r"[^A-Z0-9]", "", str(v or "").upper())
+
+
+def _inv_serial(v) -> str:
+    """
+    Trailing running number of a document number — 'LI/INV/25-26/39' → '39'.
+
+    Tally's voucher series and the series actually filed in GSTR-1 are often
+    different prefixes over the same running number ('LI/SV/25-26/39' in the books
+    vs 'LI/INV/25-26/39' on the portal). The serial is the only part the two share,
+    so it is kept as a *fallback* key for invoice matching.
+
+    Leading zeros are preserved so a credit-note serial ('0001') can never collide
+    with an invoice serial ('1').
+    """
+    m = re.search(r"(\d+)\s*$", str(v or "").strip())
+    return m.group(1) if m else ""
+
+
+def _inv_prefix(v) -> str:
+    """Everything before the trailing serial — 'LI/INV/25-26/39' → 'LIINV2526'."""
+    norm, serial = _norm_inv(v), _inv_serial(v)
+    return norm[:-len(serial)] if serial and norm.endswith(serial) else norm
 
 
 def _classify_tally_ledger(header) -> str | None:
@@ -360,8 +386,7 @@ def read_octa_excel(file_info: dict) -> tuple[pd.DataFrame, pd.DataFrame, pd.Dat
                 header_row = i
                 break
             # B2C summary header: "summary type" + "taxable value", no invoice-level "doc no"
-            if b2c_summary_df.empty and _has_cols(nh, ["summary type", "taxable value"]) \
-                    and not _has_cols(nh, ["doc no"]):
+            if b2c_summary_df.empty and _is_b2c_summary_header(nh):
                 header_row = i
                 break
             # GSTR-2B header: "supplier gstin" + ("itc eligible" or "gstr1 filing period")
@@ -389,8 +414,7 @@ def read_octa_excel(file_info: dict) -> tuple[pd.DataFrame, pd.DataFrame, pd.Dat
 
         # Detect a separate B2C summary sheet: "Summary Type" + "Taxable Value", no "Doc No".
         # Some OCTA exports fold B2CS rows into the GSTR-1 sheet; others split them out here.
-        if b2c_summary_df.empty and _has_cols(norm_headers, ["summary type", "taxable value"]) \
-                and not _has_cols(norm_headers, ["doc no"]):
+        if b2c_summary_df.empty and _is_b2c_summary_header(norm_headers):
             data_rows = [dict(zip(headers, r)) for r in rows[header_row + 1:]
                          if any(v is not None and str(v).strip() for v in r)]
             b2c_summary_df = _prepare_b2c_summary(pd.DataFrame(data_rows), sheet.title)
@@ -465,6 +489,22 @@ def _prepare_b2c_summary(df: pd.DataFrame, sheet_title: str) -> pd.DataFrame:
 def _has_cols(norm_headers: list[str], required: list[str]) -> bool:
     joined = " ".join(norm_headers)
     return all(req in joined for req in required)
+
+
+def _is_b2c_summary_header(norm_headers: list[str]) -> bool:
+    """
+    True for a rate-wise B2CS summary sheet, false for the HSN summary.
+
+    A portal export carries both, and they look alike — 'Summary Type' + 'Taxable
+    Value' with no 'Doc No'. But the HSN sheet restates *every* supply, B2B and
+    B2C alike, so folding it into GSTR-1 would roughly double the turnover. The
+    HSN column is what tells them apart.
+    """
+    if not _has_cols(norm_headers, ["summary type", "taxable value"]):
+        return False
+    if _has_cols(norm_headers, ["doc no"]):
+        return False
+    return not any("hsn" in h for h in norm_headers)
 
 
 # ---------------------------------------------------------------------------
@@ -684,8 +724,67 @@ def extract_gstr3b_monthly(gstr3b_df: pd.DataFrame) -> dict[str, dict]:
 # GSTR-1 monthly aggregator (from OCTA Final GSTR-1)
 # ---------------------------------------------------------------------------
 
+def gstr1_month_basis(gstr1_df: pd.DataFrame):
+    """
+    Return `(month_of_row, basis_name)` — how a GSTR-1 row is placed in a month.
+
+    Tax Period is the filing period, and for a **monthly** filer it is also the
+    month the invoice belongs to, so it stays the default and monthly filers keep
+    their existing numbers exactly.
+
+    A **quarterly (QRMP/IFF)** filer breaks that: the whole quarter is filed under
+    one period, so months the business actually sold in report zero against Books
+    and the monthly sections read as pure difference. When that pattern is present
+    — some month carries invoice-dated turnover but no filed turnover at all — the
+    invoice's own Doc Date is used instead, which is what Books is keyed on.
+
+    Rows with no Doc Date (B2CS summary rows carry only a period) always fall back
+    to Tax Period, so nothing is dropped.
+    """
+    period_col = _find_col(gstr1_df, ["Tax Period", "Tax period", "Period", "Return Period"])
+    date_col   = _find_col(gstr1_df, ["Doc Date", "Invoice Date", "Document Date"])
+
+    def by_period(row) -> str:
+        return _norm_month(_col_val(row, period_col)) if period_col else "Unknown"
+
+    if period_col is None or date_col is None:
+        return by_period, "Tax Period"
+
+    taxable_col = _find_col(gstr1_df, ["Item Taxable Value", "Taxable Value", "Taxable Amount", "Taxable"])
+    igst_col    = _find_col(gstr1_df, ["IGST", "Integrated Tax", "IGST Amount"])
+    cgst_col    = _find_col(gstr1_df, ["CGST", "Central Tax", "CGST Amount"])
+    sgst_col    = _find_col(gstr1_df, ["SGST", "State Tax", "SGST Amount"])
+
+    filed: set[str] = set()
+    dated: set[str] = set()
+    for _, row in gstr1_df.iterrows():
+        amount = (_f(_col_val(row, taxable_col, 0)) + _f(_col_val(row, igst_col, 0))
+                  + _f(_col_val(row, cgst_col, 0)) + _f(_col_val(row, sgst_col, 0)))
+        if amount == 0:
+            continue
+        mp = _norm_month(_col_val(row, period_col))
+        md = _norm_month(_col_val(row, date_col))
+        if mp in _FY_MONTHS:
+            filed.add(mp)
+        if md in _FY_MONTHS:
+            dated.add(md)
+
+    gaps = sorted(dated - filed, key=_month_sort_key)
+    if not gaps:
+        return by_period, "Tax Period"
+
+    def by_doc_date(row) -> str:
+        month = _norm_month(_col_val(row, date_col))
+        return month if month in _FY_MONTHS else by_period(row)
+
+    logger.info("GSTR-1: filed for %d month(s), invoiced across %d — quarterly/IFF filing "
+                "detected (no filing in %s); placing rows by Doc Date instead of Tax Period",
+                len(filed), len(dated), ", ".join(gaps))
+    return by_doc_date, "Doc Date"
+
+
 def aggregate_gstr1_monthly(gstr1_df: pd.DataFrame) -> dict[str, dict]:
-    """Aggregate Final GSTR-1 sheet by Tax Period month."""
+    """Aggregate Final GSTR-1 sheet by month (see `gstr1_month_basis`)."""
     if gstr1_df.empty:
         return {}
 
@@ -699,9 +798,11 @@ def aggregate_gstr1_monthly(gstr1_df: pd.DataFrame) -> dict[str, dict]:
         logger.warning("GSTR-1: Tax Period column not found")
         return {}
 
+    month_of, _basis = gstr1_month_basis(gstr1_df)
+
     result: dict[str, dict] = defaultdict(_zero_amounts)
     for _, row in gstr1_df.iterrows():
-        month = _norm_month(_col_val(row, period_col))
+        month = month_of(row)
         if month not in _FY_MONTHS:
             continue
         _add_amounts(
@@ -915,6 +1016,9 @@ def reconcile_b2b_new(
 
     # Index GSTR-1 rows
     gstr1_by_inv: dict[str, list[int]] = defaultdict(list)
+    # Secondary index on the trailing serial only — used when the two sides number
+    # the same invoice under different series prefixes (see `_inv_serial`).
+    gstr1_by_serial: dict[str, list[int]] = defaultdict(list)
     gstr1_rows = []
     if not gstr1_df.empty:
         for idx, row in gstr1_df.iterrows():
@@ -936,18 +1040,44 @@ def reconcile_b2b_new(
             gstr1_rows.append(g1_row)
             if norm:
                 gstr1_by_inv[norm].append(len(gstr1_rows) - 1)
+            serial = _inv_serial(inv)
+            if serial:
+                gstr1_by_serial[serial].append(len(gstr1_rows) - 1)
+
+    def _serial_pool(books_gstin: str, doc_no) -> list[int]:
+        """
+        Unmatched GSTR-1 rows sharing this document's trailing serial.
+
+        A bare serial is a weak key, so it only counts when it is unambiguous: the
+        counterparty GSTIN has to agree, and when the books row carries no GSTIN the
+        serial must point at exactly one unmatched GSTR-1 row.
+        """
+        serial = _inv_serial(doc_no)
+        if not serial:
+            return []
+        pool = [j for j in gstr1_by_serial.get(serial, []) if j not in matched_gstr1]
+        if not pool:
+            return []
+        key = re.sub(r"[^A-Z0-9]", "", str(books_gstin).upper())
+        if len(key) == 15:
+            return [j for j in pool
+                    if re.sub(r"[^A-Z0-9]", "", gstr1_rows[j]["gstin"].upper()) == key]
+        return pool if len(pool) == 1 else []
 
     g1_b2b_invs = _gstr1_b2b_invoice_set(gstr1_df)
     inv_cols = tuple(c for c in (inv_col, ref_col) if c)
 
     matched_gstr1: set[int] = set()
     result_rows: list[dict] = []
+    # Rows the exact-number pass could not place, retried in a second pass below
+    leftovers: list[tuple] = []
 
     for _, tally_row in tally_df.iterrows():
         # Get key fields
         inv_no   = str(_col_val(tally_row, inv_col, "")).strip()
         ref_no   = str(_col_val(tally_row, ref_col, "")).strip() if ref_col else ""
         part     = str(_col_val(tally_row, part_col, "")).strip()
+        row_gstin = str(_col_val(tally_row, gstin_col, "")).strip() if gstin_col else ""
         taxable  = _f(_col_val(tally_row, taxable_col, 0))
         igst_v   = _f(_col_val(tally_row, igst_col, 0))
         cgst_v   = _f(_col_val(tally_row, cgst_col, 0))
@@ -1022,8 +1152,73 @@ def reconcile_b2b_new(
         else:
             _set_empty_gstr1(out)
             out["_remark"] = "Not in GSTR-1"
+            leftovers.append((len(result_rows), row_gstin, inv_no, ref_no,
+                              taxable, igst_v, cgst_v, sgst_v))
 
         result_rows.append(out)
+
+    # Second pass — only over rows the exact-number pass could not place.
+    # Running it afterwards (rather than inline) means a weaker key can never claim
+    # a GSTR-1 row that some later invoice matches exactly: every match the first
+    # pass made stands, and this can only turn "Not in GSTR-1" into a match.
+    # A serial on its own is not evidence of anything — 'BLR4-T-19' and 'DEL4-T-19'
+    # are different branches' invoices. It only becomes trustworthy when the file
+    # shows the two sides systematically renaming one series into another: count the
+    # serial hits whose amounts also agree, per (books series → GSTR-1 series) pair,
+    # and trust only the pairs that recur. A one-off coincidence never qualifies.
+    series_hits: Counter = Counter()
+    for _pos, row_gstin, inv_no, ref_no, taxable, *_ in leftovers:
+        for doc_no in (inv_no, ref_no):
+            for j in _serial_pool(row_gstin, doc_no):
+                if abs(taxable - gstr1_rows[j]["taxable"]) <= tolerance:
+                    series_hits[(_inv_prefix(doc_no), _inv_prefix(gstr1_rows[j]["inv_no"]))] += 1
+    trusted_series = {pair for pair, hits in series_hits.items() if hits >= _SERIES_MAP_MIN_HITS}
+    for (books_series, g1_series) in sorted(trusted_series):
+        logger.info("B2B Reco: books series %r maps to GSTR-1 series %r (%d corroborating "
+                    "invoice(s)) — serial matching enabled for it",
+                    books_series, g1_series, series_hits[(books_series, g1_series)])
+
+    def _serial_candidates(books_gstin: str, *doc_nos) -> list[int]:
+        for doc_no in doc_nos:
+            cands = [j for j in _serial_pool(books_gstin, doc_no)
+                     if (_inv_prefix(doc_no), _inv_prefix(gstr1_rows[j]["inv_no"])) in trusted_series]
+            if cands:
+                return cands
+        return []
+
+    recovered = 0
+    for pos, row_gstin, inv_no, ref_no, taxable, igst_v, cgst_v, sgst_v in leftovers:
+        candidates = []
+        if ref_no:
+            candidates = [j for j in gstr1_by_inv.get(_norm_inv(ref_no), []) if j not in matched_gstr1]
+        if not candidates:
+            candidates = _serial_candidates(row_gstin, inv_no, ref_no)
+        if not candidates:
+            continue
+        best_j = min(candidates, key=lambda j: abs(taxable - gstr1_rows[j]["taxable"]))
+        g1 = gstr1_rows[best_j]
+        dt = round_money(taxable - g1["taxable"])
+        di = round_money(igst_v  - g1["igst"])
+        dc = round_money(cgst_v  - g1["cgst"])
+        ds = round_money(sgst_v  - g1["sgst"])
+        result_rows[pos].update({
+            "_gstr1_inv_no":  g1["inv_no"],
+            "_gstr1_gstin":   g1["gstin"],
+            "_gstr1_taxable": g1["taxable"],
+            "_gstr1_igst":    g1["igst"],
+            "_gstr1_cgst":    g1["cgst"],
+            "_gstr1_sgst":    g1["sgst"],
+            "_diff_taxable":  dt,
+            "_diff_igst":     di,
+            "_diff_cgst":     dc,
+            "_diff_sgst":     ds,
+            "_remark":        "Diff" if any(abs(d) > tolerance for d in (dt, di, dc, ds)) else "Match",
+        })
+        matched_gstr1.add(best_j)
+        recovered += 1
+    if recovered:
+        logger.info("B2B Reco: %d row(s) matched on reference/serial number after the "
+                    "exact-number pass (books and GSTR-1 use different voucher series)", recovered)
 
     # Append unmatched GSTR-1 rows at the bottom
     for j, g1 in enumerate(gstr1_rows):

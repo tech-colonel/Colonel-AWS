@@ -278,7 +278,9 @@ class ReconciliationHandler(BaseHTTPRequestHandler):
                 gstr1_b2c_monthly = {}
                 if not gstr1_df.empty:
                     from recon.gstr_1_vs_books import _find_col, _f, _norm_month, _FY_MONTHS, _zero_amounts, _add_amounts
-                    period_col  = _find_col(gstr1_df, ["Tax Period", "Period"])
+                    from recon.gstr_1_vs_books import gstr1_month_basis
+                    # Same month basis as Section 2, so all three sections agree
+                    _month_of, _ = gstr1_month_basis(gstr1_df)
                     gstin_col   = _find_col(gstr1_df, ["Customer GSTIN", "GSTIN of Recipient"])
                     taxable_col = _find_col(gstr1_df, ["Item Taxable Value", "Taxable Value"])
                     igst_col    = _find_col(gstr1_df, ["IGST", "Integrated Tax"])
@@ -289,7 +291,7 @@ class ReconciliationHandler(BaseHTTPRequestHandler):
                     _b2c = _dd(_zero_amounts)
                     for _, row in gstr1_df.iterrows():
                         from recon.gstr_1_vs_books import _col_val
-                        month = _norm_month(_col_val(row, period_col))
+                        month = _month_of(row)
                         if month not in _FY_MONTHS:
                             continue
                         gstin = str(_col_val(row, gstin_col, "")).strip()
