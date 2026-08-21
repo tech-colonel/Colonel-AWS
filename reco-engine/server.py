@@ -61,6 +61,10 @@ from recon.gstr_3b_tally_entry import (
 # is wiped on restart). Best-effort only: any disk error is swallowed and the
 # in-memory fast path is unaffected. Override via RECO_OUTPUT_DIR env var.
 RECO_OUTPUT_DIR = os.environ.get("RECO_OUTPUT_DIR") or str(ROOT / "exports")
+# How many finished jobs stay in memory. Each carries its source workbooks as base64
+# plus the built xlsx, so an unbounded dict was holding a working day's uploads. The
+# xlsx is on disk regardless, so an evicted job still downloads.
+_JOB_RETAIN = int(os.environ.get("RECO_JOB_RETAIN") or 20)
 try:
     os.makedirs(RECO_OUTPUT_DIR, exist_ok=True)
 except Exception:
@@ -110,6 +114,37 @@ class _JobStore(dict):
                     with open(tmp, "wb") as f:
                         f.write(value["_xlsx_bytes"])
                     os.replace(tmp, path)
+        except Exception:
+            pass
+        # Keep only the most recent jobs in memory. A payload holds the source
+        # workbooks as base64 plus the built xlsx and the parsed result objects —
+        # tens of MB each — and this dict only ever grew, so a day's work sat in RAM
+        # long after anyone cared.
+        #
+        # Eviction is disk-aware on purpose. Not every reco type pre-builds
+        # ``_xlsx_bytes`` (multi-state builds its workbook lazily in export_job), so
+        # those jobs have no file yet and dropping one would 404 its download. So:
+        # evict a job whose workbook IS on disk first — that costs nothing, export_job
+        # reads the file. Only when nothing is on disk, and only once we are well past
+        # the limit, drop the oldest anyway, which still leaves a long window for the
+        # first download to rebuild and persist it.
+        try:
+            while len(self) > _JOB_RETAIN:
+                victim = None
+                for candidate in self:
+                    if candidate == key:
+                        continue
+                    path = _export_path(candidate)
+                    if path and os.path.exists(path):
+                        victim = candidate
+                        break
+                if victim is None:
+                    if len(self) <= _JOB_RETAIN * 2:
+                        break
+                    victim = next(iter(self))
+                    if victim == key:
+                        break
+                super().pop(victim, None)
         except Exception:
             pass
 
@@ -429,7 +464,14 @@ class ReconciliationHandler(BaseHTTPRequestHandler):
                     _log.getLogger(__name__).error("Pre-build bank_reco workbook failed: %s", _e)
                     payload["_xlsx_bytes"] = None
                 JOBS[payload["job_id"]] = payload
-                self.write_json({k: v for k, v in payload.items() if k != "_xlsx_bytes"})
+                # Internal keys never leave the engine. They are the source workbooks held as
+                # base64 (plus the parsed result objects): tens of MB that the browser has no
+                # use for, but which were serialised here, buffered whole by axios in the
+                # backend (maxContentLength: Infinity) and forwarded on — the main reason the
+                # backend ballooned to GBs and stalled during a large reconciliation. They stay
+                # in JOBS for the download, so nothing is lost. The e-invoice branch already
+                # filtered this way; these two did not.
+                self.write_json({k: v for k, v in payload.items() if not k.startswith("_")})
                 return
 
             # GSTR-2B vs Books (Purchase Register + Debit Note Register)
@@ -487,7 +529,14 @@ class ReconciliationHandler(BaseHTTPRequestHandler):
                 # Exclude only the raw xlsx bytes from the JSON response (they are
                 # cached in JOBS/disk for download); response shape is otherwise
                 # identical to before.
-                self.write_json({k: v for k, v in payload.items() if k != "_xlsx_bytes"})
+                # Internal keys never leave the engine. They are the source workbooks held as
+                # base64 (plus the parsed result objects): tens of MB that the browser has no
+                # use for, but which were serialised here, buffered whole by axios in the
+                # backend (maxContentLength: Infinity) and forwarded on — the main reason the
+                # backend ballooned to GBs and stalled during a large reconciliation. They stay
+                # in JOBS for the download, so nothing is lost. The e-invoice branch already
+                # filtered this way; these two did not.
+                self.write_json({k: v for k, v in payload.items() if not k.startswith("_")})
                 return
 
             # GSTR-2B vs Books — Multi-State (N files per input type)
@@ -559,6 +608,13 @@ class ReconciliationHandler(BaseHTTPRequestHandler):
 
                 import base64
                 job_id  = uuid4().hex
+                # Encode each distinct file ONCE. The per-state lists and the "state 1"
+                # keys below then share the very same string objects instead of holding
+                # a second, identical copy — a 10 MB register was being base64'd twice
+                # into one payload, 13 MB kept needlessly each time.
+                _all_g = [base64.b64encode(f).decode("utf-8") for f in gstr2b_list]
+                _all_p = [base64.b64encode(f).decode("utf-8") for f in purchase_sheets]
+                _all_d = [base64.b64encode(f).decode("utf-8") for f in debit_sheets]
                 payload = {
                     "job_id":    job_id,
                     "reco_type": reco_type,
@@ -570,14 +626,15 @@ class ReconciliationHandler(BaseHTTPRequestHandler):
                         "file_count":     len(gstr2b_list),
                     },
                     "results": [result.as_dict() for result in results],
-                    # First file of each type (for base workbook source sheets — state 1)
-                    "_gstr2b_b64":   base64.b64encode(gstr2b_list[0]).decode("utf-8"),
-                    "_purchase_b64": base64.b64encode(purchase_list[0]).decode("utf-8"),
-                    "_debit_b64":    base64.b64encode(debit_list[0]).decode("utf-8") if debit_list else "",
+                    # First file of each type (for base workbook source sheets — state 1);
+                    # the SAME object as element 0 of the list below, not a re-encode.
+                    "_gstr2b_b64":   _all_g[0] if _all_g else "",
+                    "_purchase_b64": _all_p[0] if _all_p else "",
+                    "_debit_b64":    _all_d[0] if _all_d else "",
                     # All state files (for adding per-state source sheets to the workbook)
-                    "_all_gstr2b_b64":   [base64.b64encode(f).decode("utf-8") for f in gstr2b_list],
-                    "_all_purchase_b64": [base64.b64encode(f).decode("utf-8") for f in purchase_sheets],
-                    "_all_debit_b64":    [base64.b64encode(f).decode("utf-8") for f in debit_sheets],
+                    "_all_gstr2b_b64":   _all_g,
+                    "_all_purchase_b64": _all_p,
+                    "_all_debit_b64":    _all_d,
                     # Stash MatchResult objects so export_job can rebuild Remark 3
                     "_results_obj":  results,
                 }
