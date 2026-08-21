@@ -251,7 +251,25 @@ def _read_gstr2b_sheet(data: bytes, sheet_name: str) -> list[dict[str, Any]]:
         seen[name] = count + 1
         combined.append(f"{name}_{count}" if count else name)
 
-    data_rows = raw.iloc[band_end:].copy()
+    # An EMPTY amendment tab is all header and no data (title, section, group, sub,
+    # sub-sub). No data-like row exists for the band detector to find, so it falls back
+    # to row 6 and the third header row would be handed back as a data row: harmless to
+    # the parser, which drops it for having no GSTIN or number, but the Proof sheet
+    # counted it as a row that failed to become a record and reported a false
+    # "DOES NOT RECONCILE". Drop any row made up entirely of this sheet's own header
+    # labels — a genuine data row is never that.
+    # A real 2B row always carries at least a GSTIN, a date or an amount; a leftover
+    # header row carries only labels. Keep the former, drop the latter.
+    _keep = []
+    for _i in range(band_end, len(raw)):
+        for _v in raw.iloc[_i]:
+            _s = str(_v).strip()
+            if not _s or _s.lower() == "nan":
+                continue
+            if _GSTIN_RE.match(_s.upper()) or _DATE_CELL_RE.match(_s) or _MONEY_CELL_RE.match(_s):
+                _keep.append(_i)
+                break
+    data_rows = raw.iloc[_keep].copy() if _keep else raw.iloc[band_end:band_end].copy()
     data_rows.columns = combined
     data_rows = data_rows.dropna(how="all")
 
@@ -2319,9 +2337,30 @@ def append_books_audit_columns(wb: Any, src_bytes: bytes, book_records: list[Any
     from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
     from openpyxl.utils import get_column_letter
 
-    ws = wb[sheet_title] if sheet_title in wb.sheetnames else None
-    if ws is None:
+    # The copied tab is named "<prefix> - <the client's own sheet name>", which is only
+    # "PR - Purchase Register" when their workbook happens to call the tab that. Real
+    # exports are often "Sheet1", and looking the title up exactly found nothing and
+    # skipped the strip in silence. Match on the prefix instead and, when a register
+    # workbook contributed several tabs (a Pivot alongside the register), take the one
+    # whose header row is a Tally register header — the same Date+Particulars test
+    # _read_tally_sheet uses to locate it.
+    prefix = sheet_title.split(" - ")[0] + " - "
+    candidates = [n for n in wb.sheetnames if n.startswith(prefix)]
+    if not candidates:
         return 0
+    ws = None
+    for name in candidates:
+        cand = wb[name]
+        for r in range(1, min(cand.max_row, 15) + 1):
+            vals = [str(cand.cell(row=r, column=c).value or "").strip().lower()
+                    for c in range(1, min(cand.max_column, 40) + 1)]
+            if any("date" in v for v in vals) and any("particulars" in v for v in vals):
+                ws = cand
+                break
+        if ws is not None:
+            break
+    if ws is None:
+        ws = wb[candidates[0]]
     try:
         rows = _read_tally_sheet(_ensure_xlsx(src_bytes))
     except Exception:
