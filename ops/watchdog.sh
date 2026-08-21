@@ -39,6 +39,22 @@ PROBE_TIMEOUT="${WATCHDOG_PROBE_TIMEOUT:-10}"   # seconds per probe
 FAIL_THRESHOLD="${WATCHDOG_FAIL_THRESHOLD:-3}"  # consecutive failures before acting
 COOLDOWN="${WATCHDOG_COOLDOWN:-900}"            # min seconds between restarts of one service
 
+# BUSY vs WEDGED.
+#
+# The first version of this script restarted after 3 failed probes, full stop. That
+# was wrong, and it made things worse: a workflow apply legitimately pegs the event
+# loop for minutes building a 136 MB workbook, and this script kept killing it at the
+# 3-minute mark, so the job could never finish. It turned a slow request into a job
+# that was impossible to complete.
+#
+# Being unresponsive says nothing on its own about whether work is happening. CPU
+# does. A process burning a core is making progress and has earned patience; a
+# process that answers nothing while sitting idle is wedged and should be restarted
+# promptly. So the grace period depends on which one it is — with a hard ceiling, so
+# a genuine runaway loop is still caught eventually rather than spinning forever.
+BUSY_CPU_PCT="${WATCHDOG_BUSY_CPU_PCT:-50}"          # >= this = actively working
+BUSY_FAIL_THRESHOLD="${WATCHDOG_BUSY_FAIL_THRESHOLD:-20}"  # probes to tolerate while busy
+
 STATE_DIR="${WATCHDOG_STATE_DIR:-/opt/colonel/ops/state}"
 DIAG_DIR="${WATCHDOG_DIAG_DIR:-/opt/colonel/ops/diags}"
 DIAG_KEEP="${WATCHDOG_DIAG_KEEP:-40}"           # newest diagnostics kept on disk
@@ -104,11 +120,27 @@ probe_http() {  # url -> 0 healthy, 1 not
   [ "$code" = "200" ]
 }
 
-# service_name  probe_url  -> restarts via pm2 after FAIL_THRESHOLD consecutive failures
+# Whole-process CPU% for a pm2 service, sampled over one second. `ps` alone reports
+# the average since the process started, which is useless here — a backend that has
+# been up an hour and is pegged right now still averages near zero.
+service_cpu() {  # service -> integer CPU%, or 0 if it cannot be determined
+  local service="$1" pid pat
+  case "$service" in
+    colonel-backend) pat="new-backend/server.js" ;;
+    *)               pat="reco-engine/server.py" ;;
+  esac
+  pid=$(pgrep -f "$pat" 2>/dev/null | head -1)
+  [ -n "$pid" ] || { echo 0; return; }
+  top -b -n2 -d1 -p "$pid" 2>/dev/null \
+    | awk -v p="$pid" '$1==p {v=$9} END {printf "%d", v+0}'
+}
+
+# service_name  probe_url  -> restarts via pm2 once it has failed for long enough,
+# where "long enough" depends on whether the process is doing work (see BUSY vs WEDGED)
 check() {
   local service="$1" url="$2"
   local fail_file="$STATE_DIR/${service}.fails" last_file="$STATE_DIR/${service}.last_restart"
-  local fails=0 last=0 now
+  local fails=0 last=0 now cpu threshold
 
   if probe_http "$url"; then
     # Recovered on its own — reset the counter and say so, so the log shows a blip.
@@ -121,9 +153,18 @@ check() {
 
   fails=$(( $(cat "$fail_file" 2>/dev/null || echo 0) + 1 ))
   echo "$fails" > "$fail_file"
-  log "$service probe FAILED ($fails/$FAIL_THRESHOLD) -> $url"
 
-  [ "$fails" -ge "$FAIL_THRESHOLD" ] || return 0
+  # Busy or wedged? Decides how long we are willing to wait.
+  cpu=$(service_cpu "$service")
+  if [ "$cpu" -ge "$BUSY_CPU_PCT" ]; then
+    threshold="$BUSY_FAIL_THRESHOLD"
+    log "$service probe FAILED ($fails/$threshold) cpu=${cpu}% — BUSY, work in progress, holding off -> $url"
+  else
+    threshold="$FAIL_THRESHOLD"
+    log "$service probe FAILED ($fails/$threshold) cpu=${cpu}% — idle and not answering -> $url"
+  fi
+
+  [ "$fails" -ge "$threshold" ] || return 0
 
   now=$(date +%s)
   last=$(cat "$last_file" 2>/dev/null || echo 0)
@@ -133,7 +174,7 @@ check() {
   fi
 
   capture_diags "$service"
-  log "$service unresponsive for $fails consecutive probes — restarting"
+  log "$service unresponsive for $fails consecutive probes (cpu=${cpu}%) — restarting"
   if pm2 restart "$service" >/dev/null 2>&1; then      # plain restart: keeps NODE_OPTIONS
     echo "$now" > "$last_file"
     echo 0 > "$fail_file"
