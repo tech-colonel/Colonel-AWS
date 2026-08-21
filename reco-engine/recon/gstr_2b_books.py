@@ -706,6 +706,35 @@ def _read_tally_sheet(data: bytes) -> list[dict[str, Any]]:
     return out
 
 
+def _state_from_voucher_type(voucher_type: Any) -> str:
+    """Read the state out of a Tally voucher type, e.g. 'Purchase Delhi' -> 'Delhi'.
+
+    Firms registered in several states name the voucher type per registration
+    ('Purchase Karnataka', 'Debit Note - Haryana'), which makes it the only place in
+    the register that states which return a row belongs to — the Books rows carry no
+    state of their own otherwise. Clients with a single registration just say
+    'Purchase' or 'Expenses', which yields nothing and leaves the caller to fall back.
+
+    Longest match wins so 'Andhra Pradesh (New)' is not shadowed by 'Andhra Pradesh',
+    and a trailing word may be a prefix of the state name — real exports carry
+    'Purchase Tamil' for Tamil Nadu."""
+    text = str(voucher_type or "").strip()
+    if not text:
+        return ""
+    low = text.lower()
+    for state in sorted(set(GST_STATE_CODES.values()), key=len, reverse=True):
+        if state.lower() in low:
+            return state
+    # Trailing token as a prefix ('… Tamil' -> 'Tamil Nadu'), guarded to 4+ characters
+    # so a stray 'Go' or 'UP' cannot pull in an unrelated state.
+    tail = re.split(r"[\s\-–,:]+", low)[-1] if low else ""
+    if len(tail) >= 4:
+        hits = [s for s in set(GST_STATE_CODES.values()) if s.lower().startswith(tail)]
+        if len(hits) == 1:
+            return hits[0]
+    return ""
+
+
 def audit_row_figures(row: dict[str, Any], default_type: str) -> dict[str, float]:
     """Re-derive one register row's figures straight from its raw cells.
 
@@ -789,6 +818,11 @@ def parse_books(purchase_data: bytes, debit_data: bytes) -> list[NormalizedInvoi
             # Which register this row came from — needed to write the audit columns
             # back onto the right copied sheet.
             row["_src_sheet"] = source
+            # The row's own state, where Tally stamps it on the voucher type. This is
+            # the only state the Books side actually carries; without it the reco sheet
+            # had to borrow the entity GSTIN from the 2B FILENAME, which is unrelated to
+            # the row and reported one state for every line.
+            row["_books_state"] = _state_from_voucher_type(row.get("Voucher Type"))
             # Skip if no date (summary rows)
             date_raw = row.get("Date", "")
             if not str(date_raw).strip() or str(date_raw).strip() in ("nan", ""):
@@ -1731,7 +1765,20 @@ def _populate_workbook(ws, results: list[Any]) -> None:
         source_bks   = "PR" if "Purchase" in src_bks_full else ("DN" if "Debit" in src_bks_full else "")
         raw_b        = _get_val(b, "raw", {}) or {}
         entity_b     = str(raw_b.get("_entity_gstin", "") or "")
-        state_bks    = GST_STATE_CODES.get(entity_b[:2], "") if entity_b else ""
+        # State of the Books row, in priority order:
+        #   1. the voucher type ('Purchase Karnataka') — the only state the register
+        #      itself states, and authoritative when present;
+        #   2. the row's GSTIN (2B side, then Books side);
+        #   3. the entity GSTIN from the 2B filename — the old behaviour, kept last so
+        #      nothing that used to show a state loses one.
+        # Previously only (3) was used, which reported our own registration on every
+        # row regardless of the vendor, and nothing at all on OCTA/IMS files whose
+        # filenames carry no GSTIN.
+        state_bks = str(raw_b.get("_books_state", "") or "")
+        if not state_bks:
+            state_bks = (GST_STATE_CODES.get(gstin_2b[:2], "") if gstin_2b else "") \
+                        or (GST_STATE_CODES.get(gstin_bks[:2], "") if gstin_bks else "") \
+                        or (GST_STATE_CODES.get(entity_b[:2], "") if entity_b else "")
 
         row = [
             _get_val(g, "supplier_name", ""),
@@ -2311,15 +2358,19 @@ def append_books_audit_columns(wb: Any, src_bytes: bytes, book_records: list[Any
     thin   = Side(style="thin", color="B0B0B0")
     border = Border(left=thin, right=thin, top=thin, bottom=thin)
 
-    titles = ["Taxable Value (Tool)", "IGST (Tool)", "CGST (Tool)", "SGST (Tool)", "Check"]
+    titles = ["Taxable Value (Tool)", "IGST (Tool)", "CGST (Tool)", "SGST (Tool)", "Check",
+              "Difference (Gross Total − Tool)"]
     band = ws.cell(row=max(header_xl - 1, 1), column=start_col,
-                   value="Tool Check-Point (for verification)")
+                   value="Tool Check-Point (for verification)     "
+                         "Difference = Gross Total (register) − (Taxable + IGST + CGST + SGST "
+                         "+ Cess + Round Off − TDS).  0.00 means the tool's figures add back "
+                         "to the invoice total printed in your register.")
     band.font = Font(bold=True, color="FFFFFF", size=10)
     band.fill = HDR
     band.alignment = Alignment(horizontal="center")
     try:
         ws.merge_cells(start_row=max(header_xl - 1, 1), start_column=start_col,
-                       end_row=max(header_xl - 1, 1), end_column=start_col + 4)
+                       end_row=max(header_xl - 1, 1), end_column=start_col + 5)
     except Exception:
         pass
     for i, t in enumerate(titles):
@@ -2340,7 +2391,7 @@ def append_books_audit_columns(wb: Any, src_bytes: bytes, book_records: list[Any
 
         if rec is None:
             ws.cell(row=xl, column=start_col + 4, value=AUDIT_MISSED)
-            for i in range(5):
+            for i in range(6):
                 cc = ws.cell(row=xl, column=start_col + i)
                 cc.fill = RED
                 cc.border = border
@@ -2365,9 +2416,236 @@ def append_books_audit_columns(wb: Any, src_bytes: bytes, book_records: list[Any
         if not same:
             flagged += 1
 
-    for i, w in enumerate([16, 13, 13, 13, 46]):
+        # Tie the tool's own figures back to the invoice total the register prints.
+        # Gross Total in Tally is stated NET of TDS and includes any Round Off, so both
+        # are brought back in — otherwise a third of the rows on a TDS-bearing register
+        # would show a difference that is really just the deduction.
+        gross = round_money(row.get("Gross Total", 0))
+        round_off = sum(round_money(v) for k, v in row.items() if _is_round_off_col(str(k)))
+        tds = sum(round_money(v) for k, v in row.items() if _is_tds_col(str(k)))
+        parts = vals[0] + vals[1] + vals[2] + vals[3] + float(_get_val(rec, "cess", 0) or 0)
+        if default_type == "DBN":          # notes are held negative on both sides
+            gross, round_off, tds = -gross, -round_off, -tds
+        diff = round(gross - (parts + round_off - tds), 2)
+        dc = ws.cell(row=xl, column=start_col + 5, value=diff)
+        dc.number_format = "#,##0.00"
+        dc.border = border
+        dc.fill = GREEN if abs(diff) <= 0.05 else YELLOW
+
+    for i, w in enumerate([16, 13, 13, 13, 46, 24]):
         ws.column_dimensions[get_column_letter(start_col + i)].width = w
     return flagged
+
+
+def _count_2b_rows_per_tab(blob: bytes) -> dict[str, int]:
+    """Rows physically present in each GSTR-2B source tab, before any parsing."""
+    counts: dict[str, int] = {}
+    octa = _find_octa_sheet_name(blob)
+    if octa is not None:
+        # OCTA records are tagged "GSTR2B-OCTA-n" regardless of the tab's actual name
+        # ("Purchase", "Sheet1", …). Label the count the same way or the sheet lists the
+        # file twice — once with rows and no records, once with records and no rows.
+        try:
+            counts[f"OCTA ({octa})"] = len(_read_octa_sheet(blob))
+        except Exception:
+            pass
+        return counts
+    for tab in ALLOWED_SHEETS_ORDER + IMS_SHEETS_ORDER:
+        try:
+            rows = _read_gstr2b_sheet(blob, tab)
+        except Exception:
+            continue
+        if rows:
+            counts[tab] = len(rows)
+    return counts
+
+
+def build_proof_sheet(wb: Any, results: list[Any], payload: dict) -> None:
+    """A one-page tie-out proving nothing was lost between file, parse and output.
+
+    The check-point columns answer "is this row right?" one row at a time. This
+    answers the question underneath it — "did the tool READ everything I gave it?" —
+    which is what actually lets an accountant stop checking line by line. Three
+    controls, each either reconciling or not:
+
+      A  every row in each GSTR-2B tab became a record
+      B  every register row became a record, or was skipped for a stated reason
+      C  every record appears exactly once in the output, by count and by value
+
+    Written defensively and last: it only ever reports, so a failure here must not
+    cost the workbook its real content."""
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    from openpyxl.utils import get_column_letter
+    import base64 as _b64
+
+    ws = wb.create_sheet(title="Proof", index=0)
+    HDR   = PatternFill("solid", fgColor="1F4E78")
+    BAND  = PatternFill("solid", fgColor="DCE6F1")
+    OKF   = PatternFill("solid", fgColor="D5F5E3")
+    BADF  = PatternFill("solid", fgColor="F9C9C4")
+    thin  = Side(style="thin", color="B0B0B0")
+    bd    = Border(left=thin, right=thin, top=thin, bottom=thin)
+    r = 1
+
+    def title(text: str) -> None:
+        nonlocal r
+        c = ws.cell(row=r, column=1, value=text)
+        c.font = Font(bold=True, color="FFFFFF", size=11)
+        c.fill = HDR
+        ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=6)
+        r += 1
+
+    def head(cells: list[str]) -> None:
+        nonlocal r
+        for i, t in enumerate(cells, 1):
+            c = ws.cell(row=r, column=i, value=t)
+            c.font = Font(bold=True, size=9)
+            c.fill = BAND
+            c.border = bd
+            c.alignment = Alignment(horizontal="center" if i > 1 else "left", wrap_text=True)
+        r += 1
+
+    def line(cells: list[Any], bold: bool = False, verdict: bool | None = None) -> None:
+        nonlocal r
+        for i, v in enumerate(cells, 1):
+            c = ws.cell(row=r, column=i, value=v)
+            c.border = bd
+            if bold:
+                c.font = Font(bold=True, size=9)
+            else:
+                c.font = Font(size=9)
+            if isinstance(v, float):
+                c.number_format = "#,##0.00"
+            if i == 1:
+                c.alignment = Alignment(horizontal="left")
+        if verdict is not None:
+            c = ws.cell(row=r, column=6, value="RECONCILES" if verdict else "DOES NOT RECONCILE")
+            c.fill = OKF if verdict else BADF
+            c.font = Font(bold=True, size=9)
+            c.border = bd
+            c.alignment = Alignment(horizontal="center")
+        r += 1
+
+    def blank() -> None:
+        nonlocal r
+        r += 1
+
+    checks: list[bool] = []
+
+    # ── A. GSTR-2B ───────────────────────────────────────────────────────────
+    blobs_2b = [_b64.b64decode(b) for b in (payload.get("_all_gstr2b_b64") or [])] or \
+               ([_b64.b64decode(payload["_gstr2b_b64"])] if payload.get("_gstr2b_b64") else [])
+    title("A.  GSTR-2B — was every row in the file read?")
+    head(["Source tab", "Rows in file", "Records parsed", "Taxable value", "", "Control"])
+    tot_file = tot_parsed = 0
+    tot_val = 0.0
+    for fi, blob in enumerate(blobs_2b):
+        in_file = _count_2b_rows_per_tab(blob)
+        try:
+            recs = parse_gstr2b(blob)
+        except Exception:
+            recs = []
+        per_tab: dict[str, list] = {}
+        for rec in recs:
+            # row_id is "GSTR2B-<true source tab>-<n>" — keeps the real tab even where
+            # sheet_name is reported under its canonical portal label.
+            parts = str(rec.row_id).split("-")
+            tab = "-".join(parts[1:-1]) if len(parts) >= 3 else (rec.sheet_name or "?")
+            if tab == "OCTA":
+                # Match the label used by _count_2b_rows_per_tab for the same file.
+                tab = next((k for k in in_file if k.startswith("OCTA")), tab)
+            per_tab.setdefault(tab, []).append(rec)
+        label = f"File {fi + 1} " if len(blobs_2b) > 1 else ""
+        for tab in sorted(set(in_file) | set(per_tab)):
+            n_file = in_file.get(tab, 0)
+            got = per_tab.get(tab, [])
+            val = round(sum(x.taxable_value for x in got), 2)
+            line([f"{label}{tab}", n_file, len(got), val])
+            tot_file += n_file
+            tot_parsed += len(got)
+            tot_val += val
+    ok_a = tot_file == tot_parsed
+    checks.append(ok_a)
+    line(["TOTAL", tot_file, tot_parsed, round(tot_val, 2), "", ""], bold=True, verdict=ok_a)
+    if not ok_a:
+        line([f"{tot_file - tot_parsed} row(s) present in the file did not become records — investigate."])
+    blank()
+
+    # ── B. Books ─────────────────────────────────────────────────────────────
+    title("B.  Books — was every register row read?")
+    head(["Register", "Rows in file", "Records parsed", "Skipped (no date)", "Taxable value", "Control"])
+    books_recs = [b for b in (_get_val(x, "purchase", None) for x in results) if b is not None]
+    b_tot_file = b_tot_parsed = b_tot_skipped = 0
+    b_tot_val = 0.0
+    reg_blobs = [("Purchase Register", payload.get("_all_purchase_b64") or
+                  ([payload["_purchase_b64"]] if payload.get("_purchase_b64") else [])),
+                 ("Debit Note Register", payload.get("_all_debit_b64") or
+                  ([payload["_debit_b64"]] if payload.get("_debit_b64") else []))]
+    for reg_name, blist in reg_blobs:
+        for fi, b64s in enumerate(blist):
+            try:
+                rows = _read_tally_sheet(_ensure_xlsx(_b64.b64decode(b64s)))
+            except Exception:
+                continue
+            skipped = sum(1 for x in rows
+                          if not str(x.get("Date", "") or "").strip()
+                          or str(x.get("Date", "")).strip() == "nan")
+            got = [x for x in books_recs
+                   if (_get_val(x, "raw", {}) or {}).get("_src_sheet") == reg_name
+                   and int((_get_val(x, "raw", {}) or {}).get("_file_idx", 0) or 0) == fi]
+            val = round(sum(float(_get_val(x, "taxable_value", 0) or 0) for x in got), 2)
+            label = f"{reg_name} (file {fi + 1})" if len(blist) > 1 else reg_name
+            line([label, len(rows), len(got), skipped, val])
+            b_tot_file += len(rows)
+            b_tot_parsed += len(got)
+            b_tot_skipped += skipped
+            b_tot_val += val
+    ok_b = (b_tot_parsed + b_tot_skipped) == b_tot_file
+    checks.append(ok_b)
+    line(["TOTAL", b_tot_file, b_tot_parsed, b_tot_skipped, round(b_tot_val, 2)], bold=True, verdict=ok_b)
+    line(["Skipped rows are summary/blank lines with no date (e.g. Tally's grand total) — expected."])
+    blank()
+
+    # ── C. Reconciliation ────────────────────────────────────────────────────
+    title("C.  Reconciliation — is every record accounted for exactly once?")
+    head(["Control", "Records", "", "", "", "Control"])
+    paired = sum(1 for x in results
+                 if _get_val(x, "gstr2b", None) is not None and _get_val(x, "purchase", None) is not None)
+    only_2b = sum(1 for x in results
+                  if _get_val(x, "gstr2b", None) is not None and _get_val(x, "purchase", None) is None)
+    only_bk = sum(1 for x in results
+                  if _get_val(x, "gstr2b", None) is None and _get_val(x, "purchase", None) is not None)
+    n2b = paired + only_2b
+    nbk = paired + only_bk
+    ok_c1 = n2b == tot_parsed
+    ok_c2 = nbk == b_tot_parsed
+    ok_c3 = len(results) == paired + only_2b + only_bk
+    checks += [ok_c1, ok_c2, ok_c3]
+    line(["GSTR-2B records parsed", tot_parsed])
+    line([f"   paired with Books ({paired}) + in 2B only ({only_2b})", n2b], verdict=ok_c1)
+    line(["Books records parsed", b_tot_parsed])
+    line([f"   paired with 2B ({paired}) + in Books only ({only_bk})", nbk], verdict=ok_c2)
+    line(["Rows written to 'Reco 2B vs Books'", len(results)], verdict=ok_c3)
+    blank()
+
+    # ── Verdict ──────────────────────────────────────────────────────────────
+    passed = all(checks)
+    c = ws.cell(row=r, column=1,
+                value=("ALL CONTROLS RECONCILE — every row in every input file is accounted for "
+                       "in this workbook."
+                       if passed else
+                       f"{sum(1 for x in checks if not x)} CONTROL(S) DO NOT RECONCILE — "
+                       "do not rely on this run until investigated."))
+    c.font = Font(bold=True, size=11, color="FFFFFF")
+    c.fill = OKF if passed else BADF
+    if passed:
+        c.font = Font(bold=True, size=11, color="1D6F42")
+    ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=6)
+    ws.row_dimensions[r].height = 26
+
+    for i, w in enumerate([46, 15, 17, 18, 18, 22], 1):
+        ws.column_dimensions[get_column_letter(i)].width = w
+    ws.sheet_view.showGridLines = False
 
 
 def _build_month_summary_sheet(wb: Any, results: list[Any]) -> None:
@@ -2725,6 +3003,15 @@ def build_gstr2b_books_workbook(results: list[dict], payload: dict | None = None
     # 5. Add main Output sheet (Reco 2B vs Books)
     ws_output = wb.create_sheet(title="Reco 2B vs Books")
     _populate_workbook(ws_output, results)
+
+    # 6. Proof sheet — control totals tying the input files to this workbook. Built
+    # last so it reports on the finished output, and placed first so it is the first
+    # thing read. Purely a report: a failure here must never cost the real content.
+    if payload:
+        try:
+            build_proof_sheet(wb, results, payload)
+        except Exception as e:
+            print(f"Failed to build Proof sheet: {e}")
 
     # Remove the default 'Sheet' that openpyxl creates automatically if we added other sheets
     if "Sheet" in wb.sheetnames and len(wb.sheetnames) > 1:
