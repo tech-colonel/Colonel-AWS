@@ -902,14 +902,14 @@ const runBankReco = (tallyPath, bankPath, outputPath, brandName, tolerance, aggr
     // Per-brand learned aggregate-reco config (dense parties + salary keywords), so a single-month
     // file recalls what prior runs learned. Brand-scoped — see load/saveAggregateConfig.
     if (aggregateConfigPath) args.push('--aggregate-config', aggregateConfigPath);
-    // Optional LLM gate (GenSpark proxy → claude-haiku-4.5) to confirm a detected dense party
-    // before it's learned. One small call per run; skipped if no GenSpark key configured.
-    const gskKey = process.env.GSK_API_KEY;
-    if (gskKey) {
-      args.push('--llm-key', gskKey);
-      if (process.env.GSK_BASE_URL) args.push('--llm-base-url', process.env.GSK_BASE_URL);
-      // Haiku on purpose (cheap, ~1 small call/run) — NOT GSK_MODEL, which may be a costlier model.
-      args.push('--llm-model', process.env.BANK_RECO_LLM_MODEL || 'claude-haiku-4-5');
+    // Optional LLM gate to confirm a detected dense party before it's learned. One small
+    // call per run. GenSpark retired (credits exhausted) → use Anthropic native (Claude):
+    // no --llm-base-url means bank_reco.py calls api.anthropic.com directly.
+    const gateKey = process.env.ANTHROPIC_API_KEY;
+    if (gateKey) {
+      args.push('--llm-key', gateKey);
+      // Haiku on purpose (cheap, ~1 small call/run).
+      args.push('--llm-model', process.env.BANK_RECO_LLM_MODEL || process.env.ANTHROPIC_MODEL || 'claude-haiku-4-5');
     }
     console.log(`[RECO-BANK-TALLY] Executing standalone bank_reco CLI (brand=${brandName || 'none'}): ${script}`);
     execFile('python3', [script, ...args], { timeout: 600000, maxBuffer: 64 * 1024 * 1024 },
