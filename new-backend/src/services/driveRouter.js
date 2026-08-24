@@ -149,10 +149,8 @@ function route(files, slots) {
  */
 async function resolveAmbiguous(result, slots, files) {
   if (!result.ambiguous || result.ambiguous.length === 0) return { ...result, usedLlm: false };
-  if (!process.env.GSK_API_KEY) return { ...result, usedLlm: false };
-
-  const GSK_BASE_URL = process.env.GSK_BASE_URL || 'https://www.genspark.ai/api/llm_proxy/v1';
-  const GSK_MODEL = process.env.GSK_MODEL || 'claude-opus-4-8';
+  if (!process.env.GEMINI_API_KEY && !process.env.ANTHROPIC_API_KEY) return { ...result, usedLlm: false };
+  const { llmComplete } = require('../ai/llmProviders');
 
   const slotLines = slots.map((s) => `- ${s.key}: ${s.label}${s.multiple ? ' (can take multiple)' : ''}`).join('\n');
   const fileLines = result.ambiguous.map((a, i) => `${i + 1}. "${a.name}" (candidate slots: ${a.candidates.join(', ')})`).join('\n');
@@ -163,14 +161,9 @@ async function resolveAmbiguous(result, slots, files) {
     `Files:\n${fileLines}`;
 
   try {
-    const resp = await fetch(`${GSK_BASE_URL}/chat/completions`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', authorization: `Bearer ${process.env.GSK_API_KEY}` },
-      body: JSON.stringify({ model: GSK_MODEL, messages: [{ role: 'user', content: prompt }], temperature: 0 }),
-    });
-    if (!resp.ok) return { ...result, usedLlm: false };
-    const data = await resp.json();
-    const text = data?.choices?.[0]?.message?.content || '';
+    // GenSpark retired → Gemini primary, Claude fallback. On any failure the
+    // outer catch returns the deterministic result unchanged.
+    const { text } = await llmComplete({ messages: [{ role: 'user', content: prompt }], maxTokens: 512, temperature: 0 });
     const jsonMatch = text.match(/\{[\s\S]*\}/);
     if (!jsonMatch) return { ...result, usedLlm: false };
     const parsed = JSON.parse(jsonMatch[0]);

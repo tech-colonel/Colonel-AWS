@@ -15,6 +15,7 @@
    reco engine and never touch this endpoint.                                   */
 
 const { Conversation } = require('../models/master');
+const { llmComplete } = require('../ai/llmProviders');
 
 // GenSpark LLM proxy — OpenAI-compatible chat completions, proxying real Claude
 // model IDs (confirmed live in workflowAiController). Configured via env.
@@ -71,9 +72,8 @@ const toOpenAiMessages = (messages) =>
     .filter((m) => m.content.trim().length > 0);
 
 const streamChat = async (req, res, next) => {
-  const apiKey = process.env.GSK_API_KEY;
-  if (!apiKey) {
-    return res.status(503).json({ error: 'Colonel AI is not configured. Set GSK_API_KEY on the backend.' });
+  if (!process.env.GEMINI_API_KEY && !process.env.ANTHROPIC_API_KEY) {
+    return res.status(503).json({ error: 'Colonel AI is not configured. Set GEMINI_API_KEY or ANTHROPIC_API_KEY on the backend.' });
   }
 
   const { conversationId, system, context } = req.body || {};
@@ -88,7 +88,6 @@ const streamChat = async (req, res, next) => {
   if (convo.length === 0) {
     return res.status(400).json({ error: 'messages is required' });
   }
-  const openAiMessages = [{ role: 'system', content: systemPrompt }, ...convo];
 
   // SSE handshake
   res.writeHead(200, {
@@ -110,63 +109,13 @@ const streamChat = async (req, res, next) => {
   req.on('close', () => { aborted = true; });
 
   try {
-    const resp = await fetch(`${GSK_BASE_URL}/chat/completions`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', authorization: `Bearer ${apiKey}` },
-      body: JSON.stringify({
-        model,
-        messages: openAiMessages,
-        max_tokens: 4096,
-        temperature: 0.7,
-        stream: true,
-        stream_options: { include_usage: true },
-      }),
-    });
-
-    if (!resp.ok || !resp.body) {
-      const errText = await resp.text().catch(() => '');
-      let msg = `Colonel AI error ${resp.status}`;
-      try { msg = JSON.parse(errText)?.error?.message || msg; } catch (_) {}
-      send('error', { error: msg });
-      return res.end();
-    }
-
-    const contentType = resp.headers.get('content-type') || '';
-
-    if (contentType.includes('text/event-stream')) {
-      // OpenAI-style streaming: data: {choices:[{delta:{content}}]} … data: [DONE]
-      const reader = resp.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = '';
-      for (;;) {
-        if (aborted) { try { await reader.cancel(); } catch (_) {} break; }
-        const { value, done } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n');
-        buffer = lines.pop() || '';
-        for (const line of lines) {
-          const t = line.trim();
-          if (!t.startsWith('data:')) continue;
-          const payload = t.slice(5).trim();
-          if (!payload || payload === '[DONE]') continue;
-          let obj; try { obj = JSON.parse(payload); } catch (_) { continue; }
-          const delta = obj?.choices?.[0]?.delta?.content;
-          if (typeof delta === 'string' && delta.length) {
-            fullText += delta;
-            if (!aborted) send('delta', { text: delta });
-          }
-          if (obj?.usage) usage = obj.usage;
-        }
-      }
-    } else {
-      // Proxy ignored `stream` → single JSON body. Emit the full reply at once.
-      const data = await resp.json().catch(() => null);
-      const text = data?.choices?.[0]?.message?.content || '';
-      fullText = text;
-      if (text && !aborted) send('delta', { text });
-      if (data?.usage) usage = data.usage;
-    }
+    // GenSpark retired (credits exhausted) → Gemini primary, Claude fallback.
+    // Non-streaming under the hood; emit the full reply as one delta so the
+    // SSE contract (delta/usage/done) stays identical for the chat UI.
+    const { text, usage: u } = await llmComplete({ system: systemPrompt, messages: convo, maxTokens: 4096, temperature: 0.7 });
+    fullText = text || '';
+    usage = u || null;
+    if (fullText && !aborted) send('delta', { text: fullText });
 
     if (!aborted) {
       if (usage) send('usage', { input_tokens: usage.prompt_tokens || 0, output_tokens: usage.completion_tokens || 0 });

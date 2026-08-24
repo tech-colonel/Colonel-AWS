@@ -15,6 +15,8 @@
 
    Nothing here changes reco/agent logic — additive only.               */
 
+const { llmComplete } = require('./llmProviders');
+
 const GSK_BASE_URL = process.env.GSK_BASE_URL || 'https://www.genspark.ai/api/llm_proxy/v1';
 
 // Assistant chat/help uses its own model var (NOT GSK_MODEL, which the
@@ -71,9 +73,6 @@ async function streamGenspark({ res, model, system, messages, maxTokens = 2048, 
     return { fullText: '', usage: null };
   }
 
-  const chosenModel = pickModel(model);
-  const openAiMessages = [{ role: 'system', content: system || '' }, ...(Array.isArray(messages) ? messages : [])];
-
   if (!res.headersSent) {
     res.writeHead(200, {
       'Content-Type': 'text/event-stream',
@@ -90,71 +89,20 @@ async function streamGenspark({ res, model, system, messages, maxTokens = 2048, 
   let usage = null;
 
   try {
-    const resp = await fetch(`${GSK_BASE_URL}/chat/completions`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', authorization: `Bearer ${apiKey}` },
-      body: JSON.stringify({
-        model: chosenModel,
-        messages: openAiMessages,
-        max_tokens: maxTokens,
-        temperature,
-        stream: true,
-        stream_options: { include_usage: true },
-      }),
-    });
-
-    if (!resp.ok || !resp.body) {
-      const errText = await resp.text().catch(() => '');
-      let msg = `Colonel AI error ${resp.status}`;
-      try { msg = JSON.parse(errText)?.error?.message || msg; } catch (_) {}
-      send('error', { error: msg });
-      if (!res.writableEnded) res.end();
-      return { fullText: '', usage: null };
-    }
-
-    const contentType = resp.headers.get('content-type') || '';
-
-    if (contentType.includes('text/event-stream')) {
-      // OpenAI-style streaming: data: {choices:[{delta:{content}}]} … data: [DONE]
-      const reader = resp.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = '';
-      for (;;) {
-        if (aborted()) { try { await reader.cancel(); } catch (_) {} break; }
-        const { value, done } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n');
-        buffer = lines.pop() || '';
-        for (const line of lines) {
-          const t = line.trim();
-          if (!t.startsWith('data:')) continue;
-          const payload = t.slice(5).trim();
-          if (!payload || payload === '[DONE]') continue;
-          let obj; try { obj = JSON.parse(payload); } catch (_) { continue; }
-          const delta = obj?.choices?.[0]?.delta?.content;
-          if (typeof delta === 'string' && delta.length) {
-            fullText += delta;
-            if (!aborted()) send('delta', { text: delta });
-          }
-          if (obj?.usage) usage = obj.usage;
-        }
-      }
-    } else {
-      // Proxy ignored `stream` → single JSON body. Emit the full reply at once.
-      const data = await resp.json().catch(() => null);
-      const text = data?.choices?.[0]?.message?.content || '';
-      fullText = text;
-      if (text && !aborted()) send('delta', { text });
-      if (data?.usage) usage = data.usage;
-    }
+    // GenSpark retired (credits exhausted) → Gemini primary, Claude fallback.
+    // Non-streaming under the hood; emit the full reply as one delta so the
+    // wire contract (delta/usage/done) stays identical for every caller.
+    const { text, usage: u, provider } = await llmComplete({ system, messages, maxTokens, temperature });
+    fullText = text || '';
+    usage = u || null;
+    if (fullText && !aborted()) send('delta', { text: fullText });
 
     if (!aborted()) {
       if (usage) send('usage', { input_tokens: usage.prompt_tokens || 0, output_tokens: usage.completion_tokens || 0 });
-      send('done', { text: fullText, model: chosenModel });
+      send('done', { text: fullText, model: provider });
     }
 
-    console.log('[ai] genspark', { model: chosenModel, in: usage?.prompt_tokens, out: usage?.completion_tokens });
+    console.log('[ai] llm', { provider, in: usage?.prompt_tokens, out: usage?.completion_tokens });
   } catch (err) {
     console.error('[ai] genspark stream error:', err);
     if (!aborted()) { try { send('error', { error: err?.message || 'Colonel AI failed' }); } catch (_) {} }
@@ -178,39 +126,9 @@ async function streamGenspark({ res, model, system, messages, maxTokens = 2048, 
  * @returns {Promise<{text: string, usage: object|null}>}
  */
 async function callGenspark({ model, system, messages, maxTokens = 256, temperature = 0 } = {}) {
-  const apiKey = process.env.GSK_API_KEY;
-  if (!apiKey) {
-    throw new Error('Colonel AI is not configured. Set GSK_API_KEY on the backend.');
-  }
-
-  const chosenModel = pickModel(model);
-  const openAiMessages = [{ role: 'system', content: system || '' }, ...(Array.isArray(messages) ? messages : [])];
-
-  const resp = await fetch(`${GSK_BASE_URL}/chat/completions`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', authorization: `Bearer ${apiKey}` },
-    body: JSON.stringify({
-      model: chosenModel,
-      messages: openAiMessages,
-      max_tokens: maxTokens,
-      temperature,
-      stream: false,
-    }),
-  });
-
-  if (!resp.ok) {
-    const errText = await resp.text().catch(() => '');
-    let msg = `Colonel AI error ${resp.status}`;
-    try { msg = JSON.parse(errText)?.error?.message || msg; } catch (_) {}
-    throw new Error(msg);
-  }
-
-  const data = await resp.json().catch(() => null);
-  const text = data?.choices?.[0]?.message?.content || '';
-  const usage = data?.usage || null;
-
-  console.log('[ai] genspark', { model: chosenModel, in: usage?.prompt_tokens, out: usage?.completion_tokens });
-
+  // GenSpark retired (credits exhausted) → Gemini primary, Claude fallback.
+  const { text, usage, provider } = await llmComplete({ system, messages, maxTokens, temperature });
+  console.log('[ai] llm', { provider, in: usage?.prompt_tokens, out: usage?.completion_tokens });
   return { text, usage };
 }
 

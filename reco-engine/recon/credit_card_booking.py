@@ -689,20 +689,13 @@ def make_llm_batch_resolver(coa, model=None, timeout=90, max_tokens=4096):
     Returns {} rather than raising on failure — L3 is an accuracy layer, never a
     dependency: a dead key must degrade the run to Suspense, not break it.
     """
-    key = _env("GSK_API_KEY")
-    base = _env("GSK_BASE_URL") or _GSK_DEFAULT_BASE
-    url, headers, native = f"{base.rstrip('/')}/chat/completions", {}, False
-    if key:
-        headers["Authorization"] = f"Bearer {key}"
-    else:                                        # fall back to Anthropic native
-        key = _env("ANTHROPIC_API_KEY")
-        if not key:
-            return None
-        url = "https://api.anthropic.com/v1/messages"
-        headers = {"x-api-key": key, "anthropic-version": "2023-06-01"}
-        native = True
-
-    chosen = model or _env("CC_LLM_MODEL") or _GSK_MODEL
+    # GenSpark retired (credits exhausted) → Gemini primary, Claude fallback.
+    gem_key = _env("GEMINI_API_KEY")
+    ant_key = _env("ANTHROPIC_API_KEY")
+    if not gem_key and not ant_key:
+        return None
+    gem_model = _env("CC_GEMINI_MODEL") or "gemini-2.5-flash"
+    ant_model = model or _env("CC_LLM_MODEL") or _GSK_MODEL   # claude-haiku-4-5
     cached_block = _build_cached_block(coa)
     coa_norm = {_norm_ledger(c): str(c).strip() for c in coa if str(c or "").strip()}
     stats = {"calls": 0, "usage": []}
@@ -726,31 +719,46 @@ def make_llm_batch_resolver(coa, model=None, timeout=90, max_tokens=4096):
             else:
                 lines.append(f"{i}. NARRATION: {item}")
         ask = "Map each narration to a ledger.\n\n" + "\n\n".join(lines)
+
+        def _call_gemini():
+            g_url = (f"https://generativelanguage.googleapis.com/v1beta/models/"
+                     f"{gem_model}:generateContent?key={gem_key}")
+            data = _llm_post(g_url, {}, {
+                "systemInstruction": {"parts": [{"text": cached_block}]},
+                "contents": [{"role": "user", "parts": [{"text": ask}]}],
+                "generationConfig": {"maxOutputTokens": max_tokens, "temperature": 0,
+                                     "thinkingConfig": {"thinkingBudget": 0}},
+            }, timeout)
+            parts = (((data.get("candidates") or [{}])[0].get("content") or {}).get("parts") or [])
+            return "".join(p.get("text", "") for p in parts), (data.get("usageMetadata") or {})
+
+        def _call_claude():
+            data = _llm_post("https://api.anthropic.com/v1/messages",
+                             {"x-api-key": ant_key, "anthropic-version": "2023-06-01"}, {
+                                 "model": ant_model, "max_tokens": max_tokens,
+                                 "messages": [{"role": "user", "content": [
+                                     {"type": "text", "text": cached_block, "cache_control": {"type": "ephemeral"}},
+                                     {"type": "text", "text": ask},
+                                 ]}],
+                             }, timeout)
+            return (next((b.get("text", "") for b in data.get("content", [])
+                          if b.get("type") == "text"), ""), (data.get("usage") or {}))
+
+        text = ""
         try:
             stats["calls"] += 1
-            if native:
-                data = _llm_post(url, headers, {
-                    "model": chosen, "max_tokens": max_tokens,
-                    "messages": [{"role": "user", "content": [
-                        {"type": "text", "text": cached_block,
-                         "cache_control": {"type": "ephemeral"}},
-                        {"type": "text", "text": ask},
-                    ]}],
-                }, timeout)
-                text = next((b.get("text", "") for b in data.get("content", [])
-                             if b.get("type") == "text"), "")
-            else:
-                data = _llm_post(url, headers, {
-                    "model": chosen, "max_tokens": max_tokens, "temperature": 0,
-                    "messages": [
-                        {"role": "system", "content": [
-                            {"type": "text", "text": cached_block,
-                             "cache_control": {"type": "ephemeral"}}]},
-                        {"role": "user", "content": ask},
-                    ],
-                }, timeout)
-                text = ((data.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
-            stats["usage"].append(data.get("usage") or {})
+            if gem_key:
+                try:
+                    text, usage = _call_gemini()
+                    stats["usage"].append(usage)
+                except Exception as e:
+                    logger.warning("Card Gemini failed, falling back to Claude: %s", str(e)[:150])
+                    if ant_key:
+                        text, usage = _call_claude()
+                        stats["usage"].append(usage)
+            elif ant_key:
+                text, usage = _call_claude()
+                stats["usage"].append(usage)
         except Exception as e:
             logger.warning("Card LLM call failed: %s: %s", type(e).__name__, str(e)[:200])
             return {}

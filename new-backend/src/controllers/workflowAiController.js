@@ -251,30 +251,121 @@ function extractToolCall(message) {
   };
 }
 
-async function callGenspark({ systemPrompt, messages, forceEmitOnly }) {
-  const res = await fetch(`${GSK_BASE_URL}/chat/completions`, {
-    method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-      authorization: `Bearer ${process.env.GSK_API_KEY}`
-    },
-    body: JSON.stringify({
-      model: GSK_MODEL,
-      max_tokens: 8192,
-      tools: TOOLS,
-      tool_choice: forceEmitOnly
-        ? { type: 'function', function: { name: 'emit_workflow_draft' } }
-        : 'required',
-      messages: [{ role: 'system', content: systemPrompt }, ...messages]
-    })
-  });
-  const data = await res.json();
-  if (!res.ok) {
-    const err = new Error(data?.error?.message || `Genspark LLM proxy returned ${res.status}`);
-    err.status = res.status;
-    throw err;
+// ── GenSpark retired (credits exhausted) → Gemini function-calling PRIMARY,
+//    Claude tool-use FALLBACK. Both adapted to the OpenAI completion shape this
+//    controller already consumes, so aiChat's logic is unchanged.
+const WF_GEMINI_MODEL = process.env.WORKFLOW_GEMINI_MODEL || process.env.GEMINI_MODEL || 'gemini-2.5-flash';
+const WF_CLAUDE_MODEL = process.env.WORKFLOW_ANTHROPIC_MODEL || process.env.ANTHROPIC_MODEL || 'claude-haiku-4-5';
+
+// Gemini function parameters use an OpenAPI subset — strip fields it rejects.
+function sanitizeSchema(s) {
+  if (Array.isArray(s)) return s.map(sanitizeSchema);
+  if (s && typeof s === 'object') {
+    const o = {};
+    for (const [k, v] of Object.entries(s)) {
+      if (k === 'additionalProperties' || k === 'strict') continue;
+      o[k] = sanitizeSchema(v);
+    }
+    return o;
   }
-  return data;
+  return s;
+}
+const GEMINI_FUNCS = TOOLS.map(t => ({ name: t.function.name, description: t.function.description, parameters: sanitizeSchema(t.function.parameters) }));
+const CLAUDE_TOOLS = TOOLS.map(t => ({ name: t.function.name, description: t.function.description, input_schema: t.function.parameters }));
+
+let _tcSeq = 0;
+const toolCallId = () => `call_${Date.now()}_${_tcSeq++}`;
+
+// OpenAI messages -> Gemini contents (user / assistant-with-tool_calls / tool result)
+function toGeminiContents(messages) {
+  const idToName = {}; const out = [];
+  for (const m of messages) {
+    if (m.role === 'user') out.push({ role: 'user', parts: [{ text: String(m.content || '') }] });
+    else if (m.role === 'assistant') {
+      const parts = [];
+      if (m.content) parts.push({ text: String(m.content) });
+      for (const tc of (m.tool_calls || [])) {
+        idToName[tc.id] = tc.function.name;
+        let args = {}; try { args = JSON.parse(tc.function.arguments); } catch (_) {}
+        parts.push({ functionCall: { name: tc.function.name, args } });
+      }
+      out.push({ role: 'model', parts: parts.length ? parts : [{ text: '' }] });
+    } else if (m.role === 'tool') {
+      out.push({ role: 'user', parts: [{ functionResponse: { name: idToName[m.tool_call_id] || 'tool', response: { result: String(m.content || '') } } }] });
+    }
+  }
+  return out;
+}
+
+// OpenAI messages -> Claude messages
+function toClaudeMessages(messages) {
+  const out = [];
+  for (const m of messages) {
+    if (m.role === 'user') out.push({ role: 'user', content: String(m.content || '') });
+    else if (m.role === 'assistant') {
+      const content = [];
+      if (m.content) content.push({ type: 'text', text: String(m.content) });
+      for (const tc of (m.tool_calls || [])) {
+        let input = {}; try { input = JSON.parse(tc.function.arguments); } catch (_) {}
+        content.push({ type: 'tool_use', id: tc.id, name: tc.function.name, input });
+      }
+      out.push({ role: 'assistant', content: content.length ? content : String(m.content || '') });
+    } else if (m.role === 'tool') {
+      out.push({ role: 'user', content: [{ type: 'tool_result', tool_use_id: m.tool_call_id, content: String(m.content || '') }] });
+    }
+  }
+  return out;
+}
+
+async function geminiToolCall({ systemPrompt, messages, forceEmitOnly }) {
+  const key = process.env.GEMINI_API_KEY;
+  if (!key) throw new Error('GEMINI_API_KEY not set');
+  const body = {
+    systemInstruction: { parts: [{ text: systemPrompt }] },
+    contents: toGeminiContents(messages),
+    tools: [{ functionDeclarations: GEMINI_FUNCS }],
+    toolConfig: { functionCallingConfig: forceEmitOnly ? { mode: 'ANY', allowedFunctionNames: ['emit_workflow_draft'] } : { mode: 'ANY' } },
+    generationConfig: { maxOutputTokens: 8192, temperature: 0, thinkingConfig: { thinkingBudget: 0 } },
+  };
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${WF_GEMINI_MODEL}:generateContent?key=${key}`;
+  const resp = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  if (!resp.ok) throw new Error(`Gemini ${resp.status}: ${(await resp.text().catch(() => '')).slice(0, 220)}`);
+  const data = await resp.json();
+  const parts = data?.candidates?.[0]?.content?.parts || [];
+  const text = parts.filter(p => p.text).map(p => p.text).join('');
+  const tool_calls = parts.filter(p => p.functionCall).map(p => ({ id: toolCallId(), type: 'function', function: { name: p.functionCall.name, arguments: JSON.stringify(p.functionCall.args || {}) } }));
+  if (!tool_calls.length) throw new Error('Gemini returned no tool call');
+  return { choices: [{ message: { role: 'assistant', content: text, tool_calls } }] };
+}
+
+async function claudeToolCall({ systemPrompt, messages, forceEmitOnly }) {
+  const key = process.env.ANTHROPIC_API_KEY;
+  if (!key) throw new Error('ANTHROPIC_API_KEY not set');
+  const body = {
+    model: WF_CLAUDE_MODEL, max_tokens: 8192, system: systemPrompt, tools: CLAUDE_TOOLS,
+    tool_choice: forceEmitOnly ? { type: 'tool', name: 'emit_workflow_draft' } : { type: 'any' },
+    messages: toClaudeMessages(messages),
+  };
+  const resp = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-api-key': key, 'anthropic-version': '2023-06-01' },
+    body: JSON.stringify(body),
+  });
+  const data = await resp.json();
+  if (!resp.ok) { const err = new Error(data?.error?.message || `Anthropic returned ${resp.status}`); err.status = resp.status; throw err; }
+  const blocks = data?.content || [];
+  const text = blocks.filter(b => b.type === 'text').map(b => b.text).join('');
+  const tool_calls = blocks.filter(b => b.type === 'tool_use').map(b => ({ id: b.id, type: 'function', function: { name: b.name, arguments: JSON.stringify(b.input || {}) } }));
+  return { choices: [{ message: { role: 'assistant', content: text, tool_calls: tool_calls.length ? tool_calls : undefined } }] };
+}
+
+async function callGenspark({ systemPrompt, messages, forceEmitOnly }) {
+  try {
+    return await geminiToolCall({ systemPrompt, messages, forceEmitOnly });
+  } catch (e) {
+    console.warn('[workflow-ai] Gemini failed, falling back to Claude:', e.message);
+    return await claudeToolCall({ systemPrompt, messages, forceEmitOnly });
+  }
 }
 
 const aiChat = async (req, res, next) => {
