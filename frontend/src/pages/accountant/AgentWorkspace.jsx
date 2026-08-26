@@ -118,7 +118,10 @@ const AgentWorkspace = () => {
   // at THIS brand. Fixes sales/settlement/order-cycle agents showing a reduced menu.
   const sidebarItems = sidebarFor([
     { path: `/brands/${brandId}/dashboard`, label: 'Dashboard', icon: LayoutDashboard, testId: 'nav-dashboard' },
-    { path: `/brands/${brandId}/agents`, label: 'All Agents', icon: Bot, testId: 'nav-agents' },
+    // Label MUST be 'Agents' (not 'All Agents') so it MERGES with the base 'Agents'
+    // item (overriding its path to THIS brand) instead of appending a duplicate
+    // "All Agents" row at the bottom of the sidebar.
+    { path: `/brands/${brandId}/agents`, label: 'Agents', icon: Bot, testId: 'nav-agents' },
   ]);
 
   useEffect(() => {

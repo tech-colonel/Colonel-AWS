@@ -56,6 +56,20 @@ const Brand = masterSequelize.define('Brand', {
   drive_folder_id: {
     type: DataTypes.STRING,
     allowNull: true
+  },
+  // The brand's n8n INPUT Drive folder (from the workflow's "Search files and
+  // folders" node) — where the in-UI Drive-upload box drops invoice files so the
+  // workflow picks them up. Separate from drive_folder_id above.
+  invoice_input_folder_id: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  // The brand's vendor-wise PROCESSED folder (the "Create folder" node's parent
+  // in n8n) — n8n files each processed invoice into a per-vendor subfolder here.
+  // Box 3 embeds this folder in an iframe so the accountant can browse/edit it.
+  vendor_folder_id: {
+    type: DataTypes.STRING,
+    allowNull: true
   }
 }, {
   tableName: 'brands',

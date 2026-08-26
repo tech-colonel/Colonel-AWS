@@ -329,9 +329,34 @@ const feedInvoicesFromN8n = async (req, res, next) => {
                 || ((isMissingField(row.vendor_name_tally) && isMissingField(row.category)) ? 'Needs Review' : 'Approved')
         }));
 
+        // ─── Dedupe: skip line items that already exist ────────────────
+        // Re-processing the SAME invoice (a re-run, or a repeated test) must not
+        // pile up duplicate rows. Match a line by its natural identity; invalid /
+        // unextracted rows key on the SOURCE FILE so two different failed PDFs are
+        // never collapsed. Pure skip (no deletes) — safe even though n8n feeds one
+        // line item per call, and idempotent across runs.
+        const _dk = (r) => {
+            const inv = String(r.invoice_number || '').trim().toLowerCase();
+            if (!inv || inv === 'invalid') return 'file::' + String(r.invoice_link || '').trim().toLowerCase();
+            return [inv, String(r.company || '').trim().toLowerCase(), String(r.product_name || '').trim().toLowerCase(),
+                Number(r.taxable_value) || 0, Number(r.gst_amount) || 0].join('|');
+        };
+        let existingKeys = new Set();
+        try {
+            const incomingInvNos = [...new Set([...finalData, ...corruptedRows].map((r) => r.invoice_number).filter(Boolean))];
+            if (incomingInvNos.length) {
+                const existing = await InvoiceModel.findAll({ where: { invoice_number: incomingInvNos }, raw: true });
+                existingKeys = new Set(existing.map(_dk));
+            }
+        } catch (e) { console.warn('[n8n feed] dedupe lookup failed (non-fatal):', e.message); }
+        const dedupFinal = finalData.filter((r) => !existingKeys.has(_dk(r)));
+        const dedupCorrupt = corruptedRows.filter((r) => !existingKeys.has(_dk(r)));
+        const _skipped = (finalData.length - dedupFinal.length) + (corruptedRows.length - dedupCorrupt.length);
+        if (_skipped) console.log(`[n8n feed] ⏭️  Skipped ${_skipped} duplicate line item(s) already present.`);
+
         // ─── Insert Data ───────────────────────────────────────────────
-        const validResult = await InvoiceModel.bulkCreate(finalData, { returning: true });
-        const corruptedResult = await InvoiceModel.bulkCreate(corruptedRows, { returning: true });
+        const validResult = await InvoiceModel.bulkCreate(dedupFinal, { returning: true });
+        const corruptedResult = await InvoiceModel.bulkCreate(dedupCorrupt, { returning: true });
         [...validResult, ...corruptedResult].forEach((row) => addInvoiceId(resolvedBrandId, resolvedAgentId, row.id));
 
         // ─── Accumulate live progress across per-invoice feed calls ─────

@@ -3,7 +3,8 @@ import { useParams } from 'react-router-dom';
 import {
   AlertTriangle, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, Database,
   ExternalLink, FileText, Loader2, Maximize2, Pencil, Play, RefreshCw,
-  Save, Search, Sheet, Sparkles, ThumbsDown, ThumbsUp, Trash2, X, Zap
+  Save, Search, Sheet, Sparkles, ThumbsDown, ThumbsUp, Trash2, X, Zap,
+  Mail, UploadCloud, Inbox, FolderOpen
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { format } from 'date-fns';
@@ -32,6 +33,7 @@ const INVOICE_LIVE_BRAND_IDS = [
   'bbd59c4f-c164-42bd-90b8-0325cbb4e1b6', // M Brands
   '1db31f67-8d3f-4037-ba49-57406731ff38', // Zyden
   '52c5cf6f-851f-4deb-9ddf-998c5c43f20a', // Nailinit
+  '31c807fc-8b33-4527-b1af-097be4949e63', // SpatialAI
 ];
 const INVOICE_SHUMEE_TOYS_ID = '91c1a721-4b1d-46de-9cd1-361e179c878e';
 const INVOICE_DRIVE_FOLDER_URL = 'https://drive.google.com/drive/folders/1hsv4GVpNiG6eIS2j8OybkaqNzaNOWi-C';
@@ -200,6 +202,62 @@ const KIND_META = {
   done: { dot: T_SUCCESS, bg: '#FFFFFF', accent: 'transparent', label: null, textColor: '#065F46' },
 };
 
+// ─── Invoice grouping (line-item rows → one card per invoice) ────────────────
+// Rows are stored one-per-line-item; the queue shows one card per INVOICE that
+// expands into its lines. Key MUST match the backend (invoiceGrouping.js
+// groupKeyFor): invoice_number + company, with a blank/"Invalid" invoice number
+// falling back to the source FILE so two different failed PDFs never merge.
+const _gnorm = (v) => String(v == null ? '' : v).trim().toLowerCase();
+const groupKeyForRow = (r) => {
+  const inv = _gnorm(r.invoice_number);
+  if (!inv || inv === 'invalid' || inv === 'n/a' || inv === 'na') {
+    return '__file__::' + (_gnorm(r.invoice_link) || _gnorm(r.filename) || ('id:' + r.id));
+  }
+  return inv + '::' + _gnorm(r.company);
+};
+// Worst-of status for a whole invoice: Invalid > Needs Review > Disapproved > Approved.
+const _INV_RANK = { Approved: 1, Disapproved: 2, 'Needs Review': 3, Corrupted: 4, Invalid: 4 };
+const groupStatusOf = (items) => {
+  let worst = 0, out = 'Needs Review';
+  for (const r of items) {
+    const s = getInvoiceStatus(r);
+    const rk = _INV_RANK[s] || 0;
+    if (rk >= worst) { worst = rk; out = s === 'Corrupted' ? 'Invalid' : s; }
+  }
+  return out;
+};
+// Bucket for metrics + card colour: invalid | review | rejected | done.
+const groupKindOf = (items) => {
+  const s = groupStatusOf(items);
+  if (s === 'Invalid' || s === 'Corrupted') return 'invalid';
+  if (s === 'Needs Review') return 'review';
+  if (s === 'Disapproved') return 'rejected';
+  return 'done';
+};
+const _gnum = (v) => { const n = parseFloat(v); return Number.isFinite(n) ? n : 0; };
+// Collapse flat rows into invoice groups (insertion-ordered, matching input order).
+const buildGroups = (rows) => {
+  const map = new Map();
+  for (const r of rows || []) {
+    const k = groupKeyForRow(r);
+    if (!map.has(k)) map.set(k, []);
+    map.get(k).push(r);
+  }
+  const out = [];
+  for (const [key, items] of map) {
+    let taxable = 0, gst = 0;
+    for (const r of items) { taxable += _gnum(r.taxable_value); gst += _gnum(r.gst_amount); }
+    out.push({
+      key, items, head: items[0],
+      status: groupStatusOf(items),
+      kind: groupKindOf(items),
+      line_count: items.length,
+      total_taxable: taxable, total_gst: gst, total_amount: taxable + gst,
+    });
+  }
+  return out;
+};
+
 const buildForm = (invoice) => {
   const form = {};
   EDITABLE_KEYS.forEach((key) => {
@@ -321,6 +379,20 @@ const ProcessingBanner = ({ status, count, done = 0, total = 0, review = 0, inva
   return null;
 };
 
+// Placeholder feed for the Gmail Data Room (Box 1). Gmail auto-processing isn't
+// wired yet — this shows the intended structure with dummy data.
+const DUMMY_GMAIL = [
+  { from: 'billing@vendorone.com', subject: 'Tax Invoice — INV-2291', received: '18m ago', status: 'processed', vendor: 'Vendor One Pvt Ltd', amount: '₹42,500' },
+  { from: 'accounts@brightsupplies.in', subject: 'Your invoice for July', received: '1h ago', status: 'review', vendor: 'Bright Supplies', amount: '₹1,18,900' },
+  { from: 'no-reply@cloudtools.com', subject: 'Subscription receipt', received: '3h ago', status: 'processed', vendor: 'CloudTools', amount: '₹7,999' },
+  { from: 'ar@packmasters.co', subject: 'Invoice + GST breakup', received: 'Yesterday', status: 'invalid', vendor: '—', amount: '—' },
+];
+const GMAIL_STATUS = {
+  processed: { label: 'Processed', dot: '#10B981', color: '#065F46', bg: '#ECFDF5' },
+  review: { label: 'Needs review', dot: '#F59E0B', color: '#92400E', bg: '#FFFBEB' },
+  invalid: { label: 'Not an invoice', dot: '#EF4444', color: '#991B1B', bg: '#FEF2F2' },
+};
+
 const InvoiceAgentWorkspace = ({ agent }) => {
   const { brandId, agentId } = useParams();
   // Per-brand maintenance: LIVE only for allowlisted brand IDs. Shumee Toys is
@@ -336,7 +408,15 @@ const InvoiceAgentWorkspace = ({ agent }) => {
   const [invoices, setInvoices] = useState([]);
   const [invoicesLoading, setInvoicesLoading] = useState(true);
   const [sheetUrl, setSheetUrl] = useState(null);
+  const [vendorFolderId, setVendorFolderId] = useState(null);
   const [selectedInvoiceId, setSelectedInvoiceId] = useState(null);
+  const [expandedKey, setExpandedKey] = useState(null); // which invoice row is expanded
+  const [viewMode, setViewMode] = useState('today');    // 'today' | 'history'
+  const [isUploading, setIsUploading] = useState(false);
+  const [dragOver, setDragOver] = useState(false);
+  const fileInputRef = useRef(null);
+  const [dateFrom, setDateFrom] = useState('');         // history date filter (YYYY-MM-DD)
+  const [dateTo, setDateTo] = useState('');
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState('All');
   const [filterMenuOpen, setFilterMenuOpen] = useState(false);
@@ -367,9 +447,18 @@ const InvoiceAgentWorkspace = ({ agent }) => {
   // True only after THIS session clicked Process — lets us ignore a stale
   // terminal state replayed when the SSE connects on mount.
   const startedRef = useRef(false);
+  // Highest `done` count we've already pulled the list for — so a live progress
+  // tick only refetches when a NEW invoice has actually landed.
+  const lastLiveDoneRef = useRef(0);
+  // Watchdog: poll run-status + refresh while processing so the banner ALWAYS
+  // clears when the workflow finishes, even if the SSE 'done' never arrives.
+  const processingStartRef = useRef(0);
+  const watchdogRef = useRef(null);
 
-  const fetchInvoices = useCallback(async () => {
-    setInvoicesLoading(true);
+  // `silent` = live/background refresh (no loading spinner) so the list can update
+  // in place mid-run as each invoice lands, without flashing "Loading invoices…".
+  const fetchInvoices = useCallback(async (silent = false) => {
+    if (!silent) setInvoicesLoading(true);
     try {
       const res = await api.get(`/api/brands/${brandId}/agents/${agentId}/invoices`);
       setInvoices(res.data || []);
@@ -378,7 +467,7 @@ const InvoiceAgentWorkspace = ({ agent }) => {
       setInvoices([]);
       return [];
     } finally {
-      setInvoicesLoading(false);
+      if (!silent) setInvoicesLoading(false);
     }
   }, [brandId, agentId]);
 
@@ -386,8 +475,10 @@ const InvoiceAgentWorkspace = ({ agent }) => {
     try {
       const res = await api.get(`/api/brands/${brandId}/agents/${agentId}/invoice/sheet-url`);
       setSheetUrl(res.data?.sheetUrl || null);
+      setVendorFolderId(res.data?.vendorFolderId || null);
     } catch {
       setSheetUrl(null);
+      setVendorFolderId(null);
     }
   }, [brandId, agentId]);
 
@@ -474,6 +565,13 @@ const InvoiceAgentWorkspace = ({ agent }) => {
                   setIsProcessing(true);
                   setTotalToProcess(payload.total || 0);
                   setProcessedCount(payload.done || 0);
+                  // Live incremental: the moment a new invoice is saved (done went up),
+                  // pull it into the list immediately — no waiting for the final 'done',
+                  // no manual Refresh. Silent fetch = no loading-spinner flash.
+                  if ((payload.done || 0) > lastLiveDoneRef.current) {
+                    lastLiveDoneRef.current = payload.done || 0;
+                    fetchInvoices(true);
+                  }
                 } else if (payload.status === 'cancelled') {
                   setProcessingStatus('idle');
                   setIsProcessing(false);
@@ -550,6 +648,53 @@ const InvoiceAgentWorkspace = ({ agent }) => {
     };
   }, [startSseConnection]);
 
+  // ─── Processing watchdog ──────────────────────────────────────────────────
+  // While a run is in flight, poll the n8n run status + silently refresh the list
+  // every 7s. This (a) makes invoices appear live even if the SSE stream hiccups,
+  // and (b) reliably clears the "Processing…" banner the moment the workflow is
+  // done — instead of waiting on the flaky SSE 'done' ping (which can stall ~90s).
+  useEffect(() => {
+    if (!isProcessing) {
+      if (watchdogRef.current) { clearInterval(watchdogRef.current); watchdogRef.current = null; }
+      processingStartRef.current = 0;
+      return;
+    }
+    if (!processingStartRef.current) processingStartRef.current = Date.now();
+
+    const finish = () => {
+      setIsProcessing(false);
+      setIsTriggering(false);
+      setProcessingStatus('idle');
+      startedRef.current = false;
+      if (sseAbortRef.current) sseAbortRef.current.abort();
+      fetchInvoices(true);
+    };
+
+    const tick = async () => {
+      fetchInvoices(true); // keep the list fresh regardless of SSE
+      const elapsed = Date.now() - (processingStartRef.current || Date.now());
+      let runs = [];
+      try {
+        const res = await api.get(`/api/brands/${brandId}/agents/${agentId}/invoice/runs`);
+        runs = res.data?.runs || [];
+      } catch { /* ignore */ }
+      const latest = runs[0];
+      const inFlight = latest && ['running', 'new', 'waiting'].includes(String(latest.status || '').toLowerCase());
+      let startedAfter = true;
+      try { if (latest?.startedAt) startedAfter = new Date(latest.startedAt).getTime() >= (processingStartRef.current - 15000); } catch { /* keep true */ }
+      // Finish when the workflow is no longer running (a terminal run that began
+      // at/after our trigger), after a short grace period — or a hard 3-min cap.
+      if ((latest && !inFlight && startedAfter && elapsed > 12000) || elapsed > 180000) {
+        finish();
+      }
+    };
+
+    const id = setInterval(tick, 7000);
+    watchdogRef.current = id;
+    return () => { clearInterval(id); watchdogRef.current = null; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isProcessing, brandId, agentId]);
+
   // NOTE: we intentionally do NOT auto-open the summary modal — the top completion
   // banner already shows the full breakdown ("Completed — X processed · …"), which
   // is the non-intrusive "summary at the end" the workflow calls for.
@@ -570,11 +715,15 @@ const InvoiceAgentWorkspace = ({ agent }) => {
   useEffect(() => {
     if (invoices.length === 0) {
       setSelectedInvoiceId(null);
+      setExpandedKey(null);
       return;
     }
     if (selectedInvoiceId && invoices.some((invoice) => invoice.id === selectedInvoiceId)) return;
     const firstPending = invoices.find((invoice) => !['Approved', 'Disapproved'].includes(getInvoiceStatus(invoice)));
-    setSelectedInvoiceId((firstPending || invoices[0]).id);
+    const pick = firstPending || invoices[0];
+    setSelectedInvoiceId(pick.id);
+    // NOTE: do NOT auto-expand — the table opens with every invoice collapsed;
+    // a row expands only when the user clicks it.
   }, [invoices, selectedInvoiceId]);
 
   useEffect(() => {
@@ -582,42 +731,108 @@ const InvoiceAgentWorkspace = ({ agent }) => {
     setEditForm(selectedInvoice ? buildForm(selectedInvoice) : {});
   }, [selectedInvoiceId, selectedInvoice]);
 
+  // Flat rows → one group per INVOICE (line items collapsed).
+  const groupedInvoices = useMemo(() => buildGroups(invoices), [invoices]);
+
+  // The date an invoice belongs to = the latest processed_on across its lines
+  // (the "Processed …" date). Drives the Today panel + the History date filter.
+  const groupDate = (g) => {
+    let best = null;
+    for (const r of g.items) {
+      if (!r.processed_on) continue;
+      const d = new Date(r.processed_on);
+      if (!isNaN(d.getTime()) && (!best || d > best)) best = d;
+    }
+    return best;
+  };
+
+  // Stage 1 — VIEW filter. Today = only invoices processed today; History = all,
+  // optionally narrowed to a [from, to] range.
+  const viewGroups = useMemo(() => {
+    const todayStr = new Date().toDateString();
+    const from = dateFrom ? new Date(dateFrom) : null;
+    const to = dateTo ? new Date(dateTo) : null;
+    if (to) to.setHours(23, 59, 59, 999);
+    return groupedInvoices.filter((g) => {
+      const d = groupDate(g);
+      if (viewMode === 'today') return !!d && d.toDateString() === todayStr;
+      if (from && (!d || d < from)) return false;
+      if (to && (!d || d > to)) return false;
+      return true;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [groupedInvoices, viewMode, dateFrom, dateTo]);
+
+  // Metrics reflect the CURRENT view (today's counts, or the filtered history).
   const metrics = useMemo(() => {
-    // Disjoint 3-bucket model (+ rejected): approved + review + invalid + rejected = total.
-    const totals = { total: invoices.length, approved: 0, review: 0, invalid: 0, rejected: 0 };
-    invoices.forEach((invoice) => {
-      const kind = getRowKind(invoice);
-      if (kind === 'invalid') totals.invalid += 1;
-      else if (kind === 'review') totals.review += 1;
-      else if (getInvoiceStatus(invoice) === 'Disapproved') totals.rejected += 1;
-      else totals.approved += 1; // fully done / approved (excludes rejected)
+    const totals = { total: viewGroups.length, approved: 0, review: 0, invalid: 0, rejected: 0 };
+    viewGroups.forEach((g) => {
+      if (g.kind === 'invalid') totals.invalid += 1;
+      else if (g.kind === 'review') totals.review += 1;
+      else if (g.kind === 'rejected') totals.rejected += 1;
+      else totals.approved += 1;
     });
     return totals;
-  }, [invoices]);
+  }, [viewGroups]);
 
-  const filteredInvoices = useMemo(() => {
+  // Stage 2 — STATUS tab + search filter (what the table actually renders).
+  const visibleGroups = useMemo(() => {
     const needle = search.trim().toLowerCase();
-    return invoices.filter((invoice) => {
-      const kind = getRowKind(invoice);
+    return viewGroups.filter((g) => {
       const matchesStatus =
         statusFilter === 'All' ||
-        (statusFilter === 'Done' && kind === 'done' && getInvoiceStatus(invoice) !== 'Disapproved') ||
-        (statusFilter === 'Needs Review' && kind === 'review') ||
-        (statusFilter === 'Invalid' && kind === 'invalid');
-      const haystack = [
-        invoice.company,
-        invoice.invoice_number,
-        invoice.seller_gstin,
-        invoice.buyer_gstin,
-        invoice.category,
-        invoice.product_name,
-      ].join(' ').toLowerCase();
-      return matchesStatus && (!needle || haystack.includes(needle));
+        (statusFilter === 'Done' && g.kind === 'done') ||
+        (statusFilter === 'Needs Review' && g.kind === 'review') ||
+        (statusFilter === 'Invalid' && g.kind === 'invalid');
+      if (!matchesStatus) return false;
+      if (!needle) return true;
+      const h = g.head;
+      const haystack = [h.company, h.invoice_number, h.seller_gstin, h.buyer_gstin, h.category,
+        ...g.items.map((i) => i.product_name)].join(' ').toLowerCase();
+      return haystack.includes(needle);
     });
-  }, [invoices, search, statusFilter]);
+  }, [viewGroups, search, statusFilter]);
 
-  const selectedIndex = filteredInvoices.findIndex((invoice) => invoice.id === selectedInvoiceId);
+  // Flattened line items across visible groups — drives prev/next navigation.
+  const selectableRows = useMemo(() => visibleGroups.flatMap((g) => g.items), [visibleGroups]);
+  // The invoice group that owns the currently-selected line item.
+  const selectedGroup = useMemo(
+    () => groupedInvoices.find((g) => g.items.some((r) => r.id === selectedInvoiceId)) || null,
+    [groupedInvoices, selectedInvoiceId]
+  );
+
+  const selectedIndex = selectableRows.findIndex((invoice) => invoice.id === selectedInvoiceId);
+
+  // Switching the Today/History tab collapses everything (fresh, tidy view).
+  useEffect(() => {
+    setExpandedKey(null);
+  }, [viewMode]);
   const reviewIssues = getReviewIssues(selectedInvoice);
+
+  // Drive-upload box: push the chosen files into the brand's Drive input folder,
+  // then auto-trigger a Process run (upload + auto-process).
+  const handleUploadFiles = async (fileList) => {
+    const files = Array.from(fileList || []).filter(Boolean);
+    if (!files.length) return;
+    if (INVOICE_MAINTENANCE) { toast.info(INVOICE_MAINTENANCE_TOAST); return; }
+    setIsUploading(true);
+    try {
+      const fd = new FormData();
+      files.forEach((f) => fd.append('files', f));
+      const res = await api.post(`/api/brands/${brandId}/agents/${agentId}/invoice/upload`, fd, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+      });
+      const n = res.data?.count || files.length;
+      toast.success(`${n} file${n !== 1 ? 's' : ''} uploaded to Drive — starting processing…`);
+      if (fileInputRef.current) fileInputRef.current.value = '';
+      // Give Drive a moment to index the new files, then auto-process.
+      setTimeout(() => { handleProcessInvoices(); }, 1800);
+    } catch (err) {
+      toast.error(err.response?.data?.error || err.message || 'Upload failed');
+    } finally {
+      setIsUploading(false);
+    }
+  };
 
   const handleProcessInvoices = async () => {
     // Maintenance mode: never fire the n8n webhook; just tell the user.
@@ -632,6 +847,7 @@ const InvoiceAgentWorkspace = ({ agent }) => {
     setProcessingStatus('processing');
     setProcessedCount(0);
     setTotalToProcess(0);
+    lastLiveDoneRef.current = 0;
 
     // Start listening for SSE updates first
     startSseConnection();
@@ -732,10 +948,36 @@ const InvoiceAgentWorkspace = ({ agent }) => {
   };
 
   const moveSelection = (direction) => {
-    if (filteredInvoices.length === 0) return;
+    if (selectableRows.length === 0) return;
     const current = selectedIndex >= 0 ? selectedIndex : 0;
-    const nextIndex = Math.min(Math.max(current + direction, 0), filteredInvoices.length - 1);
-    setSelectedInvoiceId(filteredInvoices[nextIndex].id);
+    const nextIndex = Math.min(Math.max(current + direction, 0), selectableRows.length - 1);
+    const next = selectableRows[nextIndex];
+    setSelectedInvoiceId(next.id);
+    setExpandedKey(groupKeyForRow(next));
+  };
+
+  // Select an invoice card: expand it and jump to its first line item.
+  const selectInvoiceGroup = (group) => {
+    setExpandedKey((prev) => (prev === group.key ? prev : group.key));
+    const firstPending = group.items.find((r) => !['Approved', 'Disapproved'].includes(getInvoiceStatus(r)));
+    setSelectedInvoiceId((firstPending || group.items[0]).id);
+  };
+
+  // Whole-invoice action (approve / reject / delete) on the selected invoice.
+  const handleGroupAction = async (action) => {
+    if (!selectedGroup) return;
+    if (action === 'delete' && !window.confirm('Delete this entire invoice (all its line items)? This cannot be undone.')) return;
+    setActioning(action);
+    try {
+      await api.post(`/api/brands/${brandId}/agents/${agentId}/invoices/group-action`, { group_key: selectedGroup.key, action });
+      toast.success(action === 'approve' ? 'Invoice approved' : action === 'reject' ? 'Invoice rejected' : 'Invoice deleted');
+      if (action === 'delete') setSelectedInvoiceId(null);
+      await fetchInvoices(true);
+    } catch {
+      toast.error(`Failed to ${action} invoice`);
+    } finally {
+      setActioning(null);
+    }
   };
 
   const statusTabs = [
@@ -744,6 +986,156 @@ const InvoiceAgentWorkspace = ({ agent }) => {
     { label: 'Needs Review', count: metrics.review },
     { label: 'Invalid', count: metrics.invalid },
   ];
+
+  // The invoice detail (SOURCE DOC + METADATA + whole-invoice actions) for the
+  // currently-selected LINE ITEM. Rendered INLINE beneath the expanded row.
+  const renderDetail = () => {
+    if (!selectedInvoice) return null;
+    return (
+      <>
+        <div className="px-6 py-4 border-b flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4" style={{ borderColor: T_BORDER }}>
+          <div className="min-w-0">
+            <div className="flex items-center gap-2 mb-1.5">
+              <span className="rounded px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider" style={statusStyle(getInvoiceStatus(selectedInvoice))}>
+                {getInvoiceStatus(selectedInvoice)}
+              </span>
+              {reviewIssues.length > 0 && (
+                <span className="rounded px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider" style={{ background: '#FEF3C7', color: '#92400E' }}>
+                  {reviewIssues.length} ISSUES
+                </span>
+              )}
+            </div>
+            <h2 className="text-xl font-bold tracking-tight" style={{ color: T_TEXT_PRIMARY, fontFamily: 'Space Grotesk' }}>
+              {selectedInvoice.invoice_number || 'Unnamed Invoice'}
+            </h2>
+            <p className="text-sm font-medium" style={{ color: T_TEXT_SECONDARY }}>{selectedInvoice.company || 'Unknown Vendor'}</p>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="flex items-center border rounded-lg mr-2 overflow-hidden" style={{ borderColor: T_BORDER }}>
+              <button onClick={() => moveSelection(-1)} disabled={selectedIndex <= 0} className="p-2 disabled:opacity-40 hover:bg-slate-50 transition-colors" style={{ color: T_TEXT_SECONDARY }}>
+                <ChevronLeft className="w-4 h-4" />
+              </button>
+              <div className="w-px h-4 bg-slate-200" />
+              <button onClick={() => moveSelection(1)} disabled={selectedIndex === -1 || selectedIndex >= selectableRows.length - 1} className="p-2 disabled:opacity-40 hover:bg-slate-50 transition-colors" style={{ color: T_TEXT_SECONDARY }}>
+                <ChevronRight className="w-4 h-4" />
+              </button>
+            </div>
+            <button
+              onClick={() => { setIsEditing((prev) => !prev); setEditForm(buildForm(selectedInvoice)); }}
+              className="inline-flex items-center gap-2 rounded-lg border px-3 py-2 text-sm font-bold hover:bg-slate-50 transition-colors"
+              style={{ borderColor: T_BORDER, color: T_TEXT_SECONDARY }}
+            >
+              {isEditing ? <X className="w-4 h-4" /> : <Pencil className="w-4 h-4" />}
+              {isEditing ? 'Cancel' : 'Edit'}
+            </button>
+            {isEditing ? (
+              <button onClick={handleSave} disabled={isSaving} className="inline-flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-bold text-white shadow-sm" style={{ background: T_BLUE }}>
+                {isSaving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
+                Save
+              </button>
+            ) : (
+              <>
+                <button onClick={() => handleGroupAction('reject')} disabled={!!actioning} className="inline-flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-bold border transition-colors hover:bg-red-50" style={{ borderColor: '#FCA5A5', color: T_DANGER, background: '#FEF2F2' }} title="Reject the whole invoice (all line items)">
+                  {actioning === 'reject' ? <Loader2 className="w-4 h-4 animate-spin" /> : <ThumbsDown className="w-4 h-4" />}
+                  Reject
+                </button>
+                <button onClick={() => handleGroupAction('approve')} disabled={!!actioning} className="inline-flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-bold text-white shadow-sm hover:brightness-110" style={{ background: T_SUCCESS }} title="Approve the whole invoice (all line items)">
+                  {actioning === 'approve' ? <Loader2 className="w-4 h-4 animate-spin" /> : <ThumbsUp className="w-4 h-4" />}
+                  Approve
+                </button>
+                <div className="w-px h-6 mx-2 bg-slate-200" />
+                <button onClick={() => handleGroupAction('delete')} disabled={!!actioning} className="p-2 rounded-lg border hover:bg-red-50 hover:text-red-600 transition-all text-slate-400 hover:border-red-200" title="Delete the whole invoice (all line items)">
+                  {actioning === 'delete' ? <Loader2 className="w-4 h-4 animate-spin" /> : <Trash2 className="w-4 h-4" />}
+                </button>
+              </>
+            )}
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 2xl:grid-cols-[minmax(0,1fr)_460px]">
+          <div className="border-b 2xl:border-b-0 2xl:border-r min-h-[560px]" style={{ borderColor: T_BORDER }}>
+            <div className="px-5 py-3 border-b flex items-center justify-between bg-slate-50/30" style={{ borderColor: T_BORDER }}>
+              <div className="flex items-center gap-2">
+                <FileText className="w-4 h-4" style={{ color: T_BLUE }} />
+                <span className="text-xs font-bold uppercase tracking-wider" style={{ color: T_TEXT_PRIMARY }}>Source Document</span>
+              </div>
+              {selectedInvoice.invoice_link && (
+                <a href={selectedInvoice.invoice_link} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 text-[11px] font-bold transition-colors hover:text-blue-700" style={{ color: T_BLUE }}>
+                  EXTERNAL VIEW <ExternalLink className="w-3 h-3" />
+                </a>
+              )}
+            </div>
+            {(() => {
+              let link = selectedInvoice.invoice_link;
+              if (link && link.includes('drive.google.com')) {
+                link = link.replace('/view', '/preview').replace('/edit', '/preview');
+                if (!link.includes('usp=drive_sdk') && !link.includes('/preview')) {
+                  link += link.includes('?') ? '&preview=1' : '/preview';
+                }
+              }
+              if (link) {
+                return (
+                  <div className="h-[560px] bg-slate-100">
+                    <iframe title="Original invoice" src={link} className="w-full h-full border-0 bg-white" allow="autoplay" />
+                  </div>
+                );
+              }
+              return (
+                <div className="h-[560px] flex flex-col items-center justify-center px-8 text-center">
+                  <AlertTriangle className="w-12 h-12 mb-4" style={{ color: '#D97706' }} />
+                  <h3 className="font-black" style={{ color: '#111827', fontFamily: 'Space Grotesk' }}>No original invoice link</h3>
+                  <p className="text-sm mt-2 max-w-sm" style={{ color: '#667085' }}>
+                    N8N did not return an invoice link for this record. You can add one while editing the processed fields.
+                  </p>
+                </div>
+              );
+            })()}
+          </div>
+
+          <div className="min-h-[560px] flex flex-col">
+            <div className="px-5 py-3 border-b flex items-center justify-between bg-slate-50/30" style={{ borderColor: T_BORDER }}>
+              <div className="flex items-center gap-2">
+                <Sparkles className="w-4 h-4" style={{ color: T_BLUE }} />
+                <span className="text-xs font-bold uppercase tracking-wider" style={{ color: T_TEXT_PRIMARY }}>Metadata</span>
+              </div>
+              <span className="text-[10px] font-bold text-slate-400 uppercase">AI Extracted</span>
+            </div>
+            {reviewIssues.length > 0 && (
+              <div className="m-4 rounded-xl border p-3" style={{ background: '#FFFBEB', borderColor: '#FDE68A' }}>
+                <div className="flex items-start gap-2">
+                  <AlertTriangle className="w-4 h-4 mt-0.5" style={{ color: '#A16207' }} />
+                  <div>
+                    <p className="text-sm font-bold" style={{ color: '#A16207' }}>Needs accountant review</p>
+                    <p className="text-xs mt-1" style={{ color: '#854D0E' }}>{reviewIssues.join(', ')}</p>
+                  </div>
+                </div>
+              </div>
+            )}
+            <div className="p-4 space-y-4 flex-1 overflow-y-auto bg-white">
+              {FIELD_SECTIONS.map((section) => (
+                <div key={section.title} className="rounded-lg border bg-white" style={{ borderColor: T_BORDER_LIGHT }}>
+                  <div className="px-4 py-2 bg-slate-50/50 border-b" style={{ borderColor: T_BORDER_LIGHT }}>
+                    <p className="text-[10px] font-bold uppercase tracking-widest" style={{ color: T_TEXT_SECONDARY }}>{section.title}</p>
+                  </div>
+                  <div className="p-4 grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-3">
+                    {section.fields.map((field) => (
+                      <div key={field.key} className={field.key === 'invoice_link' || field.key === 'product_name' ? 'sm:col-span-2' : ''}>
+                        <label className="block text-[10px] font-bold uppercase tracking-tight mb-1" style={{ color: T_TEXT_SECONDARY }}>
+                          {field.label}
+                        </label>
+                        <FieldValue invoice={selectedInvoice} field={field} editing={isEditing} editForm={editForm} onChange={handleFieldChange} />
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      </>
+    );
+  };
 
   return (
     <div className="max-w-[1600px] space-y-6 animate-in fade-in duration-500">
@@ -797,8 +1189,8 @@ const InvoiceAgentWorkspace = ({ agent }) => {
                 <Sheet className="w-4 h-4" /> Google Drive Folder
               </button>
               <button
-                onClick={fetchInvoices}
-                disabled={invoicesLoading || isProcessing}
+                onClick={() => fetchInvoices()}
+                disabled={invoicesLoading}
                 className="inline-flex items-center gap-2 rounded-lg border px-4 py-2 text-sm font-semibold transition-all hover:bg-slate-50 disabled:opacity-50"
                 style={{ borderColor: T_BORDER, color: T_TEXT_SECONDARY }}
               >
@@ -894,157 +1286,249 @@ const InvoiceAgentWorkspace = ({ agent }) => {
         </div>
       </div>
 
-      <div className="rounded-xl border bg-white shadow-sm p-3" style={{ borderColor: T_BORDER }}>
-        <div className="flex flex-col lg:flex-row gap-3 lg:items-center lg:justify-between">
-          <div className="relative flex-1 max-w-lg">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
-            <input
-              value={search}
-              onChange={(event) => setSearch(event.target.value)}
-              placeholder="Search by vendor, GSTIN, or invoice #..."
-              className="w-full rounded-lg border py-2 pl-10 pr-4 text-sm outline-none focus:ring-2 focus:ring-blue-500/10 transition-all"
-              style={{ borderColor: T_BORDER, color: T_TEXT_PRIMARY }}
-            />
+      {/* ── Intake row: Gmail Data Room (preview) + Drive Upload (live) ── */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        {/* Box 1 — Gmail Data Room (dummy for now) */}
+        <div className="rounded-xl border bg-white shadow-sm overflow-hidden flex flex-col" style={{ borderColor: T_BORDER }}>
+          <div className="px-5 py-3 border-b flex items-center justify-between bg-slate-50/50" style={{ borderColor: T_BORDER }}>
+            <div className="flex items-center gap-2">
+              <Mail className="w-4 h-4" style={{ color: '#EA4335' }} />
+              <span className="text-xs font-bold uppercase tracking-wider" style={{ color: T_TEXT_PRIMARY }}>Gmail Data Room</span>
+            </div>
+            <span className="text-[10px] font-bold px-2 py-0.5 rounded-full" style={{ background: '#FEF3C7', color: '#92400E' }}>Preview</span>
           </div>
-
-          <div className="flex flex-wrap gap-1.5">
-            {statusTabs.map((tab) => {
-              const active = statusFilter === tab.label;
-              const dot = tab.label === 'Needs Review' ? T_WARNING : tab.label === 'Invalid' ? T_DANGER : tab.label === 'Done' ? T_SUCCESS : null;
+          <div className="divide-y flex-1 max-h-[300px] overflow-y-auto" style={{ borderColor: T_BORDER_LIGHT }}>
+            {DUMMY_GMAIL.map((g, i) => {
+              const st = GMAIL_STATUS[g.status] || GMAIL_STATUS.processed;
               return (
-                <button
-                  key={tab.label}
-                  onClick={() => setStatusFilter(tab.label)}
-                  className="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold transition-all"
-                  style={{
-                    background: active ? T_BLUE : 'transparent',
-                    color: active ? '#FFFFFF' : T_TEXT_SECONDARY,
-                  }}
-                >
-                  {dot && <span className="w-2 h-2 rounded-full shrink-0" style={{ background: active ? '#FFFFFF' : dot }} />}
-                  {tab.label} <span className="opacity-60 ml-0.5">{tab.count}</span>
-                </button>
+                <div key={i} className="px-5 py-3 hover:bg-slate-50/60 transition-colors">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <p className="text-sm font-semibold truncate" style={{ color: T_TEXT_PRIMARY }}>{g.subject}</p>
+                      <p className="text-[11px] truncate" style={{ color: T_TEXT_SECONDARY }}>{g.from}</p>
+                    </div>
+                    <span className="shrink-0 inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[9px] font-bold uppercase" style={{ background: st.bg, color: st.color }}>
+                      <span className="w-1.5 h-1.5 rounded-full" style={{ background: st.dot }} /> {st.label}
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between mt-1.5">
+                    <span className="text-[10px]" style={{ color: T_TEXT_SECONDARY }}>{g.received}</span>
+                    <span className="text-[11px] font-semibold" style={{ color: T_TEXT_PRIMARY }}>{g.vendor !== '—' ? `${g.vendor} · ${g.amount}` : g.amount}</span>
+                  </div>
+                </div>
               );
             })}
+          </div>
+          <div className="px-5 py-2.5 border-t bg-slate-50/40 flex items-center gap-2" style={{ borderColor: T_BORDER_LIGHT }}>
+            <Inbox className="w-3.5 h-3.5" style={{ color: T_TEXT_SECONDARY }} />
+            <span className="text-[10px] font-medium" style={{ color: T_TEXT_SECONDARY }}>Sample data — live Gmail intake coming soon.</span>
+          </div>
+        </div>
+
+        {/* Box 2 — Drive Upload (live) */}
+        <div className="rounded-xl border bg-white shadow-sm overflow-hidden flex flex-col" style={{ borderColor: T_BORDER }}>
+          <div className="px-5 py-3 border-b flex items-center justify-between bg-slate-50/50" style={{ borderColor: T_BORDER }}>
+            <div className="flex items-center gap-2">
+              <UploadCloud className="w-4 h-4" style={{ color: T_BLUE }} />
+              <span className="text-xs font-bold uppercase tracking-wider" style={{ color: T_TEXT_PRIMARY }}>Upload Invoices</span>
+            </div>
+            <button onClick={() => window.open(INVOICE_DRIVE_FOLDER_URL, '_blank')} className="inline-flex items-center gap-1.5 text-[11px] font-bold hover:text-blue-700" style={{ color: T_BLUE }}>
+              <FolderOpen className="w-3.5 h-3.5" /> Open folder
+            </button>
+          </div>
+          <div className="p-5 flex-1 flex items-center">
+            <input ref={fileInputRef} type="file" multiple accept=".pdf,image/*" className="hidden" onChange={(e) => handleUploadFiles(e.target.files)} />
+            <button
+              type="button"
+              onClick={() => { if (!isUploading && fileInputRef.current) fileInputRef.current.click(); }}
+              onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
+              onDragLeave={() => setDragOver(false)}
+              onDrop={(e) => { e.preventDefault(); setDragOver(false); handleUploadFiles(e.dataTransfer.files); }}
+              disabled={isUploading || INVOICE_MAINTENANCE}
+              className="w-full rounded-xl border-2 border-dashed py-10 px-6 text-center transition-all disabled:opacity-60"
+              style={{ borderColor: dragOver ? T_BLUE : T_BORDER, background: dragOver ? T_BLUE_BG : '#FBFCFE' }}
+            >
+              {isUploading ? (
+                <div className="flex flex-col items-center gap-2">
+                  <Loader2 className="w-7 h-7 animate-spin" style={{ color: T_BLUE }} />
+                  <span className="text-sm font-bold" style={{ color: T_BLUE }}>Uploading &amp; processing…</span>
+                </div>
+              ) : (
+                <div className="flex flex-col items-center gap-2">
+                  <UploadCloud className="w-8 h-8" style={{ color: T_BLUE }} />
+                  <span className="text-sm font-bold" style={{ color: T_TEXT_PRIMARY }}>Drop invoice files here, or click to browse</span>
+                  <span className="text-[11px]" style={{ color: T_TEXT_SECONDARY }}>PDF or images · uploaded to Drive, then processed automatically</span>
+                </div>
+              )}
+            </button>
           </div>
         </div>
       </div>
 
-      <div className="grid grid-cols-1 xl:grid-cols-[340px_minmax(0,1fr)] gap-6 items-start">
+      {/* Box 3 — vendor-wise processed folders (live Drive view) */}
+      {vendorFolderId && (
         <div className="rounded-xl border bg-white shadow-sm overflow-hidden" style={{ borderColor: T_BORDER }}>
-          <div className="px-4 py-3 border-b flex items-center justify-between bg-slate-50/50" style={{ borderColor: T_BORDER }}>
-            <div className="relative">
-              <button
-                onClick={() => setFilterMenuOpen((o) => !o)}
-                className="flex items-center gap-1.5 rounded-md px-1.5 py-0.5 -ml-1 hover:bg-slate-100 transition-colors"
-              >
-                <Database className="w-3.5 h-3.5" style={{ color: T_BLUE }} />
-                <span className="text-xs font-bold uppercase tracking-wider" style={{ color: T_TEXT_PRIMARY }}>{statusFilter}</span>
-                <ChevronDown className="w-3.5 h-3.5" style={{ color: T_TEXT_SECONDARY, transform: filterMenuOpen ? 'rotate(180deg)' : 'none', transition: 'transform 0.15s' }} />
-              </button>
-              {filterMenuOpen && (
-                <>
-                  <div className="fixed inset-0 z-10" onClick={() => setFilterMenuOpen(false)} />
-                  <div className="absolute z-20 mt-1 left-0 w-56 rounded-lg border bg-white shadow-lg py-1" style={{ borderColor: T_BORDER }}>
-                    {statusTabs.map((tab) => {
-                      const dot = tab.label === 'Needs Review' ? T_WARNING : tab.label === 'Invalid' ? T_DANGER : tab.label === 'Done' ? T_SUCCESS : T_BLUE;
-                      const active = statusFilter === tab.label;
-                      return (
-                        <button
-                          key={tab.label}
-                          onClick={() => { setStatusFilter(tab.label); setFilterMenuOpen(false); }}
-                          className="w-full flex items-center justify-between px-3 py-2 text-xs font-semibold hover:bg-slate-50 transition-colors"
-                          style={{ background: active ? T_BLUE_BG : 'transparent', color: active ? T_BLUE : T_TEXT_PRIMARY }}
-                        >
-                          <span className="flex items-center gap-2">
-                            <span className="w-2 h-2 rounded-full" style={{ background: dot }} />
-                            {tab.label === 'Done' ? 'Done / Approved' : tab.label === 'Needs Review' ? 'Needs Review (yellow)' : tab.label === 'Invalid' ? 'Invalid (red)' : 'All'}
-                          </span>
-                          <span style={{ color: T_TEXT_SECONDARY }}>{tab.count}</span>
-                        </button>
-                      );
-                    })}
-                  </div>
-                </>
-              )}
+          <div className="px-5 py-3 border-b flex items-center justify-between bg-slate-50/50" style={{ borderColor: T_BORDER }}>
+            <div className="flex items-center gap-2">
+              <FolderOpen className="w-4 h-4" style={{ color: T_BLUE }} />
+              <span className="text-xs font-bold uppercase tracking-wider" style={{ color: T_TEXT_PRIMARY }}>Processed Folders · Vendor-wise</span>
             </div>
+            <a href={`https://drive.google.com/drive/folders/${vendorFolderId}`} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 text-[11px] font-bold hover:text-blue-700" style={{ color: T_BLUE }}>
+              Open in Drive <ExternalLink className="w-3.5 h-3.5" />
+            </a>
+          </div>
+          <iframe
+            title="Vendor-wise processed folders"
+            src={`https://drive.google.com/embeddedfolderview?id=${vendorFolderId}#list`}
+            className="w-full border-0 bg-white"
+            style={{ height: 360 }}
+          />
+        </div>
+      )}
+
+      <div className="rounded-xl border bg-white shadow-sm p-3" style={{ borderColor: T_BORDER }}>
+        <div className="flex flex-col xl:flex-row gap-3 xl:items-center xl:justify-between">
+          {/* Today / History view toggle */}
+          <div className="flex items-center gap-1 rounded-lg p-1 self-start" style={{ background: '#F1F5F9' }}>
+            {[{ id: 'today', label: 'Today' }, { id: 'history', label: 'History' }].map((v) => {
+              const on = viewMode === v.id;
+              return (
+                <button key={v.id} onClick={() => setViewMode(v.id)} className="px-3.5 py-1.5 rounded-md text-sm font-bold transition-all"
+                  style={{ background: on ? '#FFFFFF' : 'transparent', color: on ? T_BLUE : T_TEXT_SECONDARY, boxShadow: on ? '0 1px 2px rgba(0,0,0,0.08)' : 'none' }}>
+                  {v.label}
+                </button>
+              );
+            })}
+          </div>
+
+          {/* Status pills (img-39 style) */}
+          <div className="flex flex-wrap gap-1.5">
+            {statusTabs.map((tab) => {
+              const active = statusFilter === tab.label;
+              const dot = tab.label === 'Needs Review' ? T_WARNING : tab.label === 'Invalid' ? T_DANGER : tab.label === 'Done' ? T_SUCCESS : T_BLUE;
+              return (
+                <button key={tab.label} onClick={() => setStatusFilter(tab.label)}
+                  className="inline-flex items-center gap-2 rounded-full px-3.5 py-1.5 text-sm font-semibold transition-all border"
+                  style={{ background: active ? '#FFFFFF' : 'transparent', borderColor: active ? T_BORDER : 'transparent', color: active ? T_TEXT_PRIMARY : T_TEXT_SECONDARY, boxShadow: active ? '0 1px 2px rgba(0,0,0,0.06)' : 'none' }}>
+                  <span className="w-2 h-2 rounded-full shrink-0" style={{ background: dot }} />
+                  {tab.label}
+                  <span className="inline-flex items-center justify-center min-w-[20px] h-5 px-1.5 rounded-full text-[11px] font-bold" style={{ background: active ? T_BLUE_BG : '#F1F5F9', color: active ? T_BLUE : T_TEXT_SECONDARY }}>{tab.count}</span>
+                </button>
+              );
+            })}
+          </div>
+
+          {/* Search + (History) date filter */}
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="relative flex-1 min-w-[220px]">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+              <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search vendor, GSTIN, invoice #…"
+                className="w-full rounded-lg border py-2 pl-10 pr-4 text-sm outline-none focus:ring-2 focus:ring-blue-500/10 transition-all"
+                style={{ borderColor: T_BORDER, color: T_TEXT_PRIMARY }} />
+            </div>
+            {viewMode === 'history' && (
+              <div className="flex items-center gap-1.5">
+                <input type="date" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} className="rounded-lg border py-1.5 px-2 text-xs outline-none" style={{ borderColor: T_BORDER, color: T_TEXT_SECONDARY }} title="From date" />
+                <span className="text-xs text-slate-400">–</span>
+                <input type="date" value={dateTo} onChange={(e) => setDateTo(e.target.value)} className="rounded-lg border py-1.5 px-2 text-xs outline-none" style={{ borderColor: T_BORDER, color: T_TEXT_SECONDARY }} title="To date" />
+                {(dateFrom || dateTo) && (
+                  <button onClick={() => { setDateFrom(''); setDateTo(''); }} className="text-xs font-semibold px-2 py-1.5 rounded-lg hover:bg-slate-100" style={{ color: T_TEXT_SECONDARY }}>Clear</button>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
+      <div className="w-full">
+        <div className="rounded-xl border bg-white shadow-sm overflow-hidden" style={{ borderColor: T_BORDER }}>
+          <div className="px-5 py-3 border-b flex items-center justify-between bg-slate-50/50" style={{ borderColor: T_BORDER }}>
+            <span className="text-xs font-bold uppercase tracking-wider" style={{ color: T_TEXT_PRIMARY }}>
+              {viewMode === 'today' ? "Today's Invoices" : 'All Invoices'}
+            </span>
             <span className="text-[10px] font-bold px-2 py-0.5 rounded-full" style={{ background: T_BLUE_BG, color: T_BLUE }}>
-              {filteredInvoices.length} Records
+              {visibleGroups.length} {visibleGroups.length === 1 ? 'Invoice' : 'Invoices'}
             </span>
           </div>
+
+          {!invoicesLoading && visibleGroups.length > 0 && (
+            <div className="hidden md:grid gap-3 px-5 py-2.5 border-b bg-white text-[10px] font-bold uppercase tracking-wider" style={{ gridTemplateColumns: '120px 96px minmax(0,1fr) minmax(0,1.3fr) 160px 28px', borderColor: T_BORDER_LIGHT, color: T_TEXT_SECONDARY }}>
+              <span>Status</span><span>Date</span><span>Number</span><span>Vendor</span><span className="text-right">Total</span><span></span>
+            </div>
+          )}
 
           {invoicesLoading ? (
             <div className="py-16 flex items-center justify-center text-sm" style={{ color: '#667085' }}>
               <Loader2 className="w-5 h-5 animate-spin mr-2" /> Loading invoices...
             </div>
-          ) : filteredInvoices.length === 0 ? (
+          ) : visibleGroups.length === 0 ? (
             <div className="py-16 px-6 text-center">
               <FileText className="w-10 h-10 mx-auto mb-3" style={{ color: '#CBD5E1' }} />
               <p className="text-sm font-bold" style={{ color: '#475467' }}>No invoices found</p>
-              <p className="text-xs mt-1" style={{ color: '#98A2B3' }}>Try another filter or run N8N processing.</p>
+              <p className="text-xs mt-1" style={{ color: '#98A2B3' }}>{viewMode === 'today' ? 'No invoices processed today — switch to History to see earlier ones.' : 'Try another filter or run N8N processing.'}</p>
             </div>
           ) : (
-            <div className="max-h-[800px] overflow-y-auto divide-y divide-slate-100">
-              {filteredInvoices.map((invoice) => {
-                const status = getInvoiceStatus(invoice);
-                const style = statusStyle(status);
-                const kind = getRowKind(invoice);
-                const meta = KIND_META[kind];
-                const active = invoice.id === selectedInvoiceId;
+            <div className="divide-y" style={{ borderColor: T_BORDER_LIGHT }}>
+              {visibleGroups.map((g) => {
+                const style = statusStyle(g.status);
+                const isExpanded = expandedKey === g.key;
+                const multi = g.line_count > 1;
+                const d = groupDate(g);
+                const accent = g.kind === 'invalid' ? T_DANGER : g.kind === 'review' ? T_WARNING : 'transparent';
                 return (
-                  <button
-                    key={invoice.id}
-                    onClick={() => setSelectedInvoiceId(invoice.id)}
-                    className="w-full text-left p-4 transition-all hover:bg-slate-50/50 relative"
-                    style={{
-                      // Selected cards keep their status color (yellow/red) instead of turning blue;
-                      // selection is shown by a stronger tint + a full outline in that same color.
-                      background: active
-                        ? (kind === 'invalid' ? '#FEE2E2' : kind === 'review' ? '#FEF3C7' : '#F0F7FF')
-                        : meta.bg,
-                      borderLeft: `3px solid ${kind === 'done' ? (active ? T_BLUE : 'transparent') : meta.accent}`,
-                      boxShadow: active ? `inset 0 0 0 1.5px ${kind === 'done' ? T_BLUE : meta.accent}` : 'none',
-                    }}
-                  >
-                    <div className="flex items-start justify-between gap-3">
-                      <div className="min-w-0">
-                        <p className="font-bold text-sm truncate" style={{ color: T_TEXT_PRIMARY }}>
-                          {blank(invoice.company) ? 'Unknown Vendor' : invoice.company}
-                        </p>
-                        <p className="text-[11px] font-medium mt-0.5 truncate" style={{ color: T_TEXT_SECONDARY }}>
-                          #{invoice.invoice_number || 'N/A'}
-                        </p>
-                      </div>
-                      <span className="shrink-0 rounded px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-tighter" style={style}>
-                        {status}
+                  <div key={g.key} style={{ borderColor: T_BORDER_LIGHT }}>
+                    {/* Invoice row (img-39 table style) */}
+                    <button
+                      onClick={() => (expandedKey === g.key ? setExpandedKey(null) : selectInvoiceGroup(g))}
+                      className="w-full grid gap-3 px-5 py-3.5 items-center text-left transition-colors hover:bg-slate-50/70"
+                      style={{ gridTemplateColumns: '120px 96px minmax(0,1fr) minmax(0,1.3fr) 160px 28px', background: isExpanded ? '#F6F9FF' : 'transparent', borderLeft: `3px solid ${isExpanded ? T_BLUE : accent}` }}
+                    >
+                      <span><span className="inline-flex items-center rounded-full px-2.5 py-1 text-[10px] font-bold uppercase tracking-wide" style={style}>{g.status}</span></span>
+                      <span className="text-xs font-medium" style={{ color: T_TEXT_SECONDARY }}>{d ? format(d, 'dd MMM yyyy') : formatDate(g.head.invoice_date)}</span>
+                      <span className="min-w-0">
+                        <span className="block text-sm font-bold truncate" style={{ color: T_TEXT_PRIMARY }}>#{g.head.invoice_number || 'N/A'}</span>
+                        {multi && <span className="block text-[10px] font-medium" style={{ color: T_TEXT_SECONDARY }}>{g.line_count} line items</span>}
                       </span>
-                    </div>
-                    {kind !== 'done' && (
-                      <div className="flex items-center gap-1.5 mt-2">
-                        <span className="w-2 h-2 rounded-full shrink-0" style={{ background: meta.dot }} />
-                        <span className="text-[10px] font-bold" style={{ color: meta.textColor }}>{meta.label}</span>
+                      <span className="min-w-0 text-sm font-semibold truncate" style={{ color: T_TEXT_PRIMARY }}>{blank(g.head.company) ? 'Unknown Vendor' : g.head.company}</span>
+                      <span className="text-right leading-tight">
+                        <span className="block text-sm font-bold" style={{ color: T_TEXT_PRIMARY }}>{money(g.total_amount)}</span>
+                        <span className="block text-[10px] font-medium" style={{ color: T_TEXT_SECONDARY }}>taxable {money(g.total_taxable)}</span>
+                      </span>
+                      <span className="flex justify-end">
+                        <ChevronRight className="w-4 h-4 transition-transform" style={{ color: T_TEXT_SECONDARY, transform: isExpanded ? 'rotate(90deg)' : 'none' }} />
+                      </span>
+                    </button>
+
+                    {/* Inline expanded detail — line-item selector + SOURCE/METADATA */}
+                    {isExpanded && selectedInvoice && (
+                      <div className="border-t" style={{ borderColor: T_BORDER_LIGHT, background: '#FBFCFE' }}>
+                        {multi && (
+                          <div className="flex items-center gap-1.5 px-5 py-2.5 overflow-x-auto border-b bg-white" style={{ borderColor: T_BORDER_LIGHT }}>
+                            <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 shrink-0 mr-1">Line items</span>
+                            {g.items.map((li, idx) => {
+                              const a = li.id === selectedInvoiceId;
+                              const label = blank(li.product_name) ? 'item' : li.product_name;
+                              return (
+                                <button key={li.id} onClick={() => setSelectedInvoiceId(li.id)} title={label}
+                                  className="shrink-0 rounded-md px-2.5 py-1 text-[11px] font-semibold border transition-colors"
+                                  style={{ borderColor: a ? T_BLUE : T_BORDER, background: a ? T_BLUE_BG : '#fff', color: a ? T_BLUE : T_TEXT_SECONDARY }}>
+                                  {idx + 1}. {label.length > 22 ? label.slice(0, 22) + '…' : label}
+                                </button>
+                              );
+                            })}
+                          </div>
+                        )}
+                        {renderDetail()}
                       </div>
                     )}
-                    <div className="flex items-center justify-between mt-3">
-                      <span className="text-[10px] font-medium" style={{ color: T_TEXT_SECONDARY }}>{formatDate(invoice.invoice_date)}</span>
-                      <span className="text-xs font-bold" style={{ color: T_TEXT_PRIMARY }}>{money(invoice.taxable_value)}</span>
-                    </div>
-                    {invoice.processed_on && (() => {
-                      let dt = null;
-                      try { dt = format(new Date(invoice.processed_on), 'd MMM yyyy, h:mm a'); } catch { dt = null; }
-                      return dt ? (
-                        <div className="mt-1.5 text-[9px] font-medium" style={{ color: T_TEXT_SECONDARY, opacity: 0.8 }}>
-                          Processed {dt}
-                        </div>
-                      ) : null;
-                    })()}
-                  </button>
+                  </div>
                 );
               })}
             </div>
           )}
         </div>
 
+        {false && (
         <div className="rounded-xl border bg-white shadow-sm overflow-hidden min-h-[800px]" style={{ borderColor: T_BORDER }}>
           {!selectedInvoice ? (
             <div className="h-[720px] flex flex-col items-center justify-center text-center px-6">
@@ -1087,7 +1571,7 @@ const InvoiceAgentWorkspace = ({ agent }) => {
                     <div className="w-px h-4 bg-slate-200" />
                     <button
                       onClick={() => moveSelection(1)}
-                      disabled={selectedIndex === -1 || selectedIndex >= filteredInvoices.length - 1}
+                      disabled={selectedIndex === -1 || selectedIndex >= selectableRows.length - 1}
                       className="p-2 disabled:opacity-40 hover:bg-slate-50 transition-colors"
                       style={{ color: T_TEXT_SECONDARY }}
                     >
@@ -1118,30 +1602,33 @@ const InvoiceAgentWorkspace = ({ agent }) => {
                   ) : (
                     <>
                       <button
-                        onClick={() => handleStatusUpdate('Disapproved')}
+                        onClick={() => handleGroupAction('reject')}
                         disabled={!!actioning}
                         className="inline-flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-bold border transition-colors hover:bg-red-50"
                         style={{ borderColor: '#FCA5A5', color: T_DANGER, background: '#FEF2F2' }}
+                        title="Reject the whole invoice (all line items)"
                       >
-                        {actioning === 'Disapproved' ? <Loader2 className="w-4 h-4 animate-spin" /> : <ThumbsDown className="w-4 h-4" />}
+                        {actioning === 'reject' ? <Loader2 className="w-4 h-4 animate-spin" /> : <ThumbsDown className="w-4 h-4" />}
                         Reject
                       </button>
                       <button
-                        onClick={() => handleStatusUpdate('Approved')}
+                        onClick={() => handleGroupAction('approve')}
                         disabled={!!actioning}
                         className="inline-flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-bold text-white shadow-sm hover:brightness-110"
                         style={{ background: T_SUCCESS }}
+                        title="Approve the whole invoice (all line items)"
                       >
-                        {actioning === 'Approved' ? <Loader2 className="w-4 h-4 animate-spin" /> : <ThumbsUp className="w-4 h-4" />}
+                        {actioning === 'approve' ? <Loader2 className="w-4 h-4 animate-spin" /> : <ThumbsUp className="w-4 h-4" />}
                         Approve
                       </button>
                       <div className="w-px h-6 mx-2 bg-slate-200" />
                       <button
-                        onClick={() => handleDelete(selectedInvoice.id)}
+                        onClick={() => handleGroupAction('delete')}
+                        disabled={!!actioning}
                         className="p-2 rounded-lg border hover:bg-red-50 hover:text-red-600 transition-all text-slate-400 hover:border-red-200"
-                        title="Delete Record"
+                        title="Delete the whole invoice (all line items)"
                       >
-                        <Trash2 className="w-4 h-4" />
+                        {actioning === 'delete' ? <Loader2 className="w-4 h-4 animate-spin" /> : <Trash2 className="w-4 h-4" />}
                       </button>
                     </>
                   )}
@@ -1252,6 +1739,7 @@ const InvoiceAgentWorkspace = ({ agent }) => {
             </>
           )}
         </div>
+        )}
       </div>
 
       {showSheet && (

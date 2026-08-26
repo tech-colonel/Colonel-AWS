@@ -94,14 +94,19 @@ const clearTimer = (key) => {
 };
 
 // True when the current state belongs to a finished/other run and the next tick
-// should start a fresh one: no state, not processing, a run already "full"
-// (done >= total), or the previous run already signalled done.
+// should start a fresh one: no state, not processing, or the state is stale
+// (no activity for 2 min → a previous run that never finalized).
 // A run continues as long as it is live and processing. We deliberately do NOT
-// start fresh just because done >= total: n8n feeds once per LINE ITEM while
-// total is the number of INVOICES (files), so a run legitimately keeps receiving
-// feeds after done reaches total — resetting there corrupted the count.
+// start fresh (a) just because done >= total — n8n feeds once per LINE ITEM while
+// total is the number of INVOICES, so a run legitimately keeps receiving feeds
+// after done reaches total; nor (b) just because the run already signalled 'done'
+// — the 'Progress: done' ping often arrives BEFORE the last per-line feeds, and
+// resetting on those late feeds bounced the counter back to 0 ("1 of 2 → 0 of 2").
+// A genuinely new run is detected by status (a finalized run is 'done', not
+// 'processing') or by the 2-min staleness guard.
 const shouldStartFresh = (st) =>
-  !st || st.status !== 'processing' || st.done === undefined || st.doneRequested === true;
+  !st || st.status !== 'processing' || st.done === undefined
+  || (st.timestamp && (Date.now() - new Date(st.timestamp).getTime()) > 120000);
 
 const freshState = () => ({ status: 'processing', invoices: new Map(), done: 0, total: 0, approved: 0, review: 0, invalid: 0, wrongBrand: 0, wrongBrandName: null, doneRequested: false, timestamp: new Date() });
 

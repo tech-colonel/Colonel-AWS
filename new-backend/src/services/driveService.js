@@ -133,6 +133,27 @@ async function downloadFile(fileId) {
 }
 
 /**
+ * Upload a raw file (e.g. an invoice PDF) from a Buffer into a Drive folder,
+ * keeping its original type. Used by the in-UI "Drive upload" box → the file
+ * lands in the brand's n8n INPUT folder so the workflow picks it up.
+ * Returns { id, name, webViewLink }.
+ */
+async function uploadFile(buffer, name, mimeType, folderId) {
+  const drive = getDrive();
+  const { Readable } = require('stream');
+  const res = await drive.files.create({
+    requestBody: {
+      name: name || `upload-${Date.now()}`,
+      ...(folderId ? { parents: [folderId] } : {}),
+    },
+    media: { mimeType: mimeType || 'application/octet-stream', body: Readable.from(buffer) },
+    fields: 'id, name, webViewLink',
+    supportsAllDrives: true,
+  });
+  return { id: res.data.id, name: res.data.name, webViewLink: res.data.webViewLink };
+}
+
+/**
  * Upload a local .xlsx and convert it to a native Google Sheet.
  * Returns { id, webViewLink }. Honours GOOGLE_OUTPUT_FOLDER_ID if set.
  */
@@ -255,6 +276,7 @@ module.exports = {
   listChildren,
   listSubfolders,
   downloadFile,
+  uploadFile,
   uploadXlsxAsSheet,
   uploadXlsxAsSheetOAuth,
   makeAnyoneReader,

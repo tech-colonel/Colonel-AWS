@@ -4,6 +4,8 @@ const { getDynamicModel } = require('../../../models/brand');
 const { markProcessing, markDone, resetRun, getState } = require('../../../utils/invoiceEvents');
 const { setExecution, getExecution, clearExecution } = require('../../../utils/executionStore');
 const n8nApi = require('../../../utils/n8nApi');
+const drive = require('../../../services/driveService');
+const { groupInvoices, idsForGroup } = require('./invoiceGrouping');
 
 // ─── Helper: parse dates in DD/MM/YYYY or DD-MM-YYYY format ─────────────────
 const parseDate = (dString) => {
@@ -167,7 +169,13 @@ const getSheetUrl = async (req, res, next) => {
       process.env[`${brand.name.replace(/\s+/g, '_')}_invoice_sheet`] ||
       null;
 
-    res.json({ sheetUrl });
+    // Also hand back the Drive folder ids so the UI can render the vendor-wise
+    // processed folder (Box 3) and route uploads to the input folder (Box 2).
+    res.json({
+      sheetUrl,
+      vendorFolderId: brand.vendor_folder_id || null,
+      inputFolderId: brand.invoice_input_folder_id || null,
+    });
   } catch (error) {
     next(error);
   }
@@ -373,9 +381,113 @@ const retryRun = async (req, res, next) => {
   }
 };
 
+// ─── GET /api/brands/:brandId/agents/:agentId/invoices/grouped ───────────────
+// Same rows as GET /invoices, but collapsed into one object per INVOICE
+// (invoice_number + company_name), each carrying its line_items[]. Additive —
+// the flat /invoices endpoint is untouched for backward compatibility.
+const getInvoicesGrouped = async (req, res, next) => {
+  try {
+    const { brandId, agentId } = req.params;
+    const brand = await Brand.findByPk(brandId);
+    const agent = await Agent.findByPk(agentId);
+    if (!brand || !agent) return res.status(404).json({ error: 'Brand or Agent not found' });
+
+    const brandDb = getBrandConnection(brand.db_name);
+    const tableName = agent.name.replace(/[^a-zA-Z0-9]/g, '_').toLowerCase();
+    const InvoiceModel = getDynamicModel(brandDb, tableName, agent.columns);
+    await InvoiceModel.sync({ alter: false }).catch(() => { });
+
+    try {
+      const rows = await InvoiceModel.findAll({ order: [['processed_on', 'DESC']], raw: true });
+      return res.json(groupInvoices(rows));
+    } catch (err) {
+      if (err.name === 'SequelizeDatabaseError') return res.json([]);
+      throw err;
+    }
+  } catch (error) {
+    next(error);
+  }
+};
+
+// ─── POST /api/brands/:brandId/agents/:agentId/invoices/group-action ─────────
+// Whole-invoice action on every line item of a group. Body:
+//   { group_key, action: 'approve' | 'reject' | 'delete' }
+// approve → status 'Approved', reject → 'Disapproved', delete → destroy.
+// One endpoint (not DELETE /invoices/group) so it never collides with the
+// existing DELETE /invoices/:invoiceId param route.
+const groupAction = async (req, res, next) => {
+  try {
+    const { brandId, agentId } = req.params;
+    const { group_key, action } = req.body || {};
+    if (!group_key || !['approve', 'reject', 'delete'].includes(action)) {
+      return res.status(400).json({ error: 'group_key and a valid action (approve|reject|delete) are required' });
+    }
+
+    const brand = await Brand.findByPk(brandId);
+    const agent = await Agent.findByPk(agentId);
+    if (!brand || !agent) return res.status(404).json({ error: 'Brand or Agent not found' });
+
+    const brandDb = getBrandConnection(brand.db_name);
+    const tableName = agent.name.replace(/[^a-zA-Z0-9]/g, '_').toLowerCase();
+    const InvoiceModel = getDynamicModel(brandDb, tableName, agent.columns);
+
+    // Re-derive which row ids belong to this group from the live rows (robust to
+    // the invalid-row per-file fallback keys). Brand-scoped by RLS already.
+    const rows = await InvoiceModel.findAll({ raw: true });
+    const ids = idsForGroup(rows, group_key);
+    if (ids.length === 0) return res.status(404).json({ error: 'Invoice group not found' });
+
+    if (action === 'delete') {
+      await InvoiceModel.destroy({ where: { id: ids } });
+      return res.json({ success: true, action, affected: ids.length });
+    }
+    const status = action === 'approve' ? 'Approved' : 'Disapproved';
+    await InvoiceModel.update({ status }, { where: { id: ids } });
+    return res.json({ success: true, action, status, affected: ids.length });
+  } catch (error) {
+    next(error);
+  }
+};
+
+// ─── POST /api/brands/:brandId/agents/:agentId/invoice/upload ────────────────
+// Receives one or more files from the in-UI Drive-upload box and drops them into
+// the brand's n8n INPUT folder (brands.invoice_input_folder_id) so the workflow
+// picks them up. The frontend then auto-triggers a Process run.
+const uploadInvoiceFiles = async (req, res, next) => {
+  try {
+    const { brandId } = req.params;
+    const brand = await Brand.findByPk(brandId);
+    if (!brand) return res.status(404).json({ error: 'Brand not found' });
+
+    const folderId = brand.invoice_input_folder_id;
+    if (!folderId) return res.status(400).json({ error: "No Drive input folder is configured for this brand yet." });
+
+    const files = req.files || [];
+    if (!files.length) return res.status(400).json({ error: 'No files were uploaded.' });
+
+    const uploaded = [];
+    for (const f of files) {
+      try {
+        const r = await drive.uploadFile(f.buffer, f.originalname, f.mimetype, folderId);
+        uploaded.push({ id: r.id, name: r.name, link: r.webViewLink });
+      } catch (e) {
+        console.error('[Invoice upload] failed for', f.originalname, '-', e.message);
+        const sa = drive.serviceAccountEmail ? drive.serviceAccountEmail() : 'the service account';
+        return res.status(502).json({ error: `Could not upload "${f.originalname}". Ensure the brand's Drive folder is shared with ${sa}.`, uploaded });
+      }
+    }
+    return res.json({ success: true, count: uploaded.length, uploaded });
+  } catch (error) {
+    next(error);
+  }
+};
+
 module.exports = {
   processInvoice,
   getInvoices,
+  getInvoicesGrouped,
+  groupAction,
+  uploadInvoiceFiles,
   getSheetUrl,
   updateInvoice,
   deleteInvoice,

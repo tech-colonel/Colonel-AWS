@@ -4,14 +4,19 @@ const invoiceController = require('../controllers/agents/invoice-process/invoice
 const { feedInvoicesFromN8n, progressFromN8n } = require('../controllers/agents/invoice-process/n8n-invoice-feed-db');
 const { authenticateToken } = require('../middleware/authMiddleware');
 const { addSseClient, removeSseClient, getState } = require('../utils/invoiceEvents');
+const multer = require('multer');
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 25 * 1024 * 1024 } });
 
-const { processInvoice, getInvoices, getSheetUrl, updateInvoice, deleteInvoice, cancelInvoice, getRunHistory, retryRun } = invoiceController;
+const { processInvoice, getInvoices, getInvoicesGrouped, groupAction, uploadInvoiceFiles, getSheetUrl, updateInvoice, deleteInvoice, cancelInvoice, getRunHistory, retryRun } = invoiceController;
 
 router.post('/brands/:brandId/agents/:agentId/invoice/process',          authenticateToken, processInvoice);
+router.post('/brands/:brandId/agents/:agentId/invoice/upload',           authenticateToken, upload.array('files', 25), uploadInvoiceFiles);
 router.post('/brands/:brandId/agents/:agentId/invoice/cancel',           authenticateToken, cancelInvoice);
 router.get('/brands/:brandId/agents/:agentId/invoice/runs',              authenticateToken, getRunHistory);
 router.post('/brands/:brandId/agents/:agentId/invoice/retry',            authenticateToken, retryRun);
 router.get('/brands/:brandId/agents/:agentId/invoices',                  authenticateToken, getInvoices);
+router.get('/brands/:brandId/agents/:agentId/invoices/grouped',          authenticateToken, getInvoicesGrouped);
+router.post('/brands/:brandId/agents/:agentId/invoices/group-action',    authenticateToken, groupAction);
 router.get('/brands/:brandId/agents/:agentId/invoice/sheet-url',         authenticateToken, getSheetUrl);
 router.patch('/brands/:brandId/agents/:agentId/invoices/:invoiceId',     authenticateToken, updateInvoice);
 router.delete('/brands/:brandId/agents/:agentId/invoices/:invoiceId',    authenticateToken, deleteInvoice);
