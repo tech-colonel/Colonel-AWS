@@ -1,15 +1,16 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '../../components/ui/modal';
 import {
     Loader2, Plus, Download, Trash2, FileText, RefreshCw,
     ChevronRight, ChevronLeft, CheckCircle2, Package, CreditCard,
     ShoppingBag, UploadCloud, AlertCircle, Calendar, BarChart2,
-    ArrowLeft, Eye, TrendingDown, TrendingUp, XCircle, HandCoins, RotateCcw,
+    ArrowLeft, Eye, XCircle, Search, Info, Route, LayoutDashboard,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { format } from 'date-fns';
 import api from '../../lib/api';
+import { loadOcDateRange, saveOcDateRange } from '../../lib/ocDateRange';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 const LOGISTICS_PARTNERS = [
@@ -41,6 +42,22 @@ function monthNumToName(n) {
 const currentYear = new Date().getFullYear();
 const YEARS = Array.from({ length: 5 }, (_, i) => currentYear - i);
 
+// ─── Date-range picker helpers (Month/Year selects, same as the Receivable
+// Dashboard's own picker — the underlying fromDate/toDate the API takes are
+// still exact ISO dates, just derived from the selected month's first/last day) ──
+function isoToMonthYear(iso) {
+    if (!iso) return null;
+    const [y, m] = iso.split('-');
+    return { month: parseInt(m, 10), year: parseInt(y, 10) };
+}
+function monthYearToFromDate(month, year) {
+    return `${year}-${String(month).padStart(2, '0')}-01`;
+}
+function monthYearToToDate(month, year) {
+    const lastDay = new Date(year, month, 0).getDate();
+    return `${year}-${String(month).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`;
+}
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 function formatDate(d) {
     if (!d) return '—';
@@ -61,6 +78,426 @@ function fmtINR(n) {
 function fmtFull(n) {
     if (n === null || n === undefined) return '—';
     return '₹' + Number(n).toLocaleString('en-IN', { maximumFractionDigits: 2 });
+}
+
+// ─── Order-Cycle Overview sections (Page-1 spec: Volume / Cash / Funnel /
+// Scenario Catalog / Package Status / Cash Action). Read-only summaries layered
+// onto the Reconciliation Report; the "View Transaction Data" sheet is unchanged.
+const OCV_VOLUME_CARDS = [
+    { key: 'ordersPlaced',        label: 'Orders Placed',           calc: 'count of order lines in the Sales Order file (period / brand / channel filter)' },
+    { key: 'cancelled',           label: 'Cancelled',               calc: 'reconciliation / delivery status = CANCELLED' },
+    { key: 'dispatched',          label: 'Dispatched',              calc: 'dispatch date present / status in the Dispatch Scenarios list' },
+    { key: 'delivered',           label: 'Delivered',               calc: 'courier status in the Delivered list (DELIVERED, DL-DELIVERED, …)' },
+    { key: 'rtoLost',             label: 'RTO / Lost',              calc: 'status = RTO_*, LOST, LT-LOST, UNTRACEABLE' },
+    { key: 'returnedPostDelivery', label: 'Returned (post-delivery)', calc: 'status = COURIER_RETURN-*, or matched in the SRN / Refunds file' },
+];
+const ocvCount = (v) => (v == null ? '—' : Number(v).toLocaleString('en-IN'));
+
+// Uploaded files each overview table's numbers are derived from (shown behind a
+// header "Sources" info toggle — secondary info, not the main content).
+const OCV_SOURCES = {
+    funnel: [
+        'Sales Order Combined Report',
+        'Export-Tally GST Report',
+        'Delivery Partner status reports',
+        'Return GST Report / SRN-Refunds',
+    ],
+    scenarios: [
+        'Export-Tally GST Report',
+        'Return GST Report / SRN-Refunds',
+        'Courier settlement reports (Ekart / Delhivery / Xpressbees)',
+        'Payment gateway reports (Snapmint / BharatX / Razorpay)',
+    ],
+    packageStatus: [
+        'Sales Order Combined Report',
+        'Delivery Partner status reports',
+        'Return GST Report / SRN-Refunds',
+    ],
+    cashActions: [
+        'Delivery Partner status reports',
+        'Courier settlement reports (Ekart / Delhivery / Xpressbees)',
+        'Payment gateway reports (Snapmint / BharatX / Razorpay)',
+        'Return GST Report / SRN-Refunds',
+    ],
+};
+
+function OcvVolumeStrip({ volume }) {
+    if (!volume) return null;
+    return (
+        <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
+            <div className="px-5 py-3.5 border-b border-slate-100">
+                <h3 className="text-sm font-bold text-slate-800">Order Cycle — Volume</h3>
+                <p className="text-xs text-slate-400 mt-0.5">Where every order in the period ended up</p>
+            </div>
+            <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 divide-x divide-y xl:divide-y-0 divide-slate-100">
+                {OCV_VOLUME_CARDS.map(c => (
+                    <div key={c.key} className="px-4 py-4">
+                        <span className="text-[11px] font-bold uppercase tracking-wide text-slate-400">{c.label}</span>
+                        <div className="mt-1 text-2xl font-bold text-slate-900 tabular-nums">{ocvCount(volume[c.key])}</div>
+                        <p className="mt-1.5 text-[10px] leading-relaxed text-slate-400">{c.calc}</p>
+                    </div>
+                ))}
+            </div>
+        </div>
+    );
+}
+
+function OcvCashStrip({ cash }) {
+    if (!cash) return null;
+    const Card = ({ label, value, tone, calc }) => (
+        <div className="flex-1 min-w-[180px] rounded-xl border border-slate-200 bg-white px-4 py-3.5">
+            <span className="text-[11px] font-bold uppercase tracking-wide text-slate-400">{label}</span>
+            <div className={`mt-1 text-xl font-bold tabular-nums ${tone || 'text-slate-900'}`}>{fmtINR(value)}</div>
+            <p className="mt-1.5 text-[10px] leading-relaxed text-slate-400">{calc}</p>
+        </div>
+    );
+    return (
+        <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
+            <div className="px-5 py-3.5 border-b border-slate-100">
+                <h3 className="text-sm font-bold text-slate-800">Cash Cycle — Equation Strip</h3>
+                <p className="text-xs text-slate-400 mt-0.5">How much of the period's net sales has actually landed</p>
+            </div>
+            <div className="p-4 space-y-3">
+                <div className="flex flex-wrap items-stretch gap-2">
+                    <Card label="Net Sales" value={cash.netSales} calc="SUM(Net Amount) across all invoiced lines in the period (Tally file)" />
+                    <div className="flex items-center text-slate-300 font-bold text-lg px-1">−</div>
+                    <Card label="Received" value={cash.received} tone="text-emerald-600" calc="SUM(settlement received): prepaid = same month as sale; COD = courier remittance file" />
+                    <div className="flex items-center text-slate-300 font-bold text-lg px-1">=</div>
+                    <Card label="Balance" value={cash.balance} tone="text-amber-600" calc="Net Sales − Received, for orders not yet returned" />
+                </div>
+                <div className="flex flex-wrap items-stretch gap-2">
+                    <div className="flex-1 min-w-[220px] rounded-xl border border-slate-200 bg-slate-50/60 px-4 py-3">
+                        <span className="text-[11px] font-bold uppercase tracking-wide text-slate-400">Advance Amount</span>
+                        <div className="mt-1 text-lg font-bold text-slate-800 tabular-nums">{fmtINR(cash.advanceAmount)}</div>
+                        <p className="mt-1.5 text-[10px] leading-relaxed text-slate-400">PREPAID orders received but not yet dispatched (ADVANCE_ASOF)</p>
+                    </div>
+                    <div className="flex-1 min-w-[220px] rounded-xl border border-slate-200 bg-slate-50/60 px-4 py-3">
+                        <span className="text-[11px] font-bold uppercase tracking-wide text-slate-400">Payable</span>
+                        <div className="mt-1 text-lg font-bold text-slate-800 tabular-nums">{fmtINR(cash.payableAmount)}</div>
+                        <p className="mt-1.5 text-[10px] leading-relaxed text-slate-400">orders settled then returned — refund owed back to the customer (PAYABLE_ASOF)</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    );
+}
+
+const ocvClickableCount = (value, filter, onDrill) => {
+    const has = Number(value) > 0;
+    return (
+        <button
+            type="button"
+            disabled={!has}
+            onClick={() => has && onDrill(filter)}
+            className={`font-bold tabular-nums transition-colors ${
+                has
+                    ? 'text-indigo-600 hover:text-indigo-800 hover:underline decoration-dotted underline-offset-2 cursor-pointer'
+                    : 'text-slate-300 cursor-default'}`}
+            title={has ? 'View these orders' : undefined}
+        >
+            {ocvCount(value)}
+        </button>
+    );
+};
+const ocvPaymentPill = (pm) => (
+    <span className={`inline-flex px-2 py-0.5 rounded-full text-[10px] font-bold tracking-wide ${
+        (pm || '').toUpperCase() === 'COD' ? 'bg-amber-50 text-amber-700' : 'bg-blue-50 text-blue-700'}`}>
+        {pm}
+    </span>
+);
+
+// Shared "Amount" + "% share of amount" columns, appended to every overview
+// table beside its order count(s). `amount` is the summed net amount of the
+// row's orders; `pctAmount` its share (funnel → of orders placed; the other
+// tables → of the table's own total).
+const OCV_AMOUNT_COLUMNS = [
+    { key: 'amount', label: 'Amount', align: 'right',
+      render: r => <span className="font-semibold text-slate-700 tabular-nums">{fmtINR(r.amount)}</span> },
+    { key: 'pctAmount', label: '% Share', align: 'right',
+      render: r => <span className="text-slate-400 tabular-nums">{r.pctAmount == null ? '—' : `${Number(r.pctAmount).toFixed(1)}%`}</span> },
+];
+
+// Reference table with a per-row "how it's calculated" note, revealed by an info
+// icon beside the row's name. The calc text lives on `row.calc`; `nameKey` marks
+// which column carries the name the icon attaches to. `sources` (optional) lists
+// the uploaded files the numbers are derived from — tucked behind a header info
+// icon so it's available without being in the way.
+function OcvRefTable({ title, subtitle, icon: Icon, columns, rows, nameKey, sources }) {
+    const [openRow, setOpenRow] = useState(null);
+    const [showSources, setShowSources] = useState(false);
+    if (!rows || !rows.length) return null;
+    return (
+        <div className="bg-white border border-slate-200 rounded-xl overflow-hidden shadow-sm">
+            <div className="flex items-center gap-3 px-5 py-4 border-b border-slate-100">
+                {Icon && (
+                    <span className="flex items-center justify-center w-8 h-8 rounded-lg bg-slate-100 text-slate-500 shrink-0">
+                        <Icon className="w-4 h-4" />
+                    </span>
+                )}
+                <div>
+                    <h3 className="text-sm font-bold text-slate-800">{title}</h3>
+                    {subtitle && <p className="text-xs text-slate-400 mt-0.5">{subtitle}</p>}
+                </div>
+                {sources && sources.length > 0 && (
+                    <button
+                        type="button"
+                        onClick={() => setShowSources(s => !s)}
+                        aria-label="Data sources"
+                        title="Data sources"
+                        className={`ml-auto inline-flex items-center gap-1 shrink-0 text-[10px] font-semibold px-2 py-1 rounded-lg transition-colors ${
+                            showSources ? 'bg-indigo-50 text-indigo-600' : 'text-slate-400 hover:text-slate-600 hover:bg-slate-100'}`}
+                    >
+                        <Info className="w-3.5 h-3.5" />
+                        <span className="hidden sm:inline">Sources</span>
+                    </button>
+                )}
+            </div>
+            {showSources && sources && sources.length > 0 && (
+                <div className="px-5 py-3 bg-indigo-50/40 border-b border-slate-100">
+                    <span className="block text-[9px] font-bold uppercase tracking-wider text-slate-400 mb-1.5">Data sources</span>
+                    <div className="flex flex-wrap gap-1.5">
+                        {sources.map(s => (
+                            <span key={s} className="inline-flex items-center text-[11px] text-slate-600 bg-white border border-slate-200 rounded-md px-2 py-0.5">{s}</span>
+                        ))}
+                    </div>
+                </div>
+            )}
+            <div className="overflow-x-auto">
+                <table className="w-full text-xs">
+                    <thead>
+                        <tr className="bg-slate-50/80 border-b border-slate-200 text-[10px] font-bold text-slate-400 uppercase tracking-wider">
+                            {columns.map(col => (
+                                <th key={col.key} className={`px-4 py-3 whitespace-nowrap font-bold ${col.align === 'right' ? 'text-right' : 'text-left'}`}>{col.label}</th>
+                            ))}
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {rows.map((r, i) => {
+                            const isOpen = openRow === i;
+                            return (
+                                <React.Fragment key={i}>
+                                    <tr className={`border-b border-slate-100 last:border-0 transition-colors ${isOpen ? 'bg-indigo-50/40' : 'hover:bg-slate-50/70'}`}>
+                                        {columns.map(col => {
+                                            let content;
+                                            if (col.key === 'n') {
+                                                content = (
+                                                    <span className="inline-flex items-center justify-center w-5 h-5 rounded-md bg-slate-100 text-[10px] font-bold text-slate-500">{r.n}</span>
+                                                );
+                                            } else if (col.render) {
+                                                content = col.render(r);
+                                            } else {
+                                                content = <span className={col.strong ? 'font-semibold text-slate-800' : 'text-slate-600'}>{r[col.key]}</span>;
+                                            }
+                                            const isName = col.key === nameKey;
+                                            return (
+                                                <td key={col.key} className={`px-4 py-3 align-top ${col.align === 'right' ? 'text-right tabular-nums' : 'text-left'}`}>
+                                                    {isName ? (
+                                                        <span className="inline-flex items-center gap-1.5">
+                                                            {content}
+                                                            {r.calc && (
+                                                                <button type="button" aria-label="How it's calculated"
+                                                                    onClick={() => setOpenRow(isOpen ? null : i)}
+                                                                    className={`inline-flex items-center justify-center w-4 h-4 rounded-full transition-colors ${isOpen ? 'bg-indigo-100 text-indigo-600' : 'text-slate-300 hover:text-slate-600 hover:bg-slate-100'}`}>
+                                                                    <Info className="w-3 h-3" />
+                                                                </button>
+                                                            )}
+                                                        </span>
+                                                    ) : content}
+                                                </td>
+                                            );
+                                        })}
+                                    </tr>
+                                    {isOpen && r.calc && (
+                                        <tr className="bg-indigo-50/40">
+                                            <td colSpan={columns.length} className="px-4 pb-3 pt-0">
+                                                <div className="flex items-start gap-2 rounded-lg bg-white border border-indigo-100 px-3 py-2">
+                                                    <Info className="w-3.5 h-3.5 text-indigo-400 shrink-0 mt-0.5" />
+                                                    <div>
+                                                        <span className="block text-[9px] font-bold uppercase tracking-wider text-slate-400">How it's calculated</span>
+                                                        <span className="text-[11px] leading-relaxed text-slate-600">{r.calc}</span>
+                                                    </div>
+                                                </div>
+                                            </td>
+                                        </tr>
+                                    )}
+                                </React.Fragment>
+                            );
+                        })}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    );
+}
+
+function OcvSourceLegend() {
+    const items = [
+        { stage: 'Dispatch', src: 'Unicommerce' },
+        { stage: 'Delivery', src: 'Delivery Partner Status Reports' },
+        { stage: 'Settlement', src: 'Payment Gateway · Delivery Partner Settlement Reports' },
+    ];
+    return (
+        <div className="flex flex-wrap items-center gap-x-6 gap-y-2 px-5 py-3.5 rounded-xl bg-white border border-slate-200 text-xs">
+            <span className="text-[10px] font-bold uppercase tracking-wide text-slate-400">Sources</span>
+            {items.map((s, i) => (
+                <span key={s.stage} className="flex items-center gap-2 text-slate-500">
+                    {i > 0 && <span className="text-slate-300">→</span>}
+                    <span className="font-semibold text-slate-700">{s.stage}</span>
+                    <span className="text-slate-400">·</span>
+                    <span>{s.src}</span>
+                </span>
+            ))}
+        </div>
+    );
+}
+
+// Drill modal — orders behind one clicked number in a Page-1 overview table.
+function OcvDrillModal({ open, onClose, brandId, agentId, filename, fromDate, toDate, filter }) {
+    const [rows, setRows] = useState([]);
+    const [total, setTotal] = useState(0);
+    const [totals, setTotals] = useState(null);
+    const [totalPages, setTotalPages] = useState(1);
+    const [page, setPage] = useState(1);
+    const [loading, setLoading] = useState(true);
+    const [searchInput, setSearchInput] = useState('');
+    const [search, setSearch] = useState('');
+
+    useEffect(() => { setPage(1); setSearchInput(''); setSearch(''); }, [filter]);
+    useEffect(() => {
+        const t = setTimeout(() => { setSearch(searchInput); setPage(1); }, 350);
+        return () => clearTimeout(t);
+    }, [searchInput]);
+
+    useEffect(() => {
+        if (!open || !filter) return;
+        let cancel = false;
+        setLoading(true);
+        const p = new URLSearchParams();
+        Object.entries(filter).forEach(([k, v]) => { if (k !== 'title' && v != null && v !== '') p.set(k, v); });
+        if (fromDate) p.set('fromDate', fromDate);
+        if (toDate) p.set('toDate', toDate);
+        p.set('page', page);
+        p.set('pageSize', 50);
+        if (search) p.set('search', search);
+        api.get(`/api/brands/${brandId}/agents/${agentId}/order-cycle-shopify/files/${encodeURIComponent(filename)}/overview-transactions?${p}`)
+            .then(r => {
+                if (cancel) return;
+                setRows(r.data.rows || []);
+                setTotal(r.data.total || 0);
+                setTotals(r.data.totals || null);
+                setTotalPages(r.data.totalPages || 1);
+            })
+            .catch(() => { if (!cancel) { setRows([]); setTotal(0); setTotals(null); setTotalPages(1); } })
+            .finally(() => { if (!cancel) setLoading(false); });
+        return () => { cancel = true; };
+    }, [open, filter, fromDate, toDate, page, search, brandId, agentId, filename]);
+
+    if (!open) return null;
+
+    return (
+        <Dialog open={open} onOpenChange={(o) => { if (!o) onClose(); }}>
+            <DialogContent onClose={onClose} className="max-w-[92vw] w-[92vw] max-h-[90vh] flex flex-col gap-0 overflow-hidden p-0">
+                <div className="flex items-start justify-between gap-4 px-5 py-4 border-b border-slate-100 shrink-0">
+                    <div className="min-w-0">
+                        <h3 className="text-base font-bold text-slate-900 truncate">{filter?.title || 'Orders'}</h3>
+                        <p className="text-xs text-slate-400 mt-0.5">{total.toLocaleString('en-IN')} order{total === 1 ? '' : 's'}</p>
+                    </div>
+                    <input
+                        value={searchInput}
+                        onChange={e => setSearchInput(e.target.value)}
+                        placeholder="Order ID, invoice, AWB…"
+                        className="mr-8 shrink-0 text-xs px-3 py-1.5 border border-slate-200 rounded-lg bg-slate-50 w-52 focus:outline-none focus:border-slate-400"
+                    />
+                </div>
+                <div className="flex-1 min-h-0 overflow-auto bg-slate-50">
+                    {loading ? (
+                        <div className="flex items-center justify-center py-24 gap-3 text-slate-400 text-sm">
+                            <Loader2 className="h-5 w-5 animate-spin" /> Loading…
+                        </div>
+                    ) : rows.length === 0 ? (
+                        <div className="py-24 text-center text-sm text-slate-400">No orders</div>
+                    ) : (
+                        <table className="w-full text-xs bg-white">
+                            <thead className="sticky top-0 z-10">
+                                <tr className="bg-slate-50 border-b border-slate-200 text-[10px] font-bold text-slate-400 uppercase tracking-wider">
+                                    <th className="px-3 py-2.5 text-left">Order ID</th>
+                                    <th className="px-3 py-2.5 text-left">Invoice</th>
+                                    <th className="px-3 py-2.5 text-left">Channel</th>
+                                    <th className="px-3 py-2.5 text-left">Payment</th>
+                                    <th className="px-3 py-2.5 text-left">Courier</th>
+                                    <th className="px-3 py-2.5 text-right">Gross</th>
+                                    <th className="px-3 py-2.5 text-right">Return</th>
+                                    <th className="px-3 py-2.5 text-right">Net</th>
+                                    <th className="px-3 py-2.5 text-right">Settled</th>
+                                    <th className="px-3 py-2.5 text-right">Balance</th>
+                                    <th className="px-3 py-2.5 text-left">Dispatch</th>
+                                    <th className="px-3 py-2.5 text-left">Delivery</th>
+                                    <th className="px-3 py-2.5 text-left">Reco</th>
+                                </tr>
+                            </thead>
+                            <tbody className="divide-y divide-slate-50">
+                                {rows.map((r, i) => {
+                                    const bal = Number(r.balance_amount_receivable) || 0;
+                                    return (
+                                        <tr key={r.id || r.sale_order_number || i} className="hover:bg-slate-50/60">
+                                            <td className="px-3 py-2 font-semibold text-slate-800 whitespace-nowrap">{r.sale_order_number || '—'}</td>
+                                            <td className="px-3 py-2 text-slate-500 whitespace-nowrap">{r.invoice_number || '—'}</td>
+                                            <td className="px-3 py-2 text-slate-500 whitespace-nowrap">{r.platform || '—'}</td>
+                                            <td className="px-3 py-2">{ocvPaymentPill(r.payment_method)}</td>
+                                            <td className="px-3 py-2 text-slate-500 whitespace-nowrap capitalize">{(r.courier_group || r.shipping_partner || '—')}</td>
+                                            <td className="px-3 py-2 text-right tabular-nums">{fmtFull(r.total_amount)}</td>
+                                            <td className="px-3 py-2 text-right tabular-nums text-slate-500">{Number(r.return_amount) ? fmtFull(r.return_amount) : '—'}</td>
+                                            <td className="px-3 py-2 text-right tabular-nums">{fmtFull(r.net_amount)}</td>
+                                            <td className="px-3 py-2 text-right tabular-nums text-slate-600">{Number(r.total_settlement_received) ? fmtFull(r.total_settlement_received) : '—'}</td>
+                                            <td className="px-3 py-2 text-right tabular-nums">
+                                                <span className={bal === 0 ? 'text-emerald-600' : bal > 0 ? 'text-amber-600' : 'text-purple-600'}>{fmtFull(bal)}</span>
+                                            </td>
+                                            <td className="px-3 py-2 text-slate-500 whitespace-nowrap">{formatDate(r.dispatch_or_cancellation_date)}</td>
+                                            <td className="px-3 py-2 text-slate-500 whitespace-nowrap">{r.delivery_status || '—'}</td>
+                                            <td className="px-3 py-2 text-slate-500 whitespace-nowrap">{r.reconciliation_status || '—'}</td>
+                                        </tr>
+                                    );
+                                })}
+                            </tbody>
+                            {totals && (
+                                <tfoot className="sticky bottom-0 z-10">
+                                    <tr className="bg-slate-800 text-white border-t-2 border-slate-900 shadow-[0_-4px_12px_rgba(15,23,42,0.15)]">
+                                        <td className="px-3 py-3 text-left text-[10px] font-bold uppercase tracking-wider text-slate-300" colSpan={5}>
+                                            <span className="inline-flex items-center gap-1.5">
+                                                <span className="inline-block w-1.5 h-1.5 rounded-full bg-emerald-400" />
+                                                Totals · {total.toLocaleString('en-IN')} order{total === 1 ? '' : 's'}
+                                            </span>
+                                        </td>
+                                        <td className="px-3 py-3 text-right tabular-nums text-sm font-bold">{fmtFull(totals.gross)}</td>
+                                        <td className="px-3 py-3 text-right tabular-nums text-sm font-bold text-slate-300">{fmtFull(totals.ret)}</td>
+                                        <td className="px-3 py-3 text-right tabular-nums text-sm font-bold">{fmtFull(totals.net)}</td>
+                                        <td className="px-3 py-3 text-right tabular-nums text-sm font-bold text-slate-200">{fmtFull(totals.settled)}</td>
+                                        <td className="px-3 py-3 text-right tabular-nums text-sm font-extrabold">
+                                            <span className={totals.balance === 0 ? 'text-emerald-400' : totals.balance > 0 ? 'text-amber-300' : 'text-purple-300'}>{fmtFull(totals.balance)}</span>
+                                        </td>
+                                        <td colSpan={3} className="bg-slate-800" />
+                                    </tr>
+                                </tfoot>
+                            )}
+                        </table>
+                    )}
+                </div>
+                {totalPages > 1 && (
+                    <div className="flex items-center justify-between px-5 py-3 border-t border-slate-100 shrink-0 bg-white">
+                        <span className="text-xs text-slate-400">
+                            {((page - 1) * 50 + 1).toLocaleString()}–{Math.min(page * 50, total).toLocaleString()} of {total.toLocaleString()}
+                        </span>
+                        <div className="flex items-center gap-1">
+                            <button disabled={page <= 1} onClick={() => setPage(p => p - 1)}
+                                className="px-2.5 py-1.5 text-xs border border-slate-200 rounded-lg disabled:opacity-40 hover:bg-slate-50">← Prev</button>
+                            <button disabled={page >= totalPages} onClick={() => setPage(p => p + 1)}
+                                className="px-2.5 py-1.5 text-xs border border-slate-200 rounded-lg disabled:opacity-40 hover:bg-slate-50">Next →</button>
+                        </div>
+                    </div>
+                )}
+            </DialogContent>
+        </Dialog>
+    );
 }
 
 const initModal = () => ({
@@ -201,8 +638,9 @@ function TxDrillRow({ row }) {
     const rzAmt  = toNum(row.razorpay_settlement_amount);
     const totalSettled = toNum(row.total_settlement_received);
     const bal = toNum(row.balance_amount_receivable);
+    const sc = row.scenario || {};
     const courierName = ekAmt > 0 ? 'Ekart' : delAmt > 0 ? 'Delhivery' : xpAmt > 0 ? 'Xpressbees' : 'Courier';
-    const gatewayName = snAmt !== 0 ? 'Snapmint' : bhAmt !== 0 ? 'BharatX' : rzAmt !== 0 ? 'Razorpay' : 'Gateway';
+    const gatewayName = snAmt !== 0 ? 'Snapmint' : bhAmt !== 0 ? 'BharatX' : rzAmt !== 0 ? 'Razorpay' : (sc.settledSource || 'Gateway');
     const srcSection = (dot, label, file, children) => (
         <div className="bg-white border border-slate-200 rounded-lg overflow-hidden">
             <div className="flex items-center gap-1.5 px-3 py-2 border-b border-slate-100" style={{ background: `${dot}12` }}>
@@ -215,7 +653,7 @@ function TxDrillRow({ row }) {
     );
     return (
         <tr>
-            <td colSpan={11} className="p-0">
+            <td colSpan={10} className="p-0">
                 <div className="border-t border-slate-100 bg-slate-50/60 px-4 py-4">
                     <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-3">
                         {srcSection('#2a78d6', 'Tally GST', 'Export-Tally GST Report', <>
@@ -228,8 +666,10 @@ function TxDrillRow({ row }) {
                         {srcSection('#b45309', 'Return GST', 'Return GST Report', <>
                             {kvRow('Return Date', formatDate(row.return_date))}
                             {kvRow('SRN', row.srn)}
+                            {kvRow('SRN Status', sc.srnStatus || '—')}
                             {kvRow('Return Amount', fmtFull(row.return_amount))}
                             {kvRow('Net Amount', `${fmtFull(row.total_amount)} − ${fmtFull(row.return_amount)} = ${fmtFull(row.net_amount)}`)}
+                            {kvRow('Refund Due', sc.refundDue > 0 ? fmtFull(sc.refundDue) : '—')}
                         </>)}
                         {srcSection('#1baf7a', courierName, `${courierName} settlement report`, <>
                             {kvRow('Join Key (AWB)', row.awb_number)}
@@ -237,12 +677,15 @@ function TxDrillRow({ row }) {
                             {delAmt > 0 && <>{kvRow('Delivery Date', formatDate(row.delhivery_delivery_date))}{kvRow('COD Amount', fmtFull(delAmt))}</>}
                             {xpAmt > 0 && <>{kvRow('Delivery Date', formatDate(row.xpressbees_delivery_date))}{kvRow('Txn Date', formatDate(row.xpressbees_transaction_date))}{kvRow('Net Payment', fmtFull(xpAmt))}</>}
                             {ekAmt === 0 && delAmt === 0 && xpAmt === 0 && kvRow('Amount', '— No record found')}
+                            {kvRow('Who Has Product', sc.holder || '—')}
                         </>)}
                         {srcSection('#7c3aed', gatewayName, `${gatewayName} settlement report`, <>
+                            {kvRow('Payment', sc.paymentMethod || '—')}
                             {snAmt !== 0 && <>{kvRow('Join Key (Order No.)', row.sale_order_number)}{kvRow('Settlement Date', formatDate(row.snapmint_settlement_date))}{kvRow('Settlement Value', fmtFull(snAmt))}</>}
                             {bhAmt !== 0 && <>{kvRow('Join Key (Order ID)', row.sale_order_number)}{kvRow('Settlement Date', formatDate(row.bharatx_settlement_timestamp))}{kvRow('Ledger Amount', fmtFull(bhAmt))}</>}
                             {rzAmt !== 0 && <>{kvRow('receipt → SO', row.sale_order_number)}{kvRow('Settlement Date', formatDate(row.razorpay_settlement_date))}{kvRow('Amount', fmtFull(rzAmt))}</>}
-                            {snAmt === 0 && bhAmt === 0 && rzAmt === 0 && kvRow('Settlement', '— No record found')}
+                            {snAmt === 0 && bhAmt === 0 && rzAmt === 0 && sc.settledSource && <>{kvRow('Reconciled Gateway', sc.settledSource)}{kvRow('Reconciled Amount', fmtFull(sc.settledAmount))}</>}
+                            {snAmt === 0 && bhAmt === 0 && rzAmt === 0 && !sc.settledSource && kvRow('Settlement', '— No record found')}
                         </>)}
                     </div>
                     <div className="flex flex-wrap gap-4 items-center bg-white border border-slate-200 rounded-lg px-4 py-2.5 text-xs">
@@ -264,9 +707,10 @@ function TxDrillRow({ row }) {
     );
 }
 
-function TransactionSheet({ brandId, agentId, filename, reconciliation }) {
+function TransactionSheet({ brandId, agentId, filename, reconciliation, fromDate, toDate }) {
     const [txTab, setTxTab]         = useState('all');
     const [mismatchSub, setMismatchSub] = useState('less');
+    const [matchedSub, setMatchedSub]   = useState('all');
     const [expandedId, setExpandedId]   = useState(null);
     const [searchInput, setSearchInput] = useState('');
     const [search, setSearch]       = useState('');
@@ -290,8 +734,11 @@ function TransactionSheet({ brandId, agentId, filename, reconciliation }) {
         const isFirstLoad = page === 1 && rows.length === 0;
         if (isFirstLoad) setLoading(true); else setPageLoading(true);
 
-        const params = new URLSearchParams({ tab: txTab, sub: mismatchSub, page, pageSize: 50 });
+        const sub = txTab === 'matched' ? matchedSub : mismatchSub;
+        const params = new URLSearchParams({ tab: txTab, sub, page, pageSize: 50 });
         if (search) params.set('search', search);
+        if (fromDate) params.set('fromDate', fromDate);
+        if (toDate) params.set('toDate', toDate);
 
         api.get(`/api/brands/${brandId}/agents/${agentId}/order-cycle-shopify/files/${encodeURIComponent(filename)}/transactions?${params}`)
             .then(r => {
@@ -305,7 +752,7 @@ function TransactionSheet({ brandId, agentId, filename, reconciliation }) {
             .finally(() => { if (!cancelled) { setLoading(false); setPageLoading(false); } });
 
         return () => { cancelled = true; };
-    }, [txTab, mismatchSub, page, search, brandId, agentId, filename]);
+    }, [txTab, mismatchSub, matchedSub, page, search, brandId, agentId, filename, fromDate, toDate]);
 
     const toNum = v => { const n = Number(v); return isNaN(n) ? 0 : n; };
 
@@ -320,17 +767,19 @@ function TransactionSheet({ brandId, agentId, filename, reconciliation }) {
         { key: 'mismatched', label: 'Mismatched',  count: (rc.pending || 0) + (rc.overpaid || 0) + (rc.advance || 0) },
         { key: 'unsettled',  label: 'Unsettled',   count: unsettledCount },
         { key: 'all',        label: 'All Orders',  count: rc.total },
-        { key: 'sales',      label: 'Sales Report', count: null },
     ];
 
     function switchTab(key) { setTxTab(key); setPage(1); setExpandedId(null); setRows([]); setLoading(true); }
     function switchSub(key) { setMismatchSub(key); setPage(1); setExpandedId(null); setRows([]); setLoading(true); }
+    function switchMatchedSub(key) { setMatchedSub(key); setPage(1); setExpandedId(null); setRows([]); setLoading(true); }
 
     async function handleDownloadSheet() {
         setDownloading(true);
         try {
             const params = new URLSearchParams();
             if (search) params.set('search', search);
+            if (fromDate) params.set('fromDate', fromDate);
+            if (toDate) params.set('toDate', toDate);
             const res = await api.get(
                 `/api/brands/${brandId}/agents/${agentId}/order-cycle-shopify/files/${encodeURIComponent(filename)}/transactions/download?${params}`,
                 { responseType: 'blob' }
@@ -356,7 +805,7 @@ function TransactionSheet({ brandId, agentId, filename, reconciliation }) {
         if (s === 'RECONCILED')         return <span className="px-1.5 py-0.5 rounded-full text-[9px] font-bold bg-emerald-50 text-emerald-700">RECONCILED</span>;
         if (s === 'PENDING RECEIVABLE') return <span className="px-1.5 py-0.5 rounded-full text-[9px] font-bold bg-amber-50 text-amber-700">PENDING</span>;
         if (s.startsWith('OVERPAID'))   return <span className="px-1.5 py-0.5 rounded-full text-[9px] font-bold bg-purple-50 text-purple-700">OVERPAID</span>;
-        if (s === 'ADVANCE')            return <span className="px-1.5 py-0.5 rounded-full text-[9px] font-bold bg-indigo-50 text-indigo-700">ADVANCE</span>;
+        if (s === 'ADVANCE')            return <span className="px-1.5 py-0.5 rounded-full text-[9px] font-bold bg-indigo-50 text-indigo-700">PAYABLE</span>;
         if (ds === 'RTO')               return <span className="px-1.5 py-0.5 rounded-full text-[9px] font-bold bg-red-50 text-red-700">RTO</span>;
         if (ds === 'CANCELLED')         return <span className="px-1.5 py-0.5 rounded-full text-[9px] font-bold bg-slate-100 text-slate-500">CANCELLED</span>;
         return <span className="px-1.5 py-0.5 rounded-full text-[9px] font-bold bg-slate-100 text-slate-400">UNSETTLED</span>;
@@ -369,18 +818,9 @@ function TransactionSheet({ brandId, agentId, filename, reconciliation }) {
         return <span className="px-1.5 py-0.5 rounded-full text-[9px] font-bold bg-purple-50 text-purple-700">+{fmtINR(Math.abs(bal))}</span>;
     }
 
-    function gatewayOf(row) {
-        if (toNum(row.snapmint_settlement_value) !== 0) return 'Snapmint';
-        if (toNum(row.bharatx_ledger_amount) !== 0)     return 'BharatX';
-        if (toNum(row.razorpay_settlement_amount) !== 0) return 'Razorpay';
-        return '—';
-    }
-
     function settlementDateOf(row) {
         return row.snapmint_settlement_date || row.bharatx_settlement_timestamp || row.razorpay_settlement_date;
     }
-
-    const showSales = txTab === 'sales';
 
     return (
         <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
@@ -439,22 +879,67 @@ function TransactionSheet({ brandId, agentId, filename, reconciliation }) {
                 ))}
             </div>
 
-            {/* Mismatched sub-toggle */}
+            {/* Matched sub-toggle — split the Matched population by whether a
+                return was also matched against it (still fully reconciled either
+                way; this just says whether that reconciliation happened before
+                or after a return came back). */}
+            {txTab === 'matched' && (
+                <div className="px-5 pt-3 flex justify-between gap-2">
+                    <div className="flex gap-2">
+                        {[
+                            { key: 'all', label: 'All Matched', cls: 'bg-emerald-50 border-emerald-300 text-emerald-700' },
+                        ].map(({ key, label, cls }) => (
+                            <button key={key} onClick={() => switchMatchedSub(key)}
+                                className={`px-3 py-1.5 text-xs rounded-lg border font-semibold transition-colors
+                                    ${matchedSub === key ? cls : 'bg-white border-slate-200 text-slate-500'}`}>
+                                {label}
+                            </button>
+                        ))}
+                    </div>
+                    <div className="flex gap-2">
+                        {[
+                            { key: 'return',     label: 'Matched Returned',     cls: 'bg-rose-50 border-rose-300 text-rose-700' },
+                            { key: 'notreturn',  label: 'Matched Not Returned', cls: 'bg-sky-50 border-sky-300 text-sky-700' },
+                        ].map(({ key, label, cls }) => (
+                            <button key={key} onClick={() => switchMatchedSub(key)}
+                                className={`px-3 py-1.5 text-xs rounded-lg border font-semibold transition-colors
+                                    ${matchedSub === key ? cls : 'bg-white border-slate-200 text-slate-500'}`}>
+                                {label}
+                            </button>
+                        ))}
+                    </div>
+                </div>
+            )}
+
+            {/* Mismatched sub-toggle — Less/More Received on the left, the
+                return-matching pair + Payable on the right. */}
             {txTab === 'mismatched' && (
-                <div className="px-5 pt-3 flex gap-2">
-                    {[
-                        { key: 'less',      label: 'Less Received',      cls: 'bg-amber-50 border-amber-300 text-amber-700' },
-                        { key: 'more',      label: 'More Received',      cls: 'bg-purple-50 border-purple-300 text-purple-700' },
-                        { key: 'return',    label: 'MismatchedReturn',   cls: 'bg-rose-50 border-rose-300 text-rose-700' },
-                        { key: 'notreturn', label: 'MismatchedNotReturn', cls: 'bg-sky-50 border-sky-300 text-sky-700' },
-                        { key: 'advance',   label: 'Advance',            cls: 'bg-indigo-50 border-indigo-300 text-indigo-700' },
-                    ].map(({ key, label, cls }) => (
-                        <button key={key} onClick={() => switchSub(key)}
-                            className={`px-3 py-1.5 text-xs rounded-lg border font-semibold transition-colors
-                                ${mismatchSub === key ? cls : 'bg-white border-slate-200 text-slate-500'}`}>
-                            {label}
-                        </button>
-                    ))}
+                <div className="px-5 pt-3 flex justify-between gap-2">
+                    <div className="flex gap-2">
+                        {[
+                            { key: 'less', label: 'Less Received', cls: 'bg-amber-50 border-amber-300 text-amber-700' },
+                            { key: 'more', label: 'More Received', cls: 'bg-purple-50 border-purple-300 text-purple-700' },
+                        ].map(({ key, label, cls }) => (
+                            <button key={key} onClick={() => switchSub(key)}
+                                className={`px-3 py-1.5 text-xs rounded-lg border font-semibold transition-colors
+                                    ${mismatchSub === key ? cls : 'bg-white border-slate-200 text-slate-500'}`}>
+                                {label}
+                            </button>
+                        ))}
+                    </div>
+                    <div className="flex gap-2">
+                        {[
+                            { key: 'return',    label: 'MismatchedReturn',    cls: 'bg-rose-50 border-rose-300 text-rose-700' },
+                            { key: 'notreturn', label: 'MismatchedNotReturn', cls: 'bg-sky-50 border-sky-300 text-sky-700' },
+                            { key: 'advance',   label: 'Payable',             cls: 'bg-indigo-50 border-indigo-300 text-indigo-700' },
+                        ].map(({ key, label, cls }) => (
+                            <button key={key} onClick={() => switchSub(key)}
+                                className={`px-3 py-1.5 text-xs rounded-lg border font-semibold transition-colors
+                                    ${mismatchSub === key ? cls : 'bg-white border-slate-200 text-slate-500'}`}>
+                                {label}
+                            </button>
+                        ))}
+                    </div>
                 </div>
             )}
 
@@ -469,40 +954,25 @@ function TransactionSheet({ brandId, agentId, filename, reconciliation }) {
                         <thead>
                             <tr className="bg-slate-50 border-b border-slate-200">
                                 <th className="w-8 px-3 py-2.5" />
-                                {!showSales ? (<>
-                                    <th className="px-3 py-2.5 text-left text-[10px] font-bold text-slate-400 uppercase tracking-wider whitespace-nowrap">Order ID</th>
-                                    <th className="px-3 py-2.5 text-left text-[10px] font-bold text-slate-400 uppercase tracking-wider whitespace-nowrap">Invoice No.</th>
-                                    <th className="px-3 py-2.5 text-right text-[10px] font-bold text-slate-400 uppercase tracking-wider whitespace-nowrap">Order Value</th>
-                                    <th className="px-3 py-2.5 text-right text-[10px] font-bold text-slate-400 uppercase tracking-wider whitespace-nowrap">Settlement</th>
-                                    <th className="px-3 py-2.5 text-right text-[10px] font-bold text-slate-400 uppercase tracking-wider whitespace-nowrap">Diff</th>
-                                    <th className="px-3 py-2.5 text-left text-[10px] font-bold text-slate-400 uppercase tracking-wider whitespace-nowrap">Order Date</th>
-                                    <th className="px-3 py-2.5 text-left text-[10px] font-bold text-slate-400 uppercase tracking-wider whitespace-nowrap">Settlement Date</th>
-                                    <th className="px-3 py-2.5 text-left text-[10px] font-bold text-slate-400 uppercase tracking-wider whitespace-nowrap">Status</th>
-                                    <th className="px-3 py-2.5 text-left text-[10px] font-bold text-slate-400 uppercase tracking-wider whitespace-nowrap">Courier</th>
-                                    <th className="px-3 py-2.5 text-left text-[10px] font-bold text-slate-400 uppercase tracking-wider whitespace-nowrap">Gateway</th>
-                                </>) : (<>
-                                    <th className="px-3 py-2.5 text-left text-[10px] font-bold text-slate-400 uppercase tracking-wider whitespace-nowrap">Order ID</th>
-                                    <th className="px-3 py-2.5 text-left text-[10px] font-bold text-slate-400 uppercase tracking-wider whitespace-nowrap">Invoice No.</th>
-                                    <th className="px-3 py-2.5 text-left text-[10px] font-bold text-slate-400 uppercase tracking-wider whitespace-nowrap">Invoice Date</th>
-                                    <th className="px-3 py-2.5 text-left text-[10px] font-bold text-slate-400 uppercase tracking-wider whitespace-nowrap">Channel</th>
-                                    <th className="px-3 py-2.5 text-right text-[10px] font-bold text-slate-400 uppercase tracking-wider whitespace-nowrap">GMV</th>
-                                    <th className="px-3 py-2.5 text-right text-[10px] font-bold text-slate-400 uppercase tracking-wider whitespace-nowrap">Return</th>
-                                    <th className="px-3 py-2.5 text-right text-[10px] font-bold text-slate-400 uppercase tracking-wider whitespace-nowrap">Net Amount</th>
-                                    <th className="px-3 py-2.5 text-right text-[10px] font-bold text-slate-400 uppercase tracking-wider whitespace-nowrap">Basic (÷1.12)</th>
-                                    <th className="px-3 py-2.5 text-right text-[10px] font-bold text-slate-400 uppercase tracking-wider whitespace-nowrap">GST @12%</th>
-                                    <th className="px-3 py-2.5 text-left text-[10px] font-bold text-slate-400 uppercase tracking-wider whitespace-nowrap">Status</th>
-                                </>)}
+                                <th className="px-3 py-2.5 text-left text-[10px] font-bold text-slate-400 uppercase tracking-wider whitespace-nowrap">Order ID</th>
+                                <th className="px-3 py-2.5 text-left text-[10px] font-bold text-slate-400 uppercase tracking-wider whitespace-nowrap">Invoice No.</th>
+                                <th className="px-3 py-2.5 text-right text-[10px] font-bold text-slate-400 uppercase tracking-wider whitespace-nowrap">Order Value</th>
+                                <th className="px-3 py-2.5 text-right text-[10px] font-bold text-slate-400 uppercase tracking-wider whitespace-nowrap">Settlement</th>
+                                <th className="px-3 py-2.5 text-right text-[10px] font-bold text-slate-400 uppercase tracking-wider whitespace-nowrap">Diff</th>
+                                <th className="px-3 py-2.5 text-left text-[10px] font-bold text-slate-400 uppercase tracking-wider whitespace-nowrap">Order Date</th>
+                                <th className="px-3 py-2.5 text-left text-[10px] font-bold text-slate-400 uppercase tracking-wider whitespace-nowrap">Settlement Date</th>
+                                <th className="px-3 py-2.5 text-left text-[10px] font-bold text-slate-400 uppercase tracking-wider whitespace-nowrap">Status</th>
+                                <th className="px-3 py-2.5 text-left text-[10px] font-bold text-slate-400 uppercase tracking-wider whitespace-nowrap">Courier</th>
                             </tr>
                         </thead>
                         <tbody>
                             {rows.length === 0 ? (
-                                <tr><td colSpan={11} className="text-center text-slate-400 py-10 text-xs">No records found</td></tr>
+                                <tr><td colSpan={10} className="text-center text-slate-400 py-10 text-xs">No records found</td></tr>
                             ) : rows.map(row => {
                                 const rowId = row.id || row.sale_order_number;
                                 const isExp = expandedId === rowId;
                                 const totalSettled = toNum(row.total_settlement_received);
-                                const basic12 = Math.round(toNum(row.net_amount) / 1.12 * 100) / 100;
-                                const gst12   = Math.round((toNum(row.net_amount) - basic12) * 100) / 100;
+                                const sc = row.scenario || {};
                                 return (
                                     <React.Fragment key={rowId}>
                                         <tr
@@ -512,31 +982,16 @@ function TransactionSheet({ brandId, agentId, filename, reconciliation }) {
                                             <td className="px-3 py-2.5">
                                                 <ChevronRight className={`h-3.5 w-3.5 text-slate-400 transition-transform ${isExp ? 'rotate-90' : ''}`} />
                                             </td>
-                                            {!showSales ? (<>
-                                                <td className="px-3 py-2.5 font-semibold text-slate-800 whitespace-nowrap">{row.sale_order_number || '—'}</td>
-                                                <td className="px-3 py-2.5 text-slate-500 whitespace-nowrap">{row.invoice_number || '—'}</td>
-                                                <td className="px-3 py-2.5 text-right font-medium tabular-nums whitespace-nowrap">{fmtFull(row.total_amount)}</td>
-                                                <td className="px-3 py-2.5 text-right tabular-nums text-slate-600 whitespace-nowrap">{totalSettled > 0 ? fmtFull(totalSettled) : '—'}</td>
-                                                <td className="px-3 py-2.5 text-right whitespace-nowrap">{diffBadge(row)}</td>
-                                                <td className="px-3 py-2.5 text-slate-500 whitespace-nowrap">{formatDate(row.dispatch_or_cancellation_date)}</td>
-                                                <td className="px-3 py-2.5 text-slate-500 whitespace-nowrap">{formatDate(settlementDateOf(row))}</td>
-                                                <td className="px-3 py-2.5 whitespace-nowrap">{statusBadge(row)}</td>
-                                                <td className="px-3 py-2.5 text-slate-500 whitespace-nowrap capitalize">{(row.shipping_partner || '—').toLowerCase()}</td>
-                                                <td className="px-3 py-2.5 text-slate-500 whitespace-nowrap">{gatewayOf(row)}</td>
-                                            </>) : (<>
-                                                <td className="px-3 py-2.5 font-semibold text-slate-800 whitespace-nowrap">{row.sale_order_number || '—'}</td>
-                                                <td className="px-3 py-2.5 text-slate-500 whitespace-nowrap">{row.invoice_number || '—'}</td>
-                                                <td className="px-3 py-2.5 text-slate-500 whitespace-nowrap">{formatDate(row.dispatch_or_cancellation_date)}</td>
-                                                <td className="px-3 py-2.5 text-slate-500 whitespace-nowrap">{row.platform || '—'}</td>
-                                                <td className="px-3 py-2.5 text-right font-medium tabular-nums whitespace-nowrap">{fmtFull(row.total_amount)}</td>
-                                                <td className="px-3 py-2.5 text-right tabular-nums whitespace-nowrap">
-                                                    {toNum(row.return_amount) > 0 ? <span className="text-red-500">{fmtFull(row.return_amount)}</span> : '—'}
-                                                </td>
-                                                <td className="px-3 py-2.5 text-right font-medium tabular-nums whitespace-nowrap">{fmtFull(row.net_amount)}</td>
-                                                <td className="px-3 py-2.5 text-right tabular-nums text-slate-500 whitespace-nowrap">{fmtFull(basic12)}</td>
-                                                <td className="px-3 py-2.5 text-right tabular-nums text-slate-500 whitespace-nowrap">{fmtFull(gst12)}</td>
-                                                <td className="px-3 py-2.5 whitespace-nowrap">{statusBadge(row)}</td>
-                                            </>)}
+                                            <td className="px-3 py-2.5 font-semibold text-slate-800 whitespace-nowrap">{row.sale_order_number || '—'}</td>
+                                            <td className="px-3 py-2.5 text-slate-500 whitespace-nowrap">{row.invoice_number || '—'}</td>
+                                            <td className="px-3 py-2.5 text-right font-medium tabular-nums whitespace-nowrap">{fmtFull(row.total_amount)}</td>
+                                            <td className="px-3 py-2.5 text-right tabular-nums text-slate-600 whitespace-nowrap">{totalSettled > 0 ? fmtFull(totalSettled) : '—'}</td>
+                                            <td className="px-3 py-2.5 text-right whitespace-nowrap">{diffBadge(row)}</td>
+                                            <td className="px-3 py-2.5 text-slate-500 whitespace-nowrap">{formatDate(row.dispatch_or_cancellation_date)}</td>
+                                            <td className="px-3 py-2.5 text-slate-500 whitespace-nowrap">{formatDate(settlementDateOf(row))}</td>
+                                            <td className="px-3 py-2.5 whitespace-nowrap">{statusBadge(row)}</td>
+                                            {/* Reconciled against receivable_ledger (sc.courier), falling back to shopify_order_cycle's own column. Gateway/Scenario/Who-Has-Product/SRN/Payment/Refund Due moved into the row drill-down (TxDrillRow) below. */}
+                                            <td className="px-3 py-2.5 text-slate-500 whitespace-nowrap capitalize">{(sc.courier || row.shipping_partner || '—').toLowerCase()}</td>
                                         </tr>
                                         {isExp && <TxDrillRow row={row} />}
                                     </React.Fragment>
@@ -588,21 +1043,210 @@ function TransactionSheet({ brandId, agentId, filename, reconciliation }) {
 
 // ─── Reconciliation Visualization Panel ───────────────────────────────────────
 function ReconciliationView({ file, brandId, agentId, onBack, onDownload }) {
+    const navigate = useNavigate();
     const [data, setData]       = useState(null);
     const [loading, setLoading] = useState(true);
+    const [loadError, setLoadError] = useState(null);
     const [tab, setTab]         = useState('settled');   // 'settled' | 'unsettled'
     const [showTxSheet, setShowTxSheet] = useState(false);
+    const [ocvDrill, setOcvDrill] = useState(null);   // { title, ...queryParams } for the overview drill modal
+
+    // The upload is tagged with one month, but the underlying orders' own dates
+    // routinely span a wider window (settlement/processing lag) — availableRange
+    // is that real span, computed server-side from every row in this file, and
+    // stays constant across narrowing (it always reflects the FULL file, not the
+    // current selection). `range` is the committed narrowing (null = full range),
+    // still exact ISO from/to dates for the API. draftFromMonth/Year and
+    // draftToMonth/Year are what the Month/Year selects show/edit — nothing
+    // refetches until Search is clicked, same picker pattern as the Receivable
+    // Dashboard (draft vs. committed, Search button, disabled until dirty).
+    // Session-shared range (persists across navigation + the Analytics Portal).
+    const savedRangeRef = useRef();
+    if (savedRangeRef.current === undefined) savedRangeRef.current = loadOcDateRange(brandId, agentId);
+    const savedInit = savedRangeRef.current
+        ? { f: isoToMonthYear(savedRangeRef.current.from), t: isoToMonthYear(savedRangeRef.current.to) }
+        : null;
+
+    const [availableRange, setAvailableRange] = useState(null);
+    const [range, setRange] = useState(savedRangeRef.current);
+    const [draftFromMonth, setDraftFromMonth] = useState(savedInit ? savedInit.f.month : null);
+    const [draftFromYear, setDraftFromYear] = useState(savedInit ? savedInit.f.year : null);
+    const [draftToMonth, setDraftToMonth] = useState(savedInit ? savedInit.t.month : null);
+    const [draftToYear, setDraftToYear] = useState(savedInit ? savedInit.t.year : null);
 
     useEffect(() => {
         let cancelled = false;
         setLoading(true);
-        api.get(`/api/brands/${brandId}/agents/${agentId}/order-cycle-shopify/files/${encodeURIComponent(file.filename)}/report`)
-            .then(r => { if (!cancelled) { setData(r.data); setLoading(false); } })
-            .catch(() => { if (!cancelled) { toast.error('Failed to load report data'); setLoading(false); } });
+        setLoadError(null);
+        const params = new URLSearchParams();
+        if (range?.from) params.set('fromDate', range.from);
+        if (range?.to) params.set('toDate', range.to);
+        const qs = params.toString();
+        api.get(`/api/brands/${brandId}/agents/${agentId}/order-cycle-shopify/files/${encodeURIComponent(file.filename)}/report${qs ? `?${qs}` : ''}`)
+            .then(r => {
+                if (cancelled) return;
+                setData(r.data);
+                if (r.data?.availableRange?.from && !availableRange) {
+                    setAvailableRange(r.data.availableRange);
+                    // only default the picker to the full span when nothing is saved/narrowed
+                    if (!savedRangeRef.current) {
+                        const from = isoToMonthYear(r.data.availableRange.from);
+                        const to = isoToMonthYear(r.data.availableRange.to);
+                        setDraftFromMonth(from.month); setDraftFromYear(from.year);
+                        setDraftToMonth(to.month); setDraftToYear(to.year);
+                    }
+                }
+                setLoading(false);
+            })
+            .catch(err => {
+                if (cancelled) return;
+                // Narrowed to an empty sub-range still comes back with availableRange
+                // (see getReportData) — keep the picker usable so the user can widen it.
+                const ar = err.response?.data?.availableRange;
+                if (ar?.from && !availableRange) { setAvailableRange(ar); }
+                setData(null);
+                setLoadError(err.response?.data?.error || 'Failed to load report data');
+                setLoading(false);
+            });
         return () => { cancelled = true; };
-    }, [file.filename, brandId, agentId]);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [file.filename, brandId, agentId, range]);
 
-    if (loading) return (
+    const committedFrom = range ? isoToMonthYear(range.from) : (availableRange ? isoToMonthYear(availableRange.from) : null);
+    const committedTo = range ? isoToMonthYear(range.to) : (availableRange ? isoToMonthYear(availableRange.to) : null);
+    const isDirty = !!availableRange && (
+        draftFromMonth !== committedFrom.month || draftFromYear !== committedFrom.year
+        || draftToMonth !== committedTo.month || draftToYear !== committedTo.year
+    );
+    const rangeInvalid = !!(draftFromYear && draftToYear
+        && (draftFromYear * 12 + draftFromMonth) > (draftToYear * 12 + draftToMonth));
+    const applyRange = () => {
+        if (rangeInvalid) return;
+        const next = {
+            from: monthYearToFromDate(draftFromMonth, draftFromYear),
+            to: monthYearToToDate(draftToMonth, draftToYear),
+        };
+        setRange(next);
+        savedRangeRef.current = next;
+        saveOcDateRange(brandId, agentId, next);
+    };
+    const resetRange = () => {
+        setRange(null);
+        savedRangeRef.current = null;
+        saveOcDateRange(brandId, agentId, null);
+        if (availableRange) {
+            const from = isoToMonthYear(availableRange.from);
+            const to = isoToMonthYear(availableRange.to);
+            setDraftFromMonth(from.month); setDraftFromYear(from.year);
+            setDraftToMonth(to.month); setDraftToYear(to.year);
+        }
+    };
+    const isNarrowed = !!range && availableRange && (range.from !== availableRange.from || range.to !== availableRange.to);
+
+    // Same picker span as the Receivable Dashboard's own "As of" year list —
+    // clamped to years the file's data actually spans.
+    const rangeYears = availableRange
+        ? (() => {
+            const lo = isoToMonthYear(availableRange.from).year;
+            const hi = isoToMonthYear(availableRange.to).year;
+            const ys = [];
+            for (let y = lo; y <= hi; y++) ys.push(y);
+            return ys.sort((a, b) => b - a);
+        })()
+        : [];
+
+    // Same look & pattern as the Receivable Dashboard's range picker: a tinted
+    // rounded-2xl bar, icon+label+subtitle field groups separated by a divider,
+    // and a "Search" button that stays disabled until the draft actually differs
+    // from what's applied — nothing refetches until it's clicked.
+    const DateRangeBar = availableRange && (
+        <div
+            className="flex items-center justify-between flex-wrap gap-4 px-5 py-4 rounded-2xl"
+            style={{ background: '#4F46E508', border: '1px solid #4F46E525' }}
+        >
+            <div className="flex items-center flex-wrap gap-x-6 gap-y-3">
+                <div className="flex items-center gap-2.5">
+                    <Calendar className="w-4 h-4 flex-shrink-0" style={{ color: '#4F46E5' }} />
+                    <div>
+                        <p className="text-xs font-bold whitespace-nowrap text-slate-800">From</p>
+                        <p className="text-[10px] whitespace-nowrap text-slate-400">data available from {formatDate(availableRange.from)}</p>
+                    </div>
+                    <div className="flex items-center gap-1.5 ml-1">
+                        <select
+                            value={draftFromMonth ?? ''}
+                            onChange={e => setDraftFromMonth(Number(e.target.value))}
+                            className="text-sm font-semibold px-3 py-2 rounded-lg border border-slate-200 bg-white text-slate-800"
+                        >
+                            {MONTHS.map((name, i) => <option key={name} value={i + 1}>{name}</option>)}
+                        </select>
+                        <select
+                            value={draftFromYear ?? ''}
+                            onChange={e => setDraftFromYear(Number(e.target.value))}
+                            className="text-sm font-semibold px-3 py-2 rounded-lg border border-slate-200 bg-white text-slate-800"
+                        >
+                            {rangeYears.map(y => <option key={y} value={y}>{y}</option>)}
+                        </select>
+                    </div>
+                </div>
+
+                <div className="w-px h-9 hidden sm:block bg-slate-200" />
+
+                <div className="flex items-center gap-2.5">
+                    <Calendar className="w-4 h-4 flex-shrink-0" style={{ color: '#4F46E5' }} />
+                    <div>
+                        <p className="text-xs font-bold whitespace-nowrap text-slate-800">To</p>
+                        <p className="text-[10px] whitespace-nowrap text-slate-400">through {formatDate(availableRange.to)}</p>
+                    </div>
+                    <div className="flex items-center gap-1.5 ml-1">
+                        <select
+                            value={draftToMonth ?? ''}
+                            onChange={e => setDraftToMonth(Number(e.target.value))}
+                            className="text-sm font-semibold px-3 py-2 rounded-lg border border-slate-200 bg-white text-slate-800"
+                        >
+                            {MONTHS.map((name, i) => <option key={name} value={i + 1}>{name}</option>)}
+                        </select>
+                        <select
+                            value={draftToYear ?? ''}
+                            onChange={e => setDraftToYear(Number(e.target.value))}
+                            className="text-sm font-semibold px-3 py-2 rounded-lg border border-slate-200 bg-white text-slate-800"
+                        >
+                            {rangeYears.map(y => <option key={y} value={y}>{y}</option>)}
+                        </select>
+                    </div>
+                    {isNarrowed && (
+                        <button
+                            onClick={resetRange}
+                            className="text-xs font-bold px-3 py-2 rounded-lg bg-white border border-slate-200 text-slate-500 hover:bg-slate-50 transition-colors"
+                        >
+                            Clear
+                        </button>
+                    )}
+                </div>
+            </div>
+
+            <div className="flex items-center gap-3 flex-shrink-0">
+                {isNarrowed && (
+                    <span className="text-[11px] font-bold px-2 py-1 rounded-full bg-indigo-50 text-indigo-700 border border-indigo-100">
+                        Narrowed
+                    </span>
+                )}
+                <button
+                    onClick={applyRange}
+                    disabled={!isDirty || rangeInvalid}
+                    title={rangeInvalid ? '"From" must be on or before "To"' : (isDirty ? 'Apply the selected range' : 'Range already applied')}
+                    className="flex items-center gap-1.5 text-sm font-bold px-4 py-2.5 rounded-xl flex-shrink-0 transition-all"
+                    style={isDirty && !rangeInvalid
+                        ? { background: '#4F46E5', color: '#fff', boxShadow: '0 2px 8px #4F46E540' }
+                        : { background: '#fff', border: '1px solid #e2e8f0', color: '#94a3b8', cursor: 'default' }}
+                >
+                    <Search className="w-4 h-4" />
+                    Search
+                </button>
+            </div>
+        </div>
+    );
+
+    if (loading && !data) return (
         <div className="flex flex-col items-center justify-center py-32 gap-4">
             <Loader2 className="h-10 w-10 animate-spin text-slate-300" />
             <p className="text-sm text-slate-400">Loading reconciliation data…</p>
@@ -610,14 +1254,26 @@ function ReconciliationView({ file, brandId, agentId, onBack, onDownload }) {
     );
 
     if (!data) return (
-        <div className="flex flex-col items-center justify-center py-32 gap-3">
-            <XCircle className="h-10 w-10 text-red-300" />
-            <p className="text-sm text-slate-500">Could not load data for this report</p>
-            <button onClick={onBack} className="text-sm text-slate-600 underline">Go back</button>
+        <div className="space-y-5">
+            <div className="flex items-center gap-3">
+                <button onClick={onBack}
+                    className="inline-flex items-center gap-1.5 px-3 py-2 text-sm border border-slate-200 rounded-lg bg-white hover:bg-slate-50 text-slate-600 transition-colors">
+                    <ArrowLeft className="h-4 w-4" /> Back
+                </button>
+                <h2 className="text-lg font-bold text-slate-900">Reconciliation Report</h2>
+            </div>
+            {DateRangeBar}
+            <div className="flex flex-col items-center justify-center py-24 gap-3">
+                <XCircle className="h-10 w-10 text-red-300" />
+                <p className="text-sm text-slate-500">{loadError || 'Could not load data for this report'}</p>
+                {isNarrowed && (
+                    <button onClick={resetRange} className="text-sm text-emerald-700 underline">Reset to full range</button>
+                )}
+            </div>
         </div>
     );
 
-    const { summary, reconciliation, settled, unsettled, couriers } = data;
+    const { summary, reconciliation, settled, unsettled } = data;
 
     const active   = tab === 'unsettled' ? unsettled : settled;
     const providers = active.providers;
@@ -637,121 +1293,259 @@ function ReconciliationView({ file, brandId, agentId, onBack, onDownload }) {
                     </button>
                     <div>
                         <h2 className="text-lg font-bold text-slate-900">Reconciliation Report</h2>
-                        <p className="text-xs text-slate-400 mt-0.5">{monthNumToName(file.month)} {file.year} · {file.filename}</p>
+                        {isNarrowed && (
+                            <p className="text-xs text-slate-400 mt-0.5">
+                                {formatDate(range.from)} – {formatDate(range.to)}
+                            </p>
+                        )}
                     </div>
                 </div>
-                <button
-                    onClick={() => onDownload(file.filename)}
-                    className="inline-flex items-center gap-2 px-4 py-2 text-sm font-semibold border border-slate-200 rounded-lg bg-white hover:bg-slate-50 text-slate-700 transition-colors"
-                >
-                    <Download className="h-4 w-4" /> Download Excel
-                </button>
-            </div>
-
-            {/* ── Reconciliation Summary ── */}
-            <div className="bg-white border border-slate-200 rounded-xl p-5">
-                <h3 className="text-sm font-bold text-slate-800 mb-4">Reconciliation Summary</h3>
-                <div className="flex items-center gap-8 flex-wrap">
-                    {/* NET SALES */}
-                    <div className="min-w-[130px]">
-                        <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Net Sales</p>
-                        <p className="text-2xl font-bold text-slate-900 mt-1 leading-none">{fmtINR(summary.netSales)}</p>
-                        <p className="text-xs text-slate-400 mt-1">{reconciliation.total.toLocaleString()} orders</p>
-                    </div>
-
-                    <div className="text-slate-300 font-light text-2xl leading-none">=</div>
-
-                    {/* GROSS SALES */}
-                    <div className="min-w-[130px]">
-                        <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Gross Sales</p>
-                        <p className="text-2xl font-bold text-slate-900 mt-1 leading-none">{fmtINR(summary.grossSales)}</p>
-                        <p className="text-xs text-slate-400 mt-1">{reconciliation.total.toLocaleString()} orders</p>
-                    </div>
-
-                    <div className="text-slate-300 font-light text-2xl leading-none">−</div>
-
-                    {/* RETURNS */}
-                    <div className="min-w-[110px]">
-                        <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Returns</p>
-                        <p className="text-2xl font-bold text-slate-900 mt-1 leading-none">{fmtINR(summary.totalReturns)}</p>
-                        <p className="text-xs text-slate-400 mt-1">—</p>
-                    </div>
-
-                    <div className="text-slate-300 font-light text-2xl leading-none">−</div>
-
-                    {/* CANCELLATIONS */}
-                    <div className="min-w-[110px]">
-                        <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Cancellations</p>
-                        <p className="text-2xl font-bold text-slate-900 mt-1 leading-none">{fmtINR(summary.cancelledAmount)}</p>
-                        <p className="text-xs text-slate-400 mt-1">{summary.cancelledCount.toLocaleString()} orders</p>
-                    </div>
-
-                    {/* Reconciliation Status donut */}
-                    <div className="ml-auto flex items-center gap-6 border-l border-slate-100 pl-8">
-                        <div className="text-right">
-                            <p className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-3">Reconciliation Status</p>
-                            <div className="flex items-center gap-6">
-                                <div>
-                                    <p className="text-[10px] text-slate-400 uppercase tracking-wide">Matched</p>
-                                    <p className="text-lg font-bold text-slate-900">{reconciliation.reconciled.toLocaleString()}</p>
-                                </div>
-                                <div className="relative">
-                                    <DonutChart
-                                        pct={reconciliation.matchPct}
-                                        size={90} stroke={10} color="#10b981"
-                                        label={`${reconciliation.matchPct}%`}
-                                    />
-                                </div>
-                                <div>
-                                    <p className="text-[10px] text-slate-400 uppercase tracking-wide">Total</p>
-                                    <p className="text-lg font-bold text-slate-900">{reconciliation.total.toLocaleString()}</p>
-                                </div>
-                            </div>
-                            <div className="flex gap-5 mt-3">
-                                <div>
-                                    <p className="text-[10px] text-slate-400">Mismatched</p>
-                                    <p className="text-sm font-bold text-orange-600">{(reconciliation.pending + reconciliation.overpaid + (reconciliation.advance || 0)).toLocaleString()}</p>
-                                </div>
-                                <div>
-                                    <p className="text-[10px] text-slate-400">RTO</p>
-                                    <p className="text-sm font-bold text-red-500">{reconciliation.rto.toLocaleString()}</p>
-                                </div>
-                                <div>
-                                    <p className="text-[10px] text-slate-400">Cancelled</p>
-                                    <p className="text-sm font-bold text-slate-500">{reconciliation.cancelled.toLocaleString()}</p>
-                                </div>
-                                <div>
-                                    <p className="text-[10px] text-slate-400">Unsettled</p>
-                                    <p className="text-sm font-bold text-slate-600">{(reconciliation.unsettled || 0).toLocaleString()}</p>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-
-            {/* ── Transaction Sheet ── */}
-            {!showTxSheet ? (
-                <div className="flex items-center justify-between bg-white border border-slate-200 rounded-xl px-5 py-4">
-                    <div>
-                        <p className="text-sm font-semibold text-slate-800">Transaction Data</p>
-                        <p className="text-xs text-slate-400 mt-0.5">Row-level order data with drill-down source attribution</p>
-                    </div>
+                <div className="flex items-center gap-2">
                     <button
-                        onClick={() => setShowTxSheet(true)}
-                        className="inline-flex items-center gap-2 px-4 py-2 text-sm font-semibold bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg transition-colors"
+                        onClick={() => navigate(`/brands/${brandId}/agents/${agentId}/shopify-dashboard`)}
+                        className="inline-flex items-center gap-2 px-4 py-2 text-sm font-semibold border border-blue-200 rounded-lg bg-white hover:bg-blue-50 text-blue-700 transition-colors"
                     >
-                        <BarChart2 className="h-4 w-4" /> View Transaction Data
+                        <LayoutDashboard className="h-4 w-4" /> Shopify Dashboard
+                    </button>
+                    <button
+                        onClick={() => onDownload(file.filename)}
+                        className="inline-flex items-center gap-2 px-4 py-2 text-sm font-semibold border border-slate-200 rounded-lg bg-white hover:bg-slate-50 text-slate-700 transition-colors"
+                    >
+                        <Download className="h-4 w-4" /> Download Excel
                     </button>
                 </div>
-            ) : (
-                <TransactionSheet
-                    brandId={brandId}
-                    agentId={agentId}
-                    filename={file.filename}
-                    reconciliation={reconciliation}
-                />
-            )}
+            </div>
+
+            {DateRangeBar}
+
+            <OcvVolumeStrip volume={data.volume} />
+
+            {/* ── Reconciliation Summary ──
+                Net Sales = Gross Sales − Returns is the exact identity this
+                reconciles to (each row's own net_amount = total_amount −
+                return_amount, summed — see getReportData/orderCycleShopifyProcessor's
+                loadDataToStaging). Cancellations is deliberately NOT chained in as a
+                third "−" term: a cancelled order's own value is already counted
+                inside Gross Sales, and only reduces Net Sales if a return was
+                separately matched against it — subtracting it again here would
+                double-count whenever that overlap exists. Shown as its own
+                informational callout instead. */}
+            <div className="bg-white border border-slate-200 rounded-xl p-5">
+                <div className="flex items-center justify-between mb-4">
+                    <h3 className="text-sm font-bold text-slate-800">Reconciliation Summary</h3>
+                    <span className="text-xs text-slate-400">{reconciliation.total.toLocaleString()} orders</span>
+                </div>
+
+                <div className="rounded-xl overflow-hidden border border-slate-100">
+                    <div className="flex items-center justify-between gap-3 px-4 py-3.5">
+                        <div>
+                            <span className="text-sm font-semibold text-slate-700">Gross Sales</span>
+                            <p className="text-[11px] text-slate-400 mt-0.5">Total order value across all {reconciliation.total.toLocaleString()} orders</p>
+                        </div>
+                        <span className="text-base font-bold text-slate-900 whitespace-nowrap">
+                            {fmtFull(summary.grossSales)}
+                            <span className="text-slate-400 font-medium text-xs ml-1.5">({fmtINR(summary.grossSales)})</span>
+                        </span>
+                    </div>
+                    <div className="flex items-center justify-between gap-3 px-4 py-3.5 bg-slate-50 border-t border-slate-100">
+                        <div>
+                            <span className="text-sm font-semibold text-red-600">− Returns</span>
+                            <p className="text-[11px] text-slate-400 mt-0.5">Matched against the Return GST report</p>
+                        </div>
+                        <span className="text-base font-bold text-red-600 whitespace-nowrap">
+                            {fmtFull(summary.totalReturns)}
+                            <span className="text-red-300 font-medium text-xs ml-1.5">({fmtINR(summary.totalReturns)})</span>
+                        </span>
+                    </div>
+                    <div className="flex items-center justify-between gap-3 px-4 py-3.5 border-t border-slate-100 bg-emerald-50/60">
+                        <span className="text-sm font-black text-emerald-700 uppercase tracking-wide">= Net Sales</span>
+                        <span className="text-xl font-black text-emerald-700 whitespace-nowrap">
+                            {fmtFull(summary.netSales)}
+                            <span className="text-emerald-500 font-semibold text-xs ml-1.5">({fmtINR(summary.netSales)})</span>
+                        </span>
+                    </div>
+                </div>
+
+                {summary.cancelledCount > 0 && (
+                    <div className="mt-3 flex items-start gap-2 px-3 py-2.5 bg-slate-50 border border-slate-200 rounded-lg">
+                        <AlertCircle className="h-3.5 w-3.5 text-slate-400 shrink-0 mt-0.5" />
+                        <p className="text-xs text-slate-500 leading-relaxed">
+                            <span className="font-bold text-slate-700">{summary.cancelledCount.toLocaleString()} orders ({fmtFull(summary.cancelledAmount)})</span> were
+                            cancelled — already counted within Gross Sales above, not subtracted again separately here.
+                        </p>
+                    </div>
+                )}
+            </div>
+
+            <OcvCashStrip cash={data.cash} />
+
+            {/* ── Order Breakdown ── */}
+            {(() => {
+                const mismatchedCount = reconciliation.pending + reconciliation.overpaid + (reconciliation.advance || 0);
+                const breakdown = [
+                    { label: 'Matched',     count: reconciliation.reconciled, color: '#10b981' },
+                    { label: 'Mismatched',  count: mismatchedCount,           color: '#f59e0b' },
+                    { label: 'RTO',         count: reconciliation.rto,        color: '#ef4444' },
+                    { label: 'Cancelled',   count: reconciliation.cancelled,  color: '#94a3b8' },
+                    { label: 'Unsettled',   count: reconciliation.unsettled || 0, color: '#64748b' },
+                ];
+                const total = reconciliation.total || 0;
+                const pctOf = n => (total ? (n / total) * 100 : 0);
+                return (
+                    <div className="bg-white border border-slate-200 rounded-xl p-5">
+                        <div className="flex items-center justify-between mb-4">
+                            <h3 className="text-sm font-bold text-slate-800">Order Breakdown</h3>
+                            <span className="text-xs text-slate-400">{total.toLocaleString()} orders total</span>
+                        </div>
+
+                        {/* Proportional stacked bar — same 5 categories/colors as the legend below */}
+                        <div className="h-3 w-full rounded-full overflow-hidden flex bg-slate-100">
+                            {breakdown.map(b => (
+                                <div
+                                    key={b.label}
+                                    style={{ width: `${pctOf(b.count)}%`, backgroundColor: b.color }}
+                                    title={`${b.label}: ${b.count.toLocaleString()} (${pctOf(b.count).toFixed(1)}%)`}
+                                />
+                            ))}
+                        </div>
+
+                        <div className="grid grid-cols-2 sm:grid-cols-5 gap-4 mt-5">
+                            {breakdown.map(b => (
+                                <div key={b.label}>
+                                    <div className="flex items-center gap-1.5">
+                                        <span className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: b.color }} />
+                                        <span className="text-[11px] font-semibold text-slate-500 uppercase tracking-wide">{b.label}</span>
+                                    </div>
+                                    <p className="text-lg font-bold text-slate-900 mt-1 leading-none">{b.count.toLocaleString()}</p>
+                                    <p className="text-[11px] text-slate-400 mt-1">{pctOf(b.count).toFixed(1)}% of total</p>
+                                </div>
+                            ))}
+                        </div>
+
+                        <div className="mt-4 pt-4 border-t border-slate-100 flex items-center justify-between">
+                            <span className="text-xs font-bold text-slate-500 uppercase tracking-wide">Total</span>
+                            <span className="text-sm font-bold text-slate-900">{total.toLocaleString()} orders</span>
+                        </div>
+                    </div>
+                );
+            })()}
+
+            {/* ── Table 1 — Order Journey Funnel ── */}
+            <OcvRefTable
+                title="Order Journey Funnel"
+                subtitle="Every order, one row per lifecycle stage"
+                icon={Route}
+                nameKey="stage"
+                sources={OCV_SOURCES.funnel}
+                columns={[
+                    { key: 'n', label: '#' },
+                    { key: 'stage', label: 'Stage', strong: true },
+                    { key: 'count', label: 'Orders', align: 'right', render: r => ocvClickableCount(r.count, { funnelMetric: r.metric, title: r.stage }, setOcvDrill) },
+                    ...OCV_AMOUNT_COLUMNS,
+                ]}
+                rows={data.funnel}
+            />
+
+            {/* ── Table 2 — Scenario Catalog Summary ── */}
+            <OcvRefTable
+                title="Scenario Catalog Summary"
+                subtitle="Every order mapped to one settlement scenario"
+                icon={FileText}
+                nameKey="key"
+                sources={OCV_SOURCES.scenarios}
+                columns={[
+                    { key: 'n', label: '#' },
+                    { key: 'key', label: 'Scenario', render: r => <span className="font-mono text-[11px] font-semibold text-slate-700">{r.key}</span> },
+                    { key: 'payment', label: 'Payment', render: r => ocvPaymentPill(r.payment) },
+                    { key: 'count', label: 'Orders', align: 'right', render: r => ocvClickableCount(r.count, { scenario: r.key, title: `Scenario · ${r.key}` }, setOcvDrill) },
+                    ...OCV_AMOUNT_COLUMNS,
+                ]}
+                rows={data.scenarios}
+            />
+
+            {/* ── Table 3 — Package Status Snapshot ── */}
+            <OcvRefTable
+                title="Package Status Snapshot"
+                subtitle="Where each package physically is, as of the period end"
+                icon={Package}
+                nameKey="label"
+                sources={OCV_SOURCES.packageStatus}
+                columns={[
+                    { key: 'n', label: '#' },
+                    { key: 'label', label: 'Package status bucket', strong: true },
+                    { key: 'count', label: 'Orders', align: 'right', render: r => ocvClickableCount(r.count, { pkgBucket: r.key, title: r.label }, setOcvDrill) },
+                    ...OCV_AMOUNT_COLUMNS,
+                ]}
+                rows={data.packageStatus}
+            />
+
+            {/* ── Table 4 — Cash Action Snapshot ── */}
+            <OcvRefTable
+                title="Cash Action Snapshot"
+                subtitle="What to do with the money right now · Prepaid vs COD"
+                icon={CreditCard}
+                nameKey="label"
+                sources={OCV_SOURCES.cashActions}
+                columns={[
+                    { key: 'n', label: '#' },
+                    { key: 'label', label: 'Action needed', strong: true },
+                    { key: 'prepaid', label: 'Prepaid', align: 'right', render: r => ocvClickableCount(r.prepaid, { cashAction: r.key, payment: 'Prepaid', title: `${r.label} · Prepaid` }, setOcvDrill) },
+                    { key: 'cod', label: 'COD', align: 'right', render: r => ocvClickableCount(r.cod, { cashAction: r.key, payment: 'COD', title: `${r.label} · COD` }, setOcvDrill) },
+                    ...OCV_AMOUNT_COLUMNS,
+                ]}
+                rows={(data.cashActions || []).map(r => ({ ...r, calc: r.when }))}
+            />
+
+            {(data.volume || data.cash) && <OcvSourceLegend />}
+
+            {/* ── Transaction Data — floating side tab + full-screen modal ── */}
+            <button
+                onClick={() => setShowTxSheet(true)}
+                title="View Transaction Data"
+                className="fixed right-0 top-1/2 -translate-y-1/2 z-40 flex flex-col items-center gap-2 rounded-l-xl bg-emerald-600 hover:bg-emerald-700 text-white pl-2.5 pr-2 py-4 shadow-lg shadow-emerald-600/30 transition-colors"
+            >
+                <BarChart2 className="h-4 w-4" />
+                <span className="text-[11px] font-bold tracking-wide rotate-180" style={{ writingMode: 'vertical-rl' }}>
+                    Transaction Data
+                </span>
+            </button>
+
+            <Dialog open={showTxSheet} onOpenChange={setShowTxSheet}>
+                <DialogContent
+                    onClose={() => setShowTxSheet(false)}
+                    className="max-w-[96vw] w-[96vw] max-h-[94vh] flex flex-col gap-0 overflow-hidden p-0"
+                >
+                    <div className="flex items-center justify-between px-5 py-4 border-b border-slate-100 shrink-0">
+                        <div>
+                            <h3 className="text-base font-bold text-slate-900">Transaction Data</h3>
+                            <p className="text-xs text-slate-400 mt-0.5">Row-level order data with drill-down source attribution</p>
+                        </div>
+                    </div>
+                    <div className="flex-1 min-h-0 overflow-y-auto bg-slate-50 p-4">
+                        {showTxSheet && (
+                            <TransactionSheet
+                                brandId={brandId}
+                                agentId={agentId}
+                                filename={file.filename}
+                                reconciliation={reconciliation}
+                                fromDate={range?.from}
+                                toDate={range?.to}
+                            />
+                        )}
+                    </div>
+                </DialogContent>
+            </Dialog>
+
+            <OcvDrillModal
+                open={!!ocvDrill}
+                onClose={() => setOcvDrill(null)}
+                brandId={brandId}
+                agentId={agentId}
+                filename={file.filename}
+                fromDate={range?.from}
+                toDate={range?.to}
+                filter={ocvDrill}
+            />
 
             {/* ── Settlements by Providers + Provider Breakdown ── */}
             <div className="grid grid-cols-5 gap-4">
@@ -837,92 +1631,6 @@ function ReconciliationView({ file, brandId, agentId, onBack, onDownload }) {
                 </div>
             </div>
 
-            {/* ── Party Composition (Courier Breakdown) ── */}
-            <div className="bg-white border border-slate-200 rounded-xl p-5">
-                <h3 className="text-sm font-bold text-slate-800 mb-4">Party Composition</h3>
-                <div className="grid grid-cols-5 gap-6">
-                    {/* Donut */}
-                    <div className="col-span-2 flex items-center justify-center">
-                        {couriers.length > 0 ? (
-                            <SegmentDonut
-                                segments={couriers.slice(0, 8).map((c, i) => ({
-                                    value: c.sales,
-                                    color: ['#6366f1','#f59e0b','#10b981','#ef4444','#3b82f6','#8b5cf6','#ec4899','#64748b'][i % 8],
-                                    name: c.name,
-                                }))}
-                                size={180} stroke={24}
-                            />
-                        ) : (
-                            <div className="text-slate-300 text-sm">No courier data</div>
-                        )}
-                    </div>
-
-                    {/* Table */}
-                    <div className="col-span-3">
-                        <table className="w-full text-sm">
-                            <thead>
-                                <tr className="border-b border-slate-100">
-                                    <th className="text-left text-[10px] font-bold text-slate-400 uppercase tracking-wider pb-2">Courier</th>
-                                    <th className="text-right text-[10px] font-bold text-slate-400 uppercase tracking-wider pb-2">Orders</th>
-                                    <th className="text-right text-[10px] font-bold text-slate-400 uppercase tracking-wider pb-2">Sales</th>
-                                    <th className="text-right text-[10px] font-bold text-slate-400 uppercase tracking-wider pb-2">Share</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                {couriers.length === 0 ? (
-                                    <tr><td colSpan={4} className="text-center text-slate-400 text-sm py-6">No data</td></tr>
-                                ) : couriers.map((c, i) => {
-                                    const color = ['#6366f1','#f59e0b','#10b981','#ef4444','#3b82f6','#8b5cf6','#ec4899','#64748b'][i % 8];
-                                    return (
-                                        <tr key={c.name} className="border-b border-slate-50 hover:bg-slate-50/50">
-                                            <td className="py-2.5">
-                                                <div className="space-y-1">
-                                                    <span className="capitalize font-medium text-slate-700">{c.name}</span>
-                                                    <div className="h-1 rounded-full bg-slate-100 overflow-hidden w-full max-w-[120px]">
-                                                        <div className="h-full rounded-full" style={{ width: `${c.share}%`, background: color }} />
-                                                    </div>
-                                                </div>
-                                            </td>
-                                            <td className="py-2.5 text-right text-slate-700 font-medium">
-                                                {c.orders.toLocaleString()}
-                                            </td>
-                                            <td className="py-2.5 text-right text-slate-700 font-medium">
-                                                {fmtFull(c.sales)}
-                                            </td>
-                                            <td className="py-2.5 text-right">
-                                                <span className="text-slate-500 font-semibold">{c.share}%</span>
-                                            </td>
-                                        </tr>
-                                    );
-                                })}
-                            </tbody>
-                        </table>
-                    </div>
-                </div>
-            </div>
-
-            {/* ── Status Breakdown Cards ── */}
-            <div className="grid grid-cols-5 gap-3">
-                {[
-                    { label: 'Reconciled',    value: reconciliation.reconciled,    color: 'text-emerald-600', bg: 'bg-emerald-50', border: 'border-emerald-100', icon: CheckCircle2 },
-                    { label: 'Pending',       value: reconciliation.pending,       color: 'text-amber-600',   bg: 'bg-amber-50',   border: 'border-amber-100',   icon: TrendingUp },
-                    { label: 'Overpaid',      value: reconciliation.overpaid,      color: 'text-purple-600',  bg: 'bg-purple-50',  border: 'border-purple-100',  icon: TrendingDown },
-                    { label: 'Advance',       value: reconciliation.advance || 0,  color: 'text-indigo-600',  bg: 'bg-indigo-50',  border: 'border-indigo-100',  icon: AlertCircle },
-                    { label: 'RTO',           value: reconciliation.rto,           color: 'text-red-600',     bg: 'bg-red-50',     border: 'border-red-100',     icon: XCircle },
-                ].map(({ label, value, color, bg, border, icon: Icon }) => (
-                    <div key={label} className={`${bg} border ${border} rounded-xl p-4`}>
-                        <div className="flex items-center gap-2 mb-1">
-                            <Icon className={`h-4 w-4 ${color}`} />
-                            <p className="text-xs font-semibold text-slate-500">{label}</p>
-                        </div>
-                        <p className={`text-2xl font-bold ${color}`}>{value.toLocaleString()}</p>
-                        <p className="text-xs text-slate-400 mt-0.5">
-                            {reconciliation.total > 0 ? `${Math.round(value / reconciliation.total * 100)}%` : '—'} of total
-                        </p>
-                    </div>
-                ))}
-            </div>
-
         </div>
     );
 }
@@ -930,7 +1638,6 @@ function ReconciliationView({ file, brandId, agentId, onBack, onDownload }) {
 // ─── Main Component ───────────────────────────────────────────────────────────
 const OrderCycleShopifyWorkspace = ({ agent }) => {
     const { brandId, agentId } = useParams();
-    const navigate = useNavigate();
 
     const [modal, setModal]               = useState(initModal());
     const [isGenerating, setIsGenerating] = useState(false);
@@ -938,6 +1645,18 @@ const OrderCycleShopifyWorkspace = ({ agent }) => {
     const [files, setFiles]               = useState([]);
     const [filesLoading, setFilesLoading] = useState(true);
     const [viewingFile, setViewingFile]   = useState(null); // file object being visualized
+    const [searchParams, setSearchParams] = useSearchParams();
+
+    // Keep the open report in the URL (?ocFile=…) so browser-Back — e.g. from the
+    // Analytics Portal — lands back on the Reconciliation Report, not the list.
+    const openFile = useCallback((file) => {
+        setViewingFile(file);
+        setSearchParams(prev => { const p = new URLSearchParams(prev); p.set('ocFile', file.filename); return p; });
+    }, [setSearchParams]);
+    const closeFile = useCallback(() => {
+        setViewingFile(null);
+        setSearchParams(prev => { const p = new URLSearchParams(prev); p.delete('ocFile'); return p; });
+    }, [setSearchParams]);
 
     const fetchFiles = useCallback(async () => {
         setFilesLoading(true);
@@ -949,6 +1668,15 @@ const OrderCycleShopifyWorkspace = ({ agent }) => {
     }, [brandId, agentId]);
 
     useEffect(() => { fetchFiles(); }, [fetchFiles]);
+
+    // Restore / clear the report view from ?ocFile= (handles browser Back).
+    useEffect(() => {
+        const wanted = searchParams.get('ocFile');
+        if (!wanted) { setViewingFile(f => (f ? null : f)); return; }
+        if (viewingFile?.filename === wanted) return;
+        const match = files.find(f => f.filename === wanted);
+        if (match) setViewingFile(match);
+    }, [searchParams, files, viewingFile]);
 
     const openModal  = () => setModal({ ...initModal(), open: true });
     const closeModal = () => { if (isGenerating) return; setModal(initModal()); setPreviewData(null); };
@@ -1046,13 +1774,11 @@ const OrderCycleShopifyWorkspace = ({ agent }) => {
         try {
             await api.delete(`/api/brands/${brandId}/agents/${agentId}/order-cycle-shopify/files`, { data: { filename } });
             toast.success('Report deleted');
-            if (viewingFile?.filename === filename) setViewingFile(null);
+            if (viewingFile?.filename === filename) closeFile();
             fetchFiles();
         } catch { toast.error('Delete failed'); }
     };
 
-    const totalRows  = files.reduce((s, f) => s + Number(f.row_count || 0), 0);
-    const latestFile = files[0] || null;
     const stepLabels = ['Select Partners', 'Upload Files', 'Preview & Save'];
 
     // ─── Visualization view ───────────────────────────────────────────────────
@@ -1062,7 +1788,7 @@ const OrderCycleShopifyWorkspace = ({ agent }) => {
                 file={viewingFile}
                 brandId={brandId}
                 agentId={agentId}
-                onBack={() => setViewingFile(null)}
+                onBack={closeFile}
                 onDownload={handleDownload}
             />
         );
@@ -1075,17 +1801,9 @@ const OrderCycleShopifyWorkspace = ({ agent }) => {
             <div className="flex items-center justify-between mb-6">
                 <div>
                     <h2 className="text-xl font-bold text-slate-900">Reconciliation Summary</h2>
-                    <p className="text-sm text-slate-500 mt-0.5">{agent?.name} · Shopify Order Cycle</p>
+                    <p className="text-sm text-slate-500 mt-0.5">Order Cycle</p>
                 </div>
                 <div className="flex items-center gap-2">
-                    <button onClick={() => navigate(`/brands/${brandId}/advance-amount`)}
-                        className="inline-flex items-center gap-1.5 px-3 py-2 text-sm border border-amber-200 rounded-lg bg-amber-50 hover:bg-amber-100 text-amber-700 font-semibold transition-colors">
-                        <HandCoins className="h-4 w-4" /> Advance Amount Dashboard
-                    </button>
-                    <button onClick={() => navigate(`/brands/${brandId}/payables`)}
-                        className="inline-flex items-center gap-1.5 px-3 py-2 text-sm border border-rose-200 rounded-lg bg-rose-50 hover:bg-rose-100 text-rose-700 font-semibold transition-colors">
-                        <RotateCcw className="h-4 w-4" /> Payables Dashboard
-                    </button>
                     <button onClick={fetchFiles} disabled={filesLoading}
                         className="inline-flex items-center gap-1.5 px-3 py-2 text-sm border border-slate-200 rounded-lg bg-white hover:bg-slate-50 text-slate-600 transition-colors">
                         <RefreshCw className={`h-4 w-4 ${filesLoading ? 'animate-spin' : ''}`} /> Refresh
@@ -1101,8 +1819,6 @@ const OrderCycleShopifyWorkspace = ({ agent }) => {
             <div className="grid grid-cols-3 gap-4 mb-6">
                 {[
                     { label: 'Total Reports',  value: filesLoading ? '—' : files.length,               sub: 'Generated files' },
-                    { label: 'Total Rows',     value: filesLoading ? '—' : totalRows.toLocaleString(),  sub: 'Orders processed' },
-                    { label: 'Latest Report',  value: latestFile ? `${monthNumToName(latestFile.month)} ${latestFile.year}` : '—', sub: latestFile ? formatDate(latestFile.created_at) : 'No reports yet', small: true },
                 ].map(({ label, value, sub, small }) => (
                     <div key={label} className="bg-white border border-slate-200 rounded-xl p-4">
                         <p className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-1">{label}</p>
@@ -1170,8 +1886,19 @@ const OrderCycleShopifyWorkspace = ({ agent }) => {
                                     </td>
                                     <td className="px-4 py-3.5">
                                         <div className="flex items-center gap-1.5">
-                                            <Calendar className="h-3.5 w-3.5 text-slate-400" />
-                                            <span className="text-slate-700 font-medium">{monthNumToName(file.month)} {file.year}</span>
+                                            <Calendar className="h-3.5 w-3.5 text-slate-400 shrink-0" />
+                                            {file.data_from && file.data_to ? (
+                                                <div className="leading-tight">
+                                                    <span className="text-slate-700 font-medium whitespace-nowrap">
+                                                        {formatDate(file.data_from)} – {formatDate(file.data_to)}
+                                                    </span>
+                                                    <p className="text-[10px] text-slate-400">
+                                                        uploaded as {monthNumToName(file.month)} {file.year}
+                                                    </p>
+                                                </div>
+                                            ) : (
+                                                <span className="text-slate-700 font-medium">{monthNumToName(file.month)} {file.year}</span>
+                                            )}
                                         </div>
                                     </td>
                                     <td className="px-4 py-3.5">
@@ -1183,7 +1910,7 @@ const OrderCycleShopifyWorkspace = ({ agent }) => {
                                     <td className="px-5 py-3.5">
                                         <div className="flex items-center justify-end gap-1.5">
                                             <button
-                                                onClick={() => setViewingFile(file)}
+                                                onClick={() => openFile(file)}
                                                 className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg bg-slate-900 text-white hover:bg-slate-700 transition-colors"
                                                 data-testid={`oc-view-${idx}`}
                                             >

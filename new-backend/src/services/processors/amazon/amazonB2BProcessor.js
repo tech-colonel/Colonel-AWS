@@ -661,42 +661,100 @@ async function amazonB2BProcessor(
     }
     const uniqueStateCodes = [...new Set(pivotData.map(row => getSellerStateAbbr(row['Seller Gstin'])))].filter(Boolean);
 
-    const tallyRows = pivotData.map(row => {
-      const quantity = Number(row['Quantity'] || 0);
-      const taxableValue = Number(row['Final Taxable Sales Value'] || 0);
-      const rate = Number(row['Final Tax rate'] || 0);
-      const ratePerPiece = quantity !== 0 ? taxableValue / quantity : 0;
-      const invoiceNo = row['Final Invoice No.'] || '';
-      const isCreditNote = taxableValue < 0;
-      const vchNo = isCreditNote ? `${invoiceNo}-cn` : invoiceNo;
-      const rowStateAbbr = getSellerStateAbbr(row['Seller Gstin']);
+    let tallyRows;
+    if (useInventory === true) {
+      tallyRows = pivotData.map(row => {
+        const quantity = Number(row['Quantity'] || 0);
+        const taxableValue = Number(row['Final Taxable Sales Value'] || 0);
+        const rate = Number(row['Final Tax rate'] || 0);
+        const ratePerPiece = quantity !== 0 ? taxableValue / quantity : 0;
+        const invoiceNo = row['Final Invoice No.'] || '';
+        const isCreditNote = taxableValue < 0;
+        const vchNo = isCreditNote ? `${invoiceNo}-cn` : invoiceNo;
+        const rowStateAbbr = getSellerStateAbbr(row['Seller Gstin']);
 
-      const baseRow = {
-        'Vch Date': lastDate,
-        'Seller GSTIN': row['Seller Gstin'] || '',
-        'Vch Type': isCreditNote ? 'Credit Note' : 'Sales',
-        'Vch No.': vchNo,
-        'Ref No.': vchNo,
-        'Ref Date': lastDate,
-        'Party Ledger': row['Ship To State Tally Ledger'] || '',
-        'Sales Ledger': 'Sales Amazon',
-        'Stock Item': row['FG'] || '',
-        'Quantity': quantity,
-        'Rate': rate,
-        'Amount': taxableValue,
-        'Rate Per Piece': ratePerPiece
-      };
+        const baseRow = {
+          'Vch Date': lastDate,
+          'Seller GSTIN': row['Seller Gstin'] || '',
+          'Vch Type': isCreditNote ? 'Credit Note' : 'Sales',
+          'Vch No.': vchNo,
+          'Ref No.': vchNo,
+          'Ref Date': lastDate,
+          'Party Ledger': row['Ship To State Tally Ledger'] || '',
+          'Sales Ledger': 'Sales Amazon',
+          'Stock Item': row['FG'] || '',
+          'Quantity': quantity,
+          'Rate': rate,
+          'Amount': taxableValue,
+          'Rate Per Piece': ratePerPiece
+        };
 
-      uniqueRates.forEach(r => {
-        const halfRate = r / 2;
-        uniqueStateCodes.forEach(sc => {
-          baseRow[`Output CGST ${halfRate} ${sc}`] = (rate === r && rowStateAbbr === sc) ? Number(row['Final CGST Tax'] || 0) : 0;
-          baseRow[`Output SGST ${halfRate} ${sc}`] = (rate === r && rowStateAbbr === sc) ? Number(row['Final SGST Tax'] || 0) : 0;
-          baseRow[`Output IGST ${r} ${sc}`] = (rate === r && rowStateAbbr === sc) ? Number(row['Final IGST Tax'] || 0) : 0;
+        uniqueRates.forEach(r => {
+          const halfRate = r / 2;
+          uniqueStateCodes.forEach(sc => {
+            baseRow[`Output CGST ${halfRate} ${sc}`] = (rate === r && rowStateAbbr === sc) ? Number(row['Final CGST Tax'] || 0) : 0;
+            baseRow[`Output SGST ${halfRate} ${sc}`] = (rate === r && rowStateAbbr === sc) ? Number(row['Final SGST Tax'] || 0) : 0;
+            baseRow[`Output IGST ${r} ${sc}`] = (rate === r && rowStateAbbr === sc) ? Number(row['Final IGST Tax'] || 0) : 0;
+          });
         });
+        return baseRow;
       });
-      return baseRow;
-    });
+    } else {
+      // WITHOUT INVENTORY: no stock item to itemize per SKU, so Quantity/Rate Per Piece
+      // collapse to 0 and line items sharing the same invoice/ledger/rate/credit-note
+      // status are consolidated into a single Tally voucher line (per user request).
+      const tallyGroupMap = {};
+      pivotData.forEach(row => {
+        const taxableValue = Number(row['Final Taxable Sales Value'] || 0);
+        const rate = Number(row['Final Tax rate'] || 0);
+        const isCreditNote = taxableValue < 0;
+        const invoiceNo = row['Final Invoice No.'] || '';
+        const key = `${row['Seller Gstin']}|${invoiceNo}|${row['Ship To State Tally Ledger']}|${isCreditNote}|${rate}`;
+        if (!tallyGroupMap[key]) {
+          const vchNo = isCreditNote ? `${invoiceNo}-cn` : invoiceNo;
+          tallyGroupMap[key] = {
+            row: {
+              'Vch Date': lastDate,
+              'Seller GSTIN': row['Seller Gstin'] || '',
+              'Vch Type': isCreditNote ? 'Credit Note' : 'Sales',
+              'Vch No.': vchNo,
+              'Ref No.': vchNo,
+              'Ref Date': lastDate,
+              'Party Ledger': row['Ship To State Tally Ledger'] || '',
+              'Sales Ledger': 'Sales Amazon',
+              'Stock Item': '',
+              'Quantity': 0,
+              'Rate': 0,
+              'Amount': 0,
+              'Rate Per Piece': 0
+            },
+            rate,
+            sellerGstin: row['Seller Gstin'],
+            cgst: 0,
+            sgst: 0,
+            igst: 0
+          };
+        }
+        const g = tallyGroupMap[key];
+        g.row['Amount'] += taxableValue;
+        g.cgst += Number(row['Final CGST Tax'] || 0);
+        g.sgst += Number(row['Final SGST Tax'] || 0);
+        g.igst += Number(row['Final IGST Tax'] || 0);
+      });
+
+      tallyRows = Object.values(tallyGroupMap).map(g => {
+        const rowStateAbbr = getSellerStateAbbr(g.sellerGstin);
+        uniqueRates.forEach(r => {
+          const halfRate = r / 2;
+          uniqueStateCodes.forEach(sc => {
+            g.row[`Output CGST ${halfRate} ${sc}`] = (g.rate === r && rowStateAbbr === sc) ? g.cgst : 0;
+            g.row[`Output SGST ${halfRate} ${sc}`] = (g.rate === r && rowStateAbbr === sc) ? g.sgst : 0;
+            g.row[`Output IGST ${r} ${sc}`] = (g.rate === r && rowStateAbbr === sc) ? g.igst : 0;
+          });
+        });
+        return g.row;
+      });
+    }
 
     if (tallyRows.length > 0) {
       const tallyHeaders = Object.keys(tallyRows[0]);
@@ -780,7 +838,10 @@ async function amazonB2BProcessor(
     });
     const gstrData = Object.values(gstrMap);
     if (gstrData.length > 0) {
-      const gstrHeaders = ['Seller Gstin', 'Hsn/sac', 'Rate', 'Quantity', 'Final Taxable Sales Value', 'Final CGST Tax', 'Final SGST Tax', 'Final IGST Tax'];
+      // Without inventory (per user request): IGST shown before CGST/SGST.
+      const gstrHeaders = useInventory === true
+        ? ['Seller Gstin', 'Hsn/sac', 'Rate', 'Quantity', 'Final Taxable Sales Value', 'Final CGST Tax', 'Final SGST Tax', 'Final IGST Tax']
+        : ['Seller Gstin', 'Hsn/sac', 'Rate', 'Quantity', 'Final Taxable Sales Value', 'Final IGST Tax', 'Final CGST Tax', 'Final SGST Tax'];
       gstrSheet.addRow(gstrHeaders);
       gstrData.forEach(row => {
         gstrSheet.addRow(gstrHeaders.map(h => row[h]));
@@ -789,41 +850,119 @@ async function amazonB2BProcessor(
 
     // ==================================
     // STEP 9.5: CREATE GSTR1 WORKING SHEET (EXCELJS)
-    // Same grouping as the GSTR HSN sheet above, but state-wise: the Quantity
-    // column is replaced with Ship To State (added to the group key too, so
-    // rows for the same HSN/rate but different destination states don't get
-    // merged). B2B uses Bill To State (toStateCol already prefers Bill over
-    // Ship per this processor's convention) rather than the raw Ship To State.
+    // WITH inventory: same grouping as the GSTR HSN sheet above, but state-wise: the
+    // Quantity column is replaced with Ship To State (added to the group key too, so
+    // rows for the same HSN/rate but different destination states don't get merged).
+    // B2B uses Bill To State (toStateCol already prefers Bill over Ship per this
+    // processor's convention) rather than the raw Ship To State.
+    // WITHOUT inventory (per user request): HSN dropped, "Ship To State" relabelled
+    // "Bill To State" (same underlying toStateCol value), and the sheet becomes a
+    // per-transaction detail listing (no aggregation) carrying Transaction Type,
+    // Invoice Number/Date, Credit Note No./Date and Customer Bill To Gstin — buyer
+    // GSTIN and invoice references are transaction-specific and can't be meaningfully
+    // summed into a rate+state bucket, so this matches GSTR-1 B2B invoice-wise filing.
     // ==================================
     const gstr1Sheet = workbook.addWorksheet('gstr1-working');
-    const gstr1Map = {};
-    filteredRows.forEach((row) => {
-      const sellerGstin = String(row['Seller Gstin'] || '').trim();
-      const hsn = String(row['Hsn/sac'] || '').trim();
-      const totalRate = Number(row['Cgst Rate'] || 0) + Number(row['Sgst Rate'] || 0) + Number(row['Igst Rate'] || 0);
-      const normalizedRate = Number(totalRate.toFixed(2));
-      const shipToState = String(row[toStateCol] || '').trim();
-      const key = `${sellerGstin}|${hsn}|${normalizedRate}|${shipToState}`;
-      if (!gstr1Map[key]) {
-        gstr1Map[key] = {
-          'Seller Gstin': sellerGstin,
-          'Hsn/sac': hsn,
-          'Rate': normalizedRate,
-          'Ship To State': shipToState,
-          'Final Taxable Sales Value': 0,
-          'Final CGST Tax': 0,
-          'Final SGST Tax': 0,
-          'Final IGST Tax': 0
-        };
+
+    if (useInventory === true) {
+      const gstr1Map = {};
+      filteredRows.forEach((row) => {
+        const sellerGstin = String(row['Seller Gstin'] || '').trim();
+        const hsn = String(row['Hsn/sac'] || '').trim();
+        const totalRate = Number(row['Cgst Rate'] || 0) + Number(row['Sgst Rate'] || 0) + Number(row['Igst Rate'] || 0);
+        const normalizedRate = Number(totalRate.toFixed(2));
+        const shipToState = String(row[toStateCol] || '').trim();
+        const key = `${sellerGstin}|${hsn}|${normalizedRate}|${shipToState}`;
+        if (!gstr1Map[key]) {
+          gstr1Map[key] = {
+            'Seller Gstin': sellerGstin,
+            'Hsn/sac': hsn,
+            'Rate': normalizedRate,
+            'Ship To State': shipToState,
+            'Final Taxable Sales Value': 0,
+            'Final CGST Tax': 0,
+            'Final SGST Tax': 0,
+            'Final IGST Tax': 0
+          };
+        }
+        gstr1Map[key]['Final Taxable Sales Value'] += Number(row['Final Taxable Sales Value'] || 0);
+        gstr1Map[key]['Final CGST Tax'] += Number(row['Final CGST Tax'] || 0);
+        gstr1Map[key]['Final SGST Tax'] += Number(row['Final SGST Tax'] || 0);
+        gstr1Map[key]['Final IGST Tax'] += Number(row['Final IGST Tax'] || 0);
+      });
+      const gstr1Data = Object.values(gstr1Map);
+      if (gstr1Data.length > 0) {
+        const gstr1Headers = ['Seller Gstin', 'Hsn/sac', 'Rate', 'Ship To State', 'Final Taxable Sales Value', 'Final CGST Tax', 'Final SGST Tax', 'Final IGST Tax'];
+        gstr1Sheet.addRow(gstr1Headers);
+        gstr1Data.forEach(row => {
+          gstr1Sheet.addRow(gstr1Headers.map(h => row[h]));
+        });
       }
-      gstr1Map[key]['Final Taxable Sales Value'] += Number(row['Final Taxable Sales Value'] || 0);
-      gstr1Map[key]['Final CGST Tax'] += Number(row['Final CGST Tax'] || 0);
-      gstr1Map[key]['Final SGST Tax'] += Number(row['Final SGST Tax'] || 0);
-      gstr1Map[key]['Final IGST Tax'] += Number(row['Final IGST Tax'] || 0);
-    });
-    const gstr1Data = Object.values(gstr1Map);
-    if (gstr1Data.length > 0) {
-      const gstr1Headers = ['Seller Gstin', 'Hsn/sac', 'Rate', 'Ship To State', 'Final Taxable Sales Value', 'Final CGST Tax', 'Final SGST Tax', 'Final IGST Tax'];
+    } else {
+      // Amazon's real MTR B2B export spells the buyer-GSTIN column "Gstid" (not "Gstin") —
+      // verified against a live sample file; matches the fallback salesAmazonController.js
+      // already uses for the same field. Invoice Number/Date and Credit Note No/Date are
+      // Amazon's own raw columns (verified header names below), not the internally
+      // generated "Final Invoice No." — per user request, so the real invoice/credit-note
+      // reference is preserved.
+      const buyerGstinCol = findHeader('customer bill to gstid') || findHeader('bill to gstid') ||
+        findHeader('customer bill to gstin') || findHeader('bill to gstin') ||
+        findHeader('buyer gstin') || findHeader('customer gstin');
+      const invoiceNumberCol = findHeader('invoice number');
+      const invoiceDateCol = findHeader('invoice date');
+      const creditNoteNoCol = findHeader('credit note no') || findHeader('credit note no.') || findHeader('credit note number');
+      const creditNoteDateCol = findHeader('credit note date');
+
+      const gstr1Headers = [
+        'Seller Gstin', 'Transaction Type', 'Invoice Number', 'Invoice Date',
+        'Credit Note No.', 'Credit Note Date', 'Customer Bill To Gstin',
+        'Rate', 'Bill To State', 'Final Taxable Sales Value',
+        'Final IGST Tax', 'Final CGST Tax', 'Final SGST Tax'
+      ];
+
+      // Grouped (summed) by every non-numeric identifying column, per user request — since
+      // Invoice Number/Date/Credit Note No./Date/Buyer Gstin now come straight from Amazon's
+      // own raw columns (rather than the internally generated, month-consolidated invoice
+      // number), rows sharing all of these naturally belong to the same real invoice, so
+      // grouping here just collapses multiple line items of one invoice into one row.
+      const gstr1Map = {};
+      filteredRows.forEach(row => {
+        const totalRate = Number(row['Cgst Rate'] || 0) + Number(row['Sgst Rate'] || 0) + Number(row['Igst Rate'] || 0);
+        const normalizedRate = Number(totalRate.toFixed(2));
+        const transactionType = row[transactionColumn] || '';
+        const invoiceNumber = invoiceNumberCol ? (row[invoiceNumberCol] || '') : '';
+        const invoiceDate = invoiceDateCol ? (row[invoiceDateCol] || '') : '';
+        const creditNoteNo = creditNoteNoCol ? (row[creditNoteNoCol] || '') : '';
+        const creditNoteDate = creditNoteDateCol ? (row[creditNoteDateCol] || '') : '';
+        const buyerGstin = buyerGstinCol ? (row[buyerGstinCol] || '') : '';
+        const billToState = row[toStateCol] || '';
+
+        const key = [row['Seller Gstin'] || '', transactionType, invoiceNumber, invoiceDate, creditNoteNo, creditNoteDate, buyerGstin, normalizedRate, billToState].join('|');
+
+        if (!gstr1Map[key]) {
+          gstr1Map[key] = {
+            'Seller Gstin': row['Seller Gstin'] || '',
+            'Transaction Type': transactionType,
+            'Invoice Number': invoiceNumber,
+            'Invoice Date': invoiceDate,
+            'Credit Note No.': creditNoteNo,
+            'Credit Note Date': creditNoteDate,
+            'Customer Bill To Gstin': buyerGstin,
+            'Rate': normalizedRate,
+            'Bill To State': billToState,
+            'Final Taxable Sales Value': 0,
+            'Final IGST Tax': 0,
+            'Final CGST Tax': 0,
+            'Final SGST Tax': 0
+          };
+        }
+        gstr1Map[key]['Final Taxable Sales Value'] += Number(row['Final Taxable Sales Value'] || 0);
+        gstr1Map[key]['Final IGST Tax'] += Number(row['Final IGST Tax'] || 0);
+        gstr1Map[key]['Final CGST Tax'] += Number(row['Final CGST Tax'] || 0);
+        gstr1Map[key]['Final SGST Tax'] += Number(row['Final SGST Tax'] || 0);
+      });
+
+      const gstr1Data = Object.values(gstr1Map);
       gstr1Sheet.addRow(gstr1Headers);
       gstr1Data.forEach(row => {
         gstr1Sheet.addRow(gstr1Headers.map(h => row[h]));
@@ -898,14 +1037,17 @@ async function amazonB2BProcessor(
         get: r => `Amazon B2B ${isRowIntraState(r) ? 'Intra' : 'Inter'}-State (Debtor)-${getSellerStateAbbr(r['Seller Gstin']) || ''}`
       },
       { header: 'Sales Ledger*', get: r => `Sales Amazon-${getSellerStateAbbr(r['Seller Gstin']) || ''} ${Math.round(getRowGstRate(r) * 10000) / 100}%` },
-      { header: 'Stock Item', get: r => r['FG'] || r['Item Description'] || '' },
-      { header: 'Description', get: r => r['FG'] || r['Item Description'] || '' },
+      { header: 'Stock Item', get: r => useInventory === true ? (r['FG'] || r['Item Description'] || '') : '' },
+      { header: 'Description', get: r => useInventory === true ? (r['FG'] || r['Item Description'] || '') : '' },
       { header: 'Godown', get: r => r['Ship From State'] || '' },
-      { header: 'Quantity', get: r => (r[transactionColumn] === 'Refund' ? Math.abs(Number(r[quantityColumn] || 0)) : Number(r[quantityColumn] || 0)) },
+      // Without inventory there's no stock item to itemize per unit, so Quantity/Rate
+      // collapse to 0 (per user request) — Amount* still carries the real taxable value.
+      { header: 'Quantity', get: r => useInventory !== true ? 0 : (r[transactionColumn] === 'Refund' ? Math.abs(Number(r[quantityColumn] || 0)) : Number(r[quantityColumn] || 0)) },
       {
         // Unit rate is always positive — sign lives in Amount*, not Rate.
         header: 'Rate',
         get: r => {
+          if (useInventory !== true) return 0;
           const qty = r[transactionColumn] === 'Refund' ? Math.abs(Number(r[quantityColumn] || 0)) : Number(r[quantityColumn] || 0);
           return qty !== 0 ? Math.abs(Number(r['Final Taxable Sales Value'] || 0) / qty) : 0;
         }

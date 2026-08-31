@@ -63,6 +63,12 @@ new-backend/test input files/
 new-backend/test-zepto-working.js
 new-backend/backend-structure.md
 
+# ── Local scratch / sensitive (never commit — contains live keys, client data) ─
+AWS Setup/
+agent test files/
+receivables by claude/
+cash settlement agent/
+
 # ── Build ─────────────────────────────────────────────────────────────────────
 frontend/build/
 coverage/

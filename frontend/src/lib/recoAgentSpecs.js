@@ -106,6 +106,8 @@ export const RECO_AGENT_SPECS = [
       { key: 'delhivery',    label: 'Delhivery COD Settlement (opt.)', hint: '.xlsx / .xls', required: false },
       { key: 'ekart',        label: 'Ekart COD Settlement (opt.)',     hint: '.xlsx / .xls', required: false },
       { key: 'xpressbees',   label: 'Xpressbees COD Settlement (opt.)', hint: '.xlsx / .xls', required: false },
+      { key: 'razorpay',     label: 'Razorpay Settlement (opt.)',      hint: '.xlsx / .xls / .csv — settles Prepaid orders', required: false },
+      { key: 'snapmint',     label: 'Snapmint Settlement (opt.)',      hint: '.xlsx / .xls / .csv — settles Prepaid orders', required: false },
       { key: 'srn',          label: 'Combined SRN Report (opt.)',      hint: '.xlsx / .xls', required: false },
       { key: 'delivery_status', label: 'Prepaid Delivery Status (opt.)', hint: '.xlsx / .xls — settles Prepaid orders once delivered', required: false },
     ],

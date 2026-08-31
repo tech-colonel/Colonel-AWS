@@ -82,8 +82,8 @@ const RECO_AGENTS = [
     id: 'receivable_cycle', category: 'Receivables',
     name: 'Receivable Cycle', icon: '🔄',
     color: '#0748EE', bg: '#E8EFFE', border: '#A3BFF8',
-    description: 'End-to-end order-to-cash: reconcile Tally GST, sales orders and COD settlements (Delhivery / Ekart / Xpressbees) to track the full receivable cycle.',
-    fields: ['Tally GST', 'Sales Order', 'COD Settlements'], accuracy: '—',
+    description: 'End-to-end order-to-cash: reconcile Tally GST, sales orders, COD settlements (Delhivery / Ekart / Xpressbees) and Prepaid gateway settlements (Razorpay / Snapmint) to track the full receivable cycle.',
+    fields: ['Tally GST', 'Sales Order', 'COD Settlements', 'Prepaid Settlements'], accuracy: '—',
     route: 'receivables',
   },
 ];

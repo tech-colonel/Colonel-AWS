@@ -650,17 +650,11 @@ const AgentWorkspace = () => {
               >
                 ← Back to Agents
               </Button>
-              <h1 className="text-3xl font-bold text-slate-900 tracking-tight">{agent?.name}</h1>
+              {/* Display-only friendly name — the agent is still "Shopify-Order-Cycle"
+                  in the DB (keeps isOrderCycleShopify detection + seeders intact). */}
+              <h1 className="text-3xl font-bold text-slate-900 tracking-tight">Order Cycle</h1>
               <p className="text-slate-600 mt-1">{agent?.description}</p>
             </div>
-            <Button
-              onClick={() => setShowWorkflowModal(true)}
-              variant="outline"
-              className="border-indigo-200 text-indigo-700 hover:bg-indigo-50"
-            >
-              <GitBranch className="mr-2 h-4 w-4" />
-              Workflows
-            </Button>
           </div>
           <OrderCycleShopifyWorkspace agent={agent} />
         </div>

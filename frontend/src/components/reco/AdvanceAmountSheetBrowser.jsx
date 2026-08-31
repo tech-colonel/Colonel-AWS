@@ -21,7 +21,8 @@ const GATEWAY_TABS = [
 // duplicated here. No status filter — every row in this population has
 // delivery_status IS NULL by definition (never found in Sales Order Combined).
 const FILTER_COLUMNS = [
-  { key: 'date', label: 'Date' },
+  { key: 'advanceDate', label: 'Advance date' },
+  { key: 'date', label: 'Dispatch/Delivered date' },
   { key: 'order', label: 'Order #' },
   { key: 'invoice', label: 'Invoice #' },
   { key: 'awb', label: 'AWB' },
@@ -117,7 +118,7 @@ const AdvanceAmountSheetBrowser = ({ brandId, range }) => {
       .then((res) => res.data);
   }, [brandId, range, gateway, search, filtersParam]);
 
-  const formatColumnValue = (key, v) => (key === 'date' ? fmtDate(v) : v);
+  const formatColumnValue = (key, v) => (key === 'date' || key === 'advanceDate' ? fmtDate(v) : v);
 
   const totalPages = data ? Math.max(1, Math.ceil(data.total / PAGE_SIZE)) : 1;
 
@@ -244,7 +245,7 @@ const AdvanceAmountSheetBrowser = ({ brandId, range }) => {
                             </span>
                           </th>
                         ))}
-                        {['Gateway', 'Advance received', 'Advance date', 'Order total', 'Days pending'].map((h) => (
+                        {['Gateway', 'Advance received', 'Order total', 'Days pending'].map((h) => (
                           <th key={h} className="px-3 py-2.5 text-left text-[11px] font-bold uppercase tracking-wide whitespace-nowrap" style={{ color: 'var(--text-muted)' }}>{h}</th>
                         ))}
                       </tr>
@@ -260,6 +261,7 @@ const AdvanceAmountSheetBrowser = ({ brandId, range }) => {
                           onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent'; }}
                           title="Click to see this order's journey"
                         >
+                          <td className="px-3 py-2.5 whitespace-nowrap font-medium" style={{ color: 'var(--text-heading)' }}>{fmtDate(r.advance_received_date)}</td>
                           <td className="px-3 py-2.5 whitespace-nowrap" style={{ color: 'var(--text-body)' }}>{fmtDate(r.date)}</td>
                           <td className="px-3 py-2.5 whitespace-nowrap font-medium" style={{ color: 'var(--text-heading)' }}>{r.sale_order_number || '—'}</td>
                           <td className="px-3 py-2.5 whitespace-nowrap" style={{ color: 'var(--text-muted)' }}>{r.invoice_number || '—'}</td>
@@ -267,7 +269,6 @@ const AdvanceAmountSheetBrowser = ({ brandId, range }) => {
                           <td className="px-3 py-2.5 whitespace-nowrap" style={{ color: 'var(--text-body)' }}>{r.platform || '—'}</td>
                           <td className="px-3 py-2.5 whitespace-nowrap"><Pill color={COLOR_SALES}>{r.gateway}</Pill></td>
                           <td className="px-3 py-2.5 whitespace-nowrap font-semibold" style={{ color: COLOR_PENDING }}>{money(r.gateway_amount)}</td>
-                          <td className="px-3 py-2.5 whitespace-nowrap" style={{ color: 'var(--text-muted)' }}>{fmtDate(r.advance_received_date)}</td>
                           <td className="px-3 py-2.5 whitespace-nowrap" style={{ color: 'var(--text-body)' }}>{money(r.total_amount)}</td>
                           <td className="px-3 py-2.5 whitespace-nowrap" style={{ color: 'var(--text-body)' }}>{Number(r.days_pending).toLocaleString('en-IN')}</td>
                         </tr>

@@ -16,6 +16,7 @@
 
 const { Conversation } = require('../models/master');
 const { llmComplete } = require('../ai/llmProviders');
+const { buildDashboardContext } = require('../ai/dashboardContext');
 
 // GenSpark LLM proxy — OpenAI-compatible chat completions, proxying real Claude
 // model IDs (confirmed live in workflowAiController). Configured via env.
@@ -59,6 +60,8 @@ HOW TO GUIDE USERS THROUGH THE UI (use these exact steps when someone asks "how 
 
 When a CURRENT RECONCILIATION CONTEXT section is present below, the user has just run a reconciliation — use that data to answer questions about specific entries (e.g. "why is invoice 123 partially matched?") by citing its remarks (Remark 1 = match status; Remark 2 = the reason, such as "Tax Amount Mismatch, Excess in 2B"; Remark 3 = cross-state booking error). If they ask about an entry not in the context, say you can only see the rows from the last run.
 
+When a DASHBOARD DATA section is present below, the chat has been scoped to a specific brand (and possibly one agent). It is a live snapshot of that brand's reconciliation dashboard — run counts, rows processed, matched vs unmatched, match rate, per-agent breakdown, and recent runs. Answer the user's questions about their usage and history from those figures and cite the numbers. If the user asks you to "summarise the dashboard" (or anything similar), write the summary directly from that section — the key totals, the match rate, the busiest agents, and what the recent runs show — and never ask them for a screenshot, a link, or which report they mean. Do not invent data that is not in that section; if something is not shown, say the dashboard does not cover it.
+
 Be concise, accurate, and practical. Use Indian accounting terminology. Format with markdown (headings, lists, bold, tables, code) when it helps.`;
 
 /* Coerce incoming messages → OpenAI chat messages (role: user | assistant). */
@@ -76,17 +79,32 @@ const streamChat = async (req, res, next) => {
     return res.status(503).json({ error: 'Colonel AI is not configured. Set GEMINI_API_KEY or ANTHROPIC_API_KEY on the backend.' });
   }
 
-  const { conversationId, system, context } = req.body || {};
+  const { conversationId, system, context, brandId, agentType, brandName, agentLabel } = req.body || {};
   const model = MODEL_WHITELIST.has(req.body?.model) ? req.body.model : DEFAULT_MODEL;
   const convo = toOpenAiMessages(req.body?.messages);
+
+  if (convo.length === 0) {
+    return res.status(400).json({ error: 'messages is required' });
+  }
 
   let systemPrompt = system && String(system).trim() ? String(system) : SYSTEM_PROMPT;
   if (context && String(context).trim()) {
     systemPrompt += `\n\nCURRENT RECONCILIATION CONTEXT (the user just ran this — use it to answer questions about specific entries):\n${String(context).slice(0, 12000)}`;
   }
 
-  if (convo.length === 0) {
-    return res.status(400).json({ error: 'messages is required' });
+  // Scoped-to-a-brand chat → attach a live snapshot of that brand's dashboard
+  // (reco_jobs). Read-only + brand-access gated inside buildDashboardContext;
+  // returns null on no access / no data / any error, so chat still works.
+  if (brandId) {
+    try {
+      const dash = await buildDashboardContext({ user: req.user, brandId, agentType, brandName, agentLabel });
+      if (dash) {
+        systemPrompt += `\n\n${dash}`;
+        console.log('[chat] dashboard context attached', { brandId, agentType: agentType || null, chars: dash.length });
+      } else {
+        console.log('[chat] dashboard context skipped (no access / no data)', { brandId });
+      }
+    } catch (e) { console.warn('[chat] dashboard context error:', e.message); }
   }
 
   // SSE handshake

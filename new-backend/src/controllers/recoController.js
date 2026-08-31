@@ -676,16 +676,21 @@ const saveReceivableCycleResults = async (sequelize, jobId, brandId, mainRows, c
 
 // Which upload field feeds which receivableLedgerBuilder.js role. 'sales_order' has no
 // role — it isn't consumed anywhere in the ledger ETL (confirmed: only tally_gst/
-// delhivery/ekart/xpressbees/srn/delivery_status feed receivable_ledger; see
-// RECEIVABLES_CYCLE.md §3). 'delivery_status' is the delivery-confirmation feed that
+// delhivery/ekart/xpressbees/razorpay/snapmint/srn/delivery_status feed receivable_ledger;
+// see RECEIVABLES_CYCLE.md §3). 'delivery_status' is the delivery-confirmation feed that
 // settles marketplace Prepaid orders (Amazon/Flipkart/Myntra/etc) — Prepaid no longer
 // auto-settles same-month as the sale (see receivableLedgerBuilder.js), so without this
 // upload a brand's Prepaid orders simply stay unsettled until one is provided.
+// 'razorpay'/'snapmint' are the gateway-settlement feed for Prepaid orders — consumed by
+// receivableLedgerBuilder.js's matchGatewaySettlements (already built, just had no upload
+// field wired to it until now).
 const RECEIVABLE_CYCLE_FILE_ROLES = {
   tally_gst: 'tally',
   delhivery: 'delhivery',
   ekart: 'ekart',
   xpressbees: 'xpressbees',
+  razorpay: 'razorpay',
+  snapmint: 'snapmint',
   srn: 'srn',
   delivery_status: 'delivery_status',
 };
@@ -696,11 +701,17 @@ const RECEIVABLE_CYCLE_FILE_ROLES = {
 // 'delivery_status' has no real-world sample yet (new upload type) — the signature and
 // the column aliases in receivableLedgerBuilder.js's parser are a best guess at common
 // header names and should be tightened once a real file is seen.
+// razorpay/snapmint mirror the raw export shapes orderCycleShopifyProcessor.js already
+// detects for these gateways: entity_id/settled_at/order_receipt for Razorpay's own
+// settlement export; Final Order Number/Order value/Merchant Settlement Date for
+// Snapmint's MSDR export.
 const ROLE_SHEET_SIGNATURES = {
   tally: ['Invoice number', 'Total', 'AWB num'],
   delhivery: ['waybill_num'],
   ekart: ['TRACKING_ID', 'COD_AMOUNT'],
   xpressbees: ['Net Payment'],
+  razorpay: ['entity_id', 'settled_at', 'order_receipt'],
+  snapmint: ['Final Order Number', 'Order value', 'Merchant Settlement Date'],
   srn: ['Original Invoice No', 'Total'],
   delivery_status: ['AWB', 'Delivery Status'],
 };

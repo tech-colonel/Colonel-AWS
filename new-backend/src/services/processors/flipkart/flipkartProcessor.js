@@ -771,6 +771,7 @@ async function flipkartProcessor(rawFileBuffer, skuData, stateConfigData, brandN
     const itemQuantity = safeNumber(row['Item Quantity']);
     const igstRate = safeNumber(row['IGST Rate']);
     const cgstRate = safeNumber(row['CGST Rate']);
+    const sgstRate = safeNumber(row['SGST Rate (or UTGST as applicable)']);
 
     // Compute derived columns
     // Final Price after discount (negative if Return)
@@ -782,8 +783,8 @@ async function flipkartProcessor(rawFileBuffer, skuData, stateConfigData, brandN
     // Final Item Quantity (negative if Return)
     const finalItemQuantity = isReturn ? -Math.abs(itemQuantity) : itemQuantity;
 
-    // Final GST rate = IGST Rate > 0 ? IGST Rate : CGST Rate
-    const finalGstRate = igstRate > 0 ? igstRate : cgstRate;
+    // Final GST rate = IGST Rate > 0 ? IGST Rate : CGST Rate + SGST Rate
+    const finalGstRate = igstRate > 0 ? igstRate : cgstRate + sgstRate;
 
     // Conversion rate = Final GST rate != 12 ? 1.18 : 1.12
     // const conversionRate = finalGstRate !== 12 ? 1.18 : 1.12;
@@ -798,12 +799,12 @@ async function flipkartProcessor(rawFileBuffer, skuData, stateConfigData, brandN
     }
 
     // Final Taxable sales value = Final Price after discount / Conversion rate
-    // Final Taxable sales value = Final Price after discount / Conversion rate
-    const finalTaxableSalesValue = Math.round(finalPriceAfterDiscount / conversionRate);
-
+    // (kept to 2 decimal places, no roundoff to a whole number)
+    const finalTaxableSalesValue = +(finalPriceAfterDiscount / conversionRate).toFixed(2);
 
     // Final Shipping Taxable value = Final Shipping Charges / Conversion rate
-    const finalShippingTaxableValue = finalShippingCharges / conversionRate;
+    // (kept to 2 decimal places, no roundoff to a whole number)
+    const finalShippingTaxableValue = +(finalShippingCharges / conversionRate).toFixed(2);
 
     // Intra-state vs Inter-state
     const isIntraState = normalizeStateName(sellerState) === normalizeStateName(customerDeliveryState);
@@ -1245,6 +1246,37 @@ async function flipkartProcessor(rawFileBuffer, skuData, stateConfigData, brandN
     'working-file'
   );
 
+  // 2.5 gstr1-working — grouped by Seller GSTIN + Final GST Rate + Customer's
+  // Delivery State, summing the raw (not "Final"/conversion-derived) Taxable
+  // Value and tax amount columns from the source report — matches the real
+  // GSTR-1 B2C summary table (rate + destination state, no invoice/SKU detail).
+  const gstr1WorkingMap = {};
+  for (const row of workingFileData) {
+    const key = `${row.seller_gstin || ''}|${row.final_gst_rate || 0}|${row.customer_delivery_state || ''}`;
+    if (!gstr1WorkingMap[key]) {
+      gstr1WorkingMap[key] = {
+        'Seller GSTIN': row.seller_gstin || '',
+        'Final GST Rate': row.final_gst_rate || 0,
+        "Customer's Delivery State": row.customer_delivery_state || '',
+        'Sum of Taxable Value (Final Invoice Amount -Taxes)': 0,
+        'Sum of IGST Amount': 0,
+        'Sum of CGST Amount': 0,
+        'Sum of SGST Amount (Or UTGST as applicable)': 0
+      };
+    }
+    gstr1WorkingMap[key]['Sum of Taxable Value (Final Invoice Amount -Taxes)'] += safeNumber(row.taxable_value);
+    gstr1WorkingMap[key]['Sum of IGST Amount'] += safeNumber(row.igst_amount);
+    gstr1WorkingMap[key]['Sum of CGST Amount'] += safeNumber(row.cgst_amount);
+    gstr1WorkingMap[key]['Sum of SGST Amount (Or UTGST as applicable)'] += safeNumber(row.sgst_amount);
+  }
+  const gstr1WorkingSheetData = Object.values(gstr1WorkingMap);
+  XLSX.utils.book_append_sheet(
+    outputWorkbook,
+    XLSX.utils.json_to_sheet(gstr1WorkingSheetData),
+    'gstr1-working'
+  );
+  console.log(`✓ Added gstr1-working sheet with ${gstr1WorkingSheetData.length} rows`);
+
   // 3. pivot
   const pivotSheetData = pivotData.map(row => {
     const sheetRow = {
@@ -1367,21 +1399,15 @@ async function flipkartProcessor(rawFileBuffer, skuData, stateConfigData, brandN
     { header: 'Is Vch?', get: () => null },
     { header: 'Party Ledger*', get: r => r.tally_ledgers || '' },
     { header: 'Sales Ledger*', get: r => `Sales Flipkart-${getSellerStateAbbr(r.seller_gstin) || ''} ${Number(r.final_gst_rate || 0)}%` },
-    { header: 'Stock Item', get: r => r.fg || r.product_title || '' },
+    // Stock-item detail dropped per user request — this sheet is now a
+    // ledger-only voucher import (no stock movement), so Stock Item/Qty/Rate/
+    // Unit are blanked/zeroed and rows sharing a voucher are grouped below.
+    { header: 'Stock Item', get: () => null },
     { header: 'Description', get: () => null },
     { header: 'Godown', get: r => r.order_shipped_from_state || '' },
-    // Physical quantity is always positive — Item Quantity is already signed
-    // negative for returns upstream, so abs() it back for this sheet.
-    { header: 'Quantity', get: r => Math.abs(Number(r.item_quantity || 0)) },
-    {
-      // Unit rate is always positive — sign lives in Amount*, not Rate.
-      header: 'Rate',
-      get: r => {
-        const qty = Math.abs(Number(r.item_quantity || 0));
-        return qty !== 0 ? Math.abs(Number(r.final_taxable_sales_value || 0) / qty) : 0;
-      }
-    },
-    { header: 'Unit', get: () => 'Pcs' },
+    { header: 'Quantity', get: () => 0 },
+    { header: 'Rate', get: () => 0 },
+    { header: 'Unit', get: () => null },
     { header: 'Discount', get: () => null },
     { header: 'Amount*', get: r => Number(r.final_taxable_sales_value || 0) },
     { header: 'Discount', get: () => null }
@@ -1417,7 +1443,7 @@ async function flipkartProcessor(rawFileBuffer, skuData, stateConfigData, brandN
     { header: 'GST Rate', get: r => Number(r.final_gst_rate || 0) },
     { header: 'Cess', get: () => null },
     { header: 'RCM?', get: () => null },
-    { header: 'HSN', get: r => r.hsn_code || '' },
+    { header: 'HSN', get: () => null },
     { header: 'HSN Desc', get: () => null },
     { header: 'Supply Type', get: () => null },
     { header: 'Cost Category', get: () => null },
@@ -1450,10 +1476,41 @@ async function flipkartProcessor(rawFileBuffer, skuData, stateConfigData, brandN
   );
 
   const x2betaHeaders = x2betaColumns.map(c => c.header);
-  const x2betaSheetData = [x2betaHeaders, ...workingFileData.map(row => x2betaColumns.map(c => c.get(row)))];
+  const x2betaRawRows = workingFileData.map(row => x2betaColumns.map(c => c.get(row)));
+
+  // Group rows sharing the same voucher (Stock Item/Description are now blank
+  // and Qty/Rate are zeroed above, so per-SKU line items would otherwise show
+  // up as duplicate rows) — sum Amount* and every dynamic Output IGST/CGST/SGST
+  // column across the group, keep the rest as-is (identical within a group).
+  const x2betaGroupByHeaders = [
+    'Vch. Date* ', 'Vch. Type*', 'Vch. No.*', 'Ref. No.', 'Ref. Date',
+    'Is CN?', 'Is Vch?', 'Party Ledger*', 'Sales Ledger*', 'Stock Item',
+    'Description', 'Godown'
+  ];
+  const x2betaGroupByIdx = x2betaGroupByHeaders.map(h => x2betaHeaders.indexOf(h));
+  const x2betaSumIdx = x2betaColumns
+    .map((c, i) => ({ header: c.header, i }))
+    .filter(({ header }) => header === 'Amount*' || (typeof header === 'string' && header.startsWith('Output ')))
+    .map(({ i }) => i);
+
+  const x2betaGroupedMap = new Map();
+  for (const rowArr of x2betaRawRows) {
+    const key = x2betaGroupByIdx.map(i => rowArr[i]).join('|');
+    if (!x2betaGroupedMap.has(key)) {
+      x2betaGroupedMap.set(key, [...rowArr]);
+    } else {
+      const existing = x2betaGroupedMap.get(key);
+      x2betaSumIdx.forEach(i => {
+        existing[i] = Number(existing[i] || 0) + Number(rowArr[i] || 0);
+      });
+    }
+  }
+  const x2betaGroupedRows = [...x2betaGroupedMap.values()];
+
+  const x2betaSheetData = [x2betaHeaders, ...x2betaGroupedRows];
   const x2betaSheet = XLSX.utils.aoa_to_sheet(x2betaSheetData);
   XLSX.utils.book_append_sheet(outputWorkbook, x2betaSheet, 'x2beta working');
-  console.log(`✓ Added x2beta working sheet with ${workingFileData.length} rows`);
+  console.log(`✓ Added x2beta working sheet with ${x2betaGroupedRows.length} rows (grouped from ${x2betaRawRows.length})`);
 
   // ==================================
   // VALIDATION: x2beta sheet totals must reconcile with the pivot totals

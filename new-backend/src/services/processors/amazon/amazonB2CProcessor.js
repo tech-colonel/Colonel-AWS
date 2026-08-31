@@ -800,21 +800,66 @@ async function amazonB2CProcessor(
       gstrMap[key]['Final IGST Tax'] += Number(row['Final IGST Tax'] || 0);
     });
     const gstrData = Object.values(gstrMap);
-    if (gstrData.length > 0) {
-      const gstrHeaders = ['Seller Gstin', 'Hsn/sac', 'Rate', 'Quantity', 'Final Taxable Sales Value', 'Final CGST Tax', 'Final SGST Tax', 'Final IGST Tax'];
-      gstrSheet.addRow(gstrHeaders);
+
+    if (useInventory === true) {
+      if (gstrData.length > 0) {
+        const gstrHeaders = ['Seller Gstin', 'Hsn/sac', 'Rate', 'Quantity', 'Final Taxable Sales Value', 'Final CGST Tax', 'Final SGST Tax', 'Final IGST Tax'];
+        gstrSheet.addRow(gstrHeaders);
+        gstrData.forEach(row => {
+          gstrSheet.addRow(gstrHeaders.map(h => row[h]));
+        });
+      }
+    } else {
+      // WITHOUT INVENTORY (per user request): tag sales rows with a Sales Category, then
+      // append shipping-value rows beneath them — shipping has no HSN/SAC in the raw
+      // report (left blank, matching the shipping tally-ready/x2beta-shipping sheets),
+      // so shipping rows are grouped by Seller Gstin + Rate only.
+      const shippingGstrMap = {};
+      filteredRows.forEach((row) => {
+        const sellerGstin = String(row['Seller Gstin'] || '').trim();
+        const totalRate = Number(row['Cgst Rate'] || 0) + Number(row['Sgst Rate'] || 0) + Number(row['Igst Rate'] || 0);
+        const normalizedRate = Number(totalRate.toFixed(2));
+        const key = `${sellerGstin}|${normalizedRate}`;
+        if (!shippingGstrMap[key]) {
+          shippingGstrMap[key] = {
+            'Seller Gstin': sellerGstin,
+            'Hsn/sac': '',
+            'Rate': normalizedRate,
+            'Quantity': 0,
+            'Final Taxable Sales Value': 0,
+            'Final CGST Tax': 0,
+            'Final SGST Tax': 0,
+            'Final IGST Tax': 0
+          };
+        }
+        shippingGstrMap[key]['Final Taxable Sales Value'] += Number(row['Final Taxable Shipping Value'] || 0);
+        shippingGstrMap[key]['Final CGST Tax'] += Number(row['Final Shipping CGST Tax'] || 0);
+        shippingGstrMap[key]['Final SGST Tax'] += Number(row['Final Shipping SGST Tax'] || 0);
+        shippingGstrMap[key]['Final IGST Tax'] += Number(row['Final Shipping IGST Tax'] || 0);
+      });
+      const shippingGstrData = Object.values(shippingGstrMap);
+
+      const gstrValueHeaders = ['Seller Gstin', 'Hsn/sac', 'Rate', 'Quantity', 'Final Taxable Sales Value', 'Final CGST Tax', 'Final SGST Tax', 'Final IGST Tax'];
+      gstrSheet.addRow(['Sales Category', ...gstrValueHeaders]);
       gstrData.forEach(row => {
-        gstrSheet.addRow(gstrHeaders.map(h => row[h]));
+        gstrSheet.addRow(['sales', ...gstrValueHeaders.map(h => row[h])]);
+      });
+      shippingGstrData.forEach(row => {
+        gstrSheet.addRow(['shipping', ...gstrValueHeaders.map(h => row[h])]);
       });
     }
 
     // ==================================
     // STEP 9.5: CREATE GSTR1 WORKING SHEET (EXCELJS)
-    // Same grouping as the GSTR HSN sheet above, but state-wise: the Quantity
-    // column is replaced with Ship To State (added to the group key too, so
-    // rows for the same HSN/rate but different destination states don't get
-    // merged). Uses the raw Ship To State column (shipToStateCol), not the
-    // Bill-preferring toStateCol — B2B uses Bill To State instead.
+    // WITH inventory: same grouping as the GSTR HSN sheet above, but state-wise: the
+    // Quantity column is replaced with Ship To State (added to the group key too, so
+    // rows for the same HSN/rate but different destination states don't get merged).
+    // Uses the raw Ship To State column (shipToStateCol), not the Bill-preferring
+    // toStateCol — B2B uses Bill To State instead.
+    // WITHOUT inventory (per user request): HSN dropped from both the group key and
+    // the output (matches the real GSTR-1 B2C table, which is rate+state only, not
+    // HSN-specific), and shipping taxable value/tax is folded into the main sales
+    // totals rather than kept as a separate line.
     // ==================================
     const gstr1Sheet = workbook.addWorksheet('gstr1-working');
     const gstr1Map = {};
@@ -824,11 +869,13 @@ async function amazonB2CProcessor(
       const totalRate = Number(row['Cgst Rate'] || 0) + Number(row['Sgst Rate'] || 0) + Number(row['Igst Rate'] || 0);
       const normalizedRate = Number(totalRate.toFixed(2));
       const shipToState = String(row[shipToStateCol] || '').trim();
-      const key = `${sellerGstin}|${hsn}|${normalizedRate}|${shipToState}`;
+      const key = useInventory === true
+        ? `${sellerGstin}|${hsn}|${normalizedRate}|${shipToState}`
+        : `${sellerGstin}|${normalizedRate}|${shipToState}`;
       if (!gstr1Map[key]) {
         gstr1Map[key] = {
           'Seller Gstin': sellerGstin,
-          'Hsn/sac': hsn,
+          ...(useInventory === true ? { 'Hsn/sac': hsn } : {}),
           'Rate': normalizedRate,
           'Ship To State': shipToState,
           'Final Taxable Sales Value': 0,
@@ -841,10 +888,18 @@ async function amazonB2CProcessor(
       gstr1Map[key]['Final CGST Tax'] += Number(row['Final CGST Tax'] || 0);
       gstr1Map[key]['Final SGST Tax'] += Number(row['Final SGST Tax'] || 0);
       gstr1Map[key]['Final IGST Tax'] += Number(row['Final IGST Tax'] || 0);
+      if (useInventory !== true) {
+        gstr1Map[key]['Final Taxable Sales Value'] += Number(row['Final Taxable Shipping Value'] || 0);
+        gstr1Map[key]['Final CGST Tax'] += Number(row['Final Shipping CGST Tax'] || 0);
+        gstr1Map[key]['Final SGST Tax'] += Number(row['Final Shipping SGST Tax'] || 0);
+        gstr1Map[key]['Final IGST Tax'] += Number(row['Final Shipping IGST Tax'] || 0);
+      }
     });
     const gstr1Data = Object.values(gstr1Map);
     if (gstr1Data.length > 0) {
-      const gstr1Headers = ['Seller Gstin', 'Hsn/sac', 'Rate', 'Ship To State', 'Final Taxable Sales Value', 'Final CGST Tax', 'Final SGST Tax', 'Final IGST Tax'];
+      const gstr1Headers = useInventory === true
+        ? ['Seller Gstin', 'Hsn/sac', 'Rate', 'Ship To State', 'Final Taxable Sales Value', 'Final CGST Tax', 'Final SGST Tax', 'Final IGST Tax']
+        : ['Seller Gstin', 'Rate', 'Ship To State', 'Final Taxable Sales Value', 'Final CGST Tax', 'Final SGST Tax', 'Final IGST Tax'];
       gstr1Sheet.addRow(gstr1Headers);
       gstr1Data.forEach(row => {
         gstr1Sheet.addRow(gstr1Headers.map(h => row[h]));
@@ -897,14 +952,17 @@ async function amazonB2CProcessor(
       // Ledger Master upload) — no fixed "Amazon B2C Intra/Inter-State" text, unlike B2B.
       { header: 'Party Ledger*', get: r => r['Ship To State Tally Ledger'] || '' },
       { header: 'Sales Ledger*', get: r => `Sales Amazon-${getSellerStateAbbr(r['Seller Gstin']) || ''} ${Math.round(getRowGstRate(r) * 10000) / 100}%` },
-      { header: 'Stock Item', get: r => r['FG'] || r['Item Description'] || '' },
-      { header: 'Description', get: r => r['FG'] || r['Item Description'] || '' },
+      { header: 'Stock Item', get: r => useInventory === true ? (r['FG'] || r['Item Description'] || '') : '' },
+      { header: 'Description', get: r => useInventory === true ? (r['FG'] || r['Item Description'] || '') : '' },
       { header: 'Godown', get: r => r['Ship From State'] || '' },
-      { header: 'Quantity', get: r => (r[transactionColumn] === 'Refund' ? Math.abs(Number(r[quantityColumn] || 0)) : Number(r[quantityColumn] || 0)) },
+      // Without inventory there's no stock item to itemize per unit, so Quantity/Rate
+      // collapse to 0 (per user request) — Amount* still carries the real taxable value.
+      { header: 'Quantity', get: r => useInventory !== true ? 0 : (r[transactionColumn] === 'Refund' ? Math.abs(Number(r[quantityColumn] || 0)) : Number(r[quantityColumn] || 0)) },
       {
         // Unit rate is always positive — sign lives in Amount*, not Rate.
         header: 'Rate',
         get: r => {
+          if (useInventory !== true) return 0;
           const qty = r[transactionColumn] === 'Refund' ? Math.abs(Number(r[quantityColumn] || 0)) : Number(r[quantityColumn] || 0);
           return qty !== 0 ? Math.abs(Number(r['Final Taxable Sales Value'] || 0) / qty) : 0;
         }
@@ -949,7 +1007,8 @@ async function amazonB2CProcessor(
       { header: 'GST Rate', get: () => null },
       { header: 'Cess', get: () => null },
       { header: 'RCM?', get: () => null },
-      { header: 'HSN', get: r => r['Hsn/sac'] || '' },
+      // Without inventory: HSN column left blank per user request.
+      { header: 'HSN', get: r => useInventory === true ? (r['Hsn/sac'] || '') : '' },
       { header: 'HSN Desc', get: () => null },
       { header: 'Supply Type', get: () => null },
       { header: 'Cost Category', get: () => null },

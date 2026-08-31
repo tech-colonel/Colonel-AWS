@@ -34,7 +34,7 @@ const RICH_META = {
   credit_card_booking:      { section: 'bank',        displayName: 'Credit Card Booking',            icon: '💳', category: 'Bank & Finance',     color: '#4338CA', bg: '#EEF2FF', border: '#C7D2FE', accuracy: '96.4%' },
   pdf_bank_extract:         { section: 'bank',        displayName: 'PDF → Bank Statement',           icon: '📄', category: 'Bank & Finance',     color: '#0748EE', bg: '#E8EFFE', border: '#A3BFF8', accuracy: 'Auto-detect' },
   bank_tally_reco:          { section: 'bank',        displayName: 'Bank Reco',                      icon: '🏦', category: 'Bank & Finance',     color: '#0748EE', bg: '#EFF4FF', border: '#A3BFF8', accuracy: null, fields: ['Tally Daybook', 'Universal Bank Output'] },
-  receivable_cycle:         { section: 'other',       displayName: 'Receivable Cycle',               icon: '📦', category: 'Other',            color: '#7C3AED', bg: '#F5F3FF', border: '#C4B5FD', accuracy: null, fields: ['Tally GST Report', 'Sales Order Combine', 'Courier COD Settlement', 'SRN Report'] },
+  receivable_cycle:         { section: 'other',       displayName: 'Receivable Cycle',               icon: '📦', category: 'Other',            color: '#7C3AED', bg: '#F5F3FF', border: '#C4B5FD', accuracy: null, fields: ['Tally GST Report', 'Sales Order Combine', 'Courier COD Settlement', 'Prepaid Gateway Settlement (Razorpay/Snapmint)', 'SRN Report'] },
   zepto_receivables:        { section: 'marketplace', displayName: 'Zepto Receivables',              icon: '⚡', category: 'Marketplace MIS',    color: '#6C2BD9', bg: '#F5F3FF', border: '#C4B5FD', accuracy: null, fields: ['Drive Folder (Tally + Zepto)'] },
 };
 

@@ -61,7 +61,7 @@ const Pill = ({ children, color, subtle }) => (
   </span>
 );
 
-const ReceivableSheetBrowser = ({ brandId, month, year }) => {
+const ReceivableSheetBrowser = ({ brandId, month, year, channel }) => {
   const [expanded, setExpanded] = useState(false);
   const [sheet, setSheet] = useState('Main Sheet');
   const [status, setStatus] = useState('all');
@@ -84,6 +84,7 @@ const ReceivableSheetBrowser = ({ brandId, month, year }) => {
         month: String(month), year: String(year), sheet, status,
         page: String(page), pageSize: String(PAGE_SIZE),
       });
+      if (channel) params.set('channel', channel);
       if (search) params.set('search', search);
       if (filtersParam) params.set('filters', filtersParam);
       const res = await api.get(`/api/dashboard/receivables/${brandId}/sheet?${params.toString()}`);
@@ -93,7 +94,7 @@ const ReceivableSheetBrowser = ({ brandId, month, year }) => {
     } finally {
       setLoading(false);
     }
-  }, [brandId, month, year, sheet, status, page, search, filtersParam]);
+  }, [brandId, month, year, channel, sheet, status, page, search, filtersParam]);
 
   useEffect(() => {
     if (expanded) load();
@@ -110,12 +111,13 @@ const ReceivableSheetBrowser = ({ brandId, month, year }) => {
     const params = new URLSearchParams({
       month: String(month), year: String(year), sheet, status, column,
     });
+    if (channel) params.set('channel', channel);
     if (search) params.set('search', search);
     if (filtersParam) params.set('filters', filtersParam);
     if (q) params.set('q', q);
     return api.get(`/api/dashboard/receivables/${brandId}/sheet/column-values?${params.toString()}`)
       .then((res) => res.data);
-  }, [brandId, month, year, sheet, status, search, filtersParam]);
+  }, [brandId, month, year, channel, sheet, status, search, filtersParam]);
 
   const formatColumnValue = (key, v) => {
     if (key === 'date') return fmtDate(v);

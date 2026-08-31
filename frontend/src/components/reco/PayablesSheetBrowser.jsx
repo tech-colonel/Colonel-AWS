@@ -10,13 +10,11 @@ const SOURCE_TABS = [
   { key: 'all', label: 'All sources' },
   { key: 'prepaid', label: 'Prepaid Gateway' },
   { key: 'cod', label: 'COD' },
-  { key: 'marketplace_prepaid', label: 'Marketplace Prepaid' },
 ];
 
 const COLOR_RETURNED = '#E11D48';
 const COLOR_PRIMARY = '#4F46E5';
 const COLOR_SALES = '#0748EE';
-const COLOR_MARKETPLACE = '#D97706';
 
 const cardStyle = {
   background: 'var(--surface)',
@@ -102,7 +100,7 @@ const PayablesSheetBrowser = ({ brandId, range }) => {
               View orders behind the payable amount
             </p>
             <p className="text-xs mt-0.5" style={{ color: 'var(--text-muted)' }}>
-              Every order where cash was already collected and then the order was returned — Prepaid Gateway and COD combined
+              Shopify only — every order where cash was already collected and then the order was returned — Prepaid Gateway and COD combined
             </p>
           </div>
         </div>
@@ -192,7 +190,7 @@ const PayablesSheetBrowser = ({ brandId, range }) => {
                           <td className="px-3 py-2.5 whitespace-nowrap" style={{ color: 'var(--text-muted)' }}>{r.invoice_number || '—'}</td>
                           <td className="px-3 py-2.5 whitespace-nowrap" style={{ color: 'var(--text-muted)' }}>{r.awb || '—'}</td>
                           <td className="px-3 py-2.5 whitespace-nowrap">
-                            <Pill color={r.source === 'COD' ? COLOR_SALES : r.source === 'Marketplace Prepaid' ? COLOR_MARKETPLACE : COLOR_PRIMARY}>{r.source}</Pill>
+                            <Pill color={r.source === 'COD' ? COLOR_SALES : COLOR_PRIMARY}>{r.source}</Pill>
                           </td>
                           <td className="px-3 py-2.5 whitespace-nowrap" style={{ color: 'var(--text-body)' }}>{r.channel || '—'}</td>
                           <td className="px-3 py-2.5 whitespace-nowrap" style={{ color: 'var(--text-muted)' }}>{fmtDate(r.order_date)}</td>

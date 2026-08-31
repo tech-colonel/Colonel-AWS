@@ -126,6 +126,13 @@ export default function ColonelChat() {
   const [agentContext, setAgentContext] = useState('');   // digest fed to /api/chat
   const [lastRun, setLastRun] = useState(null);            // {agentType,agentLabel,brandId,brandName,jobId,rows}
 
+  // dashboard context — scope the chat to a brand (+ optional agent) so the
+  // backend attaches that brand's live reco dashboard to Colonel AI's prompt
+  const [brands, setBrands] = useState([]);
+  const [ctxBrandId, setCtxBrandId] = useState('');
+  const [ctxAgent, setCtxAgent] = useState('');
+  const [ctxOpen, setCtxOpen] = useState(false);
+
   // + menu + panels
   const [menuOpen, setMenuOpen] = useState(false);
   const [modelOpen, setModelOpen] = useState(false);
@@ -153,6 +160,28 @@ export default function ColonelChat() {
     catch { /* silent */ }
   }, []);
   useEffect(() => { loadConvos(); }, [loadConvos]);
+
+  /* ── brands the user can scope the chat to ──
+     The chat auto-scopes to a brand so questions like "summarise this
+     dashboard" work without the user picking anything: prefer the brand they
+     last opened (localStorage.lastBrandId, set by BrandDashboard), else their
+     only brand, else the first. The header picker overrides it. */
+  useEffect(() => {
+    (async () => {
+      try {
+        const { data } = await api.get('/api/brands/my-brands');
+        const list = Array.isArray(data) ? data : (data?.brands || []);
+        setBrands(list);
+        setCtxBrandId((cur) => {
+          if (cur && list.some((b) => b.id === cur)) return cur;
+          let remembered = '';
+          try { remembered = localStorage.getItem('lastBrandId') || ''; } catch (_) {}
+          if (remembered && list.some((b) => b.id === remembered)) return remembered;
+          return list.length ? list[0].id : '';
+        });
+      } catch { /* silent — context picker just stays empty */ }
+    })();
+  }, []);
 
   /* autoscroll */
   useEffect(() => {
@@ -299,7 +328,14 @@ export default function ColonelChat() {
           Authorization: `Bearer ${localStorage.getItem('token')}`,
           'ngrok-skip-browser-warning': 'true',
         },
-        body: JSON.stringify({ conversationId: convoId, model, messages: payloadMsgs, context: agentContext || undefined }),
+        body: JSON.stringify({
+          conversationId: convoId, model, messages: payloadMsgs,
+          context: agentContext || undefined,
+          brandId: ctxBrandId || undefined,
+          agentType: ctxAgent || undefined,
+          brandName: brands.find((b) => b.id === ctxBrandId)?.name || undefined,
+          agentLabel: (ctxAgent && specByType(ctxAgent)?.name) || undefined,
+        }),
         signal: controller.signal,
       });
       if (!resp.ok || !resp.body) {
@@ -370,6 +406,9 @@ export default function ColonelChat() {
     setMessages(next);
     setAgentContext(buildAgentContext({ agentLabel, brandName, counts, rows }));
     setLastRun({ agentType, agentLabel, brandId, brandName, jobId, rows });
+    // follow the run: scope the chat's dashboard context to what was just run
+    if (brandId) setCtxBrandId(brandId);
+    if (agentType) setCtxAgent(agentType);
     setCanvas({ kind: 'excel', jobId, recoType: recoType || agentType, agentLabel });
     setCanvasOpen(true);
 
@@ -428,6 +467,37 @@ export default function ColonelChat() {
               <span>Colonel AI</span>
             </div>
             <div className="cai-head-right">
+              {/* dashboard context picker — scope chat to a brand (+ agent) */}
+              <div className="cai-modelpick">
+                <button className="cai-modelbtn" onClick={() => setCtxOpen((o) => !o)}
+                  title="Scope this chat to a brand and agent so Colonel AI can read that dashboard">
+                  {ctxBrandId
+                    ? `${brands.find((b) => b.id === ctxBrandId)?.name || 'Brand'}${ctxAgent ? ` · ${specByType(ctxAgent)?.name || ''}` : ''}`
+                    : 'Add dashboard context'}
+                  <ChevronDown className="h-3.5 w-3.5" />
+                </button>
+                {ctxOpen && (
+                  <div className="cai-modelmenu cai-ctxmenu" onMouseLeave={() => setCtxOpen(false)}>
+                    <label className="cai-field-label">Brand</label>
+                    <select className="cai-select" value={ctxBrandId} onChange={(e) => setCtxBrandId(e.target.value)}>
+                      <option value="">No brand</option>
+                      {brands.map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
+                    </select>
+                    <label className="cai-field-label" style={{ marginTop: 8 }}>Agent</label>
+                    <select className="cai-select" value={ctxAgent} onChange={(e) => setCtxAgent(e.target.value)}
+                      disabled={!ctxBrandId}>
+                      <option value="">All agents</option>
+                      {RECO_AGENT_SPECS.map((s) => <option key={s.reco_type} value={s.reco_type}>{s.name}</option>)}
+                    </select>
+                    <p className="cai-ctxhint">
+                      {ctxBrandId
+                        ? 'Colonel AI reads this brand’s dashboard — runs, match rate, recent history — to answer your questions.'
+                        : 'Pick a brand to let Colonel AI answer from your live reconciliation dashboard.'}
+                    </p>
+                  </div>
+                )}
+              </div>
+
               {/* model picker */}
               <div className="cai-modelpick">
                 <button className="cai-modelbtn" onClick={() => setModelOpen((o) => !o)}>
@@ -459,6 +529,12 @@ export default function ColonelChat() {
                 <div className="cai-welcome-icon"><Sparkles className="h-7 w-7" /></div>
                 <h2>How can I help with your reconciliation today?</h2>
                 <p>Ask about GST, ITC, bank classification, or use <strong>+ → Agent</strong> to run a reconciliation and see the dashboard here.</p>
+                {ctxBrandId && (
+                  <p style={{ marginTop: 6, fontWeight: 600, color: '#7C3AED' }}>
+                    Reading the dashboard for <strong>{brands.find((b) => b.id === ctxBrandId)?.name || 'your brand'}</strong>
+                    {ctxAgent ? <> · <strong>{specByType(ctxAgent)?.name}</strong></> : ' · all agents'} — try “summarise this dashboard”. Change it top-right.
+                  </p>
+                )}
               </div>
             )}
             {messages.map((m, i) => (
@@ -1029,6 +1105,8 @@ const CHAT_CSS = `
 .cai-modelbtn{display:flex;align-items:center;gap:6px;padding:6px 12px;font-size:13px;font-weight:600;color:#334155;background:#F1F5F9;border:1px solid #E2E8F0;border-radius:8px;cursor:pointer;}
 .cai-modelbtn:hover{background:#E2E8F0;}
 .cai-modelmenu{position:absolute;right:0;top:38px;width:200px;background:#fff;border:1px solid #E2E8F0;border-radius:10px;box-shadow:0 12px 30px rgba(15,23,42,.12);padding:6px;z-index:30;}
+.cai-ctxmenu{width:280px;padding:12px;display:flex;flex-direction:column;gap:4px;}
+.cai-ctxhint{margin:8px 0 0;font-size:11px;line-height:1.5;color:#64748B;}
 .cai-modelopt{width:100%;display:flex;flex-direction:column;align-items:flex-start;padding:8px 10px;border-radius:7px;border:none;background:transparent;cursor:pointer;text-align:left;}
 .cai-modelopt:hover{background:#F1F5F9;}
 .cai-modelopt.active{background:#EDE9FE;}

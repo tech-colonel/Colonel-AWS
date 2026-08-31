@@ -45,6 +45,7 @@ import AmazonReceivablesDashboard  from './pages/accountant/AmazonReceivablesDas
 import ShopifyReceivablesDashboard from './pages/accountant/ShopifyReceivablesDashboard';
 import AdvanceAmountDashboard from './pages/accountant/AdvanceAmountDashboard';
 import PayablesDashboard     from './pages/accountant/PayablesDashboard';
+import ShopifyOrderCycleDashboard from './pages/accountant/ShopifyOrderCycleDashboard';
 import ComplianceTracker     from './pages/accountant/ComplianceTracker';
 import StatutoryTracker      from './pages/accountant/StatutoryTracker';
 import StatutoryRedirect     from './pages/accountant/StatutoryRedirect';
@@ -257,6 +258,15 @@ function App() {
             element={
               <ProtectedRoute allowedRoles={['accountant', 'admin']}>
                 <AgentDispatch />
+              </ProtectedRoute>
+            }
+          />
+          {/* ── Shopify Order Cycle — drill-down analytics dashboard (Operations) ── */}
+          <Route
+            path="/brands/:brandId/agents/:agentId/shopify-dashboard"
+            element={
+              <ProtectedRoute allowedRoles={['accountant', 'admin']}>
+                <ShopifyOrderCycleDashboard />
               </ProtectedRoute>
             }
           />

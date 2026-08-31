@@ -160,7 +160,7 @@ const AGENT_CONFIG = {
     name: 'Receivable Cycle',
     slug: 'TALLY · COD · SRN',
     icon: RotateCcw,
-    description: 'Combines the Tally GST report, Sales Order Combine, courier COD settlement exports (Delhivery/Ekart/Xpressbees), and the combined SRN report into a Main Sheet plus per-courier COD sheets.',
+    description: 'Combines the Tally GST report, Sales Order Combine, courier COD settlement exports (Delhivery/Ekart/Xpressbees), Prepaid gateway settlement exports (Razorpay/Snapmint), and the combined SRN report into a Main Sheet plus per-courier COD sheets.',
     color: '#7C3AED', bg: 'rgba(124,58,237,0.08)', border: 'rgba(124,58,237,0.2)',
     files: [
       { key: 'tally_gst', label: 'Combine Tally GST Report', hint: '.xlsx / .xls', required: true },
@@ -168,6 +168,8 @@ const AGENT_CONFIG = {
       { key: 'delhivery', label: 'Delhivery COD Settlement (Optional)', hint: '.xlsx / .xls — one or more files', required: false, multiple: true },
       { key: 'ekart', label: 'Ekart COD Settlement (Optional)', hint: '.xlsx / .xls — one or more files', required: false, multiple: true },
       { key: 'xpressbees', label: 'Xpressbees COD Settlement (Optional)', hint: '.xlsx / .xls — one or more files', required: false, multiple: true },
+      { key: 'razorpay', label: 'Razorpay Settlement (Optional)', hint: '.xlsx / .xls / .csv — settles Prepaid orders, one or more files', required: false, multiple: true },
+      { key: 'snapmint', label: 'Snapmint Settlement (Optional)', hint: '.xlsx / .xls / .csv — settles Prepaid orders, one or more files', required: false, multiple: true },
       { key: 'srn', label: 'Combined SRN Report (Optional)', hint: '.xlsx / .xls — one or more files', required: false, multiple: true },
     ],
   },
