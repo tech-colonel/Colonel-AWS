@@ -1153,6 +1153,30 @@ def test_payment_advice_reject_on_header_mismatch():
     print("test_payment_advice_reject_on_header_mismatch OK")
 
 
+def test_summarize_zepto_money_totals():
+    # Stage 2B: summarize_zepto carries the money-flow totals the UI strip needs
+    # (same basis as the Summary sheet). Net Receivables = Net Sales - Payment - TDS.
+    from recon.zepto_receivables import summarize_zepto, COLUMN_KEYS, _RecoRows
+    def row(inv, total, cn, dn, tds, incl):
+        r = {k: "" for k in COLUMN_KEYS}
+        r.update({"invoice_number": inv, "total_invoice_amt": total, "credit_note_issued": cn,
+                  "debit_note_issued": dn, "tds": tds, "payment_received_incl_tds": incl,
+                  "net_outstanding": 0.0, "status": "Not Paid"})
+        return r
+    results = _RecoRows([row("INV1", 1000.0, 100.0, 50.0, 10.0, 400.0)])
+    results.pmdn_adjustment = -200.0
+    results.details = {"consolidate": [{"payment_amt": 399.0}, {"payment_amt": -100.0}]}
+    s = summarize_zepto(results)
+    assert s["sales_incl_tax"] == 1000.0
+    assert s["sale_return"] == 100.0
+    assert s["debit_note_issued"] == 50.0            # shown positive
+    assert s["net_sales"] == 850.0                   # 1000 - 100 - 50
+    assert s["net_receivables"] == 440.0             # 850 - 400 - 10
+    assert s["adjustments"] == -200.0
+    assert s["amount_received_in_bank"] == 299.0     # 399 + (-100)
+    print("test_summarize_zepto_money_totals OK")
+
+
 def test_canonical_invoice_resolution_exact_first_and_ambiguity_safe():
     # Payments/CNs are matched to the invoice universe: EXACT first (keeps the
     # slash-distinct invoices apart), then UNIQUE canonical (tolerates missing

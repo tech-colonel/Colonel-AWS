@@ -179,11 +179,15 @@ function analyze(rows, rejectedAdvices = []) {
   // Negative, so it can't be a pie slice — shown as its own tile + legend line.
   const excessPaid = sumNet(rows.filter((r) => r.due_status === 'Excess Paid'));
 
+  // Data completeness gaps counted on UNPAID (collectible) invoices only — a
+  // missing document on an already-paid invoice is moot. This keeps the number
+  // actionable instead of being dominated by settled invoices.
+  const gapRow = (r) => !hasPo(r) || (hasPo(r) && !realGrn(r)) || (realGrn(r) && !hasGrnDate(r)) || !hasPod(r);
   const gaps = [
-    { name: 'Missing PO', value: rows.filter((r) => !hasPo(r)).length },
-    { name: 'Missing GRN', value: rows.filter((r) => hasPo(r) && !realGrn(r)).length },
-    { name: 'Missing GRN Date', value: rows.filter((r) => realGrn(r) && !hasGrnDate(r)).length },
-    { name: 'Missing POD', value: rows.filter((r) => !hasPod(r)).length },
+    { name: 'Missing PO', value: notPaid.filter((r) => !hasPo(r)).length },
+    { name: 'Missing GRN', value: notPaid.filter((r) => hasPo(r) && !realGrn(r)).length },
+    { name: 'Missing GRN Date', value: notPaid.filter((r) => realGrn(r) && !hasGrnDate(r)).length },
+    { name: 'Missing POD', value: notPaid.filter((r) => !hasPod(r)).length },
   ];
 
   const tiles = {
@@ -194,10 +198,44 @@ function analyze(rows, rejectedAdvices = []) {
     toCollect: sumNet(rows),
     overdue: sumNet(notPaid.filter((r) => r.due_status === 'Overdue')),
     excessPaid,
-    gaps: rows.filter((r) => !hasPo(r) || (hasPo(r) && !realGrn(r)) || (realGrn(r) && !hasGrnDate(r)) || !hasPod(r)).length,
+    gaps: notPaid.filter(gapRow).length,
   };
 
-  return { tiles, aging, gaps, tickets: buildTickets(rows, rejectedAdvices) };
+  // Data quality: % of UNPAID invoices that are fully documented (PO+GRN+POD).
+  const fullyDoc = notPaid.filter((r) => hasPo(r) && realGrn(r) && hasPod(r)).length;
+  const dataQuality = notPaid.length ? Math.round((fullyDoc / notPaid.length) * 100) : 100;
+
+  // Collections forecast: unpaid invoices becoming due in the next 7 / 30 days
+  // (Due Date = GRN Date + 30). Overdue (already past) excluded here.
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const dueWithin = (days) => {
+    let count = 0, amount = 0;
+    for (const r of notPaid) {
+      const d = r.due_date ? new Date(r.due_date) : null;
+      if (!d || isNaN(d)) continue;
+      const diff = Math.round((d - today) / 86400000);
+      if (diff >= 0 && diff <= days) { count += 1; amount += num(r.net_outstanding); }
+    }
+    return { count, amount: Math.round(amount) };
+  };
+  const forecast = { next7: dueWithin(7), next30: dueWithin(30) };
+
+  // Receivables by month (collectible / unpaid net, chronological) — from the
+  // Month column, sorted oldest-first.
+  const byMonth = {};
+  for (const r of notPaid) {
+    const m = r.month || '—';
+    byMonth[m] = (byMonth[m] || 0) + num(r.net_outstanding);
+  }
+  const monthWise = Object.entries(byMonth)
+    .map(([name, v]) => ({ name, value: Math.round(v) }))
+    .filter((d) => d.name !== '—')
+    .sort((a, b) => new Date('1 ' + a.name.replace('-', ' ')) - new Date('1 ' + b.name.replace('-', ' ')));
+
+  return {
+    tiles, aging, gaps, dataQuality, forecast, monthWise,
+    tickets: buildTickets(rows, rejectedAdvices),
+  };
 }
 
 // ── small UI atoms ───────────────────────────────────────────────────────────
@@ -209,6 +247,24 @@ function Tile({ label, value, accent }) {
     }}>
       <div style={{ fontSize: 22, fontWeight: 800, fontFamily: 'Barlow', color: accent || 'var(--text-heading, #0F172A)' }}>{value}</div>
       <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: '.08em', textTransform: 'uppercase', color: 'var(--text-muted, #64748B)', fontFamily: 'DM Sans', marginTop: 2 }}>{label}</div>
+    </div>
+  );
+}
+
+// One step in the money-flow strip.
+function FlowStep({ label, value, accent, strong }) {
+  return (
+    <div style={{ padding: '2px 6px' }}>
+      <div style={{ fontSize: strong ? 19 : 16, fontWeight: strong ? 800 : 700, fontFamily: 'Barlow', color: accent || 'var(--text-heading, #0F172A)' }}>{value}</div>
+      <div style={{ fontSize: 9.5, fontWeight: 700, letterSpacing: '.06em', textTransform: 'uppercase', color: 'var(--text-muted, #64748B)', fontFamily: 'DM Sans', marginTop: 1 }}>{label}</div>
+    </div>
+  );
+}
+function FlowArrow({ sub }) {
+  return (
+    <div style={{ textAlign: 'center', color: 'var(--text-muted, #94A3B8)', padding: '0 2px' }}>
+      <div style={{ fontSize: 16, lineHeight: 1 }}>→</div>
+      {sub && <div style={{ fontSize: 9, fontFamily: 'DM Sans', marginTop: 1 }}>{sub}</div>}
     </div>
   );
 }
@@ -325,9 +381,12 @@ export default function ZeptoReceivablesDashboard({ result }) {
   const rows = result?.results || [];
   const rejectedAdvices = result?.rejected_advices || [];
   const unknownTypes = result?.unknown_types || [];
-  const { tiles, aging, gaps, tickets } = useMemo(() => analyze(rows, rejectedAdvices), [rows, rejectedAdvices]);
+  const summary = result?.summary || {};
+  const { tiles, aging, gaps, dataQuality, forecast, monthWise, tickets } =
+    useMemo(() => analyze(rows, rejectedAdvices), [rows, rejectedAdvices]);
   if (!rows.length) return null;
   const highCount = tickets.filter((t) => t.priority === 'HIGH').length;
+  const hasMoney = summary.net_receivables !== undefined;
 
   const card = { background: 'var(--card-bg, #fff)', border: '1.5px solid var(--card-border, #E2E8F6)', borderRadius: 14, padding: 16 };
   const chartTitle = { fontSize: 12, fontWeight: 800, letterSpacing: '.05em', textTransform: 'uppercase', color: 'var(--text-muted, #64748B)', fontFamily: 'DM Sans', marginBottom: 10 };
@@ -356,6 +415,27 @@ export default function ZeptoReceivablesDashboard({ result }) {
         <Tile label="Data gaps" value={tiles.gaps} accent={tiles.gaps ? '#D97706' : '#16A34A'} />
       </div>
 
+      {/* Money-flow strip (Sales -> Net Receivables) + bank/adjustments */}
+      {hasMoney && (
+        <div style={{ ...card, display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 10, rowGap: 12 }}>
+          <FlowStep label="Net Sales" value={inr(summary.net_sales)} />
+          <FlowArrow sub={`− Payment ${inr(summary.payment_received)}`} />
+          <FlowStep label="Payment Received" value={inr(summary.payment_received)} />
+          <FlowArrow sub={`− TDS ${inr(summary.tds_deducted)}`} />
+          <FlowStep label="Net Receivables" value={inr(summary.net_receivables)} accent="#0748EE" strong />
+          <div style={{ width: 1, alignSelf: 'stretch', background: 'var(--card-border,#E2E8F6)', margin: '0 4px' }} />
+          <FlowStep label="Received in Bank" value={inr(summary.amount_received_in_bank)} accent="#16A34A" />
+          <FlowStep label="Adjustments (PMDDN/AP-AR/Adv)" value={inr(summary.adjustments)} accent="#D97706" />
+        </div>
+      )}
+
+      {/* Collections forecast + data quality */}
+      <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
+        <Tile label="Due in next 7 days" value={`${inr(forecast.next7.amount)} · ${forecast.next7.count}`} accent="#D97706" />
+        <Tile label="Due in next 30 days" value={`${inr(forecast.next30.amount)} · ${forecast.next30.count}`} accent="#D97706" />
+        <Tile label="Docs complete (unpaid)" value={`${dataQuality}%`} accent={dataQuality >= 80 ? '#16A34A' : dataQuality >= 50 ? '#D97706' : '#DC2626'} />
+      </div>
+
       {/* Charts */}
       <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap' }}>
         <div style={{ ...card, flex: '1 1 300px', minWidth: 280 }}>
@@ -376,7 +456,7 @@ export default function ZeptoReceivablesDashboard({ result }) {
         </div>
 
         <div style={{ ...card, flex: '1 1 300px', minWidth: 280 }}>
-          <div style={chartTitle}>Data completeness gaps (invoices)</div>
+          <div style={chartTitle}>Data completeness gaps (unpaid invoices)</div>
           <ResponsiveContainer width="100%" height={210}>
             <BarChart data={gaps} margin={{ top: 8, right: 8, left: -18, bottom: 0 }}>
               <XAxis dataKey="name" tick={{ fontSize: 11, fill: 'var(--text-muted, #64748B)' }} axisLine={false} tickLine={false} />
@@ -389,6 +469,21 @@ export default function ZeptoReceivablesDashboard({ result }) {
           </ResponsiveContainer>
         </div>
       </div>
+
+      {/* Receivables to collect, month-wise (oldest first) */}
+      {monthWise.length > 1 && (
+        <div style={card}>
+          <div style={chartTitle}>Receivables to collect, month-wise (unpaid net)</div>
+          <ResponsiveContainer width="100%" height={220}>
+            <BarChart data={monthWise} margin={{ top: 8, right: 8, left: 6, bottom: 0 }}>
+              <XAxis dataKey="name" tick={{ fontSize: 10, fill: 'var(--text-muted, #64748B)' }} axisLine={false} tickLine={false} interval={0} angle={-30} textAnchor="end" height={50} />
+              <YAxis tick={{ fontSize: 11, fill: 'var(--text-muted, #64748B)' }} axisLine={false} tickLine={false} tickFormatter={(v) => `${Math.round(v / 100000)}L`} />
+              <Tooltip cursor={{ fill: 'rgba(0,0,0,.04)' }} formatter={(v) => [inr(v), 'To collect']} />
+              <Bar dataKey="value" fill="#0748EE" radius={[6, 6, 0, 0]} />
+            </BarChart>
+          </ResponsiveContainer>
+        </div>
+      )}
 
       {/* Issues / tickets */}
       <div style={card}>

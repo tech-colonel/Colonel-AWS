@@ -1245,11 +1245,36 @@ def reconcile_zepto(files: dict, today=None, advice_tolerance: float = 100.0) ->
 def summarize_zepto(results: list[dict]) -> dict:
     paid = sum(1 for r in results if r["status"] == "Paid")
     not_paid = sum(1 for r in results if r["status"] == "Not Paid")
+    # Money totals (same basis as the Summary sheet) so the UI can show the
+    # Sales -> Net Receivables money-flow without re-deriving it. Adjustments =
+    # PMDDN + AP-AR + Advance Adjusted; Amount Received in Bank = net cash from
+    # the payment-advice consolidate.
+    sales_incl_tax = sum(_to_float(r.get("total_invoice_amt", 0)) for r in results)
+    sale_return = sum(_to_float(r.get("credit_note_issued", 0)) for r in results)
+    dn_positive = abs(sum(_to_float(r.get("debit_note_issued", 0)) for r in results))
+    tds_deducted = sum(_to_float(r.get("tds", 0)) for r in results)
+    payment_received = sum(_to_float(r.get("payment_received_incl_tds", 0)) for r in results)
+    net_sales = sales_incl_tax - sale_return - dn_positive
+    net_receivables = net_sales - payment_received - tds_deducted
+    pmdn = getattr(results, "pmdn_adjustment", 0.0)
+    details = getattr(results, "details", None) or {}
+    amount_received_in_bank = round(
+        sum(_to_float(x.get("payment_amt", 0)) for x in details.get("consolidate", [])), 2)
     return {
         "total": len(results),
         "paid": paid,
         "not_paid": not_paid,
         "not_in_invoice_details": 0,
+        # money-flow (Stage 2B)
+        "sales_incl_tax": round(sales_incl_tax, 2),
+        "sale_return": round(sale_return, 2),
+        "debit_note_issued": round(dn_positive, 2),
+        "tds_deducted": round(tds_deducted, 2),
+        "net_sales": round(net_sales, 2),
+        "payment_received": round(payment_received, 2),
+        "net_receivables": round(net_receivables, 2),
+        "adjustments": round(pmdn, 2),
+        "amount_received_in_bank": amount_received_in_bank,
     }
 
 
