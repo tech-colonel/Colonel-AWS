@@ -9,6 +9,7 @@ import {
 import { toast } from 'sonner';
 import { format } from 'date-fns';
 import api, { API_URL } from '../../lib/api';
+import PurchaseInvoicePanel from './PurchaseInvoicePanel';
 
 // API_URL comes from lib/api's resolveApiUrl(): same-origin in production
 // (agent.accountant), http://localhost:8001 only on local dev. The old hardcoded
@@ -395,6 +396,12 @@ const GMAIL_STATUS = {
 
 const InvoiceAgentWorkspace = ({ agent }) => {
   const { brandId, agentId } = useParams();
+  // Purchase-Invoice mode — Urban Plant only for now. A brand-scoped toggle flips
+  // this workspace to the Purchase Invoice → Tally flow (separate, additive panel).
+  const PURCHASE_INVOICE_BRAND_IDS = ['dd0107f5-f36a-4244-b7e0-c298a65d4e6a']; // Urban Plant
+  const isPurchaseCapable = PURCHASE_INVOICE_BRAND_IDS.includes(brandId);
+  const [invModeState, setInvMode] = useState('sales'); // 'sales' | 'purchase'
+  const invMode = isPurchaseCapable ? invModeState : 'sales';
   // Per-brand maintenance: LIVE only for allowlisted brand IDs. Shumee Toys is
   // routed to Shumee Playroom instead of the generic maintenance copy.
   const isShumeeToys = brandId === INVOICE_SHUMEE_TOYS_ID;
@@ -1137,9 +1144,24 @@ const InvoiceAgentWorkspace = ({ agent }) => {
     );
   };
 
+  if (invMode === 'purchase') {
+    return <PurchaseInvoicePanel brandId={brandId} onSwitchToSales={() => setInvMode('sales')} />;
+  }
+
   return (
     <div className="max-w-[1600px] space-y-6 animate-in fade-in duration-500">
       <ProcessingBanner status={processingStatus} count={processedCount} done={processedCount} total={totalToProcess} review={processingSummary?.review || 0} invalid={processingSummary?.invalid || 0} wrongBrand={processingSummary?.wrongBrand || 0} wrongBrandName={processingSummary?.wrongBrandName || null} onDismiss={dismissBanner} />
+
+      {isPurchaseCapable && (
+        <div className="rounded-xl border bg-white shadow-[0_1px_3px_0_rgba(0,0,0,0.05)] px-5 py-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2" style={{ borderColor: T_BORDER }}>
+          <div className="text-sm" style={{ color: T_TEXT_SECONDARY }}>
+            <span className="font-semibold" style={{ color: T_TEXT_PRIMARY }}>Purchase invoices?</span> Switch to Purchase Invoice mode to turn vendor bills into a Tally import file.
+          </div>
+          <button onClick={() => setInvMode('purchase')} className="text-sm px-3 py-2 rounded-lg font-semibold text-white self-start sm:self-auto" style={{ background: T_BLUE }}>
+            Purchase Invoice → Tally
+          </button>
+        </div>
+      )}
 
       <div className="rounded-xl border bg-white shadow-[0_1px_3px_0_rgba(0,0,0,0.05)] overflow-hidden" style={{ borderColor: T_BORDER }}>
         {INVOICE_MAINTENANCE && (

@@ -8,6 +8,7 @@ const multer = require('multer');
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 25 * 1024 * 1024 } });
 
 const { processInvoice, getInvoices, getInvoicesGrouped, groupAction, uploadInvoiceFiles, getSheetUrl, updateInvoice, deleteInvoice, cancelInvoice, getRunHistory, retryRun } = invoiceController;
+const purchaseInvoice = require('../controllers/agents/invoice-process/purchaseInvoiceController');
 
 router.post('/brands/:brandId/agents/:agentId/invoice/process',          authenticateToken, processInvoice);
 router.post('/brands/:brandId/agents/:agentId/invoice/upload',           authenticateToken, upload.array('files', 25), uploadInvoiceFiles);
@@ -20,6 +21,13 @@ router.post('/brands/:brandId/agents/:agentId/invoices/group-action',    authent
 router.get('/brands/:brandId/agents/:agentId/invoice/sheet-url',         authenticateToken, getSheetUrl);
 router.patch('/brands/:brandId/agents/:agentId/invoices/:invoiceId',     authenticateToken, updateInvoice);
 router.delete('/brands/:brandId/agents/:agentId/invoices/:invoiceId',    authenticateToken, deleteInvoice);
+
+// ─── Purchase Invoice mode (Urban Plant) → Tally ───────────────────────────
+router.post('/brands/:brandId/purchase-invoice/extract', authenticateToken, upload.array('files', 25), purchaseInvoice.extract);
+router.post('/brands/:brandId/purchase-invoice/pick',    authenticateToken, purchaseInvoice.savePick);
+router.post('/brands/:brandId/purchase-invoice/master',  authenticateToken, purchaseInvoice.addMaster);
+router.get('/brands/:brandId/purchase-invoice/master',   authenticateToken, purchaseInvoice.searchMaster);
+router.post('/brands/:brandId/purchase-invoice/build',   authenticateToken, purchaseInvoice.build);
 
 // ─── SSE: Real-time invoice processing status ──────────────────────────────
 // GET /api/brands/:brandId/agents/:agentId/invoice/status

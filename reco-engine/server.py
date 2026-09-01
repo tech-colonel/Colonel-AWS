@@ -215,6 +215,12 @@ class ReconciliationHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/einvoice/build":
             self.handle_einvoice_build()
             return
+        if parsed.path == "/api/purchase-invoice/extract":
+            self.handle_purchase_extract()
+            return
+        if parsed.path == "/api/purchase-invoice/build":
+            self.handle_purchase_build()
+            return
         if parsed.path != "/api/reconcile":
             self.write_json({"error": "Not found"}, 404)
             return
@@ -1091,6 +1097,82 @@ class ReconciliationHandler(BaseHTTPRequestHandler):
             except Exception as exc:  # noqa: BLE001
                 logging.getLogger(__name__).error("einvoice build_workbook failed: %s", exc)
                 payload["_xlsx_bytes"] = None
+            JOBS[job_id] = payload
+            self.write_json({k: v for k, v in payload.items() if not k.startswith("_")})
+        except Exception as exc:  # noqa: BLE001
+            self.write_json({"error": str(exc)}, 500)
+
+    def handle_purchase_extract(self) -> None:
+        """Purchase-Invoice mode: extract line items from each uploaded PDF
+        (deterministic per known vendor; Gemini only for a new layout) and map every
+        line to a Tally stock item via the SKU ladder (master + learned rows passed
+        in from the DB by the Node backend). Returns a per-invoice preview."""
+        try:
+            fields, files = self.read_multipart()
+            master = json.loads(fields.get("master_rows", "[]") or "[]")
+            learned = json.loads(fields.get("learned_rows", "[]") or "[]")
+            use_gemini = str(fields.get("use_gemini", "true")).lower() != "false"
+            narration = fields.get("narration", "Excel to tally")
+            pdfs = files.get("files") or files.get("file") or []
+            if isinstance(pdfs, dict):
+                pdfs = [pdfs]
+            from recon.purchase_invoice_tally import parse_invoice, BuyerNotUrbanPlant
+            from recon.purchase_sku_match import SkuMatcher
+            matcher = SkuMatcher(master, learned)
+            out_invoices, skipped = [], []
+            for f in pdfs:
+                fn = f.get("filename", "")
+                try:
+                    r = parse_invoice(f["content"])
+                except BuyerNotUrbanPlant as e:
+                    skipped.append({"filename": fn, "reason": str(e)})
+                    continue
+                except Exception as exc:  # noqa: BLE001
+                    skipped.append({"filename": fn, "reason": f"parse_error: {exc}"})
+                    continue
+                items = [{"desc": it.get("desc"), "vendor_gstin": r.get("seller_gstin"),
+                          "rate": it.get("rate"), "hsn": it.get("hsn"), "qty": it.get("qty")}
+                         for it in r["items"]]
+                maps = matcher.map_lines(items, use_gemini=use_gemini) if items else []
+                lines = []
+                for it, m in zip(r["items"], maps):
+                    lines.append({**it, "map_status": m["status"], "stock_item": m.get("tally") or "",
+                                  "sku": m.get("sku"), "confidence": m.get("confidence"),
+                                  "candidates": m.get("candidates", []), "needs_add": m.get("needs_add", False)})
+                out_invoices.append({
+                    "filename": fn, "known_vendor": r.get("known_vendor"),
+                    "seller_gstin": r.get("seller_gstin"), "seller_name": r.get("seller_name"),
+                    "buyer_gstin": r.get("buyer_gstin"), "buyer_state": r.get("buyer_state"),
+                    "intra_state": r.get("intra_state"), "invoice_no": r.get("invoice_no"),
+                    "date": r.get("date"), "items": lines,
+                })
+            self.write_json({"ok": True, "narration": narration,
+                             "invoices": out_invoices, "skipped": skipped,
+                             "counts": {"invoices": len(out_invoices), "skipped": len(skipped)}})
+        except Exception as exc:  # noqa: BLE001
+            self.write_json({"ok": False, "error": str(exc)}, 500)
+
+    def handle_purchase_build(self) -> None:
+        """Build the 109-column Excel-to-Tally workbook from the (user-resolved)
+        invoices and register it as a job so /api/jobs/<id>/export.xlsx serves it."""
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            data = json.loads(self.rfile.read(length) if length else b"{}")
+            invoices = data.get("invoices", []) or []
+            narration = data.get("narration", "Excel to tally")
+            job_id = data.get("job_id") or uuid4().hex
+            # each invoice's items already carry a resolved 'stock_item'
+            for inv in invoices:
+                inv.setdefault("items", [])
+            from recon.purchase_invoice_tally import build_tally_workbook
+            xlsx, review = build_tally_workbook(invoices, narration=narration)
+            n_lines = sum(len(inv.get("items", [])) for inv in invoices)
+            payload = {
+                "job_id": job_id, "reco_type": "purchase_invoice_tally",
+                "summary": {"invoices": len(invoices), "line_items": n_lines,
+                            "review_items": len(review)},
+                "review": review, "_xlsx_bytes": xlsx,
+            }
             JOBS[job_id] = payload
             self.write_json({k: v for k, v in payload.items() if not k.startswith("_")})
         except Exception as exc:  # noqa: BLE001
