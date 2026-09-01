@@ -349,7 +349,7 @@ const BrandAgentsInventory = () => {
   const isSalesMarketplace = (a) =>
     /^sales-/i.test(a.name || '') ||
     /order[-\s]?cycle/i.test(a.name || '') ||
-    ['nykaa', 'settlement-amazon', 'total-sales-analyzer', 'ajio', 'meesho'].includes((a.name || '').toLowerCase());
+    ['nykaa', 'settlement-amazon', 'total-sales-analyzer', 'ajio', 'meesho', 'myntra ticket finder'].includes((a.name || '').toLowerCase());
   const isInvoice = (a) => (a.name || '').toLowerCase() === 'invoice process';
   const visibleAgents = RECO_ONLY
     ? allAgents.filter(agent => (RECO_ID_TO_TYPE[agent.id] || isSalesMarketplace(agent) || isInvoice(agent)) && !HIDDEN_WHEN_RECO_ONLY.has(agent.id))
