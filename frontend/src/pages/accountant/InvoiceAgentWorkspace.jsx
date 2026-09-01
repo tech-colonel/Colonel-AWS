@@ -1012,7 +1012,7 @@ const InvoiceAgentWorkspace = ({ agent }) => {
                 </span>
               )}
             </div>
-            <h2 className="text-xl font-bold tracking-tight" style={{ color: T_TEXT_PRIMARY, fontFamily: 'Space Grotesk' }}>
+            <h2 className="text-xl font-bold tracking-tight" style={{ color: T_TEXT_PRIMARY }}>
               {selectedInvoice.invoice_number || 'Unnamed Invoice'}
             </h2>
             <p className="text-sm font-medium" style={{ color: T_TEXT_SECONDARY }}>{selectedInvoice.company || 'Unknown Vendor'}</p>
@@ -1091,7 +1091,7 @@ const InvoiceAgentWorkspace = ({ agent }) => {
               return (
                 <div className="h-[560px] flex flex-col items-center justify-center px-8 text-center">
                   <AlertTriangle className="w-12 h-12 mb-4" style={{ color: '#D97706' }} />
-                  <h3 className="font-black" style={{ color: '#111827', fontFamily: 'Space Grotesk' }}>No original invoice link</h3>
+                  <h3 className="font-black" style={{ color: '#111827' }}>No original invoice link</h3>
                   <p className="text-sm mt-2 max-w-sm" style={{ color: '#667085' }}>
                     N8N did not return an invoice link for this record. You can add one while editing the processed fields.
                   </p>
@@ -1183,7 +1183,7 @@ const InvoiceAgentWorkspace = ({ agent }) => {
                 <span className="w-2 h-2 rounded-full" style={{ background: T_BLUE }} />
                 <span className="text-[10px] font-bold uppercase tracking-widest" style={{ color: T_BLUE }}>Record Automation</span>
               </div>
-              <h1 className="text-2xl font-bold tracking-tight" style={{ color: T_TEXT_PRIMARY, fontFamily: 'Space Grotesk' }}>
+              <h1 className="text-2xl font-bold tracking-tight" style={{ color: T_TEXT_PRIMARY }}>
                 {agent?.name || 'Invoice Agent'}
               </h1>
               <p className="text-sm mt-1" style={{ color: T_TEXT_SECONDARY }}>
@@ -1301,7 +1301,7 @@ const InvoiceAgentWorkspace = ({ agent }) => {
             { label: 'Rejected', value: metrics.rejected, color: T_TEXT_SECONDARY },
           ].map((item) => (
             <div key={item.label} className="px-6 py-4 border-r last:border-r-0" style={{ borderColor: T_BORDER }}>
-              <div className="text-xl font-bold" style={{ color: item.color, fontFamily: 'Space Grotesk' }}>{item.value}</div>
+              <div className="text-xl font-bold" style={{ color: item.color }}>{item.value}</div>
               <div className="text-[10px] font-bold uppercase tracking-wider mt-1" style={{ color: T_TEXT_SECONDARY }}>{item.label}</div>
             </div>
           ))}
@@ -1555,7 +1555,7 @@ const InvoiceAgentWorkspace = ({ agent }) => {
           {!selectedInvoice ? (
             <div className="h-[720px] flex flex-col items-center justify-center text-center px-6">
               <FileText className="w-14 h-14 mb-4" style={{ color: '#CBD5E1' }} />
-              <h3 className="text-lg font-black" style={{ color: '#111827', fontFamily: 'Space Grotesk' }}>Select an invoice</h3>
+              <h3 className="text-lg font-black" style={{ color: '#111827' }}>Select an invoice</h3>
               <p className="text-sm mt-1 max-w-sm" style={{ color: '#667085' }}>
                 Pick an invoice from the queue to review the source document and AI processed fields side by side.
               </p>
@@ -1574,7 +1574,7 @@ const InvoiceAgentWorkspace = ({ agent }) => {
                       </span>
                     )}
                   </div>
-                  <h2 className="text-xl font-bold tracking-tight" style={{ color: T_TEXT_PRIMARY, fontFamily: 'Space Grotesk' }}>
+                  <h2 className="text-xl font-bold tracking-tight" style={{ color: T_TEXT_PRIMARY }}>
                     {selectedInvoice.invoice_number || 'Unnamed Invoice'}
                   </h2>
                   <p className="text-sm font-medium" style={{ color: T_TEXT_SECONDARY }}>{selectedInvoice.company || 'Unknown Vendor'}</p>
@@ -1701,7 +1701,7 @@ const InvoiceAgentWorkspace = ({ agent }) => {
                     return (
                       <div className="h-[640px] flex flex-col items-center justify-center px-8 text-center">
                         <AlertTriangle className="w-12 h-12 mb-4" style={{ color: '#D97706' }} />
-                        <h3 className="font-black" style={{ color: '#111827', fontFamily: 'Space Grotesk' }}>No original invoice link</h3>
+                        <h3 className="font-black" style={{ color: '#111827' }}>No original invoice link</h3>
                         <p className="text-sm mt-2 max-w-sm" style={{ color: '#667085' }}>
                           N8N did not return an invoice link for this record. You can add one while editing the processed fields.
                         </p>
@@ -1773,7 +1773,7 @@ const InvoiceAgentWorkspace = ({ agent }) => {
                   <Sheet className="w-5 h-5" />
                 </div>
                 <div>
-                  <h3 className="font-black" style={{ color: '#111827', fontFamily: 'Space Grotesk' }}>Invoice Sheet</h3>
+                  <h3 className="font-black" style={{ color: '#111827' }}>Invoice Sheet</h3>
                   <p className="text-xs" style={{ color: '#667085' }}>Live source sheet configured for this brand</p>
                 </div>
               </div>
@@ -1801,7 +1801,7 @@ const InvoiceAgentWorkspace = ({ agent }) => {
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/40 backdrop-blur-sm animate-in fade-in duration-200">
           <div className="bg-white rounded-xl p-8 w-full max-w-sm shadow-2xl border" style={{ borderColor: T_BORDER }}>
             <div className="flex items-center justify-between mb-6">
-              <h3 className="font-bold text-xl tracking-tight" style={{ color: T_TEXT_PRIMARY, fontFamily: 'Space Grotesk' }}>Processing Complete</h3>
+              <h3 className="font-bold text-xl tracking-tight" style={{ color: T_TEXT_PRIMARY }}>Processing Complete</h3>
               <button onClick={() => setSummaryModal((prev) => ({ ...prev, open: false }))} className="p-1 hover:bg-slate-100 rounded-md transition-colors">
                 <X className="w-5 h-5 text-slate-400" />
               </button>
@@ -1815,7 +1815,7 @@ const InvoiceAgentWorkspace = ({ agent }) => {
               ].map((item) => (
                 <div key={item.label} className="flex items-center justify-between px-5 py-4 rounded-lg border shadow-sm" style={{ background: item.bg, borderColor: item.border }}>
                   <span className="text-xs font-bold uppercase tracking-wider" style={{ color: item.color }}>{item.label}</span>
-                  <span className="text-2xl font-bold" style={{ color: item.color, fontFamily: 'Space Grotesk' }}>{item.value}</span>
+                  <span className="text-2xl font-bold" style={{ color: item.color }}>{item.value}</span>
                 </div>
               ))}
             </div>

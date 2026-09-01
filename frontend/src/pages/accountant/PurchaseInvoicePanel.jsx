@@ -121,7 +121,7 @@ export default function PurchaseInvoicePanel({ brandId, onSwitchToSales }) {
               <FileText className="w-6 h-6" />
             </div>
             <div>
-              <h1 className="text-xl font-bold tracking-tight" style={{ color: '#111827', fontFamily: 'Space Grotesk' }}>Purchase Invoice → Tally</h1>
+              <h1 className="text-xl font-bold tracking-tight" style={{ color: '#111827' }}>Purchase Invoice → Tally</h1>
               <p className="text-sm mt-0.5" style={{ color: '#6B7280' }}>
                 Upload vendor purchase invoices → auto-map to Tally stock items → download the Tally import file. Duplicates ask you to pick; missing items you add once and they’re remembered.
               </p>
