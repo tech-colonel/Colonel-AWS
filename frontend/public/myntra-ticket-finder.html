@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Myntra Ticket Finder — Colonel</title>
+<title>Marketplace Ticket Generator — Colonel</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <style>
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
@@ -99,11 +99,11 @@ footer{text-align:center;margin-top:48px;padding-top:24px;border-top:1px solid v
 </style>
 </head>
 <body>
-<div class="topbar"><span class="logo">Colonel × Myntra</span><span class="tag">Ticket Finder</span></div>
+<div class="topbar"><span class="logo">Colonel × Marketplace</span><span class="tag">Ticket Generator</span></div>
 <div class="wrap">
-<h1>Myntra billing error detector</h1>
+<h1>Marketplace billing error detector</h1>
 <p class="lead">Upload Myntra Seller Hub reports directly — no pre-processing needed. For complete payout analysis upload Sales Reports for all relevant months, since each settlement cycle pays out carry-forward from the previous month.</p>
-<p class="step-label">Step 1 — Upload your Myntra reports</p>
+<p class="step-label">Step 1 — Upload your marketplace reports</p>
 <div class="reports-grid" id="reportGrid"></div>
 <p class="req-note"><span>*</span> Required &nbsp;·&nbsp; Forward + Reverse + Returns are minimum. Add Sales Report(s) for delivered-not-paid analysis — upload multiple months by clicking "Add another month".</p>
 <div class="progress-wrap" id="progWrap"><div class="progress-bar" id="progBar"></div></div>
@@ -116,7 +116,7 @@ footer{text-align:center;margin-top:48px;padding-top:24px;border-top:1px solid v
   <p class="step-label">Tickets to raise with Myntra</p>
   <div id="ticketList"></div>
 </div>
-<footer>Colonel · Myntra Ticket Finder · Raw reports are processed in your browser — only a summary is saved to Colonel</footer>
+<footer>Colonel · Marketplace Ticket Generator · Raw reports are processed in your browser — only a summary is saved to Colonel</footer>
 </div>
 
 <script>
@@ -520,7 +520,7 @@ function ticket_commNotReversed(){
     title:'Commission not reversed on '+affected.length+' return orders',
     amount:claimAmt,count:affected.length,orders:affected.map(a=>a.id),
     meta:[['Customer returns checked',customerRet.length],['Commission reversed correctly',reversedCount],['Not reversed',affected.length],['Estimated claim',inr(claimAmt)]],
-    desc:affected.length+' customer returns have no commission reversal entry in the Reverse Settlement. Avg commission per return: '+inr(Math.round(avgComm))+'. Total claim: '+inr(claimAmt)+'.',
+    desc:'When a customer returns an order, Myntra must give back the commission it charged on that sale. On '+affected.length+' of the '+customerRet.length+' returns checked it kept the commission \u2014 about '+inr(Math.round(avgComm))+' per return, '+inr(claimAmt)+' in total.',
     template:'Subject: Commission not reversed on returns — '+affected.length+' orders, '+inr(claimAmt)+'\\n\\nHi Myntra Seller Support,\\n\\n'+affected.length+' customer returns have no commission reversal in our Reverse Settlement (April + May).\\n\\n'+'Returns checked: '+customerRet.length+'\\nReversed correctly: '+reversedCount+'\\nNot reversed: '+affected.length+'\\nClaim: '+inr(claimAmt)+'\\n\\nPREEMPTING STANDARD RESPONSES:'+'\\n\\n1. CHECK JUNE: If reversal was in June, share June Reverse Settlement with these order_line_ids within 5 business days. Do not close citing reversal pending without the export.'+'\\n\\n2. QC REJECTION: All returns in our proof have return_mode = customer return per Myntra own MDirect Returns Report (not warehouse-rejected, not quality-failed). If any order was QC-rejected post-pickup, provide the QC rejection report for that specific order_line_id. Blanket QCF responses without order-level proof will not be accepted.'+'\\n\\n3. IN TRANSIT: Return dates are from Myntra own returns data. If any return is still in transit, provide current logistics status for that order_line_id.'+'\\n\\nFirst 20 order line IDs:\\n'+affected.slice(0,20).map(a=>a.id).join('\\n')+'\\n\\nFull evidence attached.\\n\\nBrand: D\u2019Chica',
     proof:()=>mkXLSX(affected.map(a=>{const fr=fwdMap[a.id];const comm=(fr?getCommission(fr):avgComm).toFixed(2);return[a.id,a.date||'',comm,'0.00','Commission charged on sale, not reversed on return'];}),
       ['Order ID','Return Date','Commission Should Reverse (\u20b9)','Reversed (\u20b9)','Issue'],'Proof_1_Comm_Not_Reversed.xlsx')
@@ -566,7 +566,7 @@ function ticket_closedBox(){
     title:'Closed-box returns — commission not reversed ('+affected.length+' orders)',
     amount:claim,count:affected.length,orders:affected.map(a=>a.id),
     meta:[['Closed box orders',affected.length],['Commission owed back',inr(claim)],['Policy basis','Product returned sealed — strongest ticket']],
-    desc:affected.length+' returns were CLOSED BOX pickups — sealed product. Commission must be fully reversed per Myntra policy. None appear in Reverse Settlement.',
+    desc:'A closed-box return means the customer never even opened the parcel, so Myntra policy requires the full commission back. '+affected.length+' returns came back sealed and not one of them shows a reversal \u2014 '+inr(claim)+' owed.',
     template:'Subject: Closed-box returns — commission reversal mandatory ('+affected.length+' orders, '+inr(claim)+')'+'\\n\\nHi Myntra Seller Support,\\n\\n'+affected.length+' returns picked up as CLOSED_BOX_PICKUP. Commission must be reversed per Myntra policy on sealed returns.\\n\\nOrders: '+affected.length+'\\nClaim: '+inr(claim)+'\\n\\nPREEMPTING STANDARD RESPONSES:'+'\\n\\n1. NOT VERIFIED AS CLOSED BOX: CLOSED_BOX_PICKUP return mode is from Myntra own MDirect Returns Report. This is Myntra classification, not ours.'+'\\n\\n2. CONDITION NOT CONFIRMED: Myntra seller policy mandates commission reversal on sealed returns regardless of condition assessment. Product was never opened. Please cite the specific policy clause if commission is retainable on an unopened return.'+'\\n\\n3. REVERSAL IN JUNE: If reversed in June, provide June Reverse Settlement with these order_line_ids within 5 business days.'+'\\n\\nOrder IDs:\\n'+affected.slice(0,30).map(a=>a.id).join('\\n')+'\\n\\nFull evidence attached.\\n\\nBrand: D\u2019Chica',
     proof:()=>mkXLSX(affected.map(a=>[a.id,'CLOSED_BOX_PICKUP',a.date||'',a.comm.toFixed(2),'0.00','Sealed return — commission must reverse']),
       ['Order ID','Return Mode','Return Date','Commission Owed (₹)','Reversed (₹)','Issue'],'Proof_2_Closed_Box.xlsx')
@@ -609,7 +609,7 @@ function ticket_commRate(){
     title:'Commission overcharge on '+affected.length+' orders',
     amount:Math.round(totalExcess),count:affected.length,orders:affected.map(a=>a.id),
     meta:[['Orders overcharged',affected.length],['Excess commission',inr(totalExcess)],['Detection',useRateCard?'Contracted rate card':'Statistical avg'],['Evidence strength',useRateCard?'Strong \u2014 contract breach':'Medium \u2014 pattern based']],
-    desc:affected.length+' orders charged commission above '+(useRateCard?'contracted rate':'category average')+'. Total excess: '+inr(totalExcess)+'.',
+    desc:'Your Seller Terms fix the commission percentage for each article type. Recomputing every order against the '+(useRateCard?'contracted rate card':'category average')+', '+affected.length+' were charged more than that rate \u2014 '+inr(totalExcess)+' of excess commission.',
     template:'Subject: Commission overcharge vs Seller Terms — '+affected.length+' orders, '+inr(Math.round(totalExcess))+(useRateCard?' [Rate Card Attached]':'')+'\\n\\nHi Myntra Billing Team,\\n\\n'+affected.length+' orders show commission above contracted Seller Terms rate.\\n\\n'+'Total excess: '+inr(Math.round(totalExcess))+'\\nDetection: '+(useRateCard?'Rate card (Seller Terms, effective 26-Jun-2026)':'Statistical >5pp above category average')+'\\n\\nSample:\\n'+affected.slice(0,8).map(a=>a.id+' | '+a.art+' | ₹'+a.sp.toFixed(0)+' | Charged: '+a.rate.toFixed(1)+'% | Contracted: '+a.contractedRate.toFixed(1)+'% | Excess: ₹'+a.excess.toFixed(0)).join('\\n')+'\\n\\nPREEMPTING STANDARD RESPONSES:'+'\\n\\n1. WRONG CATEGORY / LISTING ERROR: Article type in our proof is from Myntra OWN Forward Settlement (article_type column). We have not inferred any category. To dispute: provide (a) order_line_id, (b) correct article_type from your catalogue, (c) applicable rate under our Seller Terms for that category. Each order addressed individually. Blanket listing error response not accepted.'+'\\n\\n2. RATE CARD NOT APPLICABLE TO APRIL-MAY: Our rate card is effective 26-Jun-2026. If a different rate applied for April-May 2026, share that rate card within 5 business days. Without a counter rate card, current contracted rate is the reference. Note: our statistical analysis shows 5+ pp anomalies above same article type average within the same settlement cycle, which holds regardless of rate card version.'+'\\n\\n3. PROMOTIONAL CAMPAIGN OVERRIDE: If any orders were under a campaign with different commission, provide: campaign name, applicable rate, and list of order_line_ids covered. Campaign rate overrides must be pre-communicated to the seller.'+'\\n\\nWe request credit of '+inr(Math.round(totalExcess))+' within 7 business days.\\n\\nBrand: D\u2019Chica',
     proof:()=>mkXLSX(affected.map(a=>{
       let cite=a.method;
@@ -641,7 +641,7 @@ function ticket_fixedFeeOvercharge(){
     title:'Fixed fee overcharge on '+affected.length+' orders vs rate card',
     amount:Math.round(totalExcess),count:affected.length,orders:affected.map(a=>a.id),
     meta:[['Orders overcharged',affected.length],['Total excess',inr(totalExcess)],['Source','Contracted rate card'],['Type','Contract breach']],
-    desc:affected.length+' orders charged fixed fee above contracted rate. Total: '+inr(totalExcess)+'. Rate card is definitive proof.',
+    desc:affected.length+' orders were charged a flat per-order fee higher than the one fixed in your rate card, '+inr(totalExcess)+' in total. Small money, but the signed rate card makes it indisputable.',
     template:'Subject: Fixed fee overcharge vs contracted rate \u2014 '+affected.length+' orders, '+inr(Math.round(totalExcess))+'\n\nHi Myntra Billing Team,\n\n'+affected.length+' orders show fixed fee above our contracted rate card.\n\nTotal excess: '+inr(Math.round(totalExcess))+'\nBrand: D\u2019Chica',
     proof:()=>mkXLSX(affected.map(a=>[a.id,a.sku,a.art,a.sp.toFixed(2),a.actualFee.toFixed(2),a.contracted.toFixed(2),(a.excess).toFixed(2),'Fixed fee exceeds contracted rate']),
       ['Order ID','SKU','Article Type','Selling Price (\u20b9)','Fixed Fee Charged (\u20b9)','Contracted (\u20b9)','Excess (\u20b9)','Issue'],'Proof_Fixed_Fee_Overcharge.xlsx')
@@ -675,7 +675,7 @@ function ticket_highReturn(){
     title:high.length+' SKUs with \u226540% return rate \u2014 pause ads + catalogue correction',
     amount:0,count:high.length,orders:[],skus:high,
     meta:[['High-return SKUs',high.length],['Threshold','\u226540% (min 3 delivered)'],['Ticket type','Catalogue correction'],['Escalate to','Myntra catalogue team']],
-    desc:'These SKUs are loss-making once return clawback (~\u20b9661/return) is included. Pause Myntra ads. For SKUs with size/fit as top return reason, raise catalogue correction \u2014 incorrect size chart is Myntra\u2019s responsibility.',
+    desc:'This one is not a Myntra billing error \u2014 it is a product problem. These '+high.length+' SKUs come back so often that the ~\u20b9661 cost of each return wipes out the margin: pause their ads, and where size or fit is the top reason, raise a catalogue correction \u2014 the size chart is Myntra\u2019s responsibility.',
     template:'Subject: High return rates \u2014 size chart correction request\n\nHi Myntra Catalogue Team,\n\nSKUs with \u226540% return rate:\n'+high.slice(0,15).map(s=>s.sku+': '+s.rv+'/'+s.d+' returned ('+s.rate.toFixed(0)+'%) \u2014 top reason: '+s.topReason).join('\n')+(high.length>15?'\n\u2026and '+(high.length-15)+' more':'')+'\n\nPlease review and correct size charts.\n\nBrand: D\u2019Chica',
     proof:()=>mkXLSX(high.map(s=>[s.sku,s.d,s.rv,s.rate.toFixed(1)+'%',s.topReason,'Pause ads. Request catalogue correction.']),
       ['Master SKU','Units Delivered','Units Returned','Return Rate','Top Return Reason','Action'],'Proof_High_Return_SKUs.xlsx')
@@ -723,7 +723,7 @@ function ticket_returnLogistics() {
       amount:0, count:clean.length, orders:[],
       meta:[['Returns checked', rev.length], ['Fees matching rate card', clean.length],
             ['Rate cards checked','Nov 2025, Feb 2026, Apr 2026'],['Rate card effective from','13 Apr 2026 (most recent)']],
-      desc:`All ${rev.length} return logistics fees in Settlement Reverse match Myntra's published rate cards. No overcharges detected. Rate card versions checked: Nov 14 2025, Feb 9 2026, Apr 13 2026. Any future overcharge will be flagged here.`,
+      desc:`Myntra publishes the return-shipping fee it is allowed to charge you, so every fee can be checked against it. All ${rev.length} return fees match those published rate cards (Nov 2025, Feb 2026, Apr 2026) \u2014 nothing overcharged here, and any future deviation will be flagged.`,
       template:`Subject: Return logistics fee confirmation
 
 Hi Myntra Seller Support,
@@ -747,7 +747,7 @@ Brand: D’Chica`,
     orders: allFlagged.map(a => a.id),
     meta:[['Returns checked', rev.length],['Definite overcharges', overcharged.length],
           ['Rate discrepancies', wrongRate.length],['Total excess', inr(Math.round(totalExcess))]],
-    desc: `Return logistics fees cross-checked against Myntra's published rate cards (Nov 2025, Feb 2026, Apr 2026). ${overcharged.length} orders charged above the maximum contracted rate. ${wrongRate.length} orders with fees not matching any published rate tier — either wrong rate card applied or billing error. Evidence: Myntra's own published PDFs.`,
+    desc:`Myntra publishes the return-shipping fee it is allowed to charge, so every fee can be checked against it. ${overcharged.length} orders were billed above the maximum published rate and ${wrongRate.length} do not match any published tier \u2014 wrong rate card or a billing error, ${inr(Math.round(totalExcess))} in total. Evidence is Myntra\u2019s own published PDFs.`,
     template: `Subject: Return logistics fee overcharge vs published rate card
 
 Hi Myntra Seller Support,
@@ -823,7 +823,7 @@ function ticket_nonOrderDeductions() {
           ['Credits from Myntra to you',totalCredited>0?inr(Math.round(totalCredited)):'₹0'],
           ['Deductions without GST invoice',noGSTInvoice.length],
           ['ITC at risk (18% of unverified)',inr(itcAtRisk)]],
-    desc:`Myntra deducted ${inr(Math.round(totalDeducted))} in non-order charges from settlement (ad spend, platform fees, campaigns). ${noGSTInvoice.length} deduction(s) totalling ${inr(Math.round(noGSTAmt))} have only an internal batch reference — not a proper GST invoice with IRN. Without a valid GST invoice you cannot claim Input Tax Credit of ~${inr(itcAtRisk)} (18% of deduction). Breakdown: ${Object.entries(byType).map(([k,v])=>`${k} ${inr(Math.round(v))}`).join(', ')}.${totalCredited>0?` Also: ${inr(Math.round(totalCredited))} in Myntra credits — verify these reached your bank.`:''}`,
+    desc:`Myntra takes ad spend and platform fees straight out of your settlement, and you can only claim the GST back if each deduction carries a proper tax invoice. ${inr(Math.round(totalDeducted))} was deducted, and ${noGSTInvoice.length} deduction(s) worth ${inr(Math.round(noGSTAmt))} carry only an internal batch reference \u2014 putting roughly ${inr(itcAtRisk)} of input tax credit at risk. Breakdown: ${Object.entries(byType).map(([k,v])=>`${k} ${inr(Math.round(v))}`).join(', ')}.${totalCredited>0?` Also ${inr(Math.round(totalCredited))} in Myntra credits \u2014 confirm these reached your bank.`:''}`,
     template:`Subject: GST invoice request — non-order settlement deductions ${inr(Math.round(totalDeducted))}
 
 Hi Myntra Seller Support,
@@ -883,7 +883,7 @@ function ticket_marketingCharges(){
     amount:Math.round(totalCharged),count:affected.length,orders:affected.map(a=>a.id),
     meta:[['Orders with charges',affected.length],['Total charged',inr(Math.round(totalCharged))],
           ['Agreed rate','₹0 (no marketing agreement)'],['Action','Raise ticket immediately']],
-    desc:'Myntra has charged '+inr(Math.round(totalCharged))+' in marketing or royalty fees across '+affected.length+' orders. D\u2019Chica has no marketing fee agreement with Myntra — these charges have no contractual basis and must be reversed.',
+    desc:'Marketing and royalty fees can only be charged if you have signed an agreement setting that rate. No such agreement exists, yet '+inr(Math.round(totalCharged))+' has been deducted across '+affected.length+' orders \u2014 no contractual basis, so it must be reversed.',
     template:'Subject: Unauthorised marketing/royalty charges — '+inr(Math.round(totalCharged))+'\n\nHi Myntra Billing,\n\nWe have been charged '+inr(Math.round(totalCharged))+' in marketing/royalty fees across '+affected.length+' orders. We have no signed marketing fee agreement with Myntra.\n\nPlease reverse immediately and provide the contract under which these were charged.\n\nBrand: D\u2019Chica',
     proof:()=>mkXLSX(affected.map(a=>[a.id,a.sku,a.amt.toFixed(2),'No marketing agreement']),
       ['Order ID','SKU','Marketing Charge (\u20b9)','Issue'],'Proof_Marketing_Charges.xlsx')
@@ -921,7 +921,7 @@ function ticket_partialSettlement(){
     title:`${pending.length} orders partially settled — ${inr(Math.round(totalPending))} still pending`,
     amount:Math.round(totalPending),count:pending.length,orders:pending.map(a=>a.id),
     meta:[['Orders in Forward Settlement',fwd.length],['Partially settled',pending.length],['Amount still pending',inr(Math.round(totalPending))],['Typical reason','COD / postpaid orders pending customer payment']],
-    desc:`${pending.length} orders appear in the Forward Settlement file but show amount_pending_settlement > 0 — meaning Myntra has the order in their settlement cycle but has not released the full payout. This typically occurs for COD (cash on delivery) orders where the customer payment hasn't cleared, or postpaid orders. Total pending: ${inr(Math.round(totalPending))}. If these orders are older than D+30, follow up with Myntra payments team.`,
+    desc:`Myntra has these orders in its settlement cycle but has released only part of the money. ${pending.length} orders still carry an unpaid balance of ${inr(Math.round(totalPending))} \u2014 usually COD or postpaid orders where the customer payment has not cleared. Anything older than D+30 should be chased with the payments team.`,
     template:`Subject: Partially settled orders — ${pending.length} orders, ${inr(Math.round(totalPending))} pending
 
 Hi Myntra Payments Team,
@@ -1013,8 +1013,8 @@ function ticket_deliveredNotPaid(){
       ['Not settled — past D+15',notPaid.length],
       ['Days past D+15 (min / avg / max)',minDays+' / '+avgDays+' / '+maxDays+' days'],
     ],
-    desc:notPaid.length+' orders confirmed delivered do not appear in any uploaded Forward Settlement. Settlement coverage up to '+endStr+'. Days past D+15: min='+minDays+', avg='+avgDays+', max='+maxDays+'. Delivery breakdown: '+Object.entries(byMonth).sort().map(([m,c])=>m+': '+c).join(', ')+'.'+
-      (tooRecent.length>0?' '+tooRecent.length+' additional orders within D+15 will appear in next settlement cycle.':''  ),
+    desc:'Myntra commits to paying within 15 days of delivery. '+notPaid.length+' orders confirmed delivered do not appear in any settlement file at all \u2014 between '+minDays+' and '+maxDays+' days past that deadline (avg '+avgDays+'), with settlement data verified up to '+endStr+'. Delivered in: '+Object.entries(byMonth).sort().map(([m,c])=>m+': '+c).join(', ')+'.'+
+      (tooRecent.length>0?' A further '+tooRecent.length+' orders are still inside D+15 and should appear in the next cycle.':''  ),
     template:'Subject: Delivered orders not settled — '+notPaid.length+' orders, '+inr(Math.round(gmv))+' — Response required by 10 July 2026'+'\n\n'+'Hi Myntra Payments Team,'+'\n\n'+notPaid.length+' delivered orders are absent from all Forward Settlement reports. These breach your D+15 SLA by '+minDays+' to '+maxDays+' days (avg: '+avgDays+' days).'+'\n\n'+'Settlement verified: '+startStr+' to '+endStr+'\nOrders not settled (past D+15): '+notPaid.length+'\nGMV outstanding: '+inr(Math.round(gmv))+'\nDays past D+15: min='+minDays+' / avg='+avgDays+' / max='+maxDays+'\n\nDelivery breakdown:\n'+Object.entries(byMonth).sort().map(([m,c])=>m+': '+c).join('\\n')+'\n\nD+15 SLA BREACH \u2014 EXPLANATION REQUIRED:\\nMyntra settlement policy commits to payment within D+15 from delivery confirmation. These orders breached that SLA by '+minDays+' to '+maxDays+' days (avg: '+avgDays+' days). This is a contractual breach independent of eventual payment.\\nWe require written explanation within 5 business days:\\n(a) Why was the D+15 SLA breached for these specific orders?\\n(b) Was there a systemic issue affecting these order_line_ids?\\n(c) What remediation prevents recurrence?\\nEventual payment in a future cycle does NOT close the SLA breach. Both must be addressed separately.\\n\\nPREEMPTING \u201CCHECK JUNE SETTLEMENT\u201D RESPONSE:\n- June 2026 Forward Settlement is expected by 7 July 2026.\n- If any of these orders were paid in June, provide the June Forward Settlement showing the specific order_line_ids with payout dates.\n- This must be provided within 5 business days. Do not close this ticket citing \u201Cthey may be in June\u201D without order-level documentary evidence.\n- If June settlement is not produced by 10 July 2026 with matching order_line_ids, these orders remain outstanding and we will escalate to Seller Support Head.\n\nFirst 20 order line IDs: '+notPaid.slice(0,20).map(a=>getOrderId(a.row)).join(', ')+'\n\nEvidence attached sorted by most overdue.\n\nADDITIONAL PREEMPTIONS:\\n\\n4. RETURNED AFTER DELIVERY: Cross-checked against April and May Returns and RTO Report. None of these order_line_ids appear in returns data. If any was returned post-delivery, provide returns documentation with order_line_id and return date.\\n\\n5. CANCELLED POST-DELIVERY: Status in Myntra own Sale Order Report is Delivered. If subsequently cancelled in Myntra system, provide updated order record with timestamp.\\n\\nBrand: D\u2019Chica',
     proof:()=>mkXLSX(
       [...notPaid].sort((a,b)=>(b.d15&&a.d15?(b.d15-a.d15):(b.d15?1:-1))).map(({row,delDate,d15})=>{
@@ -1052,7 +1052,7 @@ function ticket_creditNoteVerification() {
     amount:Math.round(total), count:credits.length, orders:[],
     meta:[['Credits from Myntra',credits.length],['Total credit amount',inr(Math.round(total))],
           ['Action required','Cross-check bank statement'],['Risk','Myntra owes this — confirm receipt']],
-    desc:`Myntra issued ${credits.length} credit(s) totalling ${inr(Math.round(total))} against your account (seller incentive or credit note). Verify your bank statement confirms this was credited. If absent, raise immediately.`,
+    desc:`A credit raised in your favour still has to actually land in your bank. Myntra issued ${credits.length} credit(s) totalling ${inr(Math.round(total))} \u2014 check your bank statement and raise it immediately if the money is not there.`,
     template:`Subject: Seller credit note — confirm receipt of ${inr(Math.round(total))}
 
 Hi Myntra Seller Support,
@@ -1555,6 +1555,45 @@ function buildGrid(){
 
 buildGrid();
 document.getElementById('runBtn').addEventListener('click',run);
+
+// ── DRIVE INPUT (additive — nothing above this line changed) ──────────────────
+// The React wrapper (MyntraTicketFinderWorkspace) downloads Google Drive files
+// and posts their raw bytes in here. We rebuild a File and hand it to the SAME
+// processFile() the manual uploader uses, so header detection, slot auto-routing
+// and multi-month merging behave identically. No parsing logic is duplicated and
+// manual upload is untouched.
+async function loadDriveFile(file){
+  const buf=await file.arrayBuffer();
+  const probe=parseBuffer(buf,file.name);
+  if(!probe){askUserForType(file,null,null);return;}           // unreadable → ask
+  const key=probe.type;
+  if(!key||key==='unknown'){askUserForType(file,null,null);return;} // undetected → ask
+  // First EMPTY slot for this report type; if all are full, the first slot of
+  // that type (multi-month slots then merge, exactly like "+ Upload another month").
+  const slots=DEFS.filter(d=>d.key===key).sort((a,b)=>a.num-b.num);
+  const target=slots.find(d=>!FILES[d.num])||slots[0];
+  if(!target){askUserForType(file,key,null);return;}
+  await processFile(file,target.key,target.num);
+}
+
+window.addEventListener('message',async function(ev){
+  if(ev.origin!==window.location.origin) return;
+  if(ev.source!==window.parent) return;
+  if(!ev.data||ev.data.type!=='COLONEL_DRIVE_FILES') return;
+  const incoming=Array.isArray(ev.data.files)?ev.data.files:[];
+  const ack={type:'COLONEL_DRIVE_FILES_RESULT',loaded:0,failed:[]};
+  for(const item of incoming){
+    try{
+      const bytes=(item.bytes instanceof ArrayBuffer)?item.bytes:new Uint8Array(item.bytes||[]).buffer;
+      await loadDriveFile(new File([bytes],item.name||'drive-file.xlsx'));
+      ack.loaded++;
+    }catch(err){
+      console.error('[Myntra Tool] Drive load failed for',item&&item.name,err);
+      ack.failed.push((item&&item.name)||'file');
+    }
+  }
+  try{window.parent.postMessage(ack,window.location.origin);}catch(e){}
+});
 </script>
 </body>
 </html>

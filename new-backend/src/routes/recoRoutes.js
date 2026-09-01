@@ -4,6 +4,7 @@ const multer = require('multer');
 const { authenticateToken, authorize } = require('../middleware/authMiddleware');
 const { runReco, exportReco, openInSheets, checkHealth, getLedgerStatus, deleteRecoJob, detectZeptoFiles, purgeSessionMaster } = require('../controllers/recoController');
 const { routeDriveFiles } = require('../controllers/driveRouteController');
+const { listDriveFiles, getDriveFileContent } = require('../controllers/driveFetchController');
 
 // In-memory storage — files forwarded directly to Python
 const upload = multer({
@@ -79,5 +80,11 @@ router.post('/reco/detect-files', flexibleAuth, flexibleAuthorize, detectZeptoFi
 
 // Generic preview — recognize which Drive file maps to which agent slot (no download, no run)
 router.post('/drive/route', flexibleAuth, flexibleAuthorize, routeDriveFiles);
+
+// Drive input for CLIENT-SIDE agents (e.g. Marketplace Ticket Generator): plain file
+// listing + the bytes, because those agents parse in the browser and detect the
+// report type from its headers rather than its filename.
+router.post('/drive/list', flexibleAuth, flexibleAuthorize, listDriveFiles);
+router.get('/drive/file/:fileId/content', flexibleAuth, flexibleAuthorize, getDriveFileContent);
 
 module.exports = router;

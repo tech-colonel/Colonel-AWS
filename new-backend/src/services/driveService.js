@@ -133,6 +133,18 @@ async function downloadFile(fileId) {
 }
 
 /**
+ * Export a NATIVE Google file (Sheet/Doc) as binary bytes — `alt=media` does not
+ * work on Google-native types. Default target is .xlsx so a Google Sheet can be
+ * fed to the same parsers as an uploaded workbook. Additive: no existing caller
+ * changes behaviour.
+ */
+async function exportFile(fileId, mimeType = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet') {
+  const drive = getDrive();
+  const res = await drive.files.export({ fileId, mimeType }, { responseType: 'arraybuffer' });
+  return Buffer.from(res.data);
+}
+
+/**
  * Upload a raw file (e.g. an invoice PDF) from a Buffer into a Drive folder,
  * keeping its original type. Used by the in-UI "Drive upload" box → the file
  * lands in the brand's n8n INPUT folder so the workflow picks it up.
@@ -276,6 +288,7 @@ module.exports = {
   listChildren,
   listSubfolders,
   downloadFile,
+  exportFile,
   uploadFile,
   uploadXlsxAsSheet,
   uploadXlsxAsSheetOAuth,

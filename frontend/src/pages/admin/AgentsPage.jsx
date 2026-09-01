@@ -179,7 +179,7 @@ const SimpleAgentCard = ({ agent, onClick }) => {
   );
 };
 
-// Myntra Ticket Finder — distinctive cream / monospace card (D'Chica ops-hub style).
+// Marketplace Ticket Generator — distinctive cream / monospace card (D'Chica ops-hub style).
 const MyntraCard = ({ onClick }) => (
   <div
     onClick={onClick}
@@ -197,7 +197,7 @@ const MyntraCard = ({ onClick }) => (
       Marketplace · Myntra
     </div>
     <h3 style={{ fontSize: 20, fontWeight: 800, color: '#1A1A1A', letterSpacing: '0.02em', margin: '0 0 12px', lineHeight: 1.15 }}>
-      MYNTRA TICKET <span style={{ color: '#9B2242' }}>FINDER</span>
+      MARKETPLACE TICKET <span style={{ color: '#9B2242' }}>GENERATOR</span>
     </h3>
     <span style={{ alignSelf: 'flex-start', fontSize: 10, fontWeight: 700, letterSpacing: '0.08em', textTransform: 'uppercase', background: '#F3D9E0', color: '#8B1E3F', padding: '4px 9px', borderRadius: 3, marginBottom: 12 }}>
       Marketplace Team
@@ -571,7 +571,9 @@ const AgentsPage = () => {
                 </div>
                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
                   {section.items.map(a => (
-                    (a.id === '6fcb5c0e-7397-495c-af1e-9b1fe5faa2ad' || a.name === 'Myntra Ticket Finder')
+                    (a.id === '6fcb5c0e-7397-495c-af1e-9b1fe5faa2ad'
+                      || a.name === 'Marketplace Ticket Generator'
+                      || a.name === 'Myntra Ticket Finder')
                       ? <MyntraCard key={a.id} onClick={() => openAgent(a)} />
                       : RICH_META[a.name]
                         ? <RichAgentCard key={a.id} meta={RICH_META[a.name]} description={a.description} onClick={() => openAgent(a)} />
