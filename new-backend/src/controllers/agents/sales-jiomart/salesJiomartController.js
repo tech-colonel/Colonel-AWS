@@ -169,7 +169,8 @@ const generate = async (req, res, next) => {
             masterData.sku_master,
             brand.name,
             `${month}-${year}`,
-            useInventory
+            useInventory,
+            masterData.ledger_master
         );
 
         if (processedData?.missingMasterValues?.length > 0 && req.body.proceedWithoutMaster !== 'true') {
@@ -231,7 +232,8 @@ const generatePreview = async (req, res, next) => {
             masterData.sku_master,
             brand.name,
             `${month}-${year}`,
-            useInventory
+            useInventory,
+            masterData.ledger_master
         );
 
         if (!processedData || !processedData.processedData) {

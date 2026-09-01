@@ -4,6 +4,40 @@ const { createMissingMasterTracker } = require('../../../utils/missingMasterTrac
 
 const num = v => Number(v || 0);
 
+const normState = s => String(s || '').trim().toLowerCase();
+
+// Two-digit month number from the `date` string the controller passes
+// (e.g. "February-2025" or "2-2025"). Used for the "-MM" invoice-number
+// suffix on the without-inventory path.
+function monthNum2(date) {
+  const months = {
+    january: '01', february: '02', march: '03', april: '04', may: '05', june: '06',
+    july: '07', august: '08', september: '09', october: '10', november: '11', december: '12'
+  };
+  const part = String(date || '').split('-')[0].trim();
+  if (months[part.toLowerCase()]) return months[part.toLowerCase()];
+  const n = parseInt(part, 10);
+  return n >= 1 && n <= 12 ? String(n).padStart(2, '0') : '';
+}
+
+// Build a delivery-state -> { ledger, invoiceNo } lookup from the ledger master
+// (without-inventory only). Column names are matched loosely to tolerate the
+// different header casings uploaded across brands.
+function buildLedgerMap(ledgerJson) {
+  const map = {};
+  (ledgerJson || []).forEach(item => {
+    const st = normState(item['States'] || item['State'] || item['states'] || item['state']);
+    if (!st) return;
+    map[st] = {
+      ledger: item['Ledger'] || item['ledger'] || item['Party Name'] || item['party name'] || '',
+      invoiceNo:
+        item['Invoice No.'] || item['Invoice No'] || item['invoice no.'] ||
+        item['invoice_no'] || item['Invoice Number'] || ''
+    };
+  });
+  return map;
+}
+
 function getSellerStateAbbr(gstin) {
   const code = String(gstin || '').trim().substring(0, 2);
   return getStateAbbr(code) || code;
@@ -20,7 +54,7 @@ function getSellerStateAbbr(gstin) {
 // "Sales Jiomart-<state> <rate>%", matching the naming convention already
 // used by the other channels' Tally ledgers.
 // ============================================================
-function buildX2betaSheet(working, date) {
+function buildX2betaSheet(working, date, withInventory = true) {
   let x2betaVchDate;
   if (date) {
     const parsed = new Date(date);
@@ -34,25 +68,26 @@ function buildX2betaSheet(working, date) {
   const x2betaColumns = [
     { header: 'Vch. Date* ', get: () => x2betaVchDate },
     { header: 'Vch. Type*', get: r => `${Number(r['Taxable Value (Final Invoice Amount -Taxes)'] || 0) < 0 ? 'CN-' : ''}Sales-${getSellerStateAbbr(r['Seller GSTIN']) || ''}` },
-    { header: 'Vch. No.*', get: r => r['Buyer Invoice ID'] || r['Invoice Number'] || '' },
-    { header: 'Ref. No.', get: r => r['Buyer Invoice ID'] || r['Invoice Number'] || '' },
+    { header: 'Vch. No.*', get: r => (withInventory ? (r['Buyer Invoice ID'] || r['Invoice Number'] || '') : (r['Invoice No.'] || '')) },
+    { header: 'Ref. No.', get: r => (withInventory ? (r['Buyer Invoice ID'] || r['Invoice Number'] || '') : (r['Invoice No.'] || '')) },
     { header: 'Ref. Date', get: () => x2betaVchDate },
     { header: 'Is CN?', get: r => (Number(r['Taxable Value (Final Invoice Amount -Taxes)'] || 0) < 0 ? 'Yes' : null) },
     { header: 'Is Vch?', get: () => null },
-    { header: 'Party Ledger*', get: r => `Jiomart Debtor-${getSellerStateAbbr(r['Seller GSTIN']) || ''}` },
+    { header: 'Party Ledger*', get: r => (withInventory ? `Jiomart Debtor-${getSellerStateAbbr(r['Seller GSTIN']) || ''}` : (r['Party Name'] || '')) },
     { header: 'Sales Ledger*', get: r => `Sales Jiomart-${getSellerStateAbbr(r['Seller GSTIN']) || ''} ${Number(r['Final GST Rate'] || 0)}%` },
     { header: 'Stock Item', get: r => r['FG'] || r['Product Name'] || r['Item Name'] || '' },
     { header: 'Description', get: r => r['Product Name'] || r['Item Name'] || '' },
     { header: 'Godown', get: r => r['Shipped From State'] || r['Billed From State'] || '' },
-    { header: 'Quantity', get: r => Number(r['Item Quantity'] || 0) },
+    { header: 'Quantity', get: r => (withInventory ? Number(r['Item Quantity'] || 0) : '') },
     {
       header: 'Rate',
       get: r => {
+        if (!withInventory) return '';
         const qty = Number(r['Item Quantity'] || 0);
         return qty !== 0 ? Math.abs(Number(r['Taxable Value (Final Invoice Amount -Taxes)'] || 0) / qty) : 0;
       }
     },
-    { header: 'Unit', get: () => 'Pcs' },
+    { header: 'Unit', get: () => (withInventory ? 'Pcs' : '') },
     { header: 'Discount', get: () => null },
     { header: 'Amount*', get: r => Number(r['Taxable Value (Final Invoice Amount -Taxes)'] || 0) },
     { header: 'Discount', get: () => null }
@@ -121,6 +156,14 @@ function buildX2betaSheet(working, date) {
 
 function groupBy(arr, keys) {
 
+  const SUM_KEYS = [
+    'Item Quantity',
+    'Taxable Value (Final Invoice Amount -Taxes)',
+    'IGST Amount',
+    'CGST Amount',
+    'SGST Amount (Or UTGST as applicable)'
+  ];
+
   const map = {};
 
   arr.forEach(r => {
@@ -131,11 +174,12 @@ function groupBy(arr, keys) {
 
     else {
 
-      map[key]['Item Quantity'] += num(r['Item Quantity']);
-      map[key]['Taxable Value (Final Invoice Amount -Taxes)'] += num(r['Taxable Value (Final Invoice Amount -Taxes)']);
-      map[key]['IGST Amount'] += num(r['IGST Amount']);
-      map[key]['CGST Amount'] += num(r['CGST Amount']);
-      map[key]['SGST Amount (Or UTGST as applicable)'] += num(r['SGST Amount (Or UTGST as applicable)']);
+      // Only accumulate the measure columns that actually exist on the row, so
+      // callers that omit a column (e.g. the without-inventory B2C sheet drops
+      // "Item Quantity") don't get a NaN column injected.
+      SUM_KEYS.forEach(sk => {
+        if (sk in map[key]) map[key][sk] = num(map[key][sk]) + num(r[sk]);
+      });
 
     }
 
@@ -150,7 +194,8 @@ async function jiomartProcessor(
   skuJson = [],
   brandName,
   date,
-  withInventory = true
+  withInventory = true,
+  ledgerJson = []
 ) {
 
   const wb = XLSX.utils.book_new();
@@ -232,6 +277,30 @@ async function jiomartProcessor(
   }
 
   /* -------------------------
+     STEP 4b LEDGER MAP (without-inventory only)
+     Adds two trailing columns to the working sheet:
+       Party Name  -> ledger master "Ledger" for the row's delivery state
+       Invoice No. -> ledger master "Invoice No." for that state + "-MM"
+  -------------------------- */
+
+  if (!withInventory) {
+
+    const ledgerMap = buildLedgerMap(ledgerJson);
+    const mm = monthNum2(date);
+
+    working = working.map(r => {
+
+      const cfg = ledgerMap[normState(r["Customer's Delivery State"])] || {};
+
+      r['Party Name'] = cfg.ledger || '';
+      r['Invoice No.'] = cfg.invoiceNo ? `${cfg.invoiceNo}${mm ? `-${mm}` : ''}` : '';
+
+      return r;
+    });
+
+  }
+
+  /* -------------------------
      STEP 5 WORKING SHEET
   -------------------------- */
 
@@ -242,7 +311,9 @@ async function jiomartProcessor(
      STEP 6 GSTR B2C
   -------------------------- */
 
-  const b2cData = working.map(r => ({
+  // Without inventory: lead with "Seller GSTIN" (grouped in) and drop the
+  // "Item Quantity" column. With inventory: unchanged.
+  const b2cData = working.map(r => (withInventory ? {
 
     'Final GST Rate': r['Final GST Rate'],
     'Customer\'s Delivery State': r["Customer's Delivery State"],
@@ -251,11 +322,22 @@ async function jiomartProcessor(
     'IGST Amount': num(r['IGST Amount']),
     'CGST Amount': num(r['CGST Amount']),
     'SGST Amount (Or UTGST as applicable)': num(r['SGST Amount (Or UTGST as applicable)'])
+  } : {
+
+    'Seller GSTIN': r['Seller GSTIN'] || '',
+    'Final GST Rate': r['Final GST Rate'],
+    'Customer\'s Delivery State': r["Customer's Delivery State"],
+    'Taxable Value (Final Invoice Amount -Taxes)': num(r['Taxable Value (Final Invoice Amount -Taxes)']),
+    'IGST Amount': num(r['IGST Amount']),
+    'CGST Amount': num(r['CGST Amount']),
+    'SGST Amount (Or UTGST as applicable)': num(r['SGST Amount (Or UTGST as applicable)'])
   }));
 
   const gstrB2C = groupBy(
     b2cData,
-    ['Final GST Rate', "Customer's Delivery State"]
+    withInventory
+      ? ['Final GST Rate', "Customer's Delivery State"]
+      : ['Seller GSTIN', 'Final GST Rate', "Customer's Delivery State"]
   );
 
   XLSX.utils.book_append_sheet(
@@ -268,28 +350,35 @@ async function jiomartProcessor(
      STEP 7 GSTR HSN
   -------------------------- */
 
-  const hsnData = working.map(r => ({
+  let gstrHSN = null;
 
-    'HSN Code': r['HSN Code'],
-    'Final GST Rate': r['Final GST Rate'],
-    'Item Quantity': num(r['Item Quantity']),
-    'Taxable Value (Final Invoice Amount -Taxes)': num(r['Taxable Value (Final Invoice Amount -Taxes)']),
-    'IGST Amount': num(r['IGST Amount']),
-    'CGST Amount': num(r['CGST Amount']),
-    'SGST Amount (Or UTGST as applicable)': num(r['SGST Amount (Or UTGST as applicable)'])
+  // "GSTR HSN" sheet is only produced on the with-inventory path.
+  if (withInventory) {
 
-  }));
+    const hsnData = working.map(r => ({
 
-  const gstrHSN = groupBy(
-    hsnData,
-    ['HSN Code', 'Final GST Rate']
-  );
+      'HSN Code': r['HSN Code'],
+      'Final GST Rate': r['Final GST Rate'],
+      'Item Quantity': num(r['Item Quantity']),
+      'Taxable Value (Final Invoice Amount -Taxes)': num(r['Taxable Value (Final Invoice Amount -Taxes)']),
+      'IGST Amount': num(r['IGST Amount']),
+      'CGST Amount': num(r['CGST Amount']),
+      'SGST Amount (Or UTGST as applicable)': num(r['SGST Amount (Or UTGST as applicable)'])
 
-  XLSX.utils.book_append_sheet(
-    wb,
-    XLSX.utils.json_to_sheet(gstrHSN),
-    'GSTR HSN'
-  );
+    }));
+
+    gstrHSN = groupBy(
+      hsnData,
+      ['HSN Code', 'Final GST Rate']
+    );
+
+    XLSX.utils.book_append_sheet(
+      wb,
+      XLSX.utils.json_to_sheet(gstrHSN),
+      'GSTR HSN'
+    );
+
+  }
 
   /* -------------------------
      STEP 8 GSTR HSN BY SELLER GSTIN
@@ -331,7 +420,7 @@ async function jiomartProcessor(
      STEP 9 X2BETA WORKING SHEET
   -------------------------- */
 
-  const x2betaSheet = buildX2betaSheet(working, date);
+  const x2betaSheet = buildX2betaSheet(working, date, withInventory);
   XLSX.utils.book_append_sheet(wb, x2betaSheet, 'x2beta working');
 
   return {

@@ -1277,6 +1277,43 @@ async function flipkartProcessor(rawFileBuffer, skuData, stateConfigData, brandN
   );
   console.log(`✓ Added gstr1-working sheet with ${gstr1WorkingSheetData.length} rows`);
 
+  // 2.6 GSTR-HSN — same Seller GSTIN + Final GST Rate + Customer's Delivery
+  // State B2C summary as gstr1-working above (raw source-report Taxable Value
+  // and tax amounts, not the conversion-derived "Final" values). Emitted only
+  // for the "without inventory" run of sales-flipkart, per the accountant's
+  // request.
+  if (!withInventory) {
+    const gstrHsnMap = {};
+    for (const row of workingFileData) {
+      const hsnCode = row.hsn_code || '';
+      const key = `${row.seller_gstin || ''}|${hsnCode}|${row.final_gst_rate || 0}`;
+      if (!gstrHsnMap[key]) {
+        gstrHsnMap[key] = {
+          'Seller GSTIN': row.seller_gstin || '',
+          'HSN Code': hsnCode,
+          'Final GST Rate': row.final_gst_rate || 0,
+          'Sum of Item Quantity': 0,
+          'Sum of Taxable Value (Final Invoice Amount -Taxes)': 0,
+          'Sum of IGST Amount': 0,
+          'Sum of CGST Amount': 0,
+          'Sum of SGST Amount (Or UTGST as applicable)': 0
+        };
+      }
+      gstrHsnMap[key]['Sum of Item Quantity'] += safeNumber(row.item_quantity);
+      gstrHsnMap[key]['Sum of Taxable Value (Final Invoice Amount -Taxes)'] += safeNumber(row.taxable_value);
+      gstrHsnMap[key]['Sum of IGST Amount'] += safeNumber(row.igst_amount);
+      gstrHsnMap[key]['Sum of CGST Amount'] += safeNumber(row.cgst_amount);
+      gstrHsnMap[key]['Sum of SGST Amount (Or UTGST as applicable)'] += safeNumber(row.sgst_amount);
+    }
+    const gstrHsnSheetData = Object.values(gstrHsnMap);
+    XLSX.utils.book_append_sheet(
+      outputWorkbook,
+      XLSX.utils.json_to_sheet(gstrHsnSheetData),
+      'GSTR-HSN'
+    );
+    console.log(`✓ Added GSTR-HSN sheet with ${gstrHsnSheetData.length} rows`);
+  }
+
   // 3. pivot
   const pivotSheetData = pivotData.map(row => {
     const sheetRow = {
