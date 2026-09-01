@@ -35,7 +35,7 @@ const createAgent = async (req, res, next) => {
  */
 const getAllAgents = async (req, res, next) => {
   try {
-    const agents = await Agent.findAll({ order: [['createdAt', 'DESC']] });
+    const agents = await Agent.findAll({ order: [['createdAt', 'DESC'], ['name', 'ASC']] });
     res.json(agents);
   } catch (error) {
     next(error);
