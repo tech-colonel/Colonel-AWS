@@ -60,6 +60,7 @@ const salesBlinkitController = require('../controllers/agents/sales-blinkit/sale
 router.get('/brands/:brandId/agents/:agentId/myntra/master', authenticateToken, salesMyntraController.getMasterData);
 router.post('/brands/:brandId/agents/:agentId/myntra/master/sku', authenticateToken, upload.single('file'), reattachUserContext, salesMyntraController.uploadSkuMaster);
 router.post('/brands/:brandId/agents/:agentId/myntra/master/ledger', authenticateToken, upload.single('file'), reattachUserContext, salesMyntraController.uploadLedgerMaster);
+router.post('/brands/:brandId/agents/:agentId/myntra/master/hsn', authenticateToken, upload.single('file'), reattachUserContext, salesMyntraController.uploadHsnMaster);
 router.post('/brands/:brandId/agents/:agentId/myntra/generate', authenticateToken, upload.fields([
     { name: 'rtoFile', maxCount: 1 },
     { name: 'packedFile', maxCount: 1 },

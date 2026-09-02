@@ -513,9 +513,12 @@ function generateShippingTallyReady(pivotRows, fileDate, withInventory) {
  * @param {string} brandName - Brand name
  * @param {string} date - Date string (Month-YYYY)
  * @param {boolean} withInventory - Whether to include SKU/FG mapping
+ * @param {Array} hsnData - Array of {article_type, HSN} rows (HSN reference master).
+ *                          Only consumed on the "without inventory" run, to resolve
+ *                          the HSN column of the GSTR-HSN sheet by article type.
  * @returns {Object} - { workingFileData, pivotData, afterPivotData, outputWorkbook }
  */
-async function myntraProcessor(fileBuffers, skuData, stateConfigData, brandName, date, withInventory = true) {
+async function myntraProcessor(fileBuffers, skuData, stateConfigData, brandName, date, withInventory = true, hsnData = []) {
   console.log('=== MYNTRA MACROS PROCESSING ===');
   console.log(`Brand: ${brandName}, Date: ${date}`);
 
@@ -536,6 +539,21 @@ async function myntraProcessor(fileBuffers, skuData, stateConfigData, brandName,
       }
     }
     console.log(`SKU map loaded with ${Object.keys(skuMap).length} entries`);
+  }
+
+  // Build article-type → HSN lookup. Feeds the "HSN" column of "working for
+  // Accounting" (both runs) and the GSTR-HSN sheet (without-inventory only).
+  // Keyed on a trimmed/lower-cased article type, same style as skuMap.
+  const hsnMap = {};
+  if (Array.isArray(hsnData) && hsnData.length) {
+    for (const item of hsnData) {
+      const articleType = String(
+        item.article_type || item['Article_type'] || item['Article Type'] || item.articleType || ''
+      ).trim().toLowerCase();
+      const hsn = item.HSN || item.hsn || item.Hsn || item['HSN Code'] || '';
+      if (articleType) hsnMap[articleType] = hsn;
+    }
+    console.log(`HSN map loaded with ${Object.keys(hsnMap).length} entries`);
   }
 
   // Build state config lookup map
@@ -583,6 +601,12 @@ async function myntraProcessor(fileBuffers, skuData, stateConfigData, brandName,
         missingMasterTracker.track({ masterType: 'sku', matchField: 'Sales portal SKU', value: skuId });
       }
     }
+
+    // HSN by article type — populates the "HSN" column of "working for Accounting"
+    // and the GSTR-HSN sheet. Left blank (not tracked as a missing-master blocker)
+    // when the article type has no entry in the HSN master.
+    const articleType = String(row.article_type || row.Article_type || '').trim();
+    const hsn = hsnMap[articleType.toLowerCase()] || '';
 
     // Get Ship to State (different field names in different reports)
     let shipToState = '';
@@ -673,6 +697,7 @@ async function myntraProcessor(fileBuffers, skuData, stateConfigData, brandName,
       brand_name: row.brand || brandName,
       master_category: row.master_category || '',
       article_type: row.article_type || '',
+      hsn: hsn,
       net_amount: safeNumber(row.net_amount || 0),
       shipment_value: safeNumber(row.shipment_value || 0),
       base_value: safeNumber(row.base_value || 0),
@@ -709,9 +734,12 @@ async function myntraProcessor(fileBuffers, skuData, stateConfigData, brandName,
       'Month': workingRow.month,
       'Date': workingRow.date_column,
       'Seller GSTIN': workingRow.seller_gstin,
-      'Invoice number': workingRow.invoice_number,
-      'Debtor Ledger': workingRow.debtor_ledger,
+      // Invoice number carries a "-<month number>" suffix; Debtor Ledger shows the
+      // mapped ledger from the Ledger master (not the raw ship-to state name).
+      'Invoice number': `${workingRow.invoice_number || ''}-${monthNumber}`,
+      'Debtor Ledger': workingRow.ship_to_state_tally_ledger,
       'SKU': workingRow.sku,
+      'HSN': workingRow.hsn,
       'Quantity': workingRow.quantity,
       'Shipping': workingRow.shipping_case,
       'GST Rate': workingRow.gst_rate,
@@ -750,9 +778,12 @@ async function myntraProcessor(fileBuffers, skuData, stateConfigData, brandName,
       'Month': workingRow.month,
       'Date': workingRow.date_column,
       'Seller GSTIN': workingRow.seller_gstin,
-      'Invoice number': workingRow.invoice_number,
-      'Debtor Ledger': workingRow.debtor_ledger,
+      // Invoice number carries a "-<month number>" suffix; Debtor Ledger shows the
+      // mapped ledger from the Ledger master (not the raw ship-to state name).
+      'Invoice number': `${workingRow.invoice_number || ''}-${monthNumber}`,
+      'Debtor Ledger': workingRow.ship_to_state_tally_ledger,
       'SKU': workingRow.sku,
+      'HSN': workingRow.hsn,
       'Quantity': -Math.abs(workingRow.quantity),
       'Shipping': workingRow.shipping_case,
       'GST Rate': workingRow.gst_rate,
@@ -793,9 +824,12 @@ async function myntraProcessor(fileBuffers, skuData, stateConfigData, brandName,
       'Month': workingRow.month,
       'Date': workingRow.date_column,
       'Seller GSTIN': workingRow.seller_gstin,
-      'Invoice number': workingRow.invoice_number,
-      'Debtor Ledger': workingRow.debtor_ledger,
+      // Invoice number carries a "-<month number>" suffix; Debtor Ledger shows the
+      // mapped ledger from the Ledger master (not the raw ship-to state name).
+      'Invoice number': `${workingRow.invoice_number || ''}-${monthNumber}`,
+      'Debtor Ledger': workingRow.ship_to_state_tally_ledger,
       'SKU': workingRow.sku,
+      'HSN': workingRow.hsn,
       'Quantity': -Math.abs(workingRow.quantity),
       'Shipping': isInterState ? 'InterState' : 'Local',
       'GST Rate': workingRow.gst_rate,
@@ -851,6 +885,9 @@ async function myntraProcessor(fileBuffers, skuData, stateConfigData, brandName,
         date_column: row.date_column,
         final_invoice_no: row.final_invoice_no,
         tally_ledgers: row.debtor_ledger,
+        // Mapped ledger from the Ledger master (same value used for "Debtor Ledger"
+        // in "working for Accounting"); consumed by x2beta's Party Ledger column.
+        ship_to_state_tally_ledger: row.ship_to_state_tally_ledger || '',
         sum_of_quantity: 0,
         rate: row.gst_rate,
         sum_of_base_value: 0,
@@ -1147,29 +1184,31 @@ async function myntraProcessor(fileBuffers, skuData, stateConfigData, brandName,
   XLSX.utils.book_append_sheet(outputWorkbook, pivotSheet, 'Pivot table');
 
   // ============================================================
-  // STEP 2.5: CREATE TALLY READY SHEET
+  // STEP 2.5: CREATE TALLY READY + SHIPPING TALLY READY SHEETS
+  // Dropped on the "without inventory" run — that run ships the GSTR-working /
+  // GSTR-HSN sheets instead (see STEP 2.7 below).
   // ============================================================
-  console.log('Step 2.5: Create Tally Ready sheet');
-  const tallyReadyResult = generateTallyReady(pivotData, date, withInventory);
-  // Build array of arrays: [headers, ...dataRows]
-  const tallyReadySheetData = [tallyReadyResult.headers, ...tallyReadyResult.data];
-  const tallyReadySheet = XLSX.utils.aoa_to_sheet(tallyReadySheetData);
-  // Add formulas for calculated columns
-  addFormulasToTallySheet(tallyReadySheet, tallyReadyResult.headers, tallyReadyResult.data.length);
-  XLSX.utils.book_append_sheet(outputWorkbook, tallyReadySheet, 'tally ready');
-  console.log(`✓ Added tally ready sheet with ${tallyReadyResult.data.length} rows and formulas`);
+  if (withInventory) {
+    console.log('Step 2.5: Create Tally Ready sheet');
+    const tallyReadyResult = generateTallyReady(pivotData, date, withInventory);
+    // Build array of arrays: [headers, ...dataRows]
+    const tallyReadySheetData = [tallyReadyResult.headers, ...tallyReadyResult.data];
+    const tallyReadySheet = XLSX.utils.aoa_to_sheet(tallyReadySheetData);
+    // Add formulas for calculated columns
+    addFormulasToTallySheet(tallyReadySheet, tallyReadyResult.headers, tallyReadyResult.data.length);
+    XLSX.utils.book_append_sheet(outputWorkbook, tallyReadySheet, 'tally ready');
+    console.log(`✓ Added tally ready sheet with ${tallyReadyResult.data.length} rows and formulas`);
 
-
-  // ============================================================
-  console.log('Step 2.5: Create shipping ready sheet');
-  const shippingtallyReadyResult = generateShippingTallyReady(pivotData, date, withInventory);
-  // Build array of arrays: [headers, ...dataRows]
-  const shippingtallyReadySheetData = [shippingtallyReadyResult.headers, ...shippingtallyReadyResult.data];
-  const shippingtallyReadySheet = XLSX.utils.aoa_to_sheet(shippingtallyReadySheetData);
-  // Add formulas for calculated columns (if any)
-  addFormulasToTallySheet(shippingtallyReadySheet, shippingtallyReadyResult.headers, shippingtallyReadyResult.data.length);
-  XLSX.utils.book_append_sheet(outputWorkbook, shippingtallyReadySheet, 'shipping tally ready');
-  console.log(`✓ Added shipping tally ready sheet with ${shippingtallyReadyResult.data.length} rows and formulas`);
+    console.log('Step 2.5: Create shipping ready sheet');
+    const shippingtallyReadyResult = generateShippingTallyReady(pivotData, date, withInventory);
+    // Build array of arrays: [headers, ...dataRows]
+    const shippingtallyReadySheetData = [shippingtallyReadyResult.headers, ...shippingtallyReadyResult.data];
+    const shippingtallyReadySheet = XLSX.utils.aoa_to_sheet(shippingtallyReadySheetData);
+    // Add formulas for calculated columns (if any)
+    addFormulasToTallySheet(shippingtallyReadySheet, shippingtallyReadyResult.headers, shippingtallyReadyResult.data.length);
+    XLSX.utils.book_append_sheet(outputWorkbook, shippingtallyReadySheet, 'shipping tally ready');
+    console.log(`✓ Added shipping tally ready sheet with ${shippingtallyReadyResult.data.length} rows and formulas`);
+  }
 
   // ============================================================
   // STEP 2.6: CREATE X2BETA WORKING + X2BETA-SHIPPING SHEETS
@@ -1200,7 +1239,7 @@ async function myntraProcessor(fileBuffers, skuData, stateConfigData, brandName,
       { header: 'Ref. Date', get: () => x2betaVchDate },
       { header: 'Is CN?', get: () => null },
       { header: 'Is Vch?', get: () => null },
-      { header: 'Party Ledger*', get: r => r.tally_ledgers || '' },
+      { header: 'Party Ledger*', get: r => r.ship_to_state_tally_ledger || r.tally_ledgers || '' },
       { header: 'Sales Ledger*', get: r => `Sales Myntra-${getSellerStateAbbr(r.seller_gstin) || ''} ${Number(r.rate || 0)}%` },
       { header: 'Stock Item', get: r => r.fg || '' },
       { header: 'Description', get: () => null },
@@ -1288,9 +1327,113 @@ async function myntraProcessor(fileBuffers, skuData, stateConfigData, brandName,
   XLSX.utils.book_append_sheet(outputWorkbook, x2betaSheet, 'x2beta working');
   console.log(`✓ Added x2beta working sheet with ${pivotData.length} rows`);
 
-  // 3. Shipped sheet (from Packed data)
+  // ============================================================
+  // STEP 2.7: GSTR-working + GSTR-HSN  ("without inventory" run only)
+  // Two GSTR-1 style summaries built from the merged working rows. GST is split
+  // the exact same way as "working for Accounting" above (from tax_amount +
+  // shipping_case, RTO by seller state vs location), and RT/RTO measures carry
+  // the same negative sign, so these sheets reconcile to that one.
+  //   GSTR-working : Seller GSTN | tax_rate | location
+  //   GSTR-HSN     : Seller GSTN | HSN (by article type) | tax_rate
+  // ============================================================
+  if (!withInventory) {
+    const gstrMeasureRows = workingFileData.map(wr => {
+      const taxAmount = safeNumber(wr.tax_amount);
+      const isInterState = wr.report_type === 'RTO'
+        ? normalizeStateName(wr.state) !== normalizeStateName(wr.location)
+        : String(wr.shipping_case || '').toLowerCase() === 'interstate';
+
+      let igst = isInterState ? taxAmount : 0;
+      let cgst = isInterState ? 0 : taxAmount / 2;
+      let sgst = isInterState ? 0 : taxAmount / 2;
+      let quantity = safeNumber(wr.quantity);
+      let baseValue = safeNumber(wr.report_type === 'Packed' ? wr.base_Value : wr.base_value);
+
+      if (wr.report_type !== 'Packed') {
+        quantity = -Math.abs(quantity);
+        baseValue = -Math.abs(baseValue);
+        igst = -Math.abs(igst);
+        cgst = -Math.abs(cgst);
+        sgst = -Math.abs(sgst);
+      }
+
+      return {
+        seller_gstin: wr.seller_gstin || '',
+        tax_rate: safeNumber(wr.gst_rate),
+        location: wr.location || '',
+        hsn: wr.hsn || '',
+        quantity,
+        base_value: baseValue,
+        igst_amt: igst,
+        cgst_amt: cgst,
+        sgst_amt: sgst
+      };
+    });
+
+    // ---- GSTR-working : group by Seller GSTN + tax_rate + location ----
+    const gstrWorkingMap = {};
+    for (const r of gstrMeasureRows) {
+      const key = `${r.seller_gstin}||${r.tax_rate}||${r.location}`;
+      if (!gstrWorkingMap[key]) {
+        gstrWorkingMap[key] = {
+          'Seller GSTN': r.seller_gstin,
+          'tax_rate': r.tax_rate,
+          'location': r.location,
+          'Sum of base_value': 0,
+          'Sum of igst_amt': 0,
+          'Sum of cgst_amt': 0,
+          'Sum of sgst_amt': 0
+        };
+      }
+      gstrWorkingMap[key]['Sum of base_value'] += r.base_value;
+      gstrWorkingMap[key]['Sum of igst_amt'] += r.igst_amt;
+      gstrWorkingMap[key]['Sum of cgst_amt'] += r.cgst_amt;
+      gstrWorkingMap[key]['Sum of sgst_amt'] += r.sgst_amt;
+    }
+    const gstrWorkingSheetData = Object.values(gstrWorkingMap);
+    XLSX.utils.book_append_sheet(
+      outputWorkbook,
+      XLSX.utils.json_to_sheet(gstrWorkingSheetData),
+      'GSTR-working'
+    );
+    console.log(`✓ Added GSTR-working sheet with ${gstrWorkingSheetData.length} rows`);
+
+    // ---- GSTR-HSN : group by Seller GSTN + HSN + tax_rate ----
+    const gstrHsnMap = {};
+    for (const r of gstrMeasureRows) {
+      const key = `${r.seller_gstin}||${r.hsn}||${r.tax_rate}`;
+      if (!gstrHsnMap[key]) {
+        gstrHsnMap[key] = {
+          'Seller GSTN': r.seller_gstin,
+          'HSN': r.hsn,
+          'tax_rate': r.tax_rate,
+          'Sum of quantity': 0,
+          'Sum of base_value': 0,
+          'Sum of igst_amt': 0,
+          'Sum of cgst_amt': 0,
+          'Sum of sgst_amt': 0
+        };
+      }
+      gstrHsnMap[key]['Sum of quantity'] += r.quantity;
+      gstrHsnMap[key]['Sum of base_value'] += r.base_value;
+      gstrHsnMap[key]['Sum of igst_amt'] += r.igst_amt;
+      gstrHsnMap[key]['Sum of cgst_amt'] += r.cgst_amt;
+      gstrHsnMap[key]['Sum of sgst_amt'] += r.sgst_amt;
+    }
+    const gstrHsnSheetData = Object.values(gstrHsnMap);
+    XLSX.utils.book_append_sheet(
+      outputWorkbook,
+      XLSX.utils.json_to_sheet(gstrHsnSheetData),
+      'GSTR-HSN'
+    );
+    console.log(`✓ Added GSTR-HSN sheet with ${gstrHsnSheetData.length} rows`);
+  }
+
+  // 3. Packed source rows — sheet is named "packed" on the "without inventory"
+  //    run (the accurate label) and kept as "shipped" for backwards
+  //    compatibility on the with-inventory run.
   const shippedSheet = XLSX.utils.json_to_sheet(packedData);
-  XLSX.utils.book_append_sheet(outputWorkbook, shippedSheet, 'shipped');
+  XLSX.utils.book_append_sheet(outputWorkbook, shippedSheet, withInventory ? 'shipped' : 'packed');
 
   // 4. Returns sheet (from RT data)
   const returnsSheet = XLSX.utils.json_to_sheet(rtData);

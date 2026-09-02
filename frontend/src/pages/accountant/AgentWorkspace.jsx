@@ -32,7 +32,7 @@ const AgentWorkspace = () => {
   const { brandId, agentId } = useParams();
   const navigate = useNavigate();
   const [agent, setAgent] = useState(null);
-  const [masterData, setMasterData] = useState({ sku_master: [], ledger_master: [] });
+  const [masterData, setMasterData] = useState({ sku_master: [], ledger_master: [], hsn_master: [] });
   const [ledgerPreviewData, setLedgerPreviewData] = useState([]);
   const [ledgerPreviewLoading, setLedgerPreviewLoading] = useState(false);
   const [files, setFiles] = useState([]);
@@ -71,6 +71,8 @@ const AgentWorkspace = () => {
   // Modal states
   const [showUploadSkuModal, setShowUploadSkuModal] = useState(false);
   const [showUploadLedgerModal, setShowUploadLedgerModal] = useState(false);
+  const [showUploadHsnModal, setShowUploadHsnModal] = useState(false);
+  const [showViewHsnModal, setShowViewHsnModal] = useState(false);
   const [showViewSkuModal, setShowViewSkuModal] = useState(false);
   const [showViewLedgerModal, setShowViewLedgerModal] = useState(false);
   const [showGenerateModal, setShowGenerateModal] = useState(false);
@@ -91,6 +93,7 @@ const AgentWorkspace = () => {
 
   const [skuFile, setSkuFile] = useState(null);
   const [ledgerFile, setLedgerFile] = useState(null);
+  const [hsnFile, setHsnFile] = useState(null);
 
   // SKU Modal extra state
   const [skuSearch, setSkuSearch] = useState('');
@@ -239,6 +242,29 @@ const AgentWorkspace = () => {
       toast.success('Ledger Master uploaded successfully');
       setShowUploadLedgerModal(false);
       setLedgerFile(null);
+      fetchData();
+    } catch (error) {
+      toast.error('Upload failed');
+    }
+  };
+
+  const handleUploadHsn = async () => {
+    if (!hsnFile) {
+      toast.error('Please select a file');
+      return;
+    }
+
+    const formData = new FormData();
+    formData.append('file', hsnFile);
+
+    try {
+      const agentType = await detectAgentType();
+      await api.post(`/api/brands/${brandId}/agents/${agentId}/${agentType}/master/hsn`, formData, {
+        headers: { 'Content-Type': 'multipart/form-data' }
+      });
+      toast.success('HSN Master uploaded successfully');
+      setShowUploadHsnModal(false);
+      setHsnFile(null);
       fetchData();
     } catch (error) {
       toast.error('Upload failed');
@@ -843,9 +869,34 @@ const AgentWorkspace = () => {
                       View Ledger
                     </Button>
                   </div>
+                  {isMyntra && (
+                    <div className="grid grid-cols-2 gap-3">
+                      <Button
+                        variant="outline"
+                        onClick={() => setShowUploadHsnModal(true)}
+                        data-testid="upload-hsn-button"
+                        className="w-full"
+                      >
+                        <Upload className="mr-2 h-4 w-4" />
+                        Upload HSN
+                      </Button>
+                      <Button
+                        variant="outline"
+                        onClick={() => setShowViewHsnModal(true)}
+                        data-testid="view-hsn-button"
+                        className="w-full"
+                      >
+                        <Eye className="mr-2 h-4 w-4" />
+                        View HSN
+                      </Button>
+                    </div>
+                  )}
                   <div className="pt-2 text-xs text-slate-500 space-y-1">
                     <p>SKU Master: {masterData.sku_master?.length || 0} records</p>
                     <p>Ledger Master: {masterData.ledger_master?.length || 0} records</p>
+                    {isMyntra && (
+                      <p>HSN Master: {masterData.hsn_master?.length || 0} records <span className="text-slate-400">(Without Inventory · GSTR-HSN)</span></p>
+                    )}
                   </div>
                 </CardContent>
               </Card>
@@ -1001,6 +1052,40 @@ const AgentWorkspace = () => {
                     Cancel
                   </Button>
                   <Button onClick={handleUploadLedger} className="flex-1" data-testid="ledger-upload-submit">
+                    Upload
+                  </Button>
+                </div>
+              </div>
+            </DialogContent>
+          </Dialog>
+
+          {/* Upload HSN Master Modal (Myntra — Without Inventory GSTR-HSN sheet) */}
+          <Dialog open={showUploadHsnModal} onOpenChange={setShowUploadHsnModal}>
+            <DialogContent onClose={() => setShowUploadHsnModal(false)}>
+              <DialogHeader>
+                <DialogTitle>Upload HSN Master</DialogTitle>
+              </DialogHeader>
+              <div className="space-y-4">
+                <div>
+                  <Label htmlFor="hsn-file">Select Excel File *</Label>
+                  <Input
+                    id="hsn-file"
+                    type="file"
+                    accept=".xlsx,.xls"
+                    onChange={(e) => setHsnFile(e.target.files[0])}
+                    data-testid="hsn-file-input"
+                    className="mt-2"
+                  />
+                  <p className="text-xs text-slate-500 mt-2">
+                    Upload Excel file with columns: Article_type, HSN. Used only by the
+                    Without Inventory run to fill the GSTR-HSN sheet.
+                  </p>
+                </div>
+                <div className="flex gap-3 pt-4">
+                  <Button type="button" variant="secondary" onClick={() => setShowUploadHsnModal(false)} className="flex-1">
+                    Cancel
+                  </Button>
+                  <Button onClick={handleUploadHsn} className="flex-1" data-testid="hsn-upload-submit">
                     Upload
                   </Button>
                 </div>
@@ -1206,6 +1291,48 @@ const AgentWorkspace = () => {
                   </div>
                 ) : (
                   <p className="text-sm text-slate-600 py-8 text-center">No ledger master data uploaded</p>
+                )}
+              </div>
+            </DialogContent>
+          </Dialog>
+
+          {/* View HSN Master Modal (Myntra — Without Inventory GSTR-HSN sheet) */}
+          <Dialog open={showViewHsnModal} onOpenChange={setShowViewHsnModal}>
+            <DialogContent onClose={() => setShowViewHsnModal(false)} className="max-w-2xl max-h-[80vh] overflow-auto">
+              <DialogHeader>
+                <DialogTitle>HSN Master Data ({masterData.hsn_master?.length || 0} records)</DialogTitle>
+              </DialogHeader>
+              <div>
+                {masterData.hsn_master?.length > 0 ? (
+                  <div className="border rounded-lg overflow-auto max-h-[500px]">
+                    <Table>
+                      <TableHeader>
+                        <TableRow>
+                          <TableHead className="text-xs font-semibold">Article Type</TableHead>
+                          <TableHead className="text-xs font-semibold">HSN</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {masterData.hsn_master.slice(0, 100).map((row, idx) => {
+                          const articleType = row['Article_type'] || row['Article Type'] || row['article_type'] || row['ArticleType'] || row.articleType || '';
+                          const hsn = row['HSN'] || row['Hsn'] || row['hsn'] || row['HSN Code'] || '';
+                          return (
+                            <TableRow key={idx}>
+                              <TableCell className="text-xs">{articleType || <span className="text-slate-400 italic">—</span>}</TableCell>
+                              <TableCell className="text-xs">{hsn || <span className="text-slate-400 italic">—</span>}</TableCell>
+                            </TableRow>
+                          );
+                        })}
+                      </TableBody>
+                    </Table>
+                    {masterData.hsn_master.length > 100 && (
+                      <p className="text-xs text-slate-500 p-3 text-center border-t">
+                        Showing 100 of {masterData.hsn_master.length} records
+                      </p>
+                    )}
+                  </div>
+                ) : (
+                  <p className="text-sm text-slate-600 py-8 text-center">No HSN master data uploaded</p>
                 )}
               </div>
             </DialogContent>

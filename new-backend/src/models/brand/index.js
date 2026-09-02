@@ -33,6 +33,13 @@ const getBrandAgentModel = (sequelize) => {
     ledger_master: {
       type: DataTypes.JSONB,
       defaultValue: []
+    },
+    // Article-type → HSN reference master. Stored the same JSONB-on-brand_agents
+    // way as sku_master / ledger_master; currently consumed only by the
+    // sales-myntra "without inventory" run to build its GSTR-HSN sheet.
+    hsn_master: {
+      type: DataTypes.JSONB,
+      defaultValue: []
     }
   }, {
     tableName: 'brand_agents',
