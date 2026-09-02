@@ -1435,6 +1435,8 @@ const InvoiceAgentWorkspace = ({ agent }) => {
       )}
 
       <div className="rounded-xl border bg-white shadow-sm p-3" style={{ borderColor: T_BORDER }}>
+       <div className="flex flex-col gap-3">
+        {/* ROW 1 — view toggle + DOCUMENT KIND (segmented) + search */}
         <div className="flex flex-col xl:flex-row gap-3 xl:items-center xl:justify-between">
           {/* Today / History view toggle */}
           <div className="flex items-center gap-1 rounded-lg p-1 self-start" style={{ background: '#F1F5F9' }}>
@@ -1452,38 +1454,21 @@ const InvoiceAgentWorkspace = ({ agent }) => {
           {/* Document-kind tabs — Tax Invoice / Debit Note / Credit Note.
               Driven by `voucher_type`, which n8n already inverts to our side, so a
               supplier's Credit Note shows up under Debit Note here. */}
-          <div className="flex flex-wrap gap-1.5">
+          <div className="flex items-center gap-1 rounded-lg p-1 self-start" style={{ background: '#F1F5F9' }}>
             {[{ label: 'All', count: metrics.total },
               ...DOC_KINDS.map((k) => ({ label: k, count: metrics.docKinds[k] || 0 }))
             ].map((tab) => {
               const active = docFilter === tab.label;
-              const dot = tab.label === 'Debit Note' ? T_WARNING
+              const tone = tab.label === 'Debit Note' ? T_WARNING
                 : tab.label === 'Credit Note' ? T_DANGER
                   : tab.label === 'Tax Invoice' ? T_SUCCESS : T_BLUE;
               return (
                 <button key={tab.label} onClick={() => setDocFilter(tab.label)}
-                  className="inline-flex items-center gap-2 rounded-full px-3.5 py-1.5 text-sm font-semibold transition-all border"
-                  style={{ background: active ? '#FFFFFF' : 'transparent', borderColor: active ? T_BORDER : 'transparent', color: active ? T_TEXT_PRIMARY : T_TEXT_SECONDARY, boxShadow: active ? '0 1px 2px rgba(0,0,0,0.06)' : 'none' }}>
-                  <span className="w-2 h-2 rounded-full shrink-0" style={{ background: dot }} />
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-bold transition-all whitespace-nowrap"
+                  style={{ background: active ? '#FFFFFF' : 'transparent', color: active ? tone : T_TEXT_SECONDARY, boxShadow: active ? '0 1px 2px rgba(0,0,0,0.08)' : 'none' }}>
                   {tab.label}
-                  <span className="inline-flex items-center justify-center min-w-[20px] h-5 px-1.5 rounded-full text-[11px] font-bold" style={{ background: active ? T_BLUE_BG : '#F1F5F9', color: active ? T_BLUE : T_TEXT_SECONDARY }}>{tab.count}</span>
-                </button>
-              );
-            })}
-          </div>
-
-          {/* Status pills (img-39 style) */}
-          <div className="flex flex-wrap gap-1.5">
-            {statusTabs.map((tab) => {
-              const active = statusFilter === tab.label;
-              const dot = tab.label === 'Needs Review' ? T_WARNING : tab.label === 'Invalid' ? T_DANGER : tab.label === 'Done' ? T_SUCCESS : T_BLUE;
-              return (
-                <button key={tab.label} onClick={() => setStatusFilter(tab.label)}
-                  className="inline-flex items-center gap-2 rounded-full px-3.5 py-1.5 text-sm font-semibold transition-all border"
-                  style={{ background: active ? '#FFFFFF' : 'transparent', borderColor: active ? T_BORDER : 'transparent', color: active ? T_TEXT_PRIMARY : T_TEXT_SECONDARY, boxShadow: active ? '0 1px 2px rgba(0,0,0,0.06)' : 'none' }}>
-                  <span className="w-2 h-2 rounded-full shrink-0" style={{ background: dot }} />
-                  {tab.label}
-                  <span className="inline-flex items-center justify-center min-w-[20px] h-5 px-1.5 rounded-full text-[11px] font-bold" style={{ background: active ? T_BLUE_BG : '#F1F5F9', color: active ? T_BLUE : T_TEXT_SECONDARY }}>{tab.count}</span>
+                  <span className="inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded text-[11px] font-bold"
+                    style={{ background: active ? T_BLUE_BG : '#E2E8F0', color: active ? T_BLUE : T_TEXT_SECONDARY }}>{tab.count}</span>
                 </button>
               );
             })}
@@ -1509,6 +1494,27 @@ const InvoiceAgentWorkspace = ({ agent }) => {
             )}
           </div>
         </div>
+
+        {/* ROW 2 — WORK STATUS. Deliberately styled differently from the document
+            tabs above (small dot-pills vs a segmented control) so the two filter
+            axes read as separate things. They compose: e.g. Credit Note + Needs Review. */}
+        <div className="flex flex-wrap items-center gap-1.5 pt-3 border-t" style={{ borderColor: T_BORDER_LIGHT }}>
+          <span className="text-[10px] font-bold uppercase tracking-wider mr-1" style={{ color: T_TEXT_SECONDARY }}>Status</span>
+          {statusTabs.map((tab) => {
+            const active = statusFilter === tab.label;
+            const dot = tab.label === 'Needs Review' ? T_WARNING : tab.label === 'Invalid' ? T_DANGER : tab.label === 'Done' ? T_SUCCESS : T_BLUE;
+            return (
+              <button key={tab.label} onClick={() => setStatusFilter(tab.label)}
+                className="inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-[13px] font-semibold transition-all border whitespace-nowrap"
+                style={{ background: active ? T_BLUE_BG : 'transparent', borderColor: active ? T_BLUE : T_BORDER, color: active ? T_BLUE : T_TEXT_SECONDARY }}>
+                <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ background: dot }} />
+                {tab.label}
+                <span className="text-[11px] font-bold" style={{ color: active ? T_BLUE : T_TEXT_SECONDARY }}>{tab.count}</span>
+              </button>
+            );
+          })}
+        </div>
+       </div>
       </div>
 
       <div className="w-full">
