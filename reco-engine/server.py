@@ -221,6 +221,9 @@ class ReconciliationHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/purchase-invoice/build":
             self.handle_purchase_build()
             return
+        if parsed.path == "/api/x2beta/build":
+            self.handle_x2beta_build()
+            return
         if parsed.path != "/api/reconcile":
             self.write_json({"error": "Not found"}, 404)
             return
@@ -1172,6 +1175,42 @@ class ReconciliationHandler(BaseHTTPRequestHandler):
                 "summary": {"invoices": len(invoices), "line_items": n_lines,
                             "review_items": len(review)},
                 "review": review, "_xlsx_bytes": xlsx,
+            }
+            JOBS[job_id] = payload
+            self.write_json({k: v for k, v in payload.items() if not k.startswith("_")})
+        except Exception as exc:  # noqa: BLE001
+            self.write_json({"error": str(exc)}, 500)
+
+    def handle_x2beta_build(self) -> None:
+        """Build the X2Beta (Tally purchase-import) workbook from Invoice Process
+        rows and register it as a job so /api/jobs/<id>/export.xlsx serves it.
+
+        Body: {rows: [...invoice_process rows...], brand_name?, state_labels?}
+        One template serves every brand; only the GST ledger block is resolved
+        per run (reuse template spelling / create missing / blank unused)."""
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            data = json.loads(self.rfile.read(length) if length else b"{}")
+            rows = data.get("rows", []) or []
+            if not rows:
+                self.write_json({"error": "No invoice rows supplied"}, 400)
+                return
+            job_id = data.get("job_id") or uuid4().hex
+            from recon.x2beta_purchase import build_x2beta_workbook
+            xlsx, info = build_x2beta_workbook(
+                rows,
+                brand_name=data.get("brand_name"),
+                state_labels=data.get("state_labels") or None,
+            )
+            payload = {
+                "job_id": job_id, "reco_type": "x2beta_purchase",
+                "summary": {
+                    "input_rows": len(rows), "ledger_lines": info["rows"],
+                    "purchases": info["purchases"], "notes": info["notes"],
+                },
+                "created_columns": info["created_columns"],
+                "pruned_columns": info["pruned_columns"],
+                "_xlsx_bytes": xlsx,
             }
             JOBS[job_id] = payload
             self.write_json({k: v for k, v in payload.items() if not k.startswith("_")})

@@ -29,6 +29,13 @@ router.post('/brands/:brandId/purchase-invoice/master',  authenticateToken, purc
 router.get('/brands/:brandId/purchase-invoice/master',   authenticateToken, purchaseInvoice.searchMaster);
 router.post('/brands/:brandId/purchase-invoice/build',   authenticateToken, purchaseInvoice.build);
 
+// X2Beta (Tally purchase-import) export of the brand's Invoice Process rows.
+// Read-only; one template serves every brand (GST ledger block resolved per run).
+const x2beta = require('../controllers/agents/invoice-process/x2betaController');
+router.get('/brands/:brandId/invoice/x2beta/preview', authenticateToken, x2beta.preview);
+router.get('/brands/:brandId/invoice/x2beta',         authenticateToken, x2beta.build);
+router.post('/brands/:brandId/invoice/x2beta',        authenticateToken, x2beta.build);
+
 // ─── SSE: Real-time invoice processing status ──────────────────────────────
 // GET /api/brands/:brandId/agents/:agentId/invoice/status
 router.get('/brands/:brandId/agents/:agentId/invoice/status', authenticateToken, (req, res) => {

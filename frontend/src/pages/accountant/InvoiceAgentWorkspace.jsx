@@ -78,11 +78,28 @@ const num = (value) => Number(value || 0);
 const NA_TOKENS = new Set(['n/a', 'na', 'n.a.', 'missing', 'none', 'nil', '-', '—', 'null', 'undefined']);
 const missingVal = (value) => blank(value) || NA_TOKENS.has(String(value).trim().toLowerCase());
 
+// Document kind, read off `voucher_type` — which n8n already inverts to OUR side:
+//   supplier Tax Invoice -> "Purchase <State>"
+//   supplier Debit  Note -> "Credit Note <State>"
+//   supplier Credit Note -> "Debit Note <State>"
+// Rows processed before that change (2026-09-02) have no voucher_type at all and
+// fall back to 'Tax Invoice', which is what they were treated as anyway.
+const DOC_KINDS = ['Tax Invoice', 'Debit Note', 'Credit Note'];
+const docKindOf = (invoice) => {
+  const vt = String(invoice?.voucher_type || '').trim().toLowerCase();
+  if (vt.startsWith('credit note')) return 'Credit Note';
+  if (vt.startsWith('debit note')) return 'Debit Note';
+  return 'Tax Invoice';
+};
+
 const FIELD_SECTIONS = [
   {
     title: 'Vendor',
     fields: [
       { key: 'company', label: 'Vendor / Company', type: 'text', required: true },
+      // The exact ledger name in Tally, resolved by n8n's Vendor Master lookup —
+      // distinct from `company`, which is whatever the invoice prints.
+      { key: 'vendor_name_tally', label: 'Vendor (Tally)', type: 'text' },
       { key: 'seller_gstin', label: 'Seller GSTIN', type: 'text', required: true },
       { key: 'buyer_gstin', label: 'Buyer GSTIN', type: 'text', required: true },
     ],
@@ -93,6 +110,9 @@ const FIELD_SECTIONS = [
       { key: 'invoice_number', label: 'Invoice Number', type: 'text', required: true },
       { key: 'invoice_date', label: 'Invoice Date', type: 'date', required: true, display: formatDate },
       { key: 'due_date', label: 'Due Date', type: 'date', display: formatDate },
+      // Already inverted to OUR side by n8n: a supplier's Credit Note posts as our
+      // Debit Note, and vice versa. Carries the state suffix ("Debit Note Delhi").
+      { key: 'voucher_type', label: 'Voucher Type', type: 'text' },
       { key: 'category', label: 'Category', type: 'text' },
     ],
   },
@@ -185,9 +205,9 @@ const needsAccountantReview = (invoice) => {
   const status = String(invoice.status || '').trim();
   if (status === 'Approved' || status === 'Disapproved') return false;
   // Otherwise it needs review until the Tally vendor name + category are filled.
-  // vendor_name_tally isn't stored yet, so this reduces to "category missing" today,
-  // and stays correct if a Tally-vendor column is added later. "N/A"/"Missing"
-  // placeholders count as missing.
+  // vendor_name_tally is stored as of migration 027 (before that it was silently
+  // dropped, so older rows are NULL and still reduce to "category missing").
+  // "N/A"/"Missing" placeholders count as missing.
   return missingVal(invoice.vendor_name_tally) && missingVal(invoice.category);
 };
 
@@ -426,6 +446,8 @@ const InvoiceAgentWorkspace = ({ agent }) => {
   const [dateTo, setDateTo] = useState('');
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState('All');
+  // Document-kind tab (All / Tax Invoice / Debit Note / Credit Note).
+  const [docFilter, setDocFilter] = useState('All');
   const [filterMenuOpen, setFilterMenuOpen] = useState(false);
   const [showSheet, setShowSheet] = useState(false);
   const [summaryModal, setSummaryModal] = useState({ open: false, total: 0, approved: 0, review: 0, invalid: 0 });
@@ -772,8 +794,10 @@ const InvoiceAgentWorkspace = ({ agent }) => {
 
   // Metrics reflect the CURRENT view (today's counts, or the filtered history).
   const metrics = useMemo(() => {
-    const totals = { total: viewGroups.length, approved: 0, review: 0, invalid: 0, rejected: 0 };
+    const totals = { total: viewGroups.length, approved: 0, review: 0, invalid: 0, rejected: 0,
+                     docKinds: { 'Tax Invoice': 0, 'Debit Note': 0, 'Credit Note': 0 } };
     viewGroups.forEach((g) => {
+      totals.docKinds[docKindOf(g.head)] += 1;
       if (g.kind === 'invalid') totals.invalid += 1;
       else if (g.kind === 'review') totals.review += 1;
       else if (g.kind === 'rejected') totals.rejected += 1;
@@ -792,13 +816,15 @@ const InvoiceAgentWorkspace = ({ agent }) => {
         (statusFilter === 'Needs Review' && g.kind === 'review') ||
         (statusFilter === 'Invalid' && g.kind === 'invalid');
       if (!matchesStatus) return false;
+      if (docFilter !== 'All' && docKindOf(g.head) !== docFilter) return false;
       if (!needle) return true;
       const h = g.head;
-      const haystack = [h.company, h.invoice_number, h.seller_gstin, h.buyer_gstin, h.category,
+      const haystack = [h.company, h.vendor_name_tally, h.voucher_type,
+        h.invoice_number, h.seller_gstin, h.buyer_gstin, h.category,
         ...g.items.map((i) => i.product_name)].join(' ').toLowerCase();
       return haystack.includes(needle);
     });
-  }, [viewGroups, search, statusFilter]);
+  }, [viewGroups, search, statusFilter, docFilter]);
 
   // Flattened line items across visible groups — drives prev/next navigation.
   const selectableRows = useMemo(() => visibleGroups.flatMap((g) => g.items), [visibleGroups]);
@@ -1418,6 +1444,29 @@ const InvoiceAgentWorkspace = ({ agent }) => {
                 <button key={v.id} onClick={() => setViewMode(v.id)} className="px-3.5 py-1.5 rounded-md text-sm font-bold transition-all"
                   style={{ background: on ? '#FFFFFF' : 'transparent', color: on ? T_BLUE : T_TEXT_SECONDARY, boxShadow: on ? '0 1px 2px rgba(0,0,0,0.08)' : 'none' }}>
                   {v.label}
+                </button>
+              );
+            })}
+          </div>
+
+          {/* Document-kind tabs — Tax Invoice / Debit Note / Credit Note.
+              Driven by `voucher_type`, which n8n already inverts to our side, so a
+              supplier's Credit Note shows up under Debit Note here. */}
+          <div className="flex flex-wrap gap-1.5">
+            {[{ label: 'All', count: metrics.total },
+              ...DOC_KINDS.map((k) => ({ label: k, count: metrics.docKinds[k] || 0 }))
+            ].map((tab) => {
+              const active = docFilter === tab.label;
+              const dot = tab.label === 'Debit Note' ? T_WARNING
+                : tab.label === 'Credit Note' ? T_DANGER
+                  : tab.label === 'Tax Invoice' ? T_SUCCESS : T_BLUE;
+              return (
+                <button key={tab.label} onClick={() => setDocFilter(tab.label)}
+                  className="inline-flex items-center gap-2 rounded-full px-3.5 py-1.5 text-sm font-semibold transition-all border"
+                  style={{ background: active ? '#FFFFFF' : 'transparent', borderColor: active ? T_BORDER : 'transparent', color: active ? T_TEXT_PRIMARY : T_TEXT_SECONDARY, boxShadow: active ? '0 1px 2px rgba(0,0,0,0.06)' : 'none' }}>
+                  <span className="w-2 h-2 rounded-full shrink-0" style={{ background: dot }} />
+                  {tab.label}
+                  <span className="inline-flex items-center justify-center min-w-[20px] h-5 px-1.5 rounded-full text-[11px] font-bold" style={{ background: active ? T_BLUE_BG : '#F1F5F9', color: active ? T_BLUE : T_TEXT_SECONDARY }}>{tab.count}</span>
                 </button>
               );
             })}
