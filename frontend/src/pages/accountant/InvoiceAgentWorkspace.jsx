@@ -4,7 +4,7 @@ import {
   AlertTriangle, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, Database,
   ExternalLink, FileText, Loader2, Maximize2, Pencil, Play, RefreshCw,
   Save, Search, Sheet, Sparkles, ThumbsDown, ThumbsUp, Trash2, X, Zap,
-  Mail, UploadCloud, Inbox, FolderOpen
+  Mail, UploadCloud, Inbox, FolderOpen, Download
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { format } from 'date-fns';
@@ -1013,6 +1013,46 @@ const InvoiceAgentWorkspace = ({ agent }) => {
     }
   };
 
+  // ── X2Beta export ─────────────────────────────────────────────────────────
+  // Streams the CA's 109-column Tally purchase-import workbook for this brand.
+  // The engine classifies each voucher off `voucher_type` (already inverted to our
+  // side by n8n) and resolves the GST ledger block per run, so one template serves
+  // every brand. Honours the History date range when one is set.
+  const [x2betaBusy, setX2betaBusy] = useState(false);
+  const downloadX2Beta = async () => {
+    setX2betaBusy(true);
+    try {
+      const params = {};
+      if (viewMode === 'history' && dateFrom && dateTo) {
+        params.from = dateFrom;
+        params.to = dateTo;
+      }
+      const res = await api.get(`/api/brands/${brandId}/invoice/x2beta`, {
+        params, responseType: 'blob',
+      });
+      // filename comes from Content-Disposition (brand-named + dated)
+      const cd = res.headers['content-disposition'] || '';
+      const match = cd.match(/filename="?([^";]+)"?/);
+      const name = match ? match[1] : 'X2Beta.xlsx';
+      const url = window.URL.createObjectURL(new Blob([res.data]));
+      const a = document.createElement('a');
+      a.href = url; a.download = name;
+      document.body.appendChild(a); a.click(); a.remove();
+      window.URL.revokeObjectURL(url);
+      toast.success(`X2Beta workbook downloaded — ${name}`);
+    } catch (e) {
+      // the blob path hides JSON errors, so read them back out
+      let msg = 'X2Beta export failed';
+      try {
+        const txt = e?.response?.data instanceof Blob ? await e.response.data.text() : null;
+        if (txt) msg = JSON.parse(txt).error || msg;
+      } catch (_) { /* keep default */ }
+      toast.error(msg);
+    } finally {
+      setX2betaBusy(false);
+    }
+  };
+
   const statusTabs = [
     { label: 'All', count: metrics.total },
     { label: 'Done', count: metrics.approved },
@@ -1235,6 +1275,17 @@ const InvoiceAgentWorkspace = ({ agent }) => {
                 style={{ border: `1px solid ${T_BORDER}`, color: T_TEXT_SECONDARY }}
               >
                 <Sheet className="w-4 h-4" /> Google Drive Folder
+              </button>
+              <button
+                onClick={downloadX2Beta}
+                disabled={x2betaBusy}
+                title="Download the Tally X2Beta purchase-import workbook for this brand"
+                className="inline-flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-semibold transition-all hover:bg-blue-50 disabled:opacity-50"
+                style={{ border: `1px solid ${T_BLUE}`, color: T_BLUE }}
+              >
+                {x2betaBusy
+                  ? <Loader2 className="w-4 h-4 animate-spin" />
+                  : <Download className="w-4 h-4" />} X2Beta
               </button>
               <button
                 onClick={() => fetchInvoices()}
