@@ -20,6 +20,26 @@ async function ensureDir() {
     await fs.ensureDir(OUTPUT_DIR);
 }
 
+const MONTH_TO_NUM = {
+    january: 1, february: 2, march: 3, april: 4, may: 5, june: 6,
+    july: 7, august: 8, september: 9, october: 10, november: 11, december: 12
+};
+
+/**
+ * Real ISO date for the SELECTED sales period (15th of the month, so a timezone
+ * shift can't roll it into an adjacent month). This is what flipkartProcessor
+ * must receive as its `date` arg: it drives the invoice-number month suffix and
+ * the Tally voucher dates. Previously the controller passed
+ * new Date().toISOString(), so every run was stamped with the month the file
+ * happened to be generated in (e.g. a Jan-2027 run in Sep-2026 came out "-09").
+ */
+function periodDateISO(month, year) {
+    const m = MONTH_TO_NUM[String(month).trim().toLowerCase()] || parseInt(month, 10);
+    const y = parseInt(year, 10);
+    if (!m || m < 1 || m > 12 || !y) return new Date().toISOString();
+    return new Date(Date.UTC(y, m - 1, 15)).toISOString();
+}
+
 /**
  * Upload SKU Master
  */
@@ -131,7 +151,7 @@ const generate = async (req, res, next) => {
             sourceSheetData,
             masterData.ledger_master,
             brand.name,
-            new Date().toISOString(),
+            periodDateISO(month, year),
             useInventory
         );
 
