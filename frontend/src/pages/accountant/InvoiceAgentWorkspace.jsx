@@ -1019,11 +1019,15 @@ const InvoiceAgentWorkspace = ({ agent }) => {
   // side by n8n) and resolves the GST ledger block per run, so one template serves
   // every brand. Honours the History date range when one is set.
   const [x2betaBusy, setX2betaBusy] = useState(false);
-  const downloadX2Beta = async () => {
+  const [x2betaMenu, setX2betaMenu] = useState(false);
+  // scope: 'latest' = only the most recent n8n run's invoices (the per-run sheet),
+  //        'all'    = every invoice we hold for this brand.
+  const downloadX2Beta = async (scope) => {
+    setX2betaMenu(false);
     setX2betaBusy(true);
     try {
-      const params = {};
-      if (viewMode === 'history' && dateFrom && dateTo) {
+      const params = scope === 'latest' ? { scope: 'latest' } : {};
+      if (scope !== 'latest' && viewMode === 'history' && dateFrom && dateTo) {
         params.from = dateFrom;
         params.to = dateTo;
       }
@@ -1276,17 +1280,44 @@ const InvoiceAgentWorkspace = ({ agent }) => {
               >
                 <Sheet className="w-4 h-4" /> Google Drive Folder
               </button>
-              <button
-                onClick={downloadX2Beta}
-                disabled={x2betaBusy}
-                title="Download the Tally X2Beta purchase-import workbook for this brand"
-                className="inline-flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-semibold transition-all hover:bg-blue-50 disabled:opacity-50"
-                style={{ border: `1px solid ${T_BLUE}`, color: T_BLUE }}
-              >
-                {x2betaBusy
-                  ? <Loader2 className="w-4 h-4 animate-spin" />
-                  : <Download className="w-4 h-4" />} X2Beta
-              </button>
+              <div className="relative">
+                <button
+                  onClick={() => setX2betaMenu((v) => !v)}
+                  disabled={x2betaBusy}
+                  title="Download the Tally X2Beta purchase-import workbook"
+                  className="inline-flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-semibold transition-all hover:bg-blue-50 disabled:opacity-50"
+                  style={{ border: `1px solid ${T_BLUE}`, color: T_BLUE }}
+                >
+                  {x2betaBusy
+                    ? <Loader2 className="w-4 h-4 animate-spin" />
+                    : <Download className="w-4 h-4" />} X2Beta
+                  <ChevronDown className="w-3.5 h-3.5" />
+                </button>
+                {x2betaMenu && !x2betaBusy && (
+                  <>
+                    {/* click-away catcher */}
+                    <div className="fixed inset-0 z-10" onClick={() => setX2betaMenu(false)} />
+                    <div className="absolute right-0 mt-1 z-20 w-64 rounded-lg border bg-white shadow-lg overflow-hidden"
+                      style={{ borderColor: T_BORDER }}>
+                      <button onClick={() => downloadX2Beta('latest')}
+                        className="w-full text-left px-4 py-2.5 hover:bg-slate-50 transition-colors">
+                        <div className="text-sm font-bold" style={{ color: T_TEXT_PRIMARY }}>Latest run</div>
+                        <div className="text-[11px] mt-0.5" style={{ color: T_TEXT_SECONDARY }}>
+                          Only the invoices from the most recent processing run
+                        </div>
+                      </button>
+                      <div style={{ borderTop: `1px solid ${T_BORDER_LIGHT}` }} />
+                      <button onClick={() => downloadX2Beta('all')}
+                        className="w-full text-left px-4 py-2.5 hover:bg-slate-50 transition-colors">
+                        <div className="text-sm font-bold" style={{ color: T_TEXT_PRIMARY }}>All data</div>
+                        <div className="text-[11px] mt-0.5" style={{ color: T_TEXT_SECONDARY }}>
+                          Every invoice for this brand{viewMode === 'history' && dateFrom && dateTo ? ' in the selected dates' : ''}
+                        </div>
+                      </button>
+                    </div>
+                  </>
+                )}
+              </div>
               <button
                 onClick={() => fetchInvoices()}
                 disabled={invoicesLoading}

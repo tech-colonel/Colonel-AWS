@@ -55,9 +55,28 @@ exports.build = async (req, res) => {
 
     const where = ['brand_id = :brandId'];
     const repl = { brandId };
-    if (q.run_id) {
+
+    // scope=latest -> only the most recent n8n execution's rows. Rows written
+    // before run_id existed are NULL and deliberately excluded here; they are
+    // still reachable with the default (all) scope.
+    let runId = q.run_id;
+    if (!runId && String(q.scope || '').toLowerCase() === 'latest') {
+      const [latest] = await seq.query(
+        `SELECT run_id FROM invoice_process
+          WHERE brand_id = :brandId AND run_id IS NOT NULL
+          ORDER BY processed_on DESC NULLS LAST LIMIT 1`,
+        { replacements: { brandId }, type: QueryTypes.SELECT }
+      );
+      if (!latest) {
+        return res.status(404).json({
+          error: 'No run has been recorded yet — process invoices once, then Latest run will work. Use "All data" for existing invoices.',
+        });
+      }
+      runId = latest.run_id;
+    }
+    if (runId) {
       where.push('run_id = :runId');
-      repl.runId = q.run_id;
+      repl.runId = runId;
     }
     if (q.month && q.year) {
       where.push('month = :month AND year = :year');
@@ -104,11 +123,14 @@ exports.build = async (req, res) => {
     const xr = await enginePool.exportFromEngines(jobId,
       { responseType: 'arraybuffer', timeout: 200000 });
 
+    // Filename says WHICH slice this is, so a "latest run" file is never confused
+    // with a full export sitting in the same Downloads folder.
     const slug = (brand.name || 'Brand').replace(/[^A-Za-z0-9]+/g, '');
+    const scopeTag = runId ? `Run${String(runId).replace(/[^A-Za-z0-9]+/g, '')}` : 'All';
     res.setHeader('Content-Type',
       'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.setHeader('Content-Disposition',
-      `attachment; filename="${slug}_X2Beta_${stamp()}.xlsx"`);
+      `attachment; filename="${slug}_X2Beta_${scopeTag}_${stamp()}.xlsx"`);
     res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition');
     return res.send(Buffer.from(xr.data));
   } catch (e) {

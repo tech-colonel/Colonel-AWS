@@ -162,6 +162,18 @@ const feedInvoicesFromN8n = async (req, res, next) => {
         console.log('[n8n feed] Extracted -> brandName:', brandName, '| agentName:', agentName);
 
         // ─── Extract invoice array ──────────────────────────────────────
+        // n8n stamps every POST of one execution with the same `$execution.id`, so
+        // rows written across the many per-line-item calls of a single run share a
+        // run_id. That is what "Latest run" filters on. Older rows (and any caller
+        // that doesn't send it) stay NULL and are only reachable via "All data".
+        const runId = String(
+            req.query.run_id || req.body.run_id ||
+            (Array.isArray(req.body)
+                ? (req.body[0] && req.body[0].run_id)
+                : (req.body.processed_invoices && req.body.processed_invoices[0]
+                    && req.body.processed_invoices[0].run_id)) || ''
+        ).trim() || null;
+
         let processed_invoices = [];
         if (Array.isArray(req.body)) {
             processed_invoices = req.body;
@@ -243,6 +255,7 @@ const feedInvoicesFromN8n = async (req, res, next) => {
             if (isMissingCritical) {
                 corruptedRows.push({
                     processed_on: new Date(),
+                    run_id: runId,
                     company: row.company || null,
                     vendor_name_tally: row.vendor_name_tally || null,
                     invoice_number: row.invoice_number || null,
@@ -294,6 +307,7 @@ const feedInvoicesFromN8n = async (req, res, next) => {
 
         const finalData = savableRows.map((row) => ({
             processed_on: new Date(),
+            run_id: runId,
             company: row.company || null,
             vendor_name_tally: row.vendor_name_tally || null,
             invoice_number: row.invoice_number || null,
