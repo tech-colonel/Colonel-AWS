@@ -74,6 +74,13 @@ async function amazonB2CProcessor(
     if (!shipFromStateCol) throw new Error('Ship From State column not found');
     if (!shipToStateCol) throw new Error('Ship To State column not found');
 
+    // Buyer's Bill To GSTIN — drives the multi-state invoice-number middle segment.
+    // Amazon's B2C MTR spells this column several ways (and it is blank for the usual
+    // unregistered-consumer sale); tolerate every spelling.
+    const billToGstinCol = findHeader('customer bill to gstid') || findHeader('bill to gstid')
+      || findHeader('customer bill to gstin') || findHeader('bill to gstin')
+      || findHeader('buyer gstin') || findHeader('customer gstin');
+
     // ================================
     // STEP 3: FILTER Shipment & Refund
     // ================================
@@ -218,19 +225,20 @@ async function amazonB2CProcessor(
     // STEP 4.4: MAP STATE CONFIG DATA
     // ================================
 
-    // Builds the "-{sellerGstinPrefix}-{monthNumber}" (single-state) or
-    // "-{stateNumber}-{monthNumber}" (multi-state) invoice suffix.
+    // Final Invoice No. suffix appended to the master-ledger base invoice:
+    //   single-state : "{monthNumber}"                 -> {base}-{MM}
+    //   multi-state  : "{buyerStateCode}-{monthNumber}" -> {base}-{XX}-{MM}
+    // buyerStateCode = first 2 chars of the row's Bill To GSTIN, falling back to the
+    // first 2 chars of the Seller GSTIN when the buyer is unregistered (the usual B2C
+    // case, where Bill To GSTIN is blank).
     const getInvoiceSuffix = (row) => {
-      if (!multiStateSale) {
-        const gstinPrefix = String(row[sellerGstinColumn] || '').trim().slice(0, 2);
-        return gstinPrefix ? `${gstinPrefix}-${monthNumber}` : monthNumber;
-      }
-      const stateCode = getStateCodeFromName(row[fromStateCol]);
-      if (!stateCode) {
-        console.warn(`[Amazon B2C] Multi-state sale: no GST state code match for "${fromStateCol}" value "${row[fromStateCol]}"`);
-        return monthNumber;
-      }
-      return `${stateCode}-${monthNumber}`;
+      if (!multiStateSale) return monthNumber;
+      const buyerGstinPrefix = billToGstinCol
+        ? String(row[billToGstinCol] || '').trim().slice(0, 2)
+        : '';
+      const midSegment = buyerGstinPrefix
+        || String(row[sellerGstinColumn] || '').trim().slice(0, 2);
+      return midSegment ? `${midSegment}-${monthNumber}` : monthNumber;
     };
 
     if (Array.isArray(stateConfigData) && stateConfigData.length > 0) {
