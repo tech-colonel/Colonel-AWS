@@ -804,6 +804,14 @@ const InvoiceAgentWorkspace = ({ agent }) => {
   // Flat rows → one group per INVOICE (line items collapsed).
   const groupedInvoices = useMemo(() => buildGroups(invoices), [invoices]);
 
+  // Line items whose vendor/category n8n could not resolve. These are NOT
+  // "Needs Review" — a row is only flagged when BOTH fields are missing, so an
+  // invoice with a known vendor and an unrecognised fee type shows as Approved
+  // and the N/A would ride silently into the Tally export. Surface it instead:
+  // on the row, in the header count, and as its own filter.
+  const naLineCount = (g) =>
+    g.items.filter((r) => missingVal(r.vendor_name_tally) || missingVal(r.category)).length;
+
   // The date an invoice belongs to = the latest processed_on across its lines
   // (the "Processed …" date). Drives the Today panel + the History date filter.
   const groupDate = (g) => {
@@ -836,9 +844,12 @@ const InvoiceAgentWorkspace = ({ agent }) => {
   // Metrics reflect the CURRENT view (today's counts, or the filtered history).
   const metrics = useMemo(() => {
     const totals = { total: viewGroups.length, approved: 0, review: 0, invalid: 0, rejected: 0,
+                     toFix: 0, toFixLines: 0,
                      docKinds: { 'Tax Invoice': 0, 'Debit Note': 0, 'Credit Note': 0 } };
     viewGroups.forEach((g) => {
       totals.docKinds[docKindOf(g.head)] += 1;
+      const na = naLineCount(g);
+      if (na > 0) { totals.toFix += 1; totals.toFixLines += na; }
       if (g.kind === 'invalid') totals.invalid += 1;
       else if (g.kind === 'review') totals.review += 1;
       else if (g.kind === 'rejected') totals.rejected += 1;
@@ -854,6 +865,7 @@ const InvoiceAgentWorkspace = ({ agent }) => {
       const matchesStatus =
         statusFilter === 'All' ||
         (statusFilter === 'Done' && g.kind === 'done') ||
+        (statusFilter === 'To fix' && naLineCount(g) > 0) ||
         (statusFilter === 'Needs Review' && g.kind === 'review') ||
         (statusFilter === 'Invalid' && g.kind === 'invalid');
       if (!matchesStatus) return false;
@@ -1158,6 +1170,7 @@ const InvoiceAgentWorkspace = ({ agent }) => {
     { label: 'Done', count: metrics.approved },
     { label: 'Needs Review', count: metrics.review },
     { label: 'Invalid', count: metrics.invalid },
+    { label: 'To fix', count: metrics.toFix },
   ];
 
   // The invoice detail (SOURCE DOC + METADATA + whole-invoice actions) for the
@@ -1521,17 +1534,20 @@ const InvoiceAgentWorkspace = ({ agent }) => {
           </div>
         </div>
 
-        <div className="grid grid-cols-2 md:grid-cols-5 border-t" style={{ borderColor: T_BORDER }}>
+        <div className="grid grid-cols-2 md:grid-cols-6 border-t" style={{ borderColor: T_BORDER }}>
           {[
             { label: 'Total Records', value: metrics.total, color: T_TEXT_PRIMARY },
             { label: 'Approved', value: metrics.approved, color: T_SUCCESS },
             { label: 'Needs Review', value: metrics.review, color: T_WARNING },
             { label: 'Invalid', value: metrics.invalid, color: T_DANGER },
+            { label: 'To Fix', value: metrics.toFix, color: metrics.toFix > 0 ? '#B45309' : T_TEXT_SECONDARY,
+              hint: metrics.toFixLines > 0 ? `${metrics.toFixLines} line item${metrics.toFixLines !== 1 ? 's' : ''} with N/A` : null },
             { label: 'Rejected', value: metrics.rejected, color: T_TEXT_SECONDARY },
           ].map((item) => (
             <div key={item.label} className="px-6 py-4 border-r last:border-r-0" style={{ borderColor: T_BORDER }}>
               <div className="text-xl font-bold" style={{ color: item.color }}>{item.value}</div>
               <div className="text-[10px] font-bold uppercase tracking-wider mt-1" style={{ color: T_TEXT_SECONDARY }}>{item.label}</div>
+              {item.hint && <div className="text-[10px] font-medium mt-0.5" style={{ color: '#B45309' }}>{item.hint}</div>}
             </div>
           ))}
         </div>
@@ -1766,7 +1782,21 @@ const InvoiceAgentWorkspace = ({ agent }) => {
                       <span><span className="inline-flex items-center rounded-full px-2.5 py-1 text-[10px] font-bold uppercase tracking-wide" style={style}>{g.status}</span></span>
                       <span className="text-xs font-medium" style={{ color: T_TEXT_SECONDARY }}>{d ? format(d, 'dd MMM yyyy') : formatDate(g.head.invoice_date)}</span>
                       <span className="min-w-0">
-                        <span className="block text-sm font-bold truncate" style={{ color: T_TEXT_PRIMARY }}>#{g.head.invoice_number || 'N/A'}</span>
+                        <span className="flex items-center gap-1.5 min-w-0">
+                          <span className="text-sm font-bold truncate" style={{ color: T_TEXT_PRIMARY }}>#{g.head.invoice_number || 'N/A'}</span>
+                          {/* An unresolved ledger is invisible from the list otherwise —
+                              the invoice reads "Approved" and the N/A only appears once
+                              you open it and pick the right line item. */}
+                          {naLineCount(g) > 0 && (
+                            <span
+                              className="shrink-0 rounded px-1.5 py-0.5 text-[10px] font-bold"
+                              style={{ background: '#FEF3C7', color: '#92400E', border: '1px solid #FCD34D' }}
+                              title={`${naLineCount(g)} line item${naLineCount(g) !== 1 ? 's' : ''} still N/A — open the invoice and click Fix`}
+                            >
+                              {naLineCount(g)} N/A
+                            </span>
+                          )}
+                        </span>
                         {multi && <span className="block text-[10px] font-medium" style={{ color: T_TEXT_SECONDARY }}>{g.line_count} line items</span>}
                       </span>
                       <span className="min-w-0 text-sm font-semibold truncate" style={{ color: T_TEXT_PRIMARY }}>{blank(g.head.company) ? 'Unknown Vendor' : g.head.company}</span>
