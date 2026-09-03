@@ -3,7 +3,7 @@ const { Brand, Agent } = require('../../../models/master');
 const { getBrandConnection } = require('../../../config/database');
 const { getDynamicModel } = require('../../../models/brand');
 const { markDone, markProgress, startRun, feedTick, completeRun, getState } = require('../../../utils/invoiceEvents');
-const { addInvoiceId, clearExecution } = require('../../../utils/executionStore');
+const { addInvoiceId, clearExecution, getExecution } = require('../../../utils/executionStore');
 
 // Placeholder tokens the extractor writes when a field is empty — treat as missing.
 // Defined once in invoiceMasterResolver and imported here so the resolver and the
@@ -168,7 +168,7 @@ const feedInvoicesFromN8n = async (req, res, next) => {
         // rows written across the many per-line-item calls of a single run share a
         // run_id. That is what "Latest run" filters on. Older rows (and any caller
         // that doesn't send it) stay NULL and are only reachable via "All data".
-        const runId = String(
+        let runId = String(
             req.query.run_id || req.body.run_id ||
             (Array.isArray(req.body)
                 ? (req.body[0] && req.body[0].run_id)
@@ -243,6 +243,18 @@ const feedInvoicesFromN8n = async (req, res, next) => {
         console.log(`[n8n feed] ✅ Resolved -> brand: ${brand.name} (${resolvedBrandId}) | agent: ${agent.name} (${resolvedAgentId})`);
 
         // ─── Dynamic DB + Model ────────────────────────────────────────
+        // Only ONE brand's n8n workflow sends run_id ({{ $execution.id }}); the
+        // other 19 never have, so "Latest run" was permanently empty for them.
+        // We already capture the execution id when the run is TRIGGERED
+        // (processInvoice -> setExecution), so fall back to that: every brand
+        // gets a real run id with no n8n change, which keeps n8n read-only.
+        if (!runId) {
+            try {
+                const exec = getExecution(brandId, agentId);
+                if (exec && exec.executionId) runId = String(exec.executionId);
+            } catch (_) { /* non-fatal: the row just stays NULL as before */ }
+        }
+
         const brandDb = getBrandConnection(brand.db_name);
         const tableName = agent.name.replace(/[^a-zA-Z0-9]/g, '_').toLowerCase();
         const InvoiceModel = getDynamicModel(brandDb, tableName, agent.columns);
