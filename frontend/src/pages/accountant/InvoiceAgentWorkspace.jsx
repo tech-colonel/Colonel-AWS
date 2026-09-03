@@ -12,6 +12,7 @@ import api, { API_URL } from '../../lib/api';
 import PurchaseInvoicePanel from './PurchaseInvoicePanel';
 import MasterFixModal from './MasterFixModal';
 import InvoiceMastersModal from './InvoiceMastersModal';
+import FixQueueModal from './FixQueueModal';
 
 // API_URL comes from lib/api's resolveApiUrl(): same-origin in production
 // (agent.accountant), http://localhost:8001 only on local dev. The old hardcoded
@@ -486,6 +487,7 @@ const InvoiceAgentWorkspace = ({ agent }) => {
   // Which row (if any) the "N/A · Fix" popup is open for.
   const [fixInvoice, setFixInvoice] = useState(null);
   const [mastersOpen, setMastersOpen] = useState(false);
+  const [fixQueueOpen, setFixQueueOpen] = useState(false);
   // The X2Beta menu is rendered FIXED, not absolute: its card ancestor has
   // overflow-hidden, which silently clipped the third option off the bottom.
   const x2betaBtnRef = useRef(null);
@@ -1541,13 +1543,20 @@ const InvoiceAgentWorkspace = ({ agent }) => {
             { label: 'Needs Review', value: metrics.review, color: T_WARNING },
             { label: 'Invalid', value: metrics.invalid, color: T_DANGER },
             { label: 'To Fix', value: metrics.toFix, color: metrics.toFix > 0 ? '#B45309' : T_TEXT_SECONDARY,
-              hint: metrics.toFixLines > 0 ? `${metrics.toFixLines} line item${metrics.toFixLines !== 1 ? 's' : ''} with N/A` : null },
+              hint: metrics.toFixLines > 0 ? `${metrics.toFixLines} line item${metrics.toFixLines !== 1 ? 's' : ''} missing a ledger` : null },
             { label: 'Rejected', value: metrics.rejected, color: T_TEXT_SECONDARY },
           ].map((item) => (
-            <div key={item.label} className="px-6 py-4 border-r last:border-r-0" style={{ borderColor: T_BORDER }}>
+            <div key={item.label}
+              onClick={item.label === 'To Fix' && metrics.toFix > 0 ? () => setFixQueueOpen(true) : undefined}
+              role={item.label === 'To Fix' && metrics.toFix > 0 ? 'button' : undefined}
+              className={`px-6 py-4 border-r last:border-r-0${item.label === 'To Fix' && metrics.toFix > 0 ? ' cursor-pointer hover:bg-amber-50 transition-colors' : ''}`}
+              style={{ borderColor: T_BORDER }}>
               <div className="text-xl font-bold" style={{ color: item.color }}>{item.value}</div>
               <div className="text-[10px] font-bold uppercase tracking-wider mt-1" style={{ color: T_TEXT_SECONDARY }}>{item.label}</div>
               {item.hint && <div className="text-[10px] font-medium mt-0.5" style={{ color: '#B45309' }}>{item.hint}</div>}
+              {item.label === 'To Fix' && metrics.toFix > 0 && (
+                <div className="text-[10px] font-bold mt-0.5" style={{ color: T_BLUE }}>Fix all →</div>
+              )}
             </div>
           ))}
         </div>
@@ -1793,7 +1802,7 @@ const InvoiceAgentWorkspace = ({ agent }) => {
                               style={{ background: '#FEF3C7', color: '#92400E', border: '1px solid #FCD34D' }}
                               title={`${naLineCount(g)} line item${naLineCount(g) !== 1 ? 's' : ''} still N/A — open the invoice and click Fix`}
                             >
-                              {naLineCount(g)} N/A
+                              {naLineCount(g)} missing
                             </span>
                           )}
                         </span>
@@ -1818,10 +1827,20 @@ const InvoiceAgentWorkspace = ({ agent }) => {
                             {g.items.map((li, idx) => {
                               const a = li.id === selectedInvoiceId;
                               const label = blank(li.product_name) ? 'item' : li.product_name;
+                              // Mark the line items that are actually unresolved, so the
+                              // one needing attention is obvious without opening each tab
+                              // in turn. Selection (blue) still wins visually.
+                              const bad = missingVal(li.vendor_name_tally) || missingVal(li.category);
                               return (
-                                <button key={li.id} onClick={() => setSelectedInvoiceId(li.id)} title={label}
-                                  className="shrink-0 rounded-md px-2.5 py-1 text-[11px] font-semibold border transition-colors"
-                                  style={{ borderColor: a ? T_BLUE : T_BORDER, background: a ? T_BLUE_BG : '#fff', color: a ? T_BLUE : T_TEXT_SECONDARY }}>
+                                <button key={li.id} onClick={() => setSelectedInvoiceId(li.id)}
+                                  title={bad ? `${label} — missing a ledger` : label}
+                                  className="shrink-0 rounded-md px-2.5 py-1 text-[11px] font-semibold border transition-colors flex items-center gap-1"
+                                  style={{
+                                    borderColor: a ? T_BLUE : (bad ? '#FCA5A5' : T_BORDER),
+                                    background: a ? T_BLUE_BG : (bad ? '#FEF2F2' : '#fff'),
+                                    color: a ? T_BLUE : (bad ? '#B91C1C' : T_TEXT_SECONDARY),
+                                  }}>
+                                  {bad && <span className="inline-block w-1.5 h-1.5 rounded-full shrink-0" style={{ background: '#DC2626' }} />}
                                   {idx + 1}. {label.length > 22 ? label.slice(0, 22) + '…' : label}
                                 </button>
                               );
@@ -2129,6 +2148,13 @@ const InvoiceAgentWorkspace = ({ agent }) => {
       {/* Teach an unresolved vendor / fee type. Refetches on save so the fixed
           rows (there may be many — the backfill applies the rule brand-wide)
           show their real ledger straight away. */}
+      <FixQueueModal
+        open={fixQueueOpen}
+        brandId={brandId}
+        onClose={() => setFixQueueOpen(false)}
+        onChanged={() => fetchInvoices(true)}
+      />
+
       <InvoiceMastersModal
         open={mastersOpen}
         brandId={brandId}

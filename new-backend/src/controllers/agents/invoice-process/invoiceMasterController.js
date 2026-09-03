@@ -113,32 +113,92 @@ exports.listCorrections = async (req, res) => {
 };
 
 /**
- * GET …/invoice/na-summary — what still needs fixing, grouped so the UI can
- * show "N vendors unknown / M fee types unrecognised" without scanning rows.
+ * GET …/invoice/na-summary — the FIX QUEUE.
+ *
+ * Grouped by what needs TEACHING, not by invoice. That distinction is the whole
+ * point: one unrecognised fee type ("Seller Commission") can appear on hundreds
+ * of invoices, and teaching it once fixes every one of them. Listing invoices
+ * would make an accountant hunt row by row through work that is really a
+ * handful of decisions.
+ *
+ *   Case A — vendor unknown: grouped per vendor (GSTIN). Teach once, every
+ *            invoice from that vendor resolves.
+ *   Case B — fee type unrecognised: grouped per (vendor, normalized product
+ *            pattern), which is exactly the key a category rule is stored under,
+ *            so one row here == one rule to write.
+ *
+ * Grouped in Node rather than SQL so it uses the SAME normalize()/vendorKeyFor()
+ * the resolver and the writer use — a second implementation in SQL is the exact
+ * drift this feature exists to remove.
  */
 exports.naSummary = async (req, res) => {
   try {
     const db = await brandConn(req.params.brandId);
-    const naPred = `(x IS NULL OR btrim(x) = '' OR lower(btrim(x)) IN ('n/a','na','n.a.','missing','none','nil','-','null','undefined'))`;
     const rows = await db.query(
-      `WITH f AS (
-         SELECT seller_gstin, company, vendor_name_tally, category, product_name,
-                (SELECT bool_and(true) FROM (SELECT vendor_name_tally AS x) s WHERE ${naPred}) AS v_na,
-                (SELECT bool_and(true) FROM (SELECT category          AS x) s WHERE ${naPred}) AS c_na
-           FROM invoice_process
-          WHERE COALESCE(status,'') NOT IN ('Invalid','failed')
-       )
-       SELECT CASE WHEN v_na THEN 'A' ELSE 'B' END AS kind,
-              COALESCE(NULLIF(btrim(company),''), '(unknown)') AS vendor,
-              seller_gstin,
-              count(*)::int AS rows
-         FROM f
-        WHERE v_na OR c_na
-        GROUP BY 1,2,3
-        ORDER BY rows DESC LIMIT 100`,
+      `SELECT id, invoice_number, seller_gstin, company, product_name,
+              vendor_name_tally, category
+         FROM invoice_process
+        WHERE COALESCE(status,'') NOT IN ('Invalid','failed')
+        ORDER BY processed_on DESC NULLS LAST
+        LIMIT 20000`,
       { type: QueryTypes.SELECT },
     );
-    return res.json({ groups: rows });
+
+    const groups = new Map();
+    for (const r of rows) {
+      const vendorMissing = isMissingField(r.vendor_name_tally);
+      const categoryMissing = isMissingField(r.category);
+      if (!vendorMissing && !categoryMissing) continue;
+
+      let key, group;
+      if (vendorMissing) {
+        // Case A — the vendor itself is unknown, so both fields are missing.
+        key = 'A|' + (normGstin(r.seller_gstin) || normalize(r.company) || '?');
+        group = {
+          kind: 'A',
+          vendor: r.company || '(unknown vendor)',
+          seller_gstin: r.seller_gstin || null,
+          pattern: null,
+          sample_product: r.product_name || null,
+        };
+      } else {
+        // Case B — vendor known, this fee type has no rule.
+        const vk = vendorKeyFor(r.vendor_name_tally || r.company);
+        const pn = normalize(r.product_name);
+        key = 'B|' + vk + '|' + pn;
+        group = {
+          kind: 'B',
+          vendor: r.vendor_name_tally || r.company || '(unknown)',
+          seller_gstin: r.seller_gstin || null,
+          pattern: r.product_name || null,
+          pattern_norm: pn,
+          sample_product: r.product_name || null,
+        };
+      }
+
+      if (!groups.has(key)) {
+        groups.set(key, { ...group, lines: 0, invoices: new Set(), sample_row_id: r.id });
+      }
+      const g = groups.get(key);
+      g.lines += 1;
+      if (r.invoice_number) g.invoices.add(r.invoice_number);
+    }
+
+    const out = [...groups.values()]
+      .map((g) => ({ ...g, invoices: g.invoices.size }))
+      // Biggest win first: the group covering the most line items is the one
+      // fix that clears the most work.
+      .sort((a, b) => b.lines - a.lines);
+
+    return res.json({
+      groups: out,
+      totals: {
+        groups: out.length,
+        lines: out.reduce((n, g) => n + g.lines, 0),
+        invoices: new Set(rows.filter((r) => isMissingField(r.vendor_name_tally) || isMissingField(r.category))
+          .map((r) => r.invoice_number)).size,
+      },
+    });
   } catch (e) {
     return res.status(e.status || 500).json({ error: e.message });
   }
