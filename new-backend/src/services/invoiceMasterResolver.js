@@ -24,12 +24,18 @@
                   GSTIN: a marketplace bills from a different GSTIN per state
                   under one constant name).
 
+       Case V  vendor unknown but the brand's workflow still resolved a
+               category on its own -> ONLY the vendor is N/A.
+               -> invoice_vendor_master; fills the vendor, leaves the category.
+               Across all brands this is the DOMINANT case (2,328 of 3,092
+               unresolved lines), even though it cannot occur for Dichika.
+
    • CASE A MUST WRITE BOTH FIELDS OR NEITHER. The feed derives status as
        (isMissing(vendor) && isMissing(category)) ? 'Needs Review' : 'Approved'
      so filling the vendor ALONE flips a row to Approved and silently
      auto-approves exactly the invoice a human still needs to look at.
-     Case B is safe: the vendor is already present, so the row was Approved
-     before and after.
+     Cases B and V are safe: one of the two fields is already present, so the
+     row was Approved before and after and no status can change.
 
    MODES (env INVOICE_MASTER_RESOLVER):
      off      — do nothing at all
@@ -231,11 +237,21 @@ function resolveOne(masters, row) {
     return { case: 'B', category };
   }
 
-  // Vendor missing but category present: n8n resolved a category without a
-  // vendor. Filling the vendor cannot change status (already 'Approved'), but
-  // this combination does not occur in the n8n logic, so leave it be rather
-  // than guess.
-  return null;
+  // ── Vendor missing, category already resolved.
+  //
+  // Originally skipped on the assumption that it "does not occur" — true of the
+  // Dichika workflow, where a failed vendor lookup also starves the category
+  // fallback so both fields go N/A together. It is NOT true in general: other
+  // brands resolve the category from their own master even when the vendor
+  // lookup misses, and across all brands this is the DOMINANT case
+  // (2,328 of 3,092 unresolved lines).
+  //
+  // Filling the vendor alone is safe here and is NOT the L2 hazard: that rule
+  // fires only when BOTH fields are missing. With a category already present
+  // the row is 'Approved' before and after, so no status can change.
+  const v = resolveVendor(masters, row);
+  if (!v || isMissingField(v.vendor_name_tally)) return null;
+  return { case: 'V', vendor_name_tally: v.vendor_name_tally };
 }
 
 /**
