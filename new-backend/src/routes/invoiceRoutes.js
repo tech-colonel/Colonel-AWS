@@ -36,6 +36,19 @@ router.get('/brands/:brandId/invoice/x2beta/preview', authenticateToken, x2beta.
 router.get('/brands/:brandId/invoice/x2beta',         authenticateToken, x2beta.build);
 router.post('/brands/:brandId/invoice/x2beta',        authenticateToken, x2beta.build);
 
+// ─── Invoice masters (028): fixing an "N/A" and remembering the answer ──────
+// The vendor master proper is the Google Sheet n8n reads (shown in the UI as an
+// iframe); these endpoints cover only what an accountant taught us on top.
+const masters = require('../controllers/agents/invoice-process/invoiceMasterController');
+router.post('/brands/:brandId/invoice/master/resolve',        authenticateToken, masters.resolve);
+router.get('/brands/:brandId/invoice/category-master',        authenticateToken, masters.listCategoryMaster);
+router.patch('/brands/:brandId/invoice/category-master/:id',  authenticateToken, masters.updateCategoryRule);
+router.delete('/brands/:brandId/invoice/category-master/:id', authenticateToken, masters.deleteCategoryRule);
+router.get('/brands/:brandId/invoice/vendor-master',          authenticateToken, masters.listVendorMaster);
+router.delete('/brands/:brandId/invoice/vendor-master/:id',   authenticateToken, masters.deleteVendorEntry);
+router.get('/brands/:brandId/invoice/master-corrections',     authenticateToken, masters.listCorrections);
+router.get('/brands/:brandId/invoice/na-summary',             authenticateToken, masters.naSummary);
+
 // ─── SSE: Real-time invoice processing status ──────────────────────────────
 // GET /api/brands/:brandId/agents/:agentId/invoice/status
 router.get('/brands/:brandId/agents/:agentId/invoice/status', authenticateToken, (req, res) => {

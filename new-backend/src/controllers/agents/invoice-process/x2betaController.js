@@ -78,6 +78,11 @@ exports.build = async (req, res) => {
       where.push('run_id = :runId');
       repl.runId = runId;
     }
+    // scope=today -> everything processed today, however many runs that took.
+    // Sits between "latest run" and "all data": the usual end-of-day handover to
+    // Tally, where a day may have needed several runs.
+    const isToday = String(q.scope || '').toLowerCase() === 'today';
+    if (isToday) where.push('processed_on::date = CURRENT_DATE');
     if (q.month && q.year) {
       where.push('month = :month AND year = :year');
       repl.month = Number(q.month);
@@ -100,7 +105,11 @@ exports.build = async (req, res) => {
     );
 
     if (!rows.length) {
-      return res.status(404).json({ error: 'No invoice rows matched the selection' });
+      return res.status(404).json({
+        error: isToday
+          ? 'No invoices have been processed today yet. Use "All data" for earlier invoices.'
+          : 'No invoice rows matched the selection',
+      });
     }
 
     const engine = enginePool.acquireEngine();
@@ -126,7 +135,9 @@ exports.build = async (req, res) => {
     // Filename says WHICH slice this is, so a "latest run" file is never confused
     // with a full export sitting in the same Downloads folder.
     const slug = (brand.name || 'Brand').replace(/[^A-Za-z0-9]+/g, '');
-    const scopeTag = runId ? `Run${String(runId).replace(/[^A-Za-z0-9]+/g, '')}` : 'All';
+    const scopeTag = runId
+      ? `Run${String(runId).replace(/[^A-Za-z0-9]+/g, '')}`
+      : (isToday ? 'Today' : 'All');
     res.setHeader('Content-Type',
       'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.setHeader('Content-Disposition',

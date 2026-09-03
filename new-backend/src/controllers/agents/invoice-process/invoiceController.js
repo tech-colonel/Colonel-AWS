@@ -169,10 +169,24 @@ const getSheetUrl = async (req, res, next) => {
       process.env[`${brand.name.replace(/\s+/g, '_')}_invoice_sheet`] ||
       null;
 
+    // The vendor master itself — the Google Sheet n8n's AI Agent reads. We show
+    // it in an iframe rather than copying it, so it is always current and the
+    // accountant can edit it in place. Same per-brand env convention as above;
+    // null simply hides that tab.
+    const envFor = (suffix) =>
+      process.env[`${brand.name.toLowerCase()}${suffix}`] ||
+      process.env[`${brand.name.toUpperCase()}${suffix}`] ||
+      process.env[`${brand.name}${suffix}`] ||
+      process.env[`${brand.name.replace(/\s+/g, '_')}${suffix}`] ||
+      // apostrophes and dots can't appear in dotenv keys either (D'Chicha)
+      process.env[`${brand.name.replace(/[^A-Za-z0-9]/g, '')}${suffix}`] ||
+      null;
+
     // Also hand back the Drive folder ids so the UI can render the vendor-wise
     // processed folder (Box 3) and route uploads to the input folder (Box 2).
     res.json({
       sheetUrl,
+      vendorMasterUrl: envFor('_vendor_master_sheet'),
       vendorFolderId: brand.vendor_folder_id || null,
       inputFolderId: brand.invoice_input_folder_id || null,
     });
@@ -210,7 +224,11 @@ const updateInvoice = async (req, res, next) => {
       'cgst_rate', 'sgst_rate', 'igst_rate',
       'cgst_amount', 'sgst_amount', 'igst_amount',
       'gst_amount', 'taxable_value', 'invoice_link', 'status',
-      'tds_section', 'tds_rate', 'tds_amount'
+      'tds_section', 'tds_rate', 'tds_amount',
+      // Added by 027; the UI has always exposed them in FIELD_SECTIONS, but
+      // without these two entries a save reported success and changed nothing.
+      // Fixing an N/A vendor from the workspace depends on this.
+      'vendor_name_tally', 'voucher_type'
     ];
 
     const updates = {};

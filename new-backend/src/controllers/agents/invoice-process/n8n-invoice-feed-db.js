@@ -6,8 +6,10 @@ const { markDone, markProgress, startRun, feedTick, completeRun, getState } = re
 const { addInvoiceId, clearExecution } = require('../../../utils/executionStore');
 
 // Placeholder tokens the extractor writes when a field is empty — treat as missing.
-const NA_TOKENS = ['n/a', 'na', 'n.a.', 'missing', 'none', 'nil', '-', '—', 'null', 'undefined'];
-const isMissingField = (v) => !v || !String(v).trim() || NA_TOKENS.includes(String(v).trim().toLowerCase());
+// Defined once in invoiceMasterResolver and imported here so the resolver and the
+// `status` derivation below can never disagree about what "missing" means.
+const invoiceMasterResolver = require('../../../services/invoiceMasterResolver');
+const { NA_TOKENS, isMissingField } = invoiceMasterResolver;
 
 // ─── Helper: Parse Date ───────────────────────
 const MONTH_MAP = {
@@ -303,6 +305,23 @@ const feedInvoicesFromN8n = async (req, res, next) => {
         });
         if (blockedRows.length) {
             console.warn(`[n8n feed] 🛑 Blocked ${blockedRows.length} invoice(s) belonging to ${wrongBrandName}, not ${brand.name} (${resolvedBrandId})`);
+        }
+
+        // Fill values n8n returned as "N/A" from masters an accountant taught us.
+        // Placed HERE deliberately: after brand resolution (brandDb already carries
+        // app.brand_id, so RLS scopes the master reads) and after the PAN guard (a
+        // misfiled invoice is already in blockedRows and can never be scored against
+        // another brand's master) — but BEFORE the `status` derivation below, which
+        // reads the raw row. Hence it mutates rows in place, like row.__brandFlag above.
+        //
+        // Fail-open: this handler is the single ingestion choke point for all 12
+        // brands, so a throw here would become a 500 and a lost line item.
+        // No-op unless this brand is on INVOICE_MASTER_RESOLVER_BRANDS; default
+        // mode is 'shadow', which logs what it would fill and writes nothing.
+        try {
+            await invoiceMasterResolver.resolveRowsInPlace(brandDb, resolvedBrandId, savableRows);
+        } catch (e) {
+            console.warn('[n8n feed] master resolve failed (non-fatal):', e.message);
         }
 
         const finalData = savableRows.map((row) => ({

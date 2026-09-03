@@ -10,6 +10,8 @@ import { toast } from 'sonner';
 import { format } from 'date-fns';
 import api, { API_URL } from '../../lib/api';
 import PurchaseInvoicePanel from './PurchaseInvoicePanel';
+import MasterFixModal from './MasterFixModal';
+import InvoiceMastersModal from './InvoiceMastersModal';
 
 // API_URL comes from lib/api's resolveApiUrl(): same-origin in production
 // (agent.accountant), http://localhost:8001 only on local dev. The old hardcoded
@@ -288,9 +290,16 @@ const buildForm = (invoice) => {
   return form;
 };
 
-const FieldValue = ({ invoice, field, editing, editForm, onChange }) => {
+// Fields an accountant can teach us when they come back "N/A" — the vendor
+// master and category master both feed these two.
+const FIXABLE_FIELDS = new Set(['vendor_name_tally', 'category']);
+
+const FieldValue = ({ invoice, field, editing, editForm, onChange, onFix }) => {
   const value = editing ? editForm[field.key] : invoice?.[field.key];
   const missing = field.required && blank(value);
+  // "N/A" is a real stored string, not a blank, so blank() misses it — use
+  // missingVal() to catch the placeholder the extractor writes.
+  const fixable = !editing && onFix && FIXABLE_FIELDS.has(field.key) && missingVal(value);
 
   if (editing) {
     return (
@@ -310,6 +319,28 @@ const FieldValue = ({ invoice, field, editing, editForm, onChange }) => {
     : field.display
       ? field.display(value)
       : `${value}${field.suffix || ''}`;
+
+  // An unresolved vendor/category is actionable, not just wrong: offer the fix
+  // inline so it can be taught without leaving the invoice.
+  if (fixable) {
+    return (
+      <button
+        type="button"
+        onClick={() => onFix(field.key)}
+        title="Add this to the master so it resolves automatically next time"
+        className="w-full rounded-md border px-3 py-2 text-sm min-h-[38px] flex items-center justify-between gap-2 transition-colors hover:brightness-95"
+        style={{ background: '#FFFBEB', borderColor: '#FCD34D', color: '#92400E' }}
+      >
+        <span className="truncate">{blank(value) ? 'Missing' : String(value)}</span>
+        <span
+          className="shrink-0 rounded px-1.5 py-0.5 text-[11px] font-semibold"
+          style={{ background: '#F59E0B', color: '#FFFFFF' }}
+        >
+          Fix
+        </span>
+      </button>
+    );
+  }
 
   return (
     <div
@@ -452,6 +483,10 @@ const InvoiceAgentWorkspace = ({ agent }) => {
   const [showSheet, setShowSheet] = useState(false);
   const [summaryModal, setSummaryModal] = useState({ open: false, total: 0, approved: 0, review: 0, invalid: 0 });
   const [isEditing, setIsEditing] = useState(false);
+  // Which row (if any) the "N/A · Fix" popup is open for.
+  const [fixInvoice, setFixInvoice] = useState(null);
+  const [mastersOpen, setMastersOpen] = useState(false);
+  const [vendorMasterUrl, setVendorMasterUrl] = useState(null);
   const [editForm, setEditForm] = useState({});
   const [isSaving, setIsSaving] = useState(false);
   const [actioning, setActioning] = useState(null);
@@ -505,9 +540,11 @@ const InvoiceAgentWorkspace = ({ agent }) => {
       const res = await api.get(`/api/brands/${brandId}/agents/${agentId}/invoice/sheet-url`);
       setSheetUrl(res.data?.sheetUrl || null);
       setVendorFolderId(res.data?.vendorFolderId || null);
+      setVendorMasterUrl(res.data?.vendorMasterUrl || null);
     } catch {
       setSheetUrl(null);
       setVendorFolderId(null);
+      setVendorMasterUrl(null);
     }
   }, [brandId, agentId]);
 
@@ -938,16 +975,68 @@ const InvoiceAgentWorkspace = ({ agent }) => {
   const handleSave = async () => {
     if (!selectedInvoice) return;
     setIsSaving(true);
+    // Captured BEFORE the write: teaching only makes sense where the value was
+    // unresolved, because the resolver only ever fills an N/A.
+    const wasVendorMissing = missingVal(selectedInvoice.vendor_name_tally);
+    const wasCategoryMissing = missingVal(selectedInvoice.category);
     try {
       const response = await api.patch(`/api/brands/${brandId}/agents/${agentId}/invoices/${selectedInvoice.id}`, editForm);
       const updated = response.data?.data || { ...selectedInvoice, ...editForm };
       setInvoices((prev) => prev.map((invoice) => invoice.id === selectedInvoice.id ? updated : invoice));
       setIsEditing(false);
       toast.success('Invoice updated');
+      // Editing the field directly should teach the master just like the Fix
+      // popup does — otherwise the same N/A returns on the next run.
+      await learnFromEdit(updated, wasVendorMissing, wasCategoryMissing);
     } catch {
       toast.error('Failed to update invoice');
     } finally {
       setIsSaving(false);
+    }
+  };
+
+  /**
+   * Remember a vendor / fee type the accountant filled in by editing the fields
+   * rather than using the Fix popup.
+   *
+   * Fires only where the value WAS missing and is now real. A vendor is taught
+   * only together with its expense head: the backend refuses a vendor-only fix
+   * (it would flip the row to Approved with no category), so we check here too
+   * and say why instead of surfacing a raw 400.
+   *
+   * Never blocks or fails the save — the invoice is already stored.
+   */
+  const learnFromEdit = async (row, wasVendorMissing, wasCategoryMissing) => {
+    if (!wasVendorMissing && !wasCategoryMissing) return;
+    const vendorNow = row?.vendor_name_tally;
+    const categoryNow = row?.category;
+    const vendorFilled = wasVendorMissing && !missingVal(vendorNow);
+    const categoryFilled = wasCategoryMissing && !missingVal(categoryNow);
+    if (!vendorFilled && !categoryFilled) return;
+
+    if (vendorFilled && missingVal(categoryNow)) {
+      toast.info('Vendor saved on this invoice, but not added to the master — it needs a category too.');
+      return;
+    }
+
+    try {
+      // The PATCH has already overwritten the row, so the server can no longer
+      // see what these replaced — send the pre-edit values for the audit trail.
+      const prev = {
+        previous_vendor: wasVendorMissing ? 'N/A' : selectedInvoice?.vendor_name_tally,
+        previous_category: wasCategoryMissing ? 'N/A' : selectedInvoice?.category,
+      };
+      const body = vendorFilled
+        ? { invoice_row_id: row.id, vendor_name_tally: vendorNow, nature_of_expense: categoryNow, source: 'metadata_edit', ...prev }
+        : { invoice_row_id: row.id, category: categoryNow, pattern: row.product_name, source: 'metadata_edit', ...prev };
+      const res = await api.post(`/api/brands/${brandId}/invoice/master/resolve`, body);
+      const n = res.data?.applied_rows ?? 0;
+      toast.success(n > 1 ? `Remembered — ${n} rows fixed across this brand` : 'Remembered for next time');
+      fetchInvoices(true);
+    } catch (e) {
+      // Teaching is a bonus on top of a save that already succeeded, so a
+      // failure here is informational, never an error the user must act on.
+      console.warn('[masters] could not learn from edit:', e?.response?.data?.error || e.message);
     }
   };
 
@@ -1026,8 +1115,11 @@ const InvoiceAgentWorkspace = ({ agent }) => {
     setX2betaMenu(false);
     setX2betaBusy(true);
     try {
-      const params = scope === 'latest' ? { scope: 'latest' } : {};
-      if (scope !== 'latest' && viewMode === 'history' && dateFrom && dateTo) {
+      // 'latest' and 'today' are server-side scopes; only the unscoped "All data"
+      // picks up the History date range, so a scoped download is never silently
+      // narrowed (or widened) by whatever range the user last looked at.
+      const params = (scope === 'latest' || scope === 'today') ? { scope } : {};
+      if (scope === 'all' && viewMode === 'history' && dateFrom && dateTo) {
         params.from = dateFrom;
         params.to = dateTo;
       }
@@ -1201,7 +1293,7 @@ const InvoiceAgentWorkspace = ({ agent }) => {
                         <label className="block text-[10px] font-bold uppercase tracking-tight mb-1" style={{ color: T_TEXT_SECONDARY }}>
                           {field.label}
                         </label>
-                        <FieldValue invoice={selectedInvoice} field={field} editing={isEditing} editForm={editForm} onChange={handleFieldChange} />
+                        <FieldValue invoice={selectedInvoice} field={field} editing={isEditing} editForm={editForm} onChange={handleFieldChange} onFix={() => setFixInvoice(selectedInvoice)} />
                       </div>
                     ))}
                   </div>
@@ -1280,6 +1372,14 @@ const InvoiceAgentWorkspace = ({ agent }) => {
               >
                 <Sheet className="w-4 h-4" /> Google Drive Folder
               </button>
+              <button
+                onClick={() => setMastersOpen(true)}
+                title="Vendor master (the live sheet) and the fee-type rules your team has taught"
+                className="inline-flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-semibold transition-all hover:bg-blue-50"
+                style={{ border: `1px solid ${T_BORDER}`, color: T_TEXT_SECONDARY }}
+              >
+                <Database className="w-4 h-4" /> Masters
+              </button>
               <div className="relative">
                 <button
                   onClick={() => setX2betaMenu((v) => !v)}
@@ -1304,6 +1404,14 @@ const InvoiceAgentWorkspace = ({ agent }) => {
                         <div className="text-sm font-bold" style={{ color: T_TEXT_PRIMARY }}>Latest run</div>
                         <div className="text-[11px] mt-0.5" style={{ color: T_TEXT_SECONDARY }}>
                           Only the invoices from the most recent processing run
+                        </div>
+                      </button>
+                      <div style={{ borderTop: `1px solid ${T_BORDER_LIGHT}` }} />
+                      <button onClick={() => downloadX2Beta('today')}
+                        className="w-full text-left px-4 py-2.5 hover:bg-slate-50 transition-colors">
+                        <div className="text-sm font-bold" style={{ color: T_TEXT_PRIMARY }}>Today</div>
+                        <div className="text-[11px] mt-0.5" style={{ color: T_TEXT_SECONDARY }}>
+                          Everything processed today, across all runs
                         </div>
                       </button>
                       <div style={{ borderTop: `1px solid ${T_BORDER_LIGHT}` }} />
@@ -1974,6 +2082,25 @@ const InvoiceAgentWorkspace = ({ agent }) => {
           </div>
         </div>
       )}
+
+      {/* Teach an unresolved vendor / fee type. Refetches on save so the fixed
+          rows (there may be many — the backfill applies the rule brand-wide)
+          show their real ledger straight away. */}
+      <InvoiceMastersModal
+        open={mastersOpen}
+        brandId={brandId}
+        vendorMasterUrl={vendorMasterUrl}
+        onClose={() => setMastersOpen(false)}
+        onChanged={() => fetchInvoices(true)}
+      />
+
+      <MasterFixModal
+        open={!!fixInvoice}
+        invoice={fixInvoice}
+        brandId={brandId}
+        onClose={() => setFixInvoice(null)}
+        onSaved={() => fetchInvoices(true)}
+      />
     </div>
   );
 };
