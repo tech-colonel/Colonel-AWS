@@ -486,6 +486,10 @@ const InvoiceAgentWorkspace = ({ agent }) => {
   // Which row (if any) the "N/A · Fix" popup is open for.
   const [fixInvoice, setFixInvoice] = useState(null);
   const [mastersOpen, setMastersOpen] = useState(false);
+  // The X2Beta menu is rendered FIXED, not absolute: its card ancestor has
+  // overflow-hidden, which silently clipped the third option off the bottom.
+  const x2betaBtnRef = useRef(null);
+  const [x2betaAnchor, setX2betaAnchor] = useState(null);
   const [vendorMasterUrl, setVendorMasterUrl] = useState(null);
   const [editForm, setEditForm] = useState({});
   const [isSaving, setIsSaving] = useState(false);
@@ -1382,7 +1386,12 @@ const InvoiceAgentWorkspace = ({ agent }) => {
               </button>
               <div className="relative">
                 <button
-                  onClick={() => setX2betaMenu((v) => !v)}
+                  ref={x2betaBtnRef}
+                  onClick={() => {
+                    const r = x2betaBtnRef.current?.getBoundingClientRect();
+                    if (r) setX2betaAnchor({ top: r.bottom + 4, right: window.innerWidth - r.right });
+                    setX2betaMenu((v) => !v);
+                  }}
                   disabled={x2betaBusy}
                   title="Download the Tally X2Beta purchase-import workbook"
                   className="inline-flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-semibold transition-all hover:bg-blue-50 disabled:opacity-50"
@@ -1397,8 +1406,12 @@ const InvoiceAgentWorkspace = ({ agent }) => {
                   <>
                     {/* click-away catcher */}
                     <div className="fixed inset-0 z-10" onClick={() => setX2betaMenu(false)} />
-                    <div className="absolute right-0 mt-1 z-20 w-64 rounded-lg border bg-white shadow-lg overflow-hidden"
-                      style={{ borderColor: T_BORDER }}>
+                    <div className="fixed z-20 w-64 rounded-lg border bg-white shadow-lg overflow-hidden"
+                      style={{
+                        borderColor: T_BORDER,
+                        top: x2betaAnchor?.top ?? 0,
+                        right: x2betaAnchor?.right ?? 0,
+                      }}>
                       <button onClick={() => downloadX2Beta('latest')}
                         className="w-full text-left px-4 py-2.5 hover:bg-slate-50 transition-colors">
                         <div className="text-sm font-bold" style={{ color: T_TEXT_PRIMARY }}>Latest run</div>
