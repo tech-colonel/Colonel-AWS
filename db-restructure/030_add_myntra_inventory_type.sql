@@ -1,4 +1,4 @@
--- 028: myntra.inventory_type
+-- 030: myntra.inventory_type
 --
 -- The shared dynamic-table model (new-backend/src/models/brand/index.js →
 -- getDynamicModel) always declares `inventory_type` in its base schema, so
@@ -17,6 +17,6 @@
 -- table grants/policy — no policy change needed. Idempotent.
 --
 -- APPLY (as the postgres superuser — colonel_app cannot run DDL):
---   psql -U postgres -h localhost -v ON_ERROR_STOP=1 -d colonel_agent_accountant -f db-restructure/028_add_myntra_inventory_type.sql
+--   psql -U postgres -h localhost -v ON_ERROR_STOP=1 -d colonel_agent_accountant -f db-restructure/030_add_myntra_inventory_type.sql
 
 ALTER TABLE public.myntra ADD COLUMN IF NOT EXISTS inventory_type VARCHAR(255);

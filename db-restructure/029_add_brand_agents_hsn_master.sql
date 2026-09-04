@@ -1,4 +1,4 @@
--- 027: brand_agents.hsn_master
+-- 029: brand_agents.hsn_master
 --
 -- The sales-myntra "without inventory" run builds a GSTR-HSN sheet whose HSN
 -- column is resolved from an article-type → HSN reference master. That master is
@@ -13,7 +13,13 @@
 -- SELECT/INSERT/UPDATE/DELETE on it and new columns inherit that grant.
 -- Idempotent.
 --
+-- RENUMBERED 027 -> 029. 027 was already taken on production by the
+-- invoice-masters work (applied 2026-09-03). This migration had not been applied
+-- anywhere yet, so renumbering it was the zero-risk side. There is no
+-- schema_migrations table in this project -- migrations are applied by hand, by
+-- filename -- so a duplicate number is silently ambiguous rather than an error.
+--
 -- APPLY (as the postgres superuser):
---   psql -U postgres -h localhost -v ON_ERROR_STOP=1 -d colonel_agent_accountant -f db-restructure/027_add_brand_agents_hsn_master.sql
+--   psql -U postgres -h localhost -v ON_ERROR_STOP=1 -d colonel_agent_accountant -f db-restructure/029_add_brand_agents_hsn_master.sql
 
 ALTER TABLE public.brand_agents ADD COLUMN IF NOT EXISTS hsn_master jsonb DEFAULT '[]'::jsonb;
