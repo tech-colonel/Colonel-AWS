@@ -20,7 +20,7 @@ const { Brand } = require('../../../models/master');
 const { getBrandConnection } = require('../../../config/database');
 const resolver = require('../../../services/invoiceMasterResolver');
 
-const { isMissingField, normalize, vendorKeyFor, normGstin } = resolver;
+const { isMissingField, normalize, vendorKeyFor, normGstin, FIX_SINCE } = resolver;
 
 // Above this many rows the backfill finishes in the background rather than
 // holding the request open.
@@ -139,9 +139,10 @@ exports.naSummary = async (req, res) => {
               vendor_name_tally, category
          FROM invoice_process
         WHERE COALESCE(status,'') NOT IN ('Invalid','failed')
+          AND created_at >= :fixSince
         ORDER BY processed_on DESC NULLS LAST
         LIMIT 20000`,
-      { type: QueryTypes.SELECT },
+      { type: QueryTypes.SELECT, replacements: { fixSince: FIX_SINCE } },
     );
 
     const groups = new Map();

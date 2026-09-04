@@ -81,6 +81,19 @@ const num = (value) => Number(value || 0);
 const NA_TOKENS = new Set(['n/a', 'na', 'n.a.', 'missing', 'none', 'nil', '-', '—', 'null', 'undefined']);
 const missingVal = (value) => blank(value) || NA_TOKENS.has(String(value).trim().toLowerCase());
 
+// vendor_name_tally only began being STORED on 2026-09-03. Rows older than that
+// are blank because nothing ever wrote a vendor — not because a lookup failed —
+// and missingVal() cannot tell those apart. Presenting them as work buries the
+// handful of genuine gaps under thousands of unfixable blanks, so the Fix queue,
+// the To Fix count, the line-item flags and the Fix chip all ignore them.
+// Nothing is hidden from the invoice itself: the fields still render as they are.
+// The cutoff is served by the backend (`fixSince`) so it can move without a rebuild.
+const DEFAULT_FIX_SINCE = '2026-09-03T07:43:00Z';
+const inFixScope = (row, sinceMs) => {
+  const t = Date.parse(row?.processed_on || row?.created_at || row?.createdAt || '');
+  return Number.isNaN(t) ? false : t >= sinceMs;
+};
+
 // Document kind, read off `voucher_type` — which n8n already inverts to OUR side:
 //   supplier Tax Invoice -> "Purchase <State>"
 //   supplier Debit  Note -> "Credit Note <State>"
@@ -493,6 +506,11 @@ const InvoiceAgentWorkspace = ({ agent }) => {
   const x2betaBtnRef = useRef(null);
   const [x2betaAnchor, setX2betaAnchor] = useState(null);
   const [vendorMasterUrl, setVendorMasterUrl] = useState(null);
+  const [fixSince, setFixSince] = useState(DEFAULT_FIX_SINCE);
+  const fixSinceMs = useMemo(() => {
+    const t = Date.parse(fixSince);
+    return Number.isNaN(t) ? Date.parse(DEFAULT_FIX_SINCE) : t;
+  }, [fixSince]);
   const [editForm, setEditForm] = useState({});
   const [isSaving, setIsSaving] = useState(false);
   const [actioning, setActioning] = useState(null);
@@ -547,6 +565,7 @@ const InvoiceAgentWorkspace = ({ agent }) => {
       setSheetUrl(res.data?.sheetUrl || null);
       setVendorFolderId(res.data?.vendorFolderId || null);
       setVendorMasterUrl(res.data?.vendorMasterUrl || null);
+      setFixSince(res.data?.fixSince || DEFAULT_FIX_SINCE);
     } catch {
       setSheetUrl(null);
       setVendorFolderId(null);
@@ -812,7 +831,8 @@ const InvoiceAgentWorkspace = ({ agent }) => {
   // and the N/A would ride silently into the Tally export. Surface it instead:
   // on the row, in the header count, and as its own filter.
   const naLineCount = (g) =>
-    g.items.filter((r) => missingVal(r.vendor_name_tally) || missingVal(r.category)).length;
+    g.items.filter((r) => inFixScope(r, fixSinceMs)
+      && (missingVal(r.vendor_name_tally) || missingVal(r.category))).length;
 
   // The date an invoice belongs to = the latest processed_on across its lines
   // (the "Processed …" date). Drives the Today panel + the History date filter.
@@ -858,7 +878,7 @@ const InvoiceAgentWorkspace = ({ agent }) => {
       else totals.approved += 1;
     });
     return totals;
-  }, [viewGroups]);
+  }, [viewGroups, fixSinceMs]);
 
   // Stage 2 — STATUS tab + search filter (what the table actually renders).
   const visibleGroups = useMemo(() => {
@@ -879,7 +899,7 @@ const InvoiceAgentWorkspace = ({ agent }) => {
         ...g.items.map((i) => i.product_name)].join(' ').toLowerCase();
       return haystack.includes(needle);
     });
-  }, [viewGroups, search, statusFilter, docFilter]);
+  }, [viewGroups, search, statusFilter, docFilter, fixSinceMs]);
 
   // Flattened line items across visible groups — drives prev/next navigation.
   const selectableRows = useMemo(() => visibleGroups.flatMap((g) => g.items), [visibleGroups]);
@@ -1312,7 +1332,7 @@ const InvoiceAgentWorkspace = ({ agent }) => {
                         <label className="block text-[10px] font-bold uppercase tracking-tight mb-1" style={{ color: T_TEXT_SECONDARY }}>
                           {field.label}
                         </label>
-                        <FieldValue invoice={selectedInvoice} field={field} editing={isEditing} editForm={editForm} onChange={handleFieldChange} onFix={() => setFixInvoice(selectedInvoice)} />
+                        <FieldValue invoice={selectedInvoice} field={field} editing={isEditing} editForm={editForm} onChange={handleFieldChange} onFix={inFixScope(selectedInvoice, fixSinceMs) ? () => setFixInvoice(selectedInvoice) : null} />
                       </div>
                     ))}
                   </div>
@@ -1830,7 +1850,8 @@ const InvoiceAgentWorkspace = ({ agent }) => {
                               // Mark the line items that are actually unresolved, so the
                               // one needing attention is obvious without opening each tab
                               // in turn. Selection (blue) still wins visually.
-                              const bad = missingVal(li.vendor_name_tally) || missingVal(li.category);
+                              const bad = inFixScope(li, fixSinceMs)
+                                && (missingVal(li.vendor_name_tally) || missingVal(li.category));
                               return (
                                 <button key={li.id} onClick={() => setSelectedInvoiceId(li.id)}
                                   title={bad ? `${label} — missing a ledger` : label}

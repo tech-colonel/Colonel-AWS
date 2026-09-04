@@ -67,6 +67,21 @@ const isEnabledFor = (brandId) => {
 const NA_TOKENS = ['n/a', 'na', 'n.a.', 'missing', 'none', 'nil', '-', '—', 'null', 'undefined'];
 const isMissingField = (v) => !v || !String(v).trim() || NA_TOKENS.includes(String(v).trim().toLowerCase());
 
+/* ── Fix-queue scope ──────────────────────────────────────────────────────────
+   vendor_name_tally only began being STORED on 2026-09-03 07:43 UTC. Every row
+   ingested before that has no vendor because nothing ever wrote one — not
+   because a lookup failed. isMissingField() cannot tell those two apart (both
+   look like NULL), so without a cutoff the Fix queue shows ~3,060 blanks that
+   cannot be fixed and buries the ~33 that can.
+
+   This is presentation only: it decides what is offered as WORK. It never
+   changes stored data, never affects the resolver or the status derivation, and
+   the old rows remain fully visible and editable in the invoice itself.
+
+   Override with INVOICE_FIX_SINCE (any Date-parsable string); set it early to
+   bring history back into the queue. */
+const FIX_SINCE = process.env.INVOICE_FIX_SINCE || '2026-09-03T07:43:00Z';
+
 /* ── Normalizers — PORTED CHARACTER-FOR-CHARACTER from the n8n Code node ──────
    Do not "clean these up". Both are load-bearing in ways that are invisible:
 
@@ -320,6 +335,7 @@ async function resolveRowsInPlace(db, brandId, rows) {
 module.exports = {
   NA_TOKENS,
   isMissingField,
+  FIX_SINCE,
   normalize,
   vendorKeyFor,
   normGstin,

@@ -189,6 +189,10 @@ const getSheetUrl = async (req, res, next) => {
       vendorMasterUrl: envFor('_vendor_master_sheet'),
       vendorFolderId: brand.vendor_folder_id || null,
       inputFolderId: brand.invoice_input_folder_id || null,
+      // Rows older than this had no vendor_name_tally written at all, so the UI
+      // must not present them as fixable work. Served from here (rather than
+      // hard-coded in the bundle) so the cutoff can move without a rebuild.
+      fixSince: require('../../../services/invoiceMasterResolver').FIX_SINCE,
     });
   } catch (error) {
     next(error);
