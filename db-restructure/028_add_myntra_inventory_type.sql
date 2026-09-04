@@ -1,0 +1,22 @@
+-- 028: myntra.inventory_type
+--
+-- The shared dynamic-table model (new-backend/src/models/brand/index.js →
+-- getDynamicModel) always declares `inventory_type` in its base schema, so
+-- every Sequelize bulkCreate/findAll on a sales table emits it — including in
+-- the RETURNING clause of the two-phase "Accept & save" commit
+-- (salesMyntraController.generateCommit → Model.bulkCreate).
+--
+-- 002_dynamic_agent_tables.sql created the legacy `myntra` table WITHOUT that
+-- column (only the newer `sales_myntra` got it). It is the one and only sales
+-- table missing it, so committing a Myntra working file 500s with:
+--   column "inventory_type" does not exist
+--   POST .../agents/<id>/myntra/generate/commit
+--
+-- Same column/type as every sibling sales table (VARCHAR(255), nullable).
+-- `myntra` is RLS-protected but a plain ADD COLUMN inherits the existing
+-- table grants/policy — no policy change needed. Idempotent.
+--
+-- APPLY (as the postgres superuser — colonel_app cannot run DDL):
+--   psql -U postgres -h localhost -v ON_ERROR_STOP=1 -d colonel_agent_accountant -f db-restructure/028_add_myntra_inventory_type.sql
+
+ALTER TABLE public.myntra ADD COLUMN IF NOT EXISTS inventory_type VARCHAR(255);

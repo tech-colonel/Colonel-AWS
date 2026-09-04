@@ -39,6 +39,7 @@ const uploadMasterData = async (brandId, agentId, type, fileBuffer) => {
   const updateData = {};
   if (type === 'sku') updateData.sku_master = data;
   else if (type === 'ledger') updateData.ledger_master = data;
+  else if (type === 'hsn') updateData.hsn_master = data;
 
   await brandAgent.update(updateData);
   return { count: data.length };
@@ -60,7 +61,8 @@ const getMasterData = async (brandId, agentId) => {
 
   return {
     sku_master: brandAgent.sku_master || [],
-    ledger_master: brandAgent.ledger_master || []
+    ledger_master: brandAgent.ledger_master || [],
+    hsn_master: brandAgent.hsn_master || []
   };
 };
 

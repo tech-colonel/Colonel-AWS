@@ -15,10 +15,13 @@
  *   8. HSN Summary uses the HSN Code column; Taxable Value/Tax Rate/IGST/CGST/SGST carry over
  *      from the GST Sales Report — combining Sales + Returns (own sign) and every Seller State,
  *      matching the accountant's reference working file.
- * Seller State represents a distinct GSTIN registration for the brand (Vaaree ships out of more
- * than one warehouse state) — the GST Sales and B2B Sales summaries are grouped by it rather than
- * assuming a single state, so the workbook stays correct if the brand adds/drops a registration.
- * (HSN Summary is the one exception — it is not split by Seller State, per the reference file.)
+ * The workbook ties out on Fianl Taxable / IGST / CGST / SGST:
+ *   GST Sales GT  +  GST B2B Sales GT   =   HSN GT   =   Report GT.
+ * HSN and Report cover EVERY row (B2B + B2C, Sales + Returns, returns keeping their own
+ * negative sign). GST Sales and GST B2B Sales partition those same rows with no overlap:
+ * GST B2B Sales is the Sales-only, B2B-only invoice register (keeps its Seller State
+ * column); GST Sales is everything else (all B2C plus any B2B returns), grouped by
+ * Customer State x Final Rate. Neither GST Sales nor HSN is split by Seller State.
  */
 'use strict';
 const XLSX = require('xlsx-js-style');
@@ -158,15 +161,23 @@ function round2(n) {
   return Math.round((n + Number.EPSILON) * 100) / 100;
 }
 
-// ── GST Sales (B2C) summary: Seller State x Customer State x Tax Rate, Sales-only, B2C-only ──
-function buildB2CSummary(rows) {
-  const sales = rows.filter((r) => r.transactionType === 'Sales' && r.saleType === 'B2C');
+// A row belongs on the GST B2B Sales sheet (Sales-only, B2B-only). The GST Sales summary
+// excludes exactly these so the two sheets partition every row with no overlap:
+//   GST Sales + GST B2B Sales = HSN = Report  on Fianl Taxable / IGST / CGST / SGST.
+const isB2BInvoiceRow = (r) => r.transactionType === 'Sales' && r.saleType === 'B2B';
+
+// ── GST Sales summary: Customer State x Tax Rate over every row that is NOT on the GST B2B
+// Sales sheet — i.e. all B2C (Sales + Returns) plus any B2B returns — returns keeping their
+// own negative sign. Not split by Seller State — the IGST vs CGST/SGST split is already
+// decided per row from that row's own Seller vs Customer state, so the sums stay correct. ──
+function buildB2CSummary(allRows) {
+  const rows = allRows.filter((r) => !isB2BInvoiceRow(r));
   const groups = new Map();
-  sales.forEach((r) => {
-    const key = `${r.sellerState}||${r.customerState}||${r.finalRate}`;
+  rows.forEach((r) => {
+    const key = `${r.customerState}||${r.finalRate}`;
     if (!groups.has(key)) {
       groups.set(key, {
-        sellerState: r.sellerState, customerState: r.customerState, finalRate: r.finalRate,
+        customerState: r.customerState, finalRate: r.finalRate,
         taxable: 0, igst: 0, cgst: 0, sgst: 0,
       });
     }
@@ -174,15 +185,15 @@ function buildB2CSummary(rows) {
     g.taxable += r.finalTaxable; g.igst += r.igst; g.cgst += r.cgst; g.sgst += r.sgst;
   });
   const list = [...groups.values()].sort((a, b) =>
-    a.sellerState.localeCompare(b.sellerState) || a.customerState.localeCompare(b.customerState) || a.finalRate - b.finalRate
+    a.customerState.localeCompare(b.customerState) || a.finalRate - b.finalRate
   );
-  const headers = ['Seller State', 'Customer State', 'Final Rate', 'Sum of Fianl Taxable', 'Sum of IGST ', 'Sum of CGST', 'Sum of SGST'];
-  const aoa = [headers, ...list.map((g) => [g.sellerState, g.customerState, g.finalRate, round2(g.taxable), round2(g.igst), round2(g.cgst), round2(g.sgst)])];
+  const headers = ['Customer State', 'Final Rate', 'Sum of Fianl Taxable', 'Sum of IGST ', 'Sum of CGST', 'Sum of SGST'];
+  const aoa = [headers, ...list.map((g) => [g.customerState, g.finalRate, round2(g.taxable), round2(g.igst), round2(g.cgst), round2(g.sgst)])];
   if (list.length) {
     const totals = list.reduce((acc, g) => ({
       taxable: acc.taxable + g.taxable, igst: acc.igst + g.igst, cgst: acc.cgst + g.cgst, sgst: acc.sgst + g.sgst,
     }), { taxable: 0, igst: 0, cgst: 0, sgst: 0 });
-    aoa.push(['Grand Total', '', '', round2(totals.taxable), round2(totals.igst), round2(totals.cgst), round2(totals.sgst)]);
+    aoa.push(['Grand Total', '', round2(totals.taxable), round2(totals.igst), round2(totals.cgst), round2(totals.sgst)]);
   }
   return XLSX.utils.aoa_to_sheet(aoa);
 }
@@ -190,7 +201,7 @@ function buildB2CSummary(rows) {
 // ── GST B2B Sales: invoice-level list, Sales-only, B2B-only ──
 function buildB2BSales(rows) {
   const sales = rows
-    .filter((r) => r.transactionType === 'Sales' && r.saleType === 'B2B')
+    .filter(isB2BInvoiceRow)
     .sort((a, b) => a.sellerState.localeCompare(b.sellerState) || a.invoiceNumber.localeCompare(b.invoiceNumber));
   const headers = ['Seller State', 'Invoice Number', 'Invoice Date', 'Customer State', 'Customer GST No.', 'Final Rate', 'Fianl Taxable', 'IGST ', 'CGST', 'SGST'];
   const aoa = [headers, ...sales.map((r) => [
@@ -240,6 +251,21 @@ function buildHsnSummary(rows) {
 function buildReportSheet(rows) {
   const headers = REPORT_COLUMNS.map((c) => c.header);
   const aoa = [headers, ...rows.map((row) => REPORT_COLUMNS.map((c) => c.get(row)))];
+  if (rows.length) {
+    const t = rows.reduce((acc, r) => ({
+      taxable: acc.taxable + r.finalTaxable, igst: acc.igst + r.igst,
+      cgst: acc.cgst + r.cgst, sgst: acc.sgst + r.sgst, qty: acc.qty + r.quantity,
+    }), { taxable: 0, igst: 0, cgst: 0, sgst: 0, qty: 0 });
+    const totalRow = new Array(headers.length).fill('');
+    const put = (header, value) => { totalRow[REPORT_COLUMNS.findIndex((c) => c.header === header)] = value; };
+    totalRow[0] = 'Grand Total';
+    put('Fianl Taxable', round2(t.taxable));
+    put('IGST ', round2(t.igst));
+    put('CGST', round2(t.cgst));
+    put('SGST', round2(t.sgst));
+    put('Quantity', t.qty);
+    aoa.push(totalRow);
+  }
   return XLSX.utils.aoa_to_sheet(aoa);
 }
 

@@ -31,6 +31,15 @@ const monthToNumber = (monthName) => {
 };
 
 /**
+ * Normalise the uploaded HSN master rows to { article_type, HSN }.
+ * Upload template columns: Article_type, HSN (other casings tolerated).
+ */
+const mapHsnMaster = (rows) => (Array.isArray(rows) ? rows : []).map(r => ({
+    article_type: r['Article_type'] ?? r['Article Type'] ?? r['article_type'] ?? r['ArticleType'] ?? r.articleType ?? '',
+    HSN: r['HSN'] ?? r['Hsn'] ?? r['hsn'] ?? r['HSN Code'] ?? ''
+}));
+
+/**
  * Upload SKU Master
  */
 const uploadSkuMaster = async (req, res, next) => {
@@ -59,6 +68,25 @@ const uploadLedgerMaster = async (req, res, next) => {
             req.file.buffer
         );
         res.json({ message: 'Ledger Master uploaded successfully', ...result });
+    } catch (error) {
+        next(error);
+    }
+};
+
+/**
+ * Upload HSN Master (article-type → HSN reference; used by the "Without" inventory
+ * run to build the GSTR-HSN sheet). Stored on brand_agents.hsn_master exactly like
+ * the SKU / Ledger masters.
+ */
+const uploadHsnMaster = async (req, res, next) => {
+    try {
+        const result = await salesService.uploadMasterData(
+            req.params.brandId,
+            req.params.agentId,
+            'hsn',
+            req.file.buffer
+        );
+        res.json({ message: 'HSN Master uploaded successfully', ...result });
     } catch (error) {
         next(error);
     }
@@ -155,7 +183,8 @@ const generate = async (req, res, next) => {
             masterData.ledger_master,
             brand.name,
             `${month}-${year}`,
-            useInventory
+            useInventory,
+            mapHsnMaster(masterData.hsn_master)
         );
 
         if (processedData.missingMasterValues?.length > 0 && req.body.proceedWithoutMaster !== 'true') {
@@ -244,7 +273,8 @@ const generatePreview = async (req, res, next) => {
             masterData.ledger_master,
             brand.name,
             `${month}-${year}`,
-            useInventory
+            useInventory,
+            mapHsnMaster(masterData.hsn_master)
         );
 
         if (!processedData || !processedData.workingFileData) {
@@ -366,6 +396,7 @@ const generateDiscard = async (req, res, next) => {
 module.exports = {
     uploadSkuMaster,
     uploadLedgerMaster,
+    uploadHsnMaster,
     getMasterData,
     generate,
     generatePreview,
