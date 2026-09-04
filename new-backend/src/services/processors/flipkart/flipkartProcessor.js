@@ -757,13 +757,10 @@ async function flipkartProcessor(rawFileBuffer, skuData, stateConfigData, brandN
     }
     const tallyLedgers = stateConfig.tallyLedger || '';
     const baseInvoiceNo = stateConfig.invoiceNo || '';
-    // Insert the seller GSTIN's 2-digit state code before the month suffix so
-    // vouchers stay unique across sellers filing under different GSTINs but
-    // shipping to the same delivery state, e.g. FKT-KA-27-07.
-    const sellerGstinPrefix = sellerGstin.slice(0, 2);
-    const finalInvoiceNo = baseInvoiceNo
-      ? `${baseInvoiceNo}${sellerGstinPrefix ? `-${sellerGstinPrefix}` : ''}${monthSuffix}`
-      : '';
+    // Invoice number = per-state ledger code + selected-period month suffix,
+    // e.g. Flipk-AS-02 for February. The seller-GSTIN 2-digit prefix segment
+    // was removed per the accountant's decision.
+    const finalInvoiceNo = baseInvoiceNo ? `${baseInvoiceNo}${monthSuffix}` : '';
 
     // Get raw values
     const priceAfterDiscount = safeNumber(row['Price after discount (Price before discount-Total discount)']);
