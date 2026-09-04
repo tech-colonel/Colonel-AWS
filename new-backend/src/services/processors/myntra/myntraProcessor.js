@@ -1333,7 +1333,7 @@ async function myntraProcessor(fileBuffers, skuData, stateConfigData, brandName,
   // the exact same way as "working for Accounting" above (from tax_amount +
   // shipping_case, RTO by seller state vs location), and RT/RTO measures carry
   // the same negative sign, so these sheets reconcile to that one.
-  //   GSTR-working : Seller GSTN | tax_rate | location
+  //   GSTR-working : Seller GSTN | tax_rate | location (= mapped Debtor Ledger)
   //   GSTR-HSN     : Seller GSTN | HSN (by article type) | tax_rate
   // ============================================================
   if (!withInventory) {
@@ -1360,7 +1360,13 @@ async function myntraProcessor(fileBuffers, skuData, stateConfigData, brandName,
       return {
         seller_gstin: wr.seller_gstin || '',
         tax_rate: safeNumber(wr.gst_rate),
-        location: wr.location || '',
+        // "location" here = the mapped Debtor Ledger (ship-to state run through the
+        // Ledger master), the same value shown in the "Debtor Ledger" column of
+        // "working for Accounting". The raw `location` column only exists on the
+        // RTO file, so grouping on it left Packed/RT rows in a blank-location
+        // bucket and they never netted against the RTO negatives. Falls back to
+        // the raw ship-to state, then the raw `location` column.
+        location: wr.ship_to_state_tally_ledger || wr.ship_to_state || wr.location || '',
         hsn: wr.hsn || '',
         quantity,
         base_value: baseValue,

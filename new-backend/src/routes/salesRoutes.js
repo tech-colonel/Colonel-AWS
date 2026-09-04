@@ -229,4 +229,22 @@ router.post('/brands/:brandId/agents/:agentId/varee/generate/preview', authentic
 router.post('/brands/:brandId/agents/:agentId/varee/generate/commit', authenticateToken, salesVareeController.generateCommit);
 router.post('/brands/:brandId/agents/:agentId/varee/generate/discard', authenticateToken, salesVareeController.generateDiscard);
 
+const salesMeeshoController = require('../controllers/agents/sales-meesho/salesMeeshoController');
+
+// ─── Meesho Routes ─────────────────────────────────────────────────────────────
+// Two input files: salesFile (tcs_sales) + returnFile (tcs_sales_return).
+const meeshoUpload = upload.fields([
+    { name: 'salesFile', maxCount: 1 },
+    { name: 'returnFile', maxCount: 1 },
+]);
+
+router.get('/brands/:brandId/agents/:agentId/meesho/master', authenticateToken, salesMeeshoController.getMasterData);
+router.post('/brands/:brandId/agents/:agentId/meesho/master/sku', authenticateToken, upload.single('file'), reattachUserContext, salesMeeshoController.uploadSkuMaster);
+router.post('/brands/:brandId/agents/:agentId/meesho/master/ledger', authenticateToken, upload.single('file'), reattachUserContext, salesMeeshoController.uploadLedgerMaster);
+router.post('/brands/:brandId/agents/:agentId/meesho/generate', authenticateToken, meeshoUpload, reattachUserContext, salesMeeshoController.generate);
+
+router.post('/brands/:brandId/agents/:agentId/meesho/generate/preview', authenticateToken, meeshoUpload, reattachUserContext, salesMeeshoController.generatePreview);
+router.post('/brands/:brandId/agents/:agentId/meesho/generate/commit', authenticateToken, salesMeeshoController.generateCommit);
+router.post('/brands/:brandId/agents/:agentId/meesho/generate/discard', authenticateToken, salesMeeshoController.generateDiscard);
+
 module.exports = router;

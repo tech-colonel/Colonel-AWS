@@ -23,6 +23,7 @@ import OrderCycleShopifyWorkspace from './OrderCycleShopifyWorkspace';
 import SettlementAmazonWorkspace from './SettlementAmazonWorkspace';
 import TotalSalesAnalyzerModal from './TotalSalesAnalyzerModal';
 import NykaaWorkspace from './NykaaWorkspace';
+import MeeshoWorkspace from './MeeshoWorkspace';
 import PepperfryWorkspace from './PepperfryWorkspace';
 import WorkflowApplyModal from './WorkflowApplyModal';
 import WorkflowManagerModal from '../admin/WorkflowManagerModal';
@@ -192,6 +193,7 @@ const AgentWorkspace = () => {
       if (name.includes('limeroad')) return 'limeroad';
       if (name.includes('mirrow')) return 'mirrow';
       if (name.includes('nykaa')) return 'nykaa';
+      if (name.includes('meesho')) return 'meesho';
       if (name.includes('pepperfry')) return 'pepperfry';
       if (name.includes('varee')) return 'varee';
       if (name.includes('total-sales')) return 'total-sales-analyzer';
@@ -597,6 +599,7 @@ const AgentWorkspace = () => {
   const isSettlement = agent?.name?.toLowerCase().includes('settlement');
   const isTotalSalesAnalyzer = agent?.name?.toLowerCase().includes('total-sales');
   const isNykaa = agent?.name?.toLowerCase().includes('nykaa');
+  const isMeesho = agent?.name?.toLowerCase().includes('meesho');
   const isPepperfry = agent?.name?.toLowerCase().includes('pepperfry');
   const isMirrow = agent?.name?.toLowerCase().includes('mirrow');
   const isCread = agent?.name?.toLowerCase().includes('cread');
@@ -710,6 +713,42 @@ const AgentWorkspace = () => {
             </Button>
           </div>
           <NykaaWorkspace agent={agent} />
+        </div>
+      ) : isMeesho ? (
+        <div className="p-6" data-testid="meesho-workspace">
+          <div className="mb-8 flex justify-between items-start">
+            <div>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => navigate(`/brands/${brandId}/agents`)}
+                className="mb-4"
+                data-testid="back-button"
+              >
+                ← Back to Agents
+              </Button>
+              <h1 className="text-3xl font-bold text-slate-900 tracking-tight">{agent?.name}</h1>
+              <p className="text-slate-600 mt-1">{agent?.description}</p>
+            </div>
+            <div className="flex items-center gap-2">
+              <Button
+                onClick={() => setCfoConfig(prev => ({ ...prev, isOpen: true }))}
+                variant="default"
+              >
+                <BarChart3 className="mr-2 h-4 w-4" />
+                📊 CFO Dashboard
+              </Button>
+              <Button
+                onClick={() => setShowWorkflowModal(true)}
+                variant="outline"
+                className="border-indigo-200 text-indigo-700 hover:bg-indigo-50"
+              >
+                <GitBranch className="mr-2 h-4 w-4" />
+                Workflows
+              </Button>
+            </div>
+          </div>
+          <MeeshoWorkspace agent={agent} />
         </div>
       ) : isPepperfry ? (
         <div className="p-6" data-testid="pepperfry-workspace">
