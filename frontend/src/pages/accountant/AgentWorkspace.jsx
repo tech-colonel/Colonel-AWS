@@ -103,6 +103,12 @@ const AgentWorkspace = () => {
   const [newSkuRate, setNewSkuRate] = useState('');
   const [isAddingSku, setIsAddingSku] = useState(false);
   const [deletingSkuKey, setDeletingSkuKey] = useState(null);
+  const [isClearingSku, setIsClearingSku] = useState(false);
+
+  // Ledger Modal extra state
+  const [ledgerSearch, setLedgerSearch] = useState('');
+  const [deletingLedgerIdx, setDeletingLedgerIdx] = useState(null);
+  const [isClearingLedger, setIsClearingLedger] = useState(false);
 
   const [formData, setFormData] = useState({
     month: '',
@@ -315,6 +321,50 @@ const AgentWorkspace = () => {
       toast.error(error.response?.data?.error || 'Failed to delete SKU');
     } finally {
       setDeletingSkuKey(null);
+    }
+  };
+
+  const handleClearSkuMaster = async () => {
+    const n = masterData.sku_master?.length || 0;
+    if (!window.confirm(`Delete ALL ${n} SKU master record${n === 1 ? '' : 's'}? This cannot be undone.`)) return;
+    setIsClearingSku(true);
+    try {
+      await api.delete(`/api/brands/${brandId}/agents/${agentId}/master/sku/clear-all`);
+      toast.success('All SKU master records deleted');
+      fetchData();
+    } catch (error) {
+      toast.error(error.response?.data?.error || 'Failed to delete all SKUs');
+    } finally {
+      setIsClearingSku(false);
+    }
+  };
+
+  const handleDeleteSingleLedger = async (index) => {
+    if (!window.confirm('Delete this ledger master row? This cannot be undone.')) return;
+    setDeletingLedgerIdx(index);
+    try {
+      await api.delete(`/api/brands/${brandId}/agents/${agentId}/master/entry/ledger/${index}`);
+      toast.success('Ledger row deleted');
+      fetchData();
+    } catch (error) {
+      toast.error(error.response?.data?.error || 'Failed to delete ledger row');
+    } finally {
+      setDeletingLedgerIdx(null);
+    }
+  };
+
+  const handleClearLedgerMaster = async () => {
+    const n = masterData.ledger_master?.length || 0;
+    if (!window.confirm(`Delete ALL ${n} ledger master record${n === 1 ? '' : 's'}? This cannot be undone.`)) return;
+    setIsClearingLedger(true);
+    try {
+      await api.delete(`/api/brands/${brandId}/agents/${agentId}/master/ledger/clear-all`);
+      toast.success('All ledger master records deleted');
+      fetchData();
+    } catch (error) {
+      toast.error(error.response?.data?.error || 'Failed to delete all ledgers');
+    } finally {
+      setIsClearingLedger(false);
     }
   };
 
@@ -1136,7 +1186,24 @@ const AgentWorkspace = () => {
           <Dialog open={showViewSkuModal} onOpenChange={(open) => { setShowViewSkuModal(open); if (!open) { setSkuSearch(''); setNewSkuSalesPortal(''); setNewSkuTallyNew(''); } }}>
             <DialogContent onClose={() => { setShowViewSkuModal(false); setSkuSearch(''); setNewSkuSalesPortal(''); setNewSkuTallyNew(''); }} className="max-w-4xl max-h-[90vh] flex flex-col overflow-hidden">
               <DialogHeader>
-                <DialogTitle>SKU Master Data ({masterData.sku_master?.length || 0} records)</DialogTitle>
+                <div className="flex items-center justify-between pr-8">
+                  <DialogTitle>SKU Master Data ({masterData.sku_master?.length || 0} records)</DialogTitle>
+                  {masterData.sku_master?.length > 0 && (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={handleClearSkuMaster}
+                      disabled={isClearingSku}
+                      className="h-8 text-red-600 border-red-200 hover:bg-red-50 hover:text-red-700"
+                      title="Delete every SKU master record"
+                    >
+                      {isClearingSku
+                        ? <Loader2 className="h-3 w-3 mr-1 animate-spin" />
+                        : <Trash2 className="h-3 w-3 mr-1" />}
+                      Delete All
+                    </Button>
+                  )}
+                </div>
               </DialogHeader>
 
               {/* Add New SKU Section */}
@@ -1288,47 +1355,120 @@ const AgentWorkspace = () => {
           </Dialog>
 
           {/* View Ledger Master Modal */}
-          <Dialog open={showViewLedgerModal} onOpenChange={setShowViewLedgerModal}>
-            <DialogContent onClose={() => setShowViewLedgerModal(false)} className="max-w-4xl max-h-[80vh] overflow-auto">
+          <Dialog open={showViewLedgerModal} onOpenChange={(open) => { setShowViewLedgerModal(open); if (!open) setLedgerSearch(''); }}>
+            <DialogContent onClose={() => { setShowViewLedgerModal(false); setLedgerSearch(''); }} className="max-w-4xl max-h-[85vh] flex flex-col overflow-hidden">
               <DialogHeader>
-                <DialogTitle>Ledger Master Data ({masterData.ledger_master?.length || 0} records)</DialogTitle>
+                <div className="flex items-center justify-between pr-8">
+                  <DialogTitle>Ledger Master Data ({masterData.ledger_master?.length || 0} records)</DialogTitle>
+                  {masterData.ledger_master?.length > 0 && (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={handleClearLedgerMaster}
+                      disabled={isClearingLedger}
+                      className="h-8 text-red-600 border-red-200 hover:bg-red-50 hover:text-red-700"
+                      title="Delete every ledger master record"
+                    >
+                      {isClearingLedger
+                        ? <Loader2 className="h-3 w-3 mr-1 animate-spin" />
+                        : <Trash2 className="h-3 w-3 mr-1" />}
+                      Delete All
+                    </Button>
+                  )}
+                </div>
               </DialogHeader>
-              <div>
-                {masterData.ledger_master?.length > 0 ? (
-                  <div className="border rounded-lg overflow-auto max-h-[500px]">
-                    <Table>
-                      <TableHeader>
-                        <TableRow>
-                          {isZepto && <TableHead className="text-xs font-semibold">City</TableHead>}
-                          <TableHead className="text-xs font-semibold">States</TableHead>
-                          <TableHead className="text-xs font-semibold">{isZepto ? 'Tally Ledger' : 'Ledger'}</TableHead>
-                          <TableHead className="text-xs font-semibold">Invoice No.</TableHead>
-                        </TableRow>
-                      </TableHeader>
-                      <TableBody>
-                        {masterData.ledger_master.slice(0, 50).map((row, idx) => {
-                          const city = row['City'] || row.city || '';
-                          const state = row['States'] || row['State'] || row.states || row.state || '';
-                          const ledger = row['Ledger'] || row.ledger || '';
-                          const invoiceNo = row['Invoice No.'] || row['Invoice Number'] || row['Invoice No'] || row.invoiceNo || '';
-                          return (
-                            <TableRow key={idx}>
-                              {isZepto && <TableCell className="text-xs">{city || <span className="text-slate-400 italic">—</span>}</TableCell>}
-                              <TableCell className="text-xs">{state || <span className="text-slate-400 italic">—</span>}</TableCell>
-                              <TableCell className="text-xs">{ledger || <span className="text-slate-400 italic">—</span>}</TableCell>
-                              <TableCell className="text-xs">{invoiceNo || <span className="text-slate-400 italic">—</span>}</TableCell>
-                            </TableRow>
-                          );
-                        })}
-                      </TableBody>
-                    </Table>
-                    {masterData.ledger_master.length > 50 && (
-                      <p className="text-xs text-slate-500 p-3 text-center border-t">
-                        Showing 50 of {masterData.ledger_master.length} records
-                      </p>
-                    )}
-                  </div>
-                ) : (
+
+              {/* Search Bar */}
+              {masterData.ledger_master?.length > 0 && (
+                <div className="relative">
+                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-400" />
+                  <Input
+                    placeholder="Search by state, ledger or invoice no..."
+                    value={ledgerSearch}
+                    onChange={(e) => setLedgerSearch(e.target.value)}
+                    className="pl-9 h-9 text-sm"
+                  />
+                  {ledgerSearch && (
+                    <button
+                      onClick={() => setLedgerSearch('')}
+                      className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
+                    >
+                      <X className="h-4 w-4" />
+                    </button>
+                  )}
+                </div>
+              )}
+
+              <div className="flex-1 overflow-auto">
+                {masterData.ledger_master?.length > 0 ? (() => {
+                  const rows = masterData.ledger_master
+                    .map((row, idx) => ({ row, idx }))
+                    .filter(({ row }) => {
+                      if (!ledgerSearch.trim()) return true;
+                      const q = ledgerSearch.toLowerCase();
+                      const city = (row['City'] || row.city || '').toString().toLowerCase();
+                      const state = (row['States'] || row['State'] || row.states || row.state || '').toString().toLowerCase();
+                      const ledger = (row['Ledger'] || row.ledger || '').toString().toLowerCase();
+                      const invoiceNo = (row['Invoice No.'] || row['Invoice Number'] || row['Invoice No'] || row.invoiceNo || '').toString().toLowerCase();
+                      return city.includes(q) || state.includes(q) || ledger.includes(q) || invoiceNo.includes(q);
+                    });
+
+                  return rows.length > 0 ? (
+                    <div className="border rounded-lg overflow-auto max-h-[500px]">
+                      <Table>
+                        <TableHeader>
+                          <TableRow>
+                            {isZepto && <TableHead className="text-xs font-semibold">City</TableHead>}
+                            <TableHead className="text-xs font-semibold">States</TableHead>
+                            <TableHead className="text-xs font-semibold">{isZepto ? 'Tally Ledger' : 'Ledger'}</TableHead>
+                            <TableHead className="text-xs font-semibold">Invoice No.</TableHead>
+                            <TableHead className="text-right text-xs font-semibold">Action</TableHead>
+                          </TableRow>
+                        </TableHeader>
+                        <TableBody>
+                          {rows.slice(0, 100).map(({ row, idx }) => {
+                            const city = row['City'] || row.city || '';
+                            const state = row['States'] || row['State'] || row.states || row.state || '';
+                            const ledger = row['Ledger'] || row.ledger || '';
+                            const invoiceNo = row['Invoice No.'] || row['Invoice Number'] || row['Invoice No'] || row.invoiceNo || '';
+                            return (
+                              <TableRow key={idx}>
+                                {isZepto && <TableCell className="text-xs">{city || <span className="text-slate-400 italic">—</span>}</TableCell>}
+                                <TableCell className="text-xs">{state || <span className="text-slate-400 italic">—</span>}</TableCell>
+                                <TableCell className="text-xs">{ledger || <span className="text-slate-400 italic">—</span>}</TableCell>
+                                <TableCell className="text-xs">{invoiceNo || <span className="text-slate-400 italic">—</span>}</TableCell>
+                                <TableCell className="text-right">
+                                  <Button
+                                    size="sm"
+                                    variant="ghost"
+                                    className="h-7 w-7 p-0 text-red-500 hover:text-red-700 hover:bg-red-50"
+                                    onClick={() => handleDeleteSingleLedger(idx)}
+                                    disabled={deletingLedgerIdx === idx}
+                                    title="Delete this ledger row"
+                                  >
+                                    {deletingLedgerIdx === idx
+                                      ? <Loader2 className="h-3 w-3 animate-spin" />
+                                      : <Trash2 className="h-3 w-3" />}
+                                  </Button>
+                                </TableCell>
+                              </TableRow>
+                            );
+                          })}
+                        </TableBody>
+                      </Table>
+                      {rows.length > 100 && (
+                        <p className="text-xs text-slate-500 p-3 text-center border-t">
+                          Showing 100 of {rows.length}{ledgerSearch.trim() ? ' matching' : ''} records
+                        </p>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="py-12 text-center text-slate-500 text-sm">
+                      <Search className="h-8 w-8 mx-auto mb-2 text-slate-300" />
+                      No ledger rows found for "{ledgerSearch}"
+                    </div>
+                  );
+                })() : (
                   <p className="text-sm text-slate-600 py-8 text-center">No ledger master data uploaded</p>
                 )}
               </div>

@@ -155,6 +155,16 @@ function normalizeStateName(state) {
 }
 
 /**
+ * Insert "-SHIP" after the 4th character of an invoice/voucher number, e.g.
+ * "FLIP-TN--07-08" -> "FLIP-SHIP-TN--07-08". Used by both the shipping tally
+ * ready and x2beta-shipping sheets' Vch. No./Ref. No. columns.
+ */
+function addShipToVchNo(vchNo) {
+  if (!vchNo || typeof vchNo !== 'string') return vchNo;
+  return vchNo.slice(0, 4) + '-SHIP' + vchNo.slice(4);
+}
+
+/**
  * Get column letter from column number (1 = A, 2 = B, etc.)
  */
 function getColLetterFromNum(colNum) {
@@ -416,15 +426,6 @@ function generateShippingTallyReady(pivotRows, fileDate, withInventory) {
     console.warn(`⚠ Unmapped GST rate detected: ${rate}`);
     return rawRate;
   }
-
-  function addShipToVchNo(vchNo) {
-    if (!vchNo || typeof vchNo !== 'string') return vchNo;
-
-    // Insert -SHIP after first 3 characters
-    return vchNo.slice(0, 3) + '-SHIP' + vchNo.slice(3);
-  }
-
-
 
   // ---------- SAFE NUMBER ----------
   const safeNumber = (value) => {
@@ -1583,8 +1584,8 @@ async function flipkartProcessor(rawFileBuffer, skuData, stateConfigData, brandN
   const x2betaShippingColumns = [
     { header: 'Vch. Date* ', get: () => x2betaVchDate },
     { header: 'Vch. Type*', get: r => `${Number(r.final_shipping_taxable_value || 0) < 0 ? 'CN-' : ''}Sales-${getSellerStateAbbr(r.seller_gstin) || ''}` },
-    { header: 'Vch. No.*', get: r => `${Number(r.final_shipping_taxable_value || 0) < 0 ? 'CN-' : ''}${r.final_invoice_no || ''}` },
-    { header: 'Ref. No.', get: r => r.final_invoice_no || '' },
+    { header: 'Vch. No.*', get: r => `${Number(r.final_shipping_taxable_value || 0) < 0 ? 'CN-' : ''}${addShipToVchNo(r.final_invoice_no) || ''}` },
+    { header: 'Ref. No.', get: r => addShipToVchNo(r.final_invoice_no) || '' },
     { header: 'Ref. Date', get: () => x2betaVchDate },
     { header: 'Is CN?', get: r => (Number(r.final_shipping_taxable_value || 0) < 0 ? 'Yes' : null) },
     { header: 'Is Vch?', get: () => null },

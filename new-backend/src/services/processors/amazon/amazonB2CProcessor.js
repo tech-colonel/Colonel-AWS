@@ -916,8 +916,8 @@ async function amazonB2CProcessor(
       // Vch No/Ref No reuse the existing Final Invoice No. as-is (per user decision) rather than
       // the reference file's own AMZ-{ShipToStateCode}-{rank} series, which needs a per-state
       // short-code lookup the Ledger Master upload doesn't currently carry.
-      { header: 'Vch. No.*', get: r => `${Number(r['Final Taxable Sales Value'] || 0) < 0 ? 'CN-' : ''}${r['Final Invoice No.'] || ''}` },
-      { header: 'Ref. No.', get: r => r['Final Invoice No.'] || '' },
+      { header: 'Vch No.', get: r => `${Number(r['Final Taxable Sales Value'] || 0) < 0 ? 'CN-' : ''}${r['Final Invoice No.'] || ''}` },
+      { header: 'Ref No.', get: r => r['Final Invoice No.'] || '' },
       { header: 'Ref. Date', get: () => x2betaVchDate },
       { header: 'Is CN?', get: r => (Number(r['Final Taxable Sales Value'] || 0) < 0 ? 'Yes' : null) },
       { header: 'Is Vch?', get: () => null },
