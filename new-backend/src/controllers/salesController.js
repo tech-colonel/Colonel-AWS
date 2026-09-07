@@ -24,6 +24,22 @@ const OUTPUT_DIR = path.join(__dirname, '../../outputs');
 const truncate255 = value =>
   typeof value === 'string' && value.length > 255 ? value.slice(0, 255) : value;
 
+// The sales processors derive the invoice-number month suffix (and Tally
+// voucher dates) from the `date` arg they are handed. Passing new Date() made
+// every run stamp the month it was generated in (a Feb run done in Sept came
+// out "-09"). Build a real ISO date for the SELECTED period instead — 15th of
+// the month so a timezone shift can't roll it into an adjacent month.
+const MONTH_TO_NUM = {
+  january: 1, february: 2, march: 3, april: 4, may: 5, june: 6,
+  july: 7, august: 8, september: 9, october: 10, november: 11, december: 12
+};
+function periodDateISO(month, year) {
+  const m = MONTH_TO_NUM[String(month).trim().toLowerCase()] || parseInt(month, 10);
+  const y = parseInt(year, 10);
+  if (!m || m < 1 || m > 12 || !y) return new Date().toISOString();
+  return new Date(Date.UTC(y, m - 1, 15)).toISOString();
+}
+
 /**
  * Shared logic for working file management across all agents
  */
@@ -451,7 +467,7 @@ const flipkart = {
         masterData.sku_master,
         masterData.ledger_master,
         brand.name,
-        new Date().toISOString(), // Base date for invoice logic
+        periodDateISO(req.body.month, req.body.year), // selected period → invoice month suffix + Tally dates
         useInventory
       );
 
@@ -621,7 +637,7 @@ const flipkart = {
         masterData.sku_master,
         masterData.ledger_master,
         brand.name,
-        new Date().toISOString(),
+        periodDateISO(req.body.month, req.body.year), // selected period → invoice month suffix + Tally dates
         useInventory
       );
 

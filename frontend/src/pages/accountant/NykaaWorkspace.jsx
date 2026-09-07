@@ -1,6 +1,6 @@
 ﻿import React, { useState, useEffect, useCallback } from 'react';
 import { useParams } from 'react-router-dom';
-import { Upload, FileText, Download, Trash2, Loader2, Plus, CheckCircle2, XCircle } from 'lucide-react';
+import { Upload, FileText, Download, Trash2, Loader2, Plus, CheckCircle2, XCircle, Eye } from 'lucide-react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../../components/ui/card';
 import { Button } from '../../components/ui/button';
 import { Input } from '../../components/ui/input';
@@ -31,6 +31,16 @@ const NykaaWorkspace = ({ agent }) => {
   const [previewData, setPreviewData] = useState(null);
   const [isCommitting, setIsCommitting] = useState(false);
 
+  // Master data (SKU / Ledger) — same as the Sales-Flipkart workspace
+  const [masterData, setMasterData] = useState({ sku_master: [], ledger_master: [] });
+  const [showUploadSkuModal, setShowUploadSkuModal] = useState(false);
+  const [showViewSkuModal, setShowViewSkuModal] = useState(false);
+  const [showUploadLedgerModal, setShowUploadLedgerModal] = useState(false);
+  const [showViewLedgerModal, setShowViewLedgerModal] = useState(false);
+  const [skuFile, setSkuFile] = useState(null);
+  const [ledgerFile, setLedgerFile] = useState(null);
+  const [isUploadingMaster, setIsUploadingMaster] = useState(false);
+
   const fetchFiles = useCallback(async () => {
     try {
       setLoadingFiles(true);
@@ -39,7 +49,40 @@ const NykaaWorkspace = ({ agent }) => {
     } catch { } finally { setLoadingFiles(false); }
   }, [brandId, agentId]);
 
-  useEffect(() => { fetchFiles(); }, [fetchFiles]);
+  const fetchMaster = useCallback(async () => {
+    try {
+      const res = await api.get(`/api/brands/${brandId}/agents/${agentId}/nykaa/master`);
+      setMasterData({ sku_master: res.data?.sku_master || [], ledger_master: res.data?.ledger_master || [] });
+    } catch { }
+  }, [brandId, agentId]);
+
+  useEffect(() => { fetchFiles(); fetchMaster(); }, [fetchFiles, fetchMaster]);
+
+  const handleUploadSku = async () => {
+    if (!skuFile) { toast.error('Please select a file'); return; }
+    const data = new FormData();
+    data.append('file', skuFile);
+    setIsUploadingMaster(true);
+    try {
+      await api.post(`/api/brands/${brandId}/agents/${agentId}/nykaa/master/sku`, data, { headers: { 'Content-Type': 'multipart/form-data' } });
+      toast.success('SKU Master uploaded successfully');
+      setShowUploadSkuModal(false); setSkuFile(null); fetchMaster();
+    } catch (err) { toast.error(err.response?.data?.error || 'Upload failed'); }
+    finally { setIsUploadingMaster(false); }
+  };
+
+  const handleUploadLedger = async () => {
+    if (!ledgerFile) { toast.error('Please select a file'); return; }
+    const data = new FormData();
+    data.append('file', ledgerFile);
+    setIsUploadingMaster(true);
+    try {
+      await api.post(`/api/brands/${brandId}/agents/${agentId}/nykaa/master/ledger`, data, { headers: { 'Content-Type': 'multipart/form-data' } });
+      toast.success('Ledger Master uploaded successfully');
+      setShowUploadLedgerModal(false); setLedgerFile(null); fetchMaster();
+    } catch (err) { toast.error(err.response?.data?.error || 'Upload failed'); }
+    finally { setIsUploadingMaster(false); }
+  };
 
   const handleDownload = async (fileId, filename) => {
     try {
@@ -106,25 +149,30 @@ const NykaaWorkspace = ({ agent }) => {
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
         <Card>
           <CardHeader>
-            <CardTitle>Nykaa Bi-Cycle Processing</CardTitle>
-            <CardDescription>Two-cycle VLOOKUP method as per Nykaa SOP</CardDescription>
+            <CardTitle>Master Data Management</CardTitle>
+            <CardDescription>Upload and view SKU and Ledger master data</CardDescription>
           </CardHeader>
-          <CardContent className="space-y-3 text-sm text-slate-600">
-            <div className="flex items-start gap-3 p-3 rounded-lg bg-blue-50 border border-blue-100">
-              <CycleBadge label="Cycle 1  1–15" color="bg-blue-100 text-blue-800" />
-              <p>Status cross-referenced with Cycle 2 file.<br />
-                <span className="text-green-700 font-medium">Delivered / Shipped</span> → Sales &nbsp;|&nbsp;
-                <span className="text-red-600 font-medium">Return</span> → Credit Note
-              </p>
+          <CardContent className="space-y-3">
+            <div className="grid grid-cols-2 gap-3">
+              <Button variant="outline" onClick={() => setShowUploadSkuModal(true)} className="w-full">
+                <Upload className="mr-2 h-4 w-4" />Upload SKU
+              </Button>
+              <Button variant="outline" onClick={() => setShowViewSkuModal(true)} className="w-full">
+                <Eye className="mr-2 h-4 w-4" />View SKU
+              </Button>
             </div>
-            <div className="flex items-start gap-3 p-3 rounded-lg bg-amber-50 border border-amber-100">
-              <CycleBadge label="Cycle 2  16–30" color="bg-amber-100 text-amber-800" />
-              <p>Unmatched orders (not in Cycle 1).<br />
-                <span className="text-green-700 font-medium">Delivered / Shipped / Not Shipped</span> → Provisional Sales &nbsp;|&nbsp;
-                <span className="text-red-600 font-medium">Return</span> → Credit Note
-              </p>
+            <div className="grid grid-cols-2 gap-3">
+              <Button variant="outline" onClick={() => setShowUploadLedgerModal(true)} className="w-full">
+                <Upload className="mr-2 h-4 w-4" />Upload Ledger
+              </Button>
+              <Button variant="outline" onClick={() => setShowViewLedgerModal(true)} className="w-full">
+                <Eye className="mr-2 h-4 w-4" />View Ledger
+              </Button>
             </div>
-            <p className="text-xs text-slate-400 pt-1">Output: Tally-ready "Excel to Tally" sheet with 109 columns and state-wise voucher grouping.</p>
+            <div className="pt-2 text-xs text-slate-500 space-y-1">
+              <p>SKU Master: {masterData.sku_master?.length || 0} records</p>
+              <p>Ledger Master: {masterData.ledger_master?.length || 0} records</p>
+            </div>
           </CardContent>
         </Card>
         <Card>
@@ -139,6 +187,30 @@ const NykaaWorkspace = ({ agent }) => {
           </CardContent>
         </Card>
       </div>
+
+      <Card className="mb-8">
+        <CardHeader>
+          <CardTitle>Nykaa Bi-Cycle Processing</CardTitle>
+          <CardDescription>Two-cycle VLOOKUP method as per Nykaa SOP</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-3 text-sm text-slate-600">
+          <div className="flex items-start gap-3 p-3 rounded-lg bg-blue-50 border border-blue-100">
+            <CycleBadge label="Cycle 1  1–15" color="bg-blue-100 text-blue-800" />
+            <p>Status cross-referenced with Cycle 2 file.<br />
+              <span className="text-green-700 font-medium">Delivered / Shipped</span> → Sales &nbsp;|&nbsp;
+              <span className="text-red-600 font-medium">Return</span> → Credit Note
+            </p>
+          </div>
+          <div className="flex items-start gap-3 p-3 rounded-lg bg-amber-50 border border-amber-100">
+            <CycleBadge label="Cycle 2  16–30" color="bg-amber-100 text-amber-800" />
+            <p>Unmatched orders (not in Cycle 1).<br />
+              <span className="text-green-700 font-medium">Delivered / Shipped / Not Shipped</span> → Provisional Sales &nbsp;|&nbsp;
+              <span className="text-red-600 font-medium">Return</span> → Credit Note
+            </p>
+          </div>
+          <p className="text-xs text-slate-400 pt-1">Output: Tally-ready "Excel to Tally" sheet with 109 columns and state-wise voucher grouping.</p>
+        </CardContent>
+      </Card>
 
       <Card>
         <CardHeader>
@@ -334,6 +406,114 @@ const NykaaWorkspace = ({ agent }) => {
                 </Button>
               </div>
             </div>
+          )}
+        </DialogContent>
+      </Dialog>
+
+      {/* Upload SKU Master Modal */}
+      <Dialog open={showUploadSkuModal} onOpenChange={setShowUploadSkuModal}>
+        <DialogContent onClose={() => setShowUploadSkuModal(false)}>
+          <DialogHeader><DialogTitle>Upload SKU Master</DialogTitle></DialogHeader>
+          <div className="space-y-4">
+            <div>
+              <Label htmlFor="nykaa-sku-file">Select Excel File *</Label>
+              <Input id="nykaa-sku-file" type="file" accept=".xlsx,.xls" className="mt-2"
+                onChange={(e) => setSkuFile(e.target.files[0] || null)} />
+              <p className="text-xs text-slate-500 mt-2">Upload Excel file with columns: Sales Portal SKU, Tally New SKU</p>
+            </div>
+            <div className="flex gap-3 pt-2">
+              <Button type="button" variant="secondary" className="flex-1" onClick={() => setShowUploadSkuModal(false)} disabled={isUploadingMaster}>Cancel</Button>
+              <Button className="flex-1" onClick={handleUploadSku} disabled={isUploadingMaster}>
+                {isUploadingMaster ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" />Uploading…</> : 'Upload'}
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* Upload Ledger Master Modal */}
+      <Dialog open={showUploadLedgerModal} onOpenChange={setShowUploadLedgerModal}>
+        <DialogContent onClose={() => setShowUploadLedgerModal(false)}>
+          <DialogHeader><DialogTitle>Upload Ledger Master</DialogTitle></DialogHeader>
+          <div className="space-y-4">
+            <div>
+              <Label htmlFor="nykaa-ledger-file">Select Excel File *</Label>
+              <Input id="nykaa-ledger-file" type="file" accept=".xlsx,.xls" className="mt-2"
+                onChange={(e) => setLedgerFile(e.target.files[0] || null)} />
+              <p className="text-xs text-slate-500 mt-2">Upload Excel file with columns: State, Ledger, Invoice No.</p>
+            </div>
+            <div className="flex gap-3 pt-2">
+              <Button type="button" variant="secondary" className="flex-1" onClick={() => setShowUploadLedgerModal(false)} disabled={isUploadingMaster}>Cancel</Button>
+              <Button className="flex-1" onClick={handleUploadLedger} disabled={isUploadingMaster}>
+                {isUploadingMaster ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" />Uploading…</> : 'Upload'}
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* View SKU Master Modal */}
+      <Dialog open={showViewSkuModal} onOpenChange={setShowViewSkuModal}>
+        <DialogContent onClose={() => setShowViewSkuModal(false)} className="max-w-3xl max-h-[80vh] overflow-auto">
+          <DialogHeader><DialogTitle>SKU Master Data ({masterData.sku_master?.length || 0} records)</DialogTitle></DialogHeader>
+          {masterData.sku_master?.length > 0 ? (
+            <div className="border rounded-lg overflow-auto max-h-[500px]">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead className="text-xs font-semibold">Sales Portal SKU</TableHead>
+                    <TableHead className="text-xs font-semibold">Tally New SKU</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {masterData.sku_master.slice(0, 100).map((row, idx) => (
+                    <TableRow key={idx}>
+                      <TableCell className="text-xs">{row['Sales portal SKU'] || row['Sales Portal SKU'] || row.salesPortalSku || row.sku || <span className="text-slate-400 italic">—</span>}</TableCell>
+                      <TableCell className="text-xs">{row['Tally new SKU'] || row['Tally New SKU'] || row.tallyNewSku || row.fg || <span className="text-slate-400 italic">—</span>}</TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+              {masterData.sku_master.length > 100 && (
+                <p className="text-xs text-slate-500 p-3 text-center border-t">Showing 100 of {masterData.sku_master.length} records</p>
+              )}
+            </div>
+          ) : (
+            <p className="text-sm text-slate-600 py-8 text-center">No SKU master data uploaded</p>
+          )}
+        </DialogContent>
+      </Dialog>
+
+      {/* View Ledger Master Modal */}
+      <Dialog open={showViewLedgerModal} onOpenChange={setShowViewLedgerModal}>
+        <DialogContent onClose={() => setShowViewLedgerModal(false)} className="max-w-3xl max-h-[80vh] overflow-auto">
+          <DialogHeader><DialogTitle>Ledger Master Data ({masterData.ledger_master?.length || 0} records)</DialogTitle></DialogHeader>
+          {masterData.ledger_master?.length > 0 ? (
+            <div className="border rounded-lg overflow-auto max-h-[500px]">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead className="text-xs font-semibold">States</TableHead>
+                    <TableHead className="text-xs font-semibold">Ledger</TableHead>
+                    <TableHead className="text-xs font-semibold">Invoice No.</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {masterData.ledger_master.slice(0, 100).map((row, idx) => (
+                    <TableRow key={idx}>
+                      <TableCell className="text-xs">{row['States'] || row['State'] || row.states || row.state || <span className="text-slate-400 italic">—</span>}</TableCell>
+                      <TableCell className="text-xs">{row['Ledger'] || row.ledger || <span className="text-slate-400 italic">—</span>}</TableCell>
+                      <TableCell className="text-xs">{row['Invoice No.'] || row['Invoice Number'] || row['Invoice No'] || row.invoiceNo || <span className="text-slate-400 italic">—</span>}</TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+              {masterData.ledger_master.length > 100 && (
+                <p className="text-xs text-slate-500 p-3 text-center border-t">Showing 100 of {masterData.ledger_master.length} records</p>
+              )}
+            </div>
+          ) : (
+            <p className="text-sm text-slate-600 py-8 text-center">No ledger master data uploaded</p>
           )}
         </DialogContent>
       </Dialog>

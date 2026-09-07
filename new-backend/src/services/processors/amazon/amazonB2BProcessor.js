@@ -773,7 +773,10 @@ async function amazonB2BProcessor(
       const rate = Number(row['Final Tax rate'] || 0);
       const invoiceNo = row['Final Invoice No.'] || '';
       const isCreditNote = shippingValue < 0;
-      const vchNo = isCreditNote ? `${invoiceNo}-cn` : invoiceNo;
+      const baseVchNo = isCreditNote ? `${invoiceNo}-cn` : invoiceNo;
+      // "SHIP-" prefix keeps freight vouchers distinct from the main tally-ready
+      // sheet's Vch No./Ref No. (same marker used on the x2beta-shipping sheet).
+      const vchNo = baseVchNo ? `SHIP-${baseVchNo}` : baseVchNo;
       const rowStateAbbr = getSellerStateAbbr(row['Seller Gstin']);
       const shippingRow = {
         'Vch Date': lastDate,
@@ -1004,29 +1007,30 @@ async function amazonB2BProcessor(
     const x2betaShipToCol = findHeader('ship to state');
     const isRowIntraState = row => row[x2betaShipFromCol] === row[x2betaShipToCol];
 
-    // State-rank: alphabetical position (1-indexed) of a seller-state-abbr among all seller
-    // states seen this run — verified against the reference file (HR=1, KA=2, MH=3, UP=4,
-    // i.e. alphabetical order), used to build the AMZ-Intra/Inter-{rank} voucher number series.
     const sortedStateCodes = [...uniqueStateCodes].sort();
-    const getStateRank = stateAbbr => sortedStateCodes.indexOf(stateAbbr) + 1;
+
+    // Raw 2-digit GST jurisdiction code (e.g. "06" for Haryana) for the Vch/Ref No series,
+    // plus the selected-period month, per user request: AMZ-{INTRA|INTER}-{stateGstCode}-{month}.
+    const getSellerStateCode = gstin => String(gstin || '').trim().substring(0, 2);
+    const x2betaVchMonth = String(x2betaVchDate.getMonth() + 1).padStart(2, '0');
 
     const x2betaColumns = [
       { header: 'Vch. Date* ', get: () => x2betaVchDate },
       { header: 'Vch. Type*', get: r => `${Number(r['Final Taxable Sales Value'] || 0) < 0 ? 'CN-' : ''}Sales-${getSellerStateAbbr(r['Seller Gstin']) || ''}` },
       {
-        header: 'Vch. No.*',
+        header: 'Vch No.',
         get: r => {
           const isCN = Number(r['Final Taxable Sales Value'] || 0) < 0;
-          const rank = getStateRank(getSellerStateAbbr(r['Seller Gstin']));
-          return `AMZ-${isRowIntraState(r) ? 'Intra' : 'Inter'}-${isCN ? 'CN-' : ''}${rank}`;
+          const stateCode = getSellerStateCode(r['Seller Gstin']);
+          return `AMZ-${isRowIntraState(r) ? 'INTRA' : 'INTER'}-${isCN ? 'CN-' : ''}${stateCode}-${x2betaVchMonth}`;
         }
       },
       {
-        header: 'Ref. No.',
+        header: 'Ref No.',
         get: r => {
           const isCN = Number(r['Final Taxable Sales Value'] || 0) < 0;
-          const rank = getStateRank(getSellerStateAbbr(r['Seller Gstin']));
-          return `AMZ-${isRowIntraState(r) ? 'Intra' : 'Inter'}-${isCN ? 'CN-' : ''}${rank}`;
+          const stateCode = getSellerStateCode(r['Seller Gstin']);
+          return `AMZ-${isRowIntraState(r) ? 'INTRA' : 'INTER'}-${isCN ? 'CN-' : ''}${stateCode}-${x2betaVchMonth}`;
         }
       },
       { header: 'Ref. Date', get: () => x2betaVchDate },
@@ -1170,20 +1174,22 @@ async function amazonB2BProcessor(
     const x2betaShippingColumns = [
       { header: 'Vch. Date* ', get: () => x2betaVchDate },
       { header: 'Vch. Type*', get: r => `${Number(r['Final Taxable Shipping Value'] || 0) < 0 ? 'CN-' : ''}Sales-${getSellerStateAbbr(r['Seller Gstin']) || ''}` },
+      // Freight vouchers get a "SHIP-" prefix so they don't collide with the main
+      // x2beta sheet's Vch No./Ref No. in Tally — mirrors the shipping tally-ready sheet.
       {
-        header: 'Vch. No.*',
+        header: 'Vch No.',
         get: r => {
           const isCN = Number(r['Final Taxable Shipping Value'] || 0) < 0;
-          const rank = getStateRank(getSellerStateAbbr(r['Seller Gstin']));
-          return `AMZ-${isRowIntraState(r) ? 'Intra' : 'Inter'}-${isCN ? 'CN-' : ''}${rank}`;
+          const stateCode = getSellerStateCode(r['Seller Gstin']);
+          return `SHIP-AMZ-${isRowIntraState(r) ? 'INTRA' : 'INTER'}-${isCN ? 'CN-' : ''}${stateCode}-${x2betaVchMonth}`;
         }
       },
       {
-        header: 'Ref. No.',
+        header: 'Ref No.',
         get: r => {
           const isCN = Number(r['Final Taxable Shipping Value'] || 0) < 0;
-          const rank = getStateRank(getSellerStateAbbr(r['Seller Gstin']));
-          return `AMZ-${isRowIntraState(r) ? 'Intra' : 'Inter'}-${isCN ? 'CN-' : ''}${rank}`;
+          const stateCode = getSellerStateCode(r['Seller Gstin']);
+          return `SHIP-AMZ-${isRowIntraState(r) ? 'INTRA' : 'INTER'}-${isCN ? 'CN-' : ''}${stateCode}-${x2betaVchMonth}`;
         }
       },
       { header: 'Ref. Date', get: () => x2betaVchDate },

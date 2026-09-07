@@ -25,6 +25,22 @@ const getMasterData = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
+const uploadSkuMaster = async (req, res, next) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: 'File is required' });
+    const result = await salesService.uploadMasterData(req.params.brandId, req.params.agentId, 'sku', req.file.buffer);
+    res.json({ message: 'SKU Master uploaded successfully', ...result });
+  } catch (err) { next(err); }
+};
+
+const uploadLedgerMaster = async (req, res, next) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: 'File is required' });
+    const result = await salesService.uploadMasterData(req.params.brandId, req.params.agentId, 'ledger', req.file.buffer);
+    res.json({ message: 'Ledger Master uploaded successfully', ...result });
+  } catch (err) { next(err); }
+};
+
 function mapRowToSchema(row, monthName, year, filename) {
   return {
     year: parseInt(year, 10),
@@ -100,4 +116,4 @@ const generateDiscard = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
-module.exports = { getMasterData, generatePreview, generateCommit, generateDiscard };
+module.exports = { getMasterData, uploadSkuMaster, uploadLedgerMaster, generatePreview, generateCommit, generateDiscard };

@@ -155,6 +155,19 @@ function normalizeStateName(state) {
 }
 
 /**
+ * Prefix an invoice/voucher number with "SHIP-", e.g.
+ * "FLIP-TN--07-08" -> "SHIP-FLIP-TN--07-08". Used by both the shipping tally
+ * ready and x2beta-shipping sheets' Vch. No./Ref. No. columns so freight
+ * vouchers stay distinct from the goods voucher on Tally import (mirrors the
+ * "SHIP-" prefix the Amazon B2B/B2C processors put on their shipping sheets).
+ * Blank stays blank.
+ */
+function addShipToVchNo(vchNo) {
+  if (!vchNo || typeof vchNo !== 'string') return vchNo;
+  return 'SHIP-' + vchNo;
+}
+
+/**
  * Get column letter from column number (1 = A, 2 = B, etc.)
  */
 function getColLetterFromNum(colNum) {
@@ -416,15 +429,6 @@ function generateShippingTallyReady(pivotRows, fileDate, withInventory) {
     console.warn(`⚠ Unmapped GST rate detected: ${rate}`);
     return rawRate;
   }
-
-  function addShipToVchNo(vchNo) {
-    if (!vchNo || typeof vchNo !== 'string') return vchNo;
-
-    // Insert -SHIP after first 3 characters
-    return vchNo.slice(0, 3) + '-SHIP' + vchNo.slice(3);
-  }
-
-
 
   // ---------- SAFE NUMBER ----------
   const safeNumber = (value) => {
@@ -757,13 +761,10 @@ async function flipkartProcessor(rawFileBuffer, skuData, stateConfigData, brandN
     }
     const tallyLedgers = stateConfig.tallyLedger || '';
     const baseInvoiceNo = stateConfig.invoiceNo || '';
-    // Insert the seller GSTIN's 2-digit state code before the month suffix so
-    // vouchers stay unique across sellers filing under different GSTINs but
-    // shipping to the same delivery state, e.g. FKT-KA-27-07.
-    const sellerGstinPrefix = sellerGstin.slice(0, 2);
-    const finalInvoiceNo = baseInvoiceNo
-      ? `${baseInvoiceNo}${sellerGstinPrefix ? `-${sellerGstinPrefix}` : ''}${monthSuffix}`
-      : '';
+    // Invoice number = per-state ledger code + selected-period month suffix,
+    // e.g. Flipk-AS-02 for February. The seller-GSTIN 2-digit prefix segment
+    // was removed per the accountant's decision.
+    const finalInvoiceNo = baseInvoiceNo ? `${baseInvoiceNo}${monthSuffix}` : '';
 
     // Get raw values
     const priceAfterDiscount = safeNumber(row['Price after discount (Price before discount-Total discount)']);
@@ -1586,8 +1587,10 @@ async function flipkartProcessor(rawFileBuffer, skuData, stateConfigData, brandN
   const x2betaShippingColumns = [
     { header: 'Vch. Date* ', get: () => x2betaVchDate },
     { header: 'Vch. Type*', get: r => `${Number(r.final_shipping_taxable_value || 0) < 0 ? 'CN-' : ''}Sales-${getSellerStateAbbr(r.seller_gstin) || ''}` },
-    { header: 'Vch. No.*', get: r => `${Number(r.final_shipping_taxable_value || 0) < 0 ? 'CN-' : ''}${r.final_invoice_no || ''}` },
-    { header: 'Ref. No.', get: r => r.final_invoice_no || '' },
+    // "SHIP-" leads the token so freight vouchers can't collide with the goods
+    // voucher on Tally import — matches the shipping tally ready sheet.
+    { header: 'Vch. No.*', get: r => r.final_invoice_no ? `SHIP-${Number(r.final_shipping_taxable_value || 0) < 0 ? 'CN-' : ''}${r.final_invoice_no}` : '' },
+    { header: 'Ref. No.', get: r => addShipToVchNo(r.final_invoice_no) || '' },
     { header: 'Ref. Date', get: () => x2betaVchDate },
     { header: 'Is CN?', get: r => (Number(r.final_shipping_taxable_value || 0) < 0 ? 'Yes' : null) },
     { header: 'Is Vch?', get: () => null },

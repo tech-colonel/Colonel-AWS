@@ -149,6 +149,8 @@ const salesNykaaController = require('../controllers/agents/sales-nykaa/salesNyk
 
 // ─── Nykaa Routes ─────────────────────────────────────────────────────────────
 router.get('/brands/:brandId/agents/:agentId/nykaa/master', authenticateToken, salesNykaaController.getMasterData);
+router.post('/brands/:brandId/agents/:agentId/nykaa/master/sku', authenticateToken, upload.single('file'), reattachUserContext, salesNykaaController.uploadSkuMaster);
+router.post('/brands/:brandId/agents/:agentId/nykaa/master/ledger', authenticateToken, upload.single('file'), reattachUserContext, salesNykaaController.uploadLedgerMaster);
 
 // Two-phase generation: upload cycle1File + cycle2File → preview → commit/discard
 router.post('/brands/:brandId/agents/:agentId/nykaa/generate/preview', authenticateToken, upload.fields([
