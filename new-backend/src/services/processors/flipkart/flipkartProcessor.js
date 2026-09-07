@@ -155,13 +155,16 @@ function normalizeStateName(state) {
 }
 
 /**
- * Insert "-SHIP" after the 4th character of an invoice/voucher number, e.g.
- * "FLIP-TN--07-08" -> "FLIP-SHIP-TN--07-08". Used by both the shipping tally
- * ready and x2beta-shipping sheets' Vch. No./Ref. No. columns.
+ * Prefix an invoice/voucher number with "SHIP-", e.g.
+ * "FLIP-TN--07-08" -> "SHIP-FLIP-TN--07-08". Used by both the shipping tally
+ * ready and x2beta-shipping sheets' Vch. No./Ref. No. columns so freight
+ * vouchers stay distinct from the goods voucher on Tally import (mirrors the
+ * "SHIP-" prefix the Amazon B2B/B2C processors put on their shipping sheets).
+ * Blank stays blank.
  */
 function addShipToVchNo(vchNo) {
   if (!vchNo || typeof vchNo !== 'string') return vchNo;
-  return vchNo.slice(0, 4) + '-SHIP' + vchNo.slice(4);
+  return 'SHIP-' + vchNo;
 }
 
 /**
@@ -1584,7 +1587,9 @@ async function flipkartProcessor(rawFileBuffer, skuData, stateConfigData, brandN
   const x2betaShippingColumns = [
     { header: 'Vch. Date* ', get: () => x2betaVchDate },
     { header: 'Vch. Type*', get: r => `${Number(r.final_shipping_taxable_value || 0) < 0 ? 'CN-' : ''}Sales-${getSellerStateAbbr(r.seller_gstin) || ''}` },
-    { header: 'Vch. No.*', get: r => `${Number(r.final_shipping_taxable_value || 0) < 0 ? 'CN-' : ''}${addShipToVchNo(r.final_invoice_no) || ''}` },
+    // "SHIP-" leads the token so freight vouchers can't collide with the goods
+    // voucher on Tally import — matches the shipping tally ready sheet.
+    { header: 'Vch. No.*', get: r => r.final_invoice_no ? `SHIP-${Number(r.final_shipping_taxable_value || 0) < 0 ? 'CN-' : ''}${r.final_invoice_no}` : '' },
     { header: 'Ref. No.', get: r => addShipToVchNo(r.final_invoice_no) || '' },
     { header: 'Ref. Date', get: () => x2betaVchDate },
     { header: 'Is CN?', get: r => (Number(r.final_shipping_taxable_value || 0) < 0 ? 'Yes' : null) },
