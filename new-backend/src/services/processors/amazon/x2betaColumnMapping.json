@@ -14,7 +14,7 @@
   "columns": [
     { "index": 0, "header": "Vch. Date* ", "derivation": "Last calendar day of the reco month, as a real Date object (not string)." },
     { "index": 1, "header": "Vch. Type*", "derivation": "`{CN- if credit note}Sales-{sellerStateAbbr}`, e.g. 'CN-Sales-KA'. Credit note = Final Taxable Sales Value < 0. sellerStateAbbr = 2-letter state code derived from the Seller Gstin's own state prefix." },
-    { "index": 2, "header": "Vch. No.*", "derivation": "B2B: `AMZ-{Intra|Inter}-{CN- if credit note}{stateRank}`, where isIntra is based on Ship From/To State (not Bill) and stateRank is the alphabetical rank (1,2,3...) of the seller's state among all seller states seen this run. B2C: reuses the existing 'Final Invoice No.' field as-is (see known_gaps)." },
+    { "index": 2, "header": "Vch. No.*", "derivation": "B2B: `AMZ-{Intra|Inter}-{CN- if credit note}{stateRank}`, where isIntra is based on Ship From/To State (not Bill) and stateRank is the alphabetical rank (1,2,3...) of the seller's state among all seller states seen this run. B2C: reuses the existing 'Final Invoice No.' field as-is (see known_gaps). On the companion 'x2beta-shipping' sheet (freight-only vouchers) the same value is prefixed with 'SHIP-' so the shipping voucher can't collide with the goods voucher in Tally — matches the 'SHIP-' prefix on the shipping tally-ready sheet." },
     { "index": 3, "header": "Ref. No.", "derivation": "Same value as Vch. No.*" },
     { "index": 4, "header": "Ref. Date", "derivation": "Same value as Vch. Date*" },
     { "index": 5, "header": "Is CN?", "derivation": "'Yes' if credit note, else blank." },

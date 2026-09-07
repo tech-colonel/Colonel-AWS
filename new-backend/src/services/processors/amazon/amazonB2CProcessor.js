@@ -744,7 +744,10 @@ async function amazonB2CProcessor(
       const rate = Number(row['Final Tax rate'] || 0);
       const invoiceNo = row['Final Invoice No.'] || '';
       const isCreditNote = shippingValue < 0;
-      const vchNo = isCreditNote ? `${invoiceNo}-cn` : invoiceNo;
+      const baseVchNo = isCreditNote ? `${invoiceNo}-cn` : invoiceNo;
+      // "SHIP-" prefix keeps freight vouchers distinct from the main tally-ready
+      // sheet's Vch No./Ref No. (same marker used on the x2beta-shipping sheet).
+      const vchNo = baseVchNo ? `SHIP-${baseVchNo}` : baseVchNo;
       const rowStateAbbr = getSellerStateAbbr(row['Seller Gstin']);
       const shippingRow = {
         'Vch Date': lastDate,
@@ -1060,8 +1063,10 @@ async function amazonB2CProcessor(
     const x2betaShippingColumns = [
       { header: 'Vch. Date* ', get: () => x2betaVchDate },
       { header: 'Vch. Type*', get: r => `${Number(r['Final Taxable Shipping Value'] || 0) < 0 ? 'CN-' : ''}Sales-${getSellerStateAbbr(r['Seller Gstin']) || ''}` },
-      { header: 'Vch. No.*', get: r => `${Number(r['Final Taxable Shipping Value'] || 0) < 0 ? 'CN-' : ''}${r['Final Invoice No.'] || ''}` },
-      { header: 'Ref. No.', get: r => r['Final Invoice No.'] || '' },
+      // Freight vouchers get a "SHIP-" prefix so they don't collide with the main
+      // x2beta sheet's Vch No./Ref No. in Tally — mirrors the shipping tally-ready sheet.
+      { header: 'Vch. No.*', get: r => r['Final Invoice No.'] ? `SHIP-${Number(r['Final Taxable Shipping Value'] || 0) < 0 ? 'CN-' : ''}${r['Final Invoice No.']}` : '' },
+      { header: 'Ref. No.', get: r => r['Final Invoice No.'] ? `SHIP-${r['Final Invoice No.']}` : '' },
       { header: 'Ref. Date', get: () => x2betaVchDate },
       { header: 'Is CN?', get: r => (Number(r['Final Taxable Shipping Value'] || 0) < 0 ? 'Yes' : null) },
       { header: 'Is Vch?', get: () => null },
