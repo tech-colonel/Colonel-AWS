@@ -14,6 +14,9 @@ import { loadOcDateRange, saveOcDateRange } from '../../lib/ocDateRange';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 const LOGISTICS_PARTNERS = [
+    // api: COD remittance pulled from the shipping platform's own API rather
+    // than an uploaded settlement file. Only offered to enabled brands.
+    { id: 'velocity',   label: 'Velocity Shipping',    color: '#10b981', api: true },
     { id: 'delhivery',  label: 'Delhivery',            color: '#6366f1' },
     { id: 'xpressbees', label: 'Xpressbees (Busybees)', color: '#f59e0b' },
     { id: 'ekart',      label: 'Instakart (Ekart)',     color: '#10b981' },
@@ -24,6 +27,9 @@ const PAYMENT_GATEWAYS = [
     { id: 'razorpay', label: 'Razorpay',         color: '#3b82f6' },
     { id: 'snapmint', label: 'Snapmint',          color: '#8b5cf6' },
     { id: 'bharatx',  label: 'BharatX (AuroraX)', color: '#ec4899' },
+    // api: pulled from the gateway's own API — no settlement file to upload.
+    // Only offered to brands the backend has enabled (see /sources).
+    { id: 'cashfree', label: 'Cashfree',          color: '#10b981', api: true },
 ];
 
 const STEP_SELECT  = 1;
@@ -510,7 +516,17 @@ const initModal = () => ({
     unicommerceFile: null,
     returnGSTFile: null,
     salesOrderReportFile: null,
+    // Where each input comes from. 'upload' keeps the original behaviour, which
+    // is what every brand without an API connection always gets.
+    masterSource: 'upload',       // 'upload' | 'shopify_primary'
+    salesOrderSource: 'upload',   // 'upload' | 'shopify_api'
+    since: '', until: '',         // pull window, prefilled from month/year
     gatewayFiles:  {},
+    // Per-gateway input source for API-capable gateways: 'api' | 'upload'.
+    // Defaults to 'api' — that is the point of enabling one — but a brand can
+    // still fall back to a settlement file.
+    gatewaySources: {},
+    logisticsSources: {},
     logisticsFiles: {},
 });
 
@@ -547,7 +563,49 @@ function DonutChart({ pct, size = 100, stroke = 10, color = '#10b981', label, su
 }
 
 // ─── Drag-drop file zone ──────────────────────────────────────────────────────
-function FileDropZone({ id, label, icon: Icon, accept, value, onChange, color = '#64748b' }) {
+/* Upload ⇄ API switch. One component so every input that can be pulled instead
+   of uploaded reads identically — Sales Order and Cashfree use the same control. */
+function SourceToggle({ isApi, onUpload, onApi, apiLabel }) {
+    const base = 'px-2.5 py-1 transition-colors';
+    // stopPropagation: this sits inside a drop zone whose onClick opens the file
+    // dialog, and switching source must not also pop a file picker.
+    const hit = (fn) => (e) => { e.stopPropagation(); fn(); };
+    return (
+        <div className="flex rounded-md overflow-hidden border border-slate-200 text-[11px] font-semibold shrink-0 bg-white">
+            <button type="button" onClick={hit(onUpload)}
+                className={`${base} ${!isApi ? 'bg-slate-700 text-white' : 'text-slate-500 hover:bg-slate-50'}`}>
+                Upload
+            </button>
+            <button type="button" onClick={hit(onApi)}
+                className={`${base} ${isApi ? 'bg-emerald-600 text-white' : 'text-slate-500 hover:bg-slate-50'}`}>
+                {apiLabel}
+            </button>
+        </div>
+    );
+}
+
+/* The API counterpart of FileDropZone. Same outer geometry on purpose: these sit
+   side by side in the same grid, so switching source must not resize the cell or
+   stretch its neighbour. */
+function ApiSourceZone({ label, icon: Icon, note, toggle }) {
+    return (
+        <div className="relative flex flex-col rounded-xl border-2 border-dashed
+                        border-emerald-300 bg-emerald-50/60 select-none py-3 px-4 min-h-[150px]">
+            <div className="h-7 flex items-start justify-end">{toggle}</div>
+            <div className="flex-1 flex flex-col items-center justify-center gap-2">
+                <div className="w-10 h-10 rounded-full flex items-center justify-center bg-white border border-emerald-200 shadow-sm">
+                    <Icon className="h-5 w-5 text-emerald-600" />
+                </div>
+                <div className="text-center">
+                    <p className="text-sm font-semibold text-emerald-800">{label}</p>
+                    <p className="text-xs text-emerald-700/80 mt-0.5">{note}</p>
+                </div>
+            </div>
+        </div>
+    );
+}
+
+function FileDropZone({ id, label, icon: Icon, accept, value, onChange, color = '#64748b', toggle }) {
     const inputRef = useRef();
     const [dragging, setDragging] = useState(false);
     const handleDrop = (e) => {
@@ -561,11 +619,15 @@ function FileDropZone({ id, label, icon: Icon, accept, value, onChange, color = 
             onDragOver={e => { e.preventDefault(); setDragging(true); }}
             onDragLeave={() => setDragging(false)}
             onDrop={handleDrop}
-            className={`relative flex flex-col items-center justify-center gap-2 rounded-xl border-2 border-dashed cursor-pointer transition-all select-none py-5 px-4
+            className={`relative flex flex-col rounded-xl border-2 border-dashed cursor-pointer transition-all select-none py-3 px-4 min-h-[150px]
                 ${dragging ? 'border-emerald-400 bg-emerald-50' : value ? 'border-emerald-300 bg-emerald-50/60' : 'border-slate-200 bg-slate-50 hover:border-slate-300 hover:bg-white'}`}
         >
+            {/* Reserved row — present with or without a toggle, so every zone is the
+                same height and the control never lands on top of the icon. */}
+            <div className="h-7 flex items-start justify-end">{toggle}</div>
             <input ref={inputRef} id={id} type="file" accept={accept} className="hidden"
                 onChange={e => onChange(e.target.files?.[0] || null)} />
+            <div className="flex-1 flex flex-col items-center justify-center gap-2">
             {value ? (
                 <>
                     <CheckCircle2 className="h-7 w-7 text-emerald-500" />
@@ -585,6 +647,7 @@ function FileDropZone({ id, label, icon: Icon, accept, value, onChange, color = 
                     </div>
                 </>
             )}
+            </div>
         </div>
     );
 }
@@ -1640,6 +1703,9 @@ const OrderCycleShopifyWorkspace = ({ agent }) => {
     const { brandId, agentId } = useParams();
 
     const [modal, setModal]               = useState(initModal());
+    // Which inputs this brand can pull automatically. Null until loaded; all-false
+    // for every brand without a Shopify connection / Cashfree enablement.
+    const [sources, setSources]           = useState(null);
     const [isGenerating, setIsGenerating] = useState(false);
     const [previewData, setPreviewData]   = useState(null);
     const [files, setFiles]               = useState([]);
@@ -1678,6 +1744,29 @@ const OrderCycleShopifyWorkspace = ({ agent }) => {
         if (match) setViewingFile(match);
     }, [searchParams, files, viewingFile]);
 
+    useEffect(() => {
+        if (!brandId || !agentId) return;
+        api.get(`/api/brands/${brandId}/agents/${agentId}/order-cycle-shopify/sources`)
+            .then(r => setSources(r.data))
+            .catch(() => setSources({ salesOrder: { shopify: false }, gateways: { cashfree: false } }));
+    }, [brandId, agentId]);
+
+    // Default pull window = the selected month, padded 15 days each side.
+    //
+    // The padding matters: Shopify filters on created_at while Tally dates the
+    // INVOICE, so an order placed on the 28th can be invoiced next month — and a
+    // payment made on the 30th settles later still. An exact month window would
+    // silently drop those at both ends. The user can override; this is only the
+    // starting point.
+    useEffect(() => {
+        const mi = MONTHS.indexOf(modal.month);
+        if (mi < 0 || !modal.year) return;
+        const pad = (d, days) => { const x = new Date(d); x.setDate(x.getDate() + days); return x.toISOString().slice(0, 10); };
+        const first = new Date(Number(modal.year), mi, 1);
+        const last  = new Date(Number(modal.year), mi + 1, 0);
+        setModal(p => (p.since || p.until) ? p : { ...p, since: pad(first, -15), until: pad(last, 15) });
+    }, [modal.month, modal.year, modal.open]);
+
     const openModal  = () => setModal({ ...initModal(), open: true });
     const closeModal = () => { if (isGenerating) return; setModal(initModal()); setPreviewData(null); };
 
@@ -1693,6 +1782,8 @@ const OrderCycleShopifyWorkspace = ({ agent }) => {
             logisticsFiles: has ? { ...p.logisticsFiles, [id]: null } : p.logisticsFiles };
     });
     const setGatewayFile   = (id, f) => setModal(p => ({ ...p, gatewayFiles:  { ...p.gatewayFiles,  [id]: f } }));
+    const setGatewaySource = (id, src) => setModal(p => ({ ...p, gatewaySources: { ...p.gatewaySources, [id]: src } }));
+    const setLogisticsSource = (id, src) => setModal(p => ({ ...p, logisticsSources: { ...p.logisticsSources, [id]: src } }));
     const setLogisticsFile = (id, f) => setModal(p => ({ ...p, logisticsFiles: { ...p.logisticsFiles, [id]: f } }));
 
     const validateStep1 = () => {
@@ -1703,12 +1794,26 @@ const OrderCycleShopifyWorkspace = ({ agent }) => {
         return true;
     };
     const validateStep2 = () => {
-        if (!modal.unicommerceFile)      { toast.error('Upload the Unicommerce file'); return false; }
-        if (!modal.salesOrderReportFile) { toast.error('Upload the Sales Order Report'); return false; }
-        for (const id of modal.selectedGateways)
-            if (!modal.gatewayFiles[id]) { toast.error(`Upload file for ${PAYMENT_GATEWAYS.find(g => g.id === id)?.label}`); return false; }
-        for (const id of modal.selectedLogistics)
-            if (!modal.logisticsFiles[id]) { toast.error(`Upload file for ${LOGISTICS_PARTNERS.find(l => l.id === id)?.label}`); return false; }
+        if (modal.masterSource !== 'shopify_primary' && !modal.unicommerceFile) {
+            toast.error('Upload the Tally GST file'); return false;
+        }
+        if (modal.salesOrderSource !== 'shopify_api' && !modal.salesOrderReportFile) {
+            toast.error('Upload the Sales Order Report'); return false;
+        }
+        if (modal.salesOrderSource === 'shopify_api' && (!modal.since || !modal.until)) {
+            toast.error('Set the Shopify pull window'); return false;
+        }
+        for (const id of modal.selectedGateways) {
+            const gw = PAYMENT_GATEWAYS.find(g => g.id === id);
+            // Pulled from the gateway's API — nothing to upload.
+            if (gw?.api && (modal.gatewaySources[id] || 'api') === 'api') continue;
+            if (!modal.gatewayFiles[id]) { toast.error(`Upload file for ${gw?.label}`); return false; }
+        }
+        for (const id of modal.selectedLogistics) {
+            const lp = LOGISTICS_PARTNERS.find(l => l.id === id);
+            if (lp?.api && (modal.logisticsSources[id] || 'api') === 'api') continue;   // pulled, not uploaded
+            if (!modal.logisticsFiles[id]) { toast.error(`Upload file for ${lp?.label}`); return false; }
+        }
         return true;
     };
 
@@ -1717,17 +1822,37 @@ const OrderCycleShopifyWorkspace = ({ agent }) => {
 
     const handleGeneratePreview = async () => {
         if (!validateStep2()) return;
-        const gwNames = modal.selectedGateways.map(id => PAYMENT_GATEWAYS.find(g => g.id === id)?.label || id);
-        const lpNames = modal.selectedLogistics.map(id => LOGISTICS_PARTNERS.find(l => l.id === id)?.label || id);
+        const isPulled = (id) => !!PAYMENT_GATEWAYS.find(g => g.id === id)?.api
+                                 && (modal.gatewaySources[id] || 'api') === 'api';
+        const fileGateways = modal.selectedGateways.filter(id => !isPulled(id));
+        const apiGateways  = modal.selectedGateways.filter(id =>  isPulled(id));
+        const gwNames = fileGateways.map(id => PAYMENT_GATEWAYS.find(g => g.id === id)?.label || id);
+        const isPulledLp = (id) => !!LOGISTICS_PARTNERS.find(l => l.id === id)?.api
+                                   && (modal.logisticsSources[id] || 'api') === 'api';
+        const fileLogistics = modal.selectedLogistics.filter(id => !isPulledLp(id));
+        const apiLogistics  = modal.selectedLogistics.filter(id =>  isPulledLp(id));
+        const lpNames = fileLogistics.map(id => LOGISTICS_PARTNERS.find(l => l.id === id)?.label || id);
         const fd = new FormData();
         fd.append('month', modal.month); fd.append('year', modal.year);
         fd.append('gatewayNames', JSON.stringify(gwNames));
         fd.append('logisticsNames', JSON.stringify(lpNames));
-        fd.append('unicommerceFile', modal.unicommerceFile);
-        fd.append('salesOrderReportFile', modal.salesOrderReportFile);
+        if (modal.masterSource === 'shopify_primary') {
+            fd.append('masterSource', 'shopify_primary');
+        } else {
+            fd.append('unicommerceFile', modal.unicommerceFile);
+        }
+        if (modal.salesOrderSource === 'shopify_api') {
+            fd.append('salesOrderSource', 'shopify_api');
+        } else {
+            fd.append('salesOrderReportFile', modal.salesOrderReportFile);
+        }
+        if (apiGateways.includes('cashfree')) fd.append('gatewaySource', 'cashfree_api');
+        if (apiLogistics.includes('velocity')) fd.append('logisticsSource', 'velocity_api');
+        if (modal.since) fd.append('since', modal.since);
+        if (modal.until) fd.append('until', modal.until);
         if (modal.returnGSTFile) fd.append('returnGSTFile', modal.returnGSTFile);
-        modal.selectedGateways.forEach((id, i) => { if (modal.gatewayFiles[id]) fd.append(`paymentGateway_${i}`, modal.gatewayFiles[id]); });
-        modal.selectedLogistics.forEach((id, i) => { if (modal.logisticsFiles[id]) fd.append(`logistics_${i}`, modal.logisticsFiles[id]); });
+        fileGateways.forEach((id, i) => { if (modal.gatewayFiles[id]) fd.append(`paymentGateway_${i}`, modal.gatewayFiles[id]); });
+        fileLogistics.forEach((id, i) => { if (modal.logisticsFiles[id]) fd.append(`logistics_${i}`, modal.logisticsFiles[id]); });
         setIsGenerating(true);
         try {
             const res = await api.post(`/api/brands/${brandId}/agents/${agentId}/order-cycle-shopify/generate/preview`, fd, { headers: { 'Content-Type': 'multipart/form-data' } });
@@ -1985,10 +2110,12 @@ const OrderCycleShopifyWorkspace = ({ agent }) => {
                             </div>
 
                             {[
-                                { title: 'Payment Gateways', icon: CreditCard, color: 'text-blue-500', items: PAYMENT_GATEWAYS,
+                                { title: 'Payment Gateways', icon: CreditCard, color: 'text-blue-500',
+                                  items: PAYMENT_GATEWAYS.filter(g => !g.api || sources?.gateways?.[g.id]),
                                   selected: modal.selectedGateways, toggle: toggleGateway,
                                   badgeClass: 'text-blue-600 bg-blue-50', selClass: 'border-blue-400 bg-blue-50 text-blue-900', chkClass: 'bg-blue-500 border-blue-500' },
-                                { title: 'Logistics Partners', icon: Package, color: 'text-orange-500', items: LOGISTICS_PARTNERS,
+                                { title: 'Logistics Partners', icon: Package, color: 'text-orange-500',
+                                  items: LOGISTICS_PARTNERS.filter(l => !l.api || sources?.logistics?.[l.id]),
                                   selected: modal.selectedLogistics, toggle: toggleLogistics,
                                   badgeClass: 'text-orange-600 bg-orange-50', selClass: 'border-orange-400 bg-orange-50 text-orange-900', chkClass: 'bg-orange-500 border-orange-500' },
                             ].map(({ title, icon: Icon, color, items, selected, toggle, badgeClass, selClass, chkClass }) => (
@@ -2028,14 +2155,83 @@ const OrderCycleShopifyWorkspace = ({ agent }) => {
                             <div>
                                 <p className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-3">Core Files</p>
                                 <div className="grid grid-cols-2 gap-3">
-                                    <FileDropZone id="oc-unicommerce" label="Unicommerce File" icon={ShoppingBag} color="#475569"
-                                        accept=".xlsx,.xls,.csv" value={modal.unicommerceFile} onChange={f => setField('unicommerceFile', f)} />
-                                    <FileDropZone id="oc-sales-order" label="Sales Order Report" icon={FileText} color="#475569"
-                                        accept=".xlsx,.xls,.csv" value={modal.salesOrderReportFile} onChange={f => setField('salesOrderReportFile', f)} />
+                                    {/* The master. Normally the Tally GST export; for a brand with
+                                        no such export (D'Chicha) it can be built from Shopify orders
+                                        instead — receivables only, not GST-tieable. */}
+                                    {sources?.master?.shopify ? (
+                                        modal.masterSource === 'shopify_primary' ? (
+                                            <ApiSourceZone
+                                                label="Orders from Shopify"
+                                                icon={ShoppingBag}
+                                                note="Master built from Shopify orders — no GST file"
+                                                toggle={<SourceToggle isApi apiLabel="Shopify"
+                                                    onUpload={() => setField('masterSource', 'upload')}
+                                                    onApi={() => setField('masterSource', 'shopify_primary')} />}
+                                            />
+                                        ) : (
+                                            <FileDropZone id="oc-unicommerce" label="Tally GST Report" icon={ShoppingBag} color="#475569"
+                                                accept=".xlsx,.xls,.csv" value={modal.unicommerceFile}
+                                                onChange={f => setField('unicommerceFile', f)}
+                                                toggle={<SourceToggle isApi={false} apiLabel="Shopify"
+                                                    onUpload={() => setField('masterSource', 'upload')}
+                                                    onApi={() => setField('masterSource', 'shopify_primary')} />}
+                                            />
+                                        )
+                                    ) : (
+                                        <FileDropZone id="oc-unicommerce" label="Unicommerce File" icon={ShoppingBag} color="#475569"
+                                            accept=".xlsx,.xls,.csv" value={modal.unicommerceFile} onChange={f => setField('unicommerceFile', f)} />
+                                    )}
+                                    {/* Sales Order — file, or pulled live from Shopify when this
+                                        brand has a store connected. Brands without one never see
+                                        the toggle and keep the plain upload box. */}
+                                    {/* Sales Order — a file, or pulled live from Shopify. The toggle
+                                        sits in the zone's own corner so both states occupy exactly
+                                        the same cell and the neighbouring zone never stretches. */}
+                                    {sources?.salesOrder?.shopify ? (
+                                        modal.salesOrderSource === 'shopify_api' ? (
+                                            <ApiSourceZone
+                                                label="Sales Order Report"
+                                                icon={FileText}
+                                                note={`Pulled live from ${sources.salesOrder.shop}`}
+                                                toggle={<SourceToggle isApi apiLabel="Shopify API"
+                                                    onUpload={() => setField('salesOrderSource', 'upload')}
+                                                    onApi={() => setField('salesOrderSource', 'shopify_api')} />}
+                                            />
+                                        ) : (
+                                            <FileDropZone id="oc-sales-order" label="Sales Order Report" icon={FileText} color="#475569"
+                                                accept=".xlsx,.xls,.csv" value={modal.salesOrderReportFile}
+                                                onChange={f => setField('salesOrderReportFile', f)}
+                                                toggle={<SourceToggle isApi={false} apiLabel="Shopify API"
+                                                    onUpload={() => setField('salesOrderSource', 'upload')}
+                                                    onApi={() => setField('salesOrderSource', 'shopify_api')} />}
+                                            />
+                                        )
+                                    ) : (
+                                        <FileDropZone id="oc-sales-order" label="Sales Order Report" icon={FileText} color="#475569"
+                                            accept=".xlsx,.xls,.csv" value={modal.salesOrderReportFile} onChange={f => setField('salesOrderReportFile', f)} />
+                                    )}
                                     <FileDropZone id="oc-return-gst" label="Return GST Report (optional)" icon={FileText} color="#b45309"
                                         accept=".xlsx,.xls,.csv" value={modal.returnGSTFile} onChange={f => setField('returnGSTFile', f)} />
                                 </div>
                             </div>
+                            {(modal.masterSource === 'shopify_primary' || modal.salesOrderSource === 'shopify_api' || modal.selectedGateways.some(id => PAYMENT_GATEWAYS.find(g => g.id === id)?.api && (modal.gatewaySources[id] || 'api') === 'api') || modal.selectedLogistics.some(id => LOGISTICS_PARTNERS.find(l => l.id === id)?.api && (modal.logisticsSources[id] || 'api') === 'api')) && (
+                                <div className="rounded-lg border border-emerald-200 bg-emerald-50/50 p-3">
+                                    <p className="text-xs font-semibold text-emerald-800 mb-1">Pull window</p>
+                                    <p className="text-[11px] text-emerald-700/80 mb-2 leading-relaxed">
+                                        Defaults to {modal.month} {modal.year} padded 15 days each side — orders placed late in
+                                        a month are often invoiced in the next one, and payments settle later still.
+                                    </p>
+                                    <div className="flex items-center gap-2">
+                                        <input type="date" value={modal.since} onChange={e => setField('since', e.target.value)}
+                                            className="text-xs border border-slate-200 rounded px-2 py-1" />
+                                        <span className="text-xs text-slate-400">to</span>
+                                        <input type="date" value={modal.until} onChange={e => setField('until', e.target.value)}
+                                            className="text-xs border border-slate-200 rounded px-2 py-1" />
+                                    </div>
+                                </div>
+                            )}
+
+
                             {modal.selectedGateways.length > 0 && (
                                 <div>
                                     <div className="flex items-center gap-2 mb-3">
@@ -2045,6 +2241,22 @@ const OrderCycleShopifyWorkspace = ({ agent }) => {
                                     <div className="grid grid-cols-2 gap-3">
                                         {modal.selectedGateways.map(id => {
                                             const gw = PAYMENT_GATEWAYS.find(g => g.id === id);
+                                            // Same Upload ⇄ API control as Sales Order. A brand can
+                                            // still upload a settlement file if it prefers.
+                                            if (gw?.api) {
+                                                const isApi = (modal.gatewaySources[id] || 'api') === 'api';
+                                                const tgl = <SourceToggle isApi={isApi} apiLabel="Cashfree API"
+                                                    onUpload={() => setGatewaySource(id, 'upload')}
+                                                    onApi={() => setGatewaySource(id, 'api')} />;
+                                                return isApi ? (
+                                                    <ApiSourceZone key={id} label={gw.label} icon={CreditCard}
+                                                        note="Settlements, fees & GST pulled directly" toggle={tgl} />
+                                                ) : (
+                                                    <FileDropZone key={id} id={`gw-file-${id}`} label={gw.label} icon={CreditCard} color={gw.color}
+                                                        accept=".xlsx,.xls,.csv" value={modal.gatewayFiles[id]}
+                                                        onChange={f => setGatewayFile(id, f)} toggle={tgl} />
+                                                );
+                                            }
                                             return <FileDropZone key={id} id={`gw-file-${id}`} label={gw?.label} icon={CreditCard} color={gw?.color}
                                                 accept=".xlsx,.xls,.csv" value={modal.gatewayFiles[id]} onChange={f => setGatewayFile(id, f)} />;
                                         })}
@@ -2060,6 +2272,21 @@ const OrderCycleShopifyWorkspace = ({ agent }) => {
                                     <div className="grid grid-cols-2 gap-3">
                                         {modal.selectedLogistics.map(id => {
                                             const lp = LOGISTICS_PARTNERS.find(l => l.id === id);
+                                            // Same Upload ⇄ API control as Sales Order and Cashfree.
+                                            if (lp?.api) {
+                                                const isApi = (modal.logisticsSources[id] || 'api') === 'api';
+                                                const tgl = <SourceToggle isApi={isApi} apiLabel="Velocity API"
+                                                    onUpload={() => setLogisticsSource(id, 'upload')}
+                                                    onApi={() => setLogisticsSource(id, 'api')} />;
+                                                return isApi ? (
+                                                    <ApiSourceZone key={id} label={lp.label} icon={Package}
+                                                        note="COD remittance & UTR pulled directly" toggle={tgl} />
+                                                ) : (
+                                                    <FileDropZone key={id} id={`lp-file-${id}`} label={lp.label} icon={Package} color={lp.color}
+                                                        accept=".xlsx,.xls,.csv" value={modal.logisticsFiles[id]}
+                                                        onChange={f => setLogisticsFile(id, f)} toggle={tgl} />
+                                                );
+                                            }
                                             return <FileDropZone key={id} id={`lp-file-${id}`} label={lp?.label} icon={Package} color={lp?.color}
                                                 accept=".xlsx,.xls,.csv" value={modal.logisticsFiles[id]} onChange={f => setLogisticsFile(id, f)} />;
                                         })}
@@ -2075,6 +2302,42 @@ const OrderCycleShopifyWorkspace = ({ agent }) => {
                     {/* STEP 3 */}
                     {modal.step === STEP_PREVIEW && (
                         <div className="flex-1 overflow-y-auto px-6 py-5">
+                            {/* Guardrails first — a run that matched nothing must not look
+                                like a clean run. This is exactly how the FLO column-shift
+                                bug stayed invisible: zero matches and zero complaints. */}
+                            {!isGenerating && previewData?.warnings?.length > 0 && (
+                                <div className="mb-4 space-y-2">
+                                    {previewData.warnings.map((w, i) => (
+                                        <div key={i} className={`rounded-lg border p-3 text-xs leading-relaxed ${
+                                            w.level === 'error'
+                                                ? 'border-rose-200 bg-rose-50 text-rose-800'
+                                                : 'border-amber-200 bg-amber-50 text-amber-800'}`}>
+                                            <span className="font-semibold">
+                                                {w.level === 'error' ? 'Check this before saving · ' : 'Warning · '}
+                                            </span>
+                                            {w.message}
+                                        </div>
+                                    ))}
+                                </div>
+                            )}
+                            {/* What was pulled, when an API source was used. */}
+                            {!isGenerating && (previewData?.shopifyPull || previewData?.cashfreePull) && (
+                                <div className="mb-4 rounded-lg border border-slate-200 bg-slate-50 p-3">
+                                    <p className="text-[11px] font-semibold text-slate-600 uppercase tracking-wider mb-2">Pulled from APIs</p>
+                                    <div className="flex flex-wrap gap-x-6 gap-y-1 text-xs text-slate-600">
+                                        {previewData.shopifyPull && (
+                                            <>
+                                                <span><b>{previewData.shopifyPull.orders}</b> Shopify orders</span>
+                                                <span><b>{previewData.shopifyPull.paymentReferenceCoverage}%</b> with payment reference</span>
+                                                <span><b>{previewData.shopifyPull.cancelled}</b> cancelled</span>
+                                            </>
+                                        )}
+                                        {previewData.cashfreePull && (
+                                            <span><b>{previewData.cashfreePull.byType?.PAYMENT || 0}</b> Cashfree settlements</span>
+                                        )}
+                                    </div>
+                                </div>
+                            )}
                             {isGenerating ? (
                                 <div className="flex flex-col items-center justify-center py-16 gap-4">
                                     <div className="w-16 h-16 rounded-full border-4 border-slate-100 flex items-center justify-center">

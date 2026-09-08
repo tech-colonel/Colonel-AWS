@@ -19,9 +19,12 @@ const isSecret = (key) => /key|secret|token|password|pat/i.test(key || '');
 const AUTH_LABEL = { api_key: 'API key', bearer: 'Bearer token', basic: 'Username & password', none: 'No auth' };
 
 /* ── One toolkit card ───────────────────────────────────────────────────────── */
-function ToolkitCard({ toolkit, connection, busy, onConnect, onConnectCreds, onDisconnect }) {
+function ToolkitCard({ toolkit, connection, busy, oauthReady, onConnect, onConnectCreds, onDisconnect }) {
   const connected = !!connection;
   const credType = ['api_key', 'bearer', 'basic', 'none'].includes(toolkit.authType) && !toolkit.oneClick;
+  // OAuth toolkit with no Composio-managed app, but WE supplied a client id/secret
+  // (Shopify). Connectable — it just needs its initiation fields first.
+  const oauthCustom = toolkit.authType === 'oauth_custom' && !!oauthReady;
 
   const [formOpen, setFormOpen] = useState(false);
   const [fldLoading, setFldLoading] = useState(false);
@@ -54,6 +57,17 @@ function ToolkitCard({ toolkit, connection, busy, onConnect, onConnectCreds, onD
     const missing = flds.some((f) => f.required && !credentials[f.name]);
     if (missing) { toast.error('Please fill the required fields.'); return; }
     setSubmitting(true);
+    // Decide on the scheme the auth config actually uses, NOT toolkit.authType —
+    // a toolkit can advertise several schemes (Shopify lists API_KEY *and* OAUTH2,
+    // and normalizeToolkit picks API_KEY first), so authType lies about how we
+    // connect. /fields reports the configured scheme, which is what matters.
+    if (oauthCustom || /^OAUTH/i.test(scheme || '')) {
+      // These values only seed the consent URL (Shopify's store subdomain) — they
+      // are not credentials. onConnect navigates the browser to the provider.
+      await onConnect(toolkit.slug, toolkit.name, credentials);
+      setSubmitting(false);
+      return;
+    }
     const ok = await onConnectCreds(toolkit.slug, scheme || toolkit.authType, credentials, toolkit.name);
     setSubmitting(false);
     if (ok) { setFormOpen(false); setVals({}); }
@@ -134,8 +148,9 @@ function ToolkitCard({ toolkit, connection, busy, onConnect, onConnectCreds, onD
               ? <><Loader2 className="animate-spin" style={{ width: 13, height: 13 }} /> Connecting…</>
               : <><Plug style={{ width: 13, height: 13 }} /> Connect</>}
           </button>
-        ) : credType ? (
+        ) : (credType || oauthCustom) ? (
           // API key / bearer / basic — collect the user's own credentials inline.
+          // OAuth-custom (Shopify) reuses the same form for its initiation fields.
           formOpen ? (
             <form onSubmit={submitCreds} style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
               {fldLoading ? (
@@ -158,6 +173,11 @@ function ToolkitCard({ toolkit, connection, busy, onConnect, onConnectCreds, onD
                       style={{ width: '100%', fontSize: 12, padding: '8px 10px', borderRadius: 9, border: '1px solid #E2E8F0', outline: 'none', color: '#0F172A', background: '#fff' }}
                     />
                   ))}
+                  {flds.some((f) => f.name === 'subdomain') && (
+                    <p style={{ fontSize: 10.5, lineHeight: 1.45, color: '#64748B', margin: '-2px 0 0' }}>
+                      Store name only — e.g. <code>dchica</code> for <code>dchica.myshopify.com</code>. Not the full URL.
+                    </p>
+                  )}
                   <div style={{ display: 'flex', gap: 6 }}>
                     <button type="submit" disabled={submitting}
                       style={{ flex: 1, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 6, background: '#0748EE', color: '#fff', border: 'none', borderRadius: 9, padding: '8px 10px', fontSize: 12, fontWeight: 700, cursor: submitting ? 'not-allowed' : 'pointer', opacity: submitting ? 0.7 : 1 }}>
@@ -174,14 +194,16 @@ function ToolkitCard({ toolkit, connection, busy, onConnect, onConnectCreds, onD
           ) : (
             <button
               onClick={openForm}
-              title={`Connect with your ${AUTH_LABEL[toolkit.authType] || 'credentials'}`}
+              title={(oauthCustom || oauthReady) ? `Connect ${toolkit.name}` : `Connect with your ${AUTH_LABEL[toolkit.authType] || 'credentials'}`}
               style={{
                 width: '100%', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 6,
                 background: '#fff', color: '#0748EE', border: '1px solid #C7D7FE', borderRadius: 10,
                 padding: '8px 12px', fontSize: 12, fontWeight: 700, cursor: 'pointer',
               }}
             >
-              <KeyRound style={{ width: 13, height: 13 }} /> Connect with {AUTH_LABEL[toolkit.authType] || 'key'}
+              {(oauthCustom || oauthReady)
+                ? <><Plug style={{ width: 13, height: 13 }} /> Connect</>
+                : <><KeyRound style={{ width: 13, height: 13 }} /> Connect with {AUTH_LABEL[toolkit.authType] || 'key'}</>}
             </button>
           )
         ) : (
@@ -207,6 +229,7 @@ function ToolkitCard({ toolkit, connection, busy, onConnect, onConnectCreds, onD
 export default function ComposioMarketplace() {
   const [configured, setConfigured] = useState(null); // null = unknown/loading
   const [toolkits, setToolkits] = useState([]);
+  const [customAuthSlugs, setCustomAuthSlugs] = useState([]); // slugs we configured with our own OAuth app
   const [connections, setConnections] = useState([]); // [{ id, slug, status }] for the selected brand
   const [brands, setBrands] = useState([]);
   const [brandId, setBrandId] = useState(() => { try { return localStorage.getItem('lastBrandId') || ''; } catch { return ''; } });
@@ -231,6 +254,7 @@ export default function ComposioMarketplace() {
         api.get('/api/brands/my-brands').catch(() => ({ data: [] })),
       ]);
       setToolkits(Array.isArray(tk.data?.toolkits) ? tk.data.toolkits : []);
+      setCustomAuthSlugs(Array.isArray(tk.data?.customAuthSlugs) ? tk.data.customAuthSlugs : []);
       const bl = Array.isArray(br.data) ? br.data : [];
       setBrands(bl);
       // Default the selected brand: remembered → first available.
@@ -300,10 +324,10 @@ export default function ComposioMarketplace() {
 
   useEffect(() => { setVisible(PAGE_SIZE); }, [query, category, oneClickOnly]);
 
-  const handleConnect = async (slug, name) => {
+  const handleConnect = async (slug, name, fields = null) => {
     setBusySlug(slug);
     try {
-      const r = await api.post(`/api/composio/${encodeURIComponent(slug)}/connect`, { brandId });
+      const r = await api.post(`/api/composio/${encodeURIComponent(slug)}/connect`, { brandId, fields });
       if (r.data?.redirectUrl) {
         window.location.href = r.data.redirectUrl; // hand off to provider consent
       } else {
@@ -456,6 +480,7 @@ export default function ComposioMarketplace() {
                 toolkit={t}
                 connection={connBySlug[norm(t.slug)]}
                 busy={busySlug === t.slug || busySlug === connBySlug[norm(t.slug)]?.id}
+                oauthReady={customAuthSlugs.includes(norm(t.slug))}
                 onConnect={handleConnect}
                 onConnectCreds={handleConnectCreds}
                 onDisconnect={handleDisconnect}

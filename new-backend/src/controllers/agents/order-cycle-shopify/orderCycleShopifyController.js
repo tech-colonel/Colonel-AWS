@@ -17,6 +17,11 @@ const { getBrandConnection } = require('../../../config/database');
 const { getDynamicModel } = require('../../../models/brand');
 const { orderCycleShopifyProcessor, parseExcelBuffer } = require('../../../services/processors/orderCycleShopifyProcessor');
 const { setPending, getPending, deletePending } = require('../../../services/pendingGenerationsStore');
+const shopifyTokenStore = require('../../../services/shopifyTokenStore');
+const shopifyCombinedSO = require('../../../services/shopifyCombinedSO');
+const cashfreeClient = require('../../../services/cashfreeClient');
+const velocityClient = require('../../../services/velocityClient');
+const shopifyPrimaryMaster = require('../../../services/shopifyPrimaryMaster');
 
 const path = require('path');
 const fs = require('fs-extra');
@@ -24,6 +29,15 @@ const { v4: uuidv4 } = require('uuid');
 const ExcelJS = require('exceljs');
 
 const OUTPUT_DIR = path.join(__dirname, '../../../../outputs');
+
+/* Brands allowed to build the Order Cycle master from Shopify orders instead of a
+   Tally GST export. Deliberately an explicit allowlist rather than "any brand with
+   a Shopify connection": connecting a store must never silently change how that
+   brand's books are assembled. D'Chicha only — it has no Tally export. */
+const shopifyPrimaryAllowed = (brandId) =>
+    String(process.env.SHOPIFY_PRIMARY_BRAND_IDS || '')
+        .split(',').map((x) => x.trim()).filter(Boolean)
+        .includes(String(brandId));
 
 async function ensureDir() {
     await fs.ensureDir(OUTPUT_DIR);
@@ -144,15 +158,38 @@ const generatePreview = async (req, res, next) => {
         const unicommerceArr = req.files?.unicommerceFile;       // Export-Tally GST Report
         const returnGSTArr = req.files?.returnGSTFile;           // Return GST Report
         const salesOrderArr = req.files?.salesOrderReportFile;   // Sales Order Combined Report
-        if (!unicommerceArr || !unicommerceArr[0]) {
+        // OPT-IN, BRAND-GATED: build the master from Shopify orders instead of a
+        // Tally GST export. For a brand with no Tally export the agent otherwise
+        // produces zero rows, because Step 1 only ever creates rows from gstJson.
+        const wantsShopifyMaster = String(req.body.masterSource || '').toLowerCase() === 'shopify_primary';
+        const shopifyMasterConn = (wantsShopifyMaster && shopifyPrimaryAllowed(brandId))
+            ? await shopifyTokenStore.getConnection(brandId).catch(() => null) : null;
+        const useShopifyMaster = wantsShopifyMaster && !!shopifyMasterConn;
+        if (wantsShopifyMaster && !shopifyMasterConn) {
+            return res.status(409).json({
+                error: shopifyPrimaryAllowed(brandId)
+                    ? 'Shopify-primary mode needs a connected Shopify store for this brand.'
+                    : 'Shopify-primary mode is not enabled for this brand.',
+            });
+        }
+        if (!useShopifyMaster && (!unicommerceArr || !unicommerceArr[0])) {
             return res.status(400).json({ error: 'Export-Tally GST file is required (field: unicommerceFile)' });
         }
-        if (!salesOrderArr || !salesOrderArr[0]) {
+        // OPT-IN: pull Sales Order Combined from the Shopify API instead of an upload.
+        // Requires an explicit flag AND a live Shopify connection for this brand, so
+        // every existing brand and every existing request behaves exactly as before.
+        const wantsShopifyApi = String(req.body.salesOrderSource || '').toLowerCase() === 'shopify_api';
+        const shopifyConn = wantsShopifyApi ? await shopifyTokenStore.getConnection(brandId).catch(() => null) : null;
+        const useShopifyApi = wantsShopifyApi && !!shopifyConn;
+        if (wantsShopifyApi && !shopifyConn) {
+            return res.status(409).json({ error: 'This brand has no Shopify store connected — connect it on Integrations, or upload the Sales Order Report file.' });
+        }
+        if (!useShopifyApi && (!salesOrderArr || !salesOrderArr[0])) {
             return res.status(400).json({ error: 'Sales Order Report file is required (field: salesOrderReportFile)' });
         }
-        const unicommerceBuffer = unicommerceArr[0].buffer;
+        const unicommerceBuffer = unicommerceArr?.[0]?.buffer || null;
         const returnGSTBuffer = returnGSTArr?.[0]?.buffer || null;
-        const salesOrderBuffer = salesOrderArr[0].buffer;
+        const salesOrderBuffer = salesOrderArr?.[0]?.buffer || null;
 
         // Validate Brand + Agent
         const brand = await Brand.findByPk(brandId);
@@ -172,21 +209,106 @@ const generatePreview = async (req, res, next) => {
         }
 
         // Parse all files to JSON
-        const unicommerceJson = await parseExcelBuffer(unicommerceBuffer, 'Export-Tally GST Report');
+        // Same row shape either way — the processor cannot tell them apart.
+        let unicommerceJson, shopifyMasterStats = null, shopifyReturnRows = null, shopifyDerivedSalesOrder = null;
+        if (useShopifyMaster) {
+            const built = await shopifyPrimaryMaster.buildFromShopify(brandId, {
+                since: req.body.since || undefined,
+                until: req.body.until || undefined,
+            });
+            unicommerceJson = built.master;
+            shopifyReturnRows = built.returns;
+            shopifyDerivedSalesOrder = built.salesOrder;   // same orders, no second pull
+            shopifyMasterStats = built.stats;
+            console.log(`[OrderCycle] master from Shopify — ${built.stats.orders} orders, ` +
+                        `gross ${built.stats.grossSales}, returns ${built.stats.returnValue}, net ${built.stats.netSales}`);
+        } else {
+            unicommerceJson = await parseExcelBuffer(unicommerceBuffer, 'Export-Tally GST Report');
+        }
         const returnGSTJson = returnGSTBuffer
             ? await parseExcelBuffer(returnGSTBuffer, 'Return GST Report')
-            : [];
-        const salesOrderJson = await parseExcelBuffer(salesOrderBuffer, 'Sales Order Combined Report');
+            : (shopifyReturnRows || []);   // Shopify refunds stand in for the Return GST report
+        // Same row shape either way — the processor cannot tell them apart.
+        let salesOrderJson, salesOrderSourceLabel = 'upload', shopifyPullStats = null;
+        if (useShopifyApi && shopifyDerivedSalesOrder) {
+            salesOrderJson = shopifyDerivedSalesOrder;
+            salesOrderSourceLabel = `shopify_api:${shopifyConn.shop_domain} (derived from master)`;
+        } else if (useShopifyApi) {
+            const pulled = await shopifyCombinedSO.buildSalesOrderRows(brandId, {
+                since: req.body.since || undefined,
+                until: req.body.until || undefined,
+            });
+            salesOrderJson = pulled.rows;
+            shopifyPullStats = pulled.stats;
+            salesOrderSourceLabel = `shopify_api:${shopifyConn.shop_domain}`;
+            console.log(`[OrderCycle] Sales Order from Shopify API — ${pulled.stats.orders} orders, ` +
+                        `payment-ref coverage ${pulled.stats.paymentReferenceCoverage}%`);
+        } else {
+            salesOrderJson = await parseExcelBuffer(salesOrderBuffer, 'Sales Order Combined Report');
+        }
         const gatewayDataJson = {};
         for (const gw of paymentGatewayFiles) {
             gatewayDataJson[gw.name] = await parseExcelBuffer(gw.buffer, `Payment Gateway: ${gw.name}`);
         }
+        // OPT-IN, BRAND-GATED: pull Cashfree settlements from the API instead of a
+        // file. Requires the flag AND the brand to be listed in CASHFREE_BRAND_IDS,
+        // so every other brand keeps uploading its gateway files unchanged.
+        const wantsCashfreeApi = String(req.body.gatewaySource || '').toLowerCase() === 'cashfree_api';
+        let cashfreePullStats = null;
+        if (wantsCashfreeApi) {
+            if (!cashfreeClient.isEnabledForBrand(brandId)) {
+                return res.status(409).json({ error: 'Cashfree API is not enabled for this brand.' });
+            }
+            const recon = await cashfreeClient.fetchSettlementRecon({
+                since: req.body.since || undefined,
+                until: req.body.until || undefined,
+            });
+            gatewayDataJson['Cashfree'] = recon;
+            const byType = recon.reduce((a, r) => {
+                const t = (r.event_details || {}).event_type || 'UNKNOWN';
+                a[t] = (a[t] || 0) + 1; return a;
+            }, {});
+            cashfreePullStats = { events: recon.length, byType };
+            console.log(`[OrderCycle] Cashfree settlements from API — ${recon.length} events`, JSON.stringify(byType));
+        }
+
+        // OPT-IN, BRAND-GATED: pull COD remittance from the shipping platform.
+        // AWBs come from the Tally master (which carries awb_number) — that is the
+        // authoritative set of shipments this period, and Velocity is keyed on AWB.
+        const wantsVelocityApi = String(req.body.logisticsSource || '').toLowerCase() === 'velocity_api';
+        let velocityPullStats = null, velocityRows = [];
+        if (wantsVelocityApi) {
+            if (!velocityClient.isEnabledForBrand(brandId)) {
+                return res.status(409).json({ error: 'Velocity API is not enabled for this brand.' });
+            }
+            const awbs = [...new Set(unicommerceJson
+                .map((r) => String(r['AWB num'] ?? r['AWB Number'] ?? r['AWB'] ?? '').trim())
+                .filter(Boolean))];
+            if (awbs.length) {
+                velocityRows = await velocityClient.fetchCodRemittance(awbs);
+                const matched = velocityRows.filter((r) => !r.error);
+                const settled = matched.filter((r) => r.utr_no);
+                const sum = (a) => a.reduce((t, r) => t + Number(r.cod_amount || 0), 0);
+                velocityPullStats = {
+                    awbsQueried: awbs.length,
+                    matched: matched.length,
+                    settled: settled.length,
+                    pending: matched.length - settled.length,
+                    settledValue: Number(sum(settled).toFixed(2)),
+                    pendingValue: Number(sum(matched.filter((r) => !r.utr_no)).toFixed(2)),
+                };
+                console.log('[OrderCycle] Velocity COD remittance —', JSON.stringify(velocityPullStats));
+            }
+        }
+
         const logisticsDataJson = {};
         for (const lp of logisticsFiles) {
             logisticsDataJson[lp.name] = await parseExcelBuffer(lp.buffer, `Logistics: ${lp.name}`);
         }
 
         // Run processor
+        if (velocityRows.length) logisticsDataJson['Velocity'] = velocityRows;
+
         const result = await orderCycleShopifyProcessor(
             unicommerceJson,
             returnGSTJson,
@@ -210,6 +332,46 @@ const generatePreview = async (req, res, next) => {
             mapRowToSchema(row, month, year, filename)
         );
 
+        // ── GUARDRAILS ──────────────────────────────────────────────────────
+        // Both convert a SILENT under-reconciliation into a visible warning.
+        // This is the failure mode that hid the FLO column-shift bug for months:
+        // a join that matches nothing looks identical to a period with no data.
+        const warnings = [];
+
+        // 1. Coverage floor — a payment-reference rate near zero means the
+        //    Shopify→gateway bridge is broken, so no settlement can ever attach.
+        if (shopifyPullStats && shopifyPullStats.orders > 50 && shopifyPullStats.paymentReferenceCoverage < 10) {
+            warnings.push({
+                level: 'error',
+                message: `Only ${shopifyPullStats.paymentReferenceCoverage}% of pulled orders carry a payment reference. `
+                       + `Gateway settlements cannot be matched — check the Shopify payment-reference field before relying on this run.`,
+            });
+        }
+
+        // 2. Window coverage — how many Tally orders were actually PRESENT in the
+        //    pulled Sales Order set. Deliberately NOT "rows without a delivery
+        //    status": an order inside the window that simply hasn't shipped yet
+        //    also has no status, and that is normal for a recent month. Only a
+        //    Tally order missing from the pull altogether indicates a bad window.
+        const rows = result.summaryRows || [];
+        if (rows.length && Array.isArray(salesOrderJson) && salesOrderJson.length) {
+            const pulled = new Set(salesOrderJson
+                .map((r) => String(r['Order No'] ?? '').replace(/^#/, '').trim())
+                .filter(Boolean));
+            const missing = rows.filter((r) => {
+                const no = String(r.sale_order_number ?? '').replace(/^#/, '').trim();
+                return no && !pulled.has(no);
+            }).length;
+            const pct = Math.round(missing / rows.length * 100);
+            if (pct >= 20) {
+                warnings.push({
+                    level: 'warn',
+                    message: `${missing} of ${rows.length} Tally orders (${pct}%) were not found in the pulled data. `
+                           + `Your window (${req.body.since || 'unset'} → ${req.body.until || 'unset'}) may not cover the Tally period — widen it and re-run.`,
+                });
+            }
+        }
+
         // Stash for commit phase
         setPending(taskId, {
             agentType: 'order-cycle-shopify',
@@ -227,6 +389,15 @@ const generatePreview = async (req, res, next) => {
             taskId,
             rowCount: result.rowCount,
             parseStats: result.parseStats,
+            // Which path produced the Sales Order rows, and — when pulled from the
+            // API — how many carry a payment reference. A coverage near 0% is the
+            // signature of the broken-join failure mode, so it is surfaced, not hidden.
+            salesOrderSource: salesOrderSourceLabel,
+            shopifyPull: shopifyPullStats,
+            cashfreePull: cashfreePullStats,
+            velocityPull: velocityPullStats,
+            shopifyMaster: shopifyMasterStats,
+            warnings,
             summary: {
                 gstReportRows: result.parseStats.gstReport,
                 returnGSTRows: result.parseStats.returnGST,
@@ -1419,7 +1590,41 @@ const getOverviewDrill = async (req, res, next) => {
     }
 };
 
+
+/* ── GET …/order-cycle-shopify/sources ───────────────────────────────────────
+   Which inputs this brand can pull automatically instead of uploading.
+
+   The UI calls this before rendering the upload modal so it never offers a
+   toggle the backend would reject. Any brand without a Shopify connection or
+   without Cashfree enablement gets all-false and sees the unchanged file-only
+   modal — which is every brand except D'Chicha today. */
+const getSources = async (req, res) => {
+    try {
+        const { brandId } = req.params;
+        const conn = await shopifyTokenStore.getConnection(brandId).catch(() => null);
+        res.json({
+            master: {
+                shopify: !!conn && shopifyPrimaryAllowed(brandId),
+            },
+            salesOrder: {
+                shopify: !!conn,
+                shop: conn ? conn.shop_domain : null,
+            },
+            gateways: {
+                cashfree: cashfreeClient.isEnabledForBrand(brandId),
+            },
+            logistics: {
+                velocity: velocityClient.isEnabledForBrand(brandId),
+            },
+        });
+    } catch (e) {
+        // Never block the workspace on a capability probe — fall back to files.
+        res.json({ master: { shopify: false }, salesOrder: { shopify: false, shop: null }, gateways: { cashfree: false }, logistics: { velocity: false } });
+    }
+};
+
 module.exports = {
+    getSources,
     generatePreview,
     generateCommit,
     generateDiscard,

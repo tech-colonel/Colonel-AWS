@@ -205,6 +205,9 @@ function detectGatewayType(rows) {
     if (getCol(f, 'LoanApp Id')) return 'snapmint';
     if (getCol(f, 'Order id by Vlook', 'Parter Id')) return 'bharatx';
     if (getCol(f, 'entity_id', 'settled_at', 'settlement_utr')) return 'razorpay';
+    // Cashfree settlement/recon rows are nested objects, not flat spreadsheet
+    // rows — event_details/payment_details identify them unambiguously.
+    if (f && f.event_details && f.payment_details) return 'cashfree';
     return null;
 }
 
@@ -472,11 +475,49 @@ function assignGatewayCandidates(rowsForOrder, candidates, apply, gatewayName, i
  * using the Combined SO "Payment References" column as the bridge.
  * Combined SO col "Payment References" contains the same receipt hash as Razorpay's "order_receipt".
  */
-function buildPaymentRefLookup(salesOrderRows) {
+/**
+ * Find which Sales Order column actually holds the gateway payment reference,
+ * by intersecting each column's values with the references the gateway file
+ * itself reports. Header-independent by design.
+ *
+ * WHY: the Combined SO export ships with its header row one column out of step
+ * with its data from ~col 47 — `Cancelled at` holds payment methods, and the
+ * receipt hash sits under `Payment Method` while the column actually named
+ * `Payment References` is empty in every row. Measured on the 24-25 file:
+ * 69,980 Razorpay receipts, 0 matched by name, 24,927 matched one column left.
+ * That produced 52,178 "Settlement Without Sales Record" exceptions — 89% of
+ * the entire report — and it failed silently, because an empty join key is
+ * indistinguishable from a period with no settlements.
+ *
+ * A name lookup cannot survive that. Matching on content can: whichever column
+ * contains the gateway's own receipts IS the reference column, whatever the
+ * header calls it and however far the file has drifted.
+ */
+function detectPaymentRefColumn(salesOrderRows, knownRefs) {
+    if (!knownRefs || !knownRefs.size || !salesOrderRows.length) return null;
+    const sample = salesOrderRows.slice(0, 2000);
+    const scores = {};
+    for (const row of sample) {
+        for (const key of Object.keys(row)) {
+            const v = safeStr(row[key]);
+            if (v.length < 8) continue;
+            if (knownRefs.has(v)) scores[key] = (scores[key] || 0) + 1;
+        }
+    }
+    const best = Object.entries(scores).sort((a, b) => b[1] - a[1])[0];
+    // Require a real signal, not one coincidental collision.
+    if (!best || best[1] < 5) return null;
+    console.log(`[OrderCycleProcessor] payment reference column detected by content: "${best[0]}" (${best[1]} of ${sample.length} sampled rows matched gateway receipts)`);
+    return best[0];
+}
+
+function buildPaymentRefLookup(salesOrderRows, detectedKey = null) {
     const map = {};
     for (const row of salesOrderRows) {
         // "Payment References" (col ~74) contains the Razorpay receipt hash for prepaid orders
-        const ref = safeStr(getCol(row, 'Payment References', 'Payment ID'));
+        // Prefer the column proven to contain the gateway's own receipts; fall
+        // back to the documented header names when detection found nothing.
+        const ref = safeStr(detectedKey ? row[detectedKey] : getCol(row, 'Payment References', 'Payment ID'));
         if (!ref || ref.length < 10 || !isNaN(parseFloat(ref))) continue;
         const orderNo = normalizeOrderNum(getCol(row, 'Order No', 'Order No_2', 'Order Number'));
         if (ref && orderNo) map[ref] = orderNo;
@@ -518,7 +559,175 @@ function buildRazorpayLookup(rows, paymentRefLookup = {}) {
     return map;
 }
 
+/**
+ * Map Cashfree cf_payment_id → Shopify order number.
+ *
+ * Deliberately NOT reusing buildPaymentRefLookup: that one rejects any ref where
+ * `!isNaN(parseFloat(ref))`, which is correct for Razorpay's alphanumeric receipt
+ * hashes but silently drops every Cashfree id, because those are pure numerics
+ * (e.g. "6427749309"). Verified: 1,196 of 1,198 D'Chicha orders carry one.
+ *
+ * The reference arrives on the Sales Order rows as 'Payment References' — the
+ * Shopify note attribute `Cashfree_txn_id`, supplied by shopifyCombinedSO.
+ */
+/**
+ * Which gateways report a per-order fee breakdown we can trust.
+ *
+ * NOT all of them do. Snapmint and BharatX ledgers carry no fee columns at all,
+ * and Razorpay's settlement file reports fee/tax only intermittently — treating
+ * a missing fee as zero there would silently understate the cost of collection
+ * and, worse, make an unsettled order look reconciled. So this is an allowlist:
+ * a gateway contributes fees only once it is proven to report them per order.
+ *
+ * Cashfree's settlement/recon returns event_service_charge and event_service_tax
+ * on every PAYMENT event — verified across 1,205 payments.
+ */
+const GATEWAY_REPORTS_FEES = { cashfree: true };
+
+function buildCashfreeRefLookup(salesOrderRows) {
+    const map = {};
+    for (const row of salesOrderRows) {
+        const ref = safeStr(getCol(row, 'Payment References', 'Payment ID'));
+        const orderNo = normalizeOrderNum(getCol(row, 'Order No', 'Order No_2', 'Order Number'));
+        if (ref && orderNo) map[ref] = orderNo;
+    }
+    return map;
+}
+
+/**
+ * Build the Cashfree settlement lookup: order number → { date, amount }.
+ *
+ * Only PAYMENT events settle an order. The other event types Cashfree returns —
+ * INSTANT_SETTLEMENT_CHARGE / _TAX, sweep initiations and their reversals,
+ * BALANCE_CARRY_OVER — are account-level costs and movements, not per-order
+ * receipts, so folding them in here would misstate what each order actually
+ * settled for. REFUND events are handled by the returns steps, not this one.
+ *
+ * event_settlement_amount is the figure that lands in the bank (gross less the
+ * service charge and the GST on it). The flat `amount_settled` field the docs
+ * mention comes back null on live data — event_details carries the real values.
+ */
+function buildCashfreeLookup(reconRows, refLookup = {}) {
+    const map = {};
+    for (const rec of reconRows) {
+        const ev = rec.event_details || {};
+        if (String(ev.event_type || '').toUpperCase() !== 'PAYMENT') continue;
+
+        const txnId = safeStr((rec.payment_details || {}).cf_payment_id);
+        if (!txnId) continue;
+        const orderNo = refLookup[txnId];
+        if (!orderNo) continue;   // no bridge to a Shopify order — cannot attribute
+
+        const net = safeNum(ev.event_settlement_amount);
+        if (net <= 0) continue;
+
+        if (!map[orderNo]) {
+            map[orderNo] = {
+                settlement_date: safeDate((rec.settlement_details || {}).settlement_date),
+                settlement_amount: 0,
+                fee: 0,
+                fee_gst: 0,
+            };
+        }
+        map[orderNo].settlement_amount += net;
+        // Cost of collection: gross − fee − GST-on-fee = what reached the bank.
+        // Recording it is what stops a fully settled order reading as an unpaid
+        // receivable, and it surfaces the GST as claimable input credit.
+        map[orderNo].fee     += safeNum(ev.event_service_charge);
+        map[orderNo].fee_gst += safeNum(ev.event_service_tax);
+    }
+    return map;
+}
+
+/**
+ * Velocity COD remittance keyed by AWB.
+ *
+ * Velocity is the shipping PLATFORM, not the carrier — Delhivery delivers the
+ * parcel and hands the cash to Velocity, which remits to the brand. So this is
+ * keyed on AWB (which both sides share) and written to the generic courier_*
+ * columns rather than delhivery_*.
+ *
+ * ⚠️ `remittance_date` is populated even when NOTHING has been paid — the API
+ * defines it as "settlement date if already remitted; otherwise the next
+ * scheduled date". Verified live: 25 of 25 D'Chicha AWBs returned today's date
+ * with utr_no null, i.e. ₹39,838 not yet received. `utr_no` is therefore the
+ * only trustworthy signal that money actually arrived, and `settled` below is
+ * what Step 10 is allowed to count.
+ */
+function buildVelocityLookup(rows) {
+    const map = {};
+    for (const rec of rows || []) {
+        if (rec.error) continue;                      // prepaid order, or AWB not in account
+        const awb = normalizeAWB(rec.tracking_number);
+        if (!awb) continue;
+        const cod = safeNum(rec.cod_amount);
+        if (cod <= 0) continue;
+        map[awb] = {
+            cod_amount: cod,
+            delivery_date: safeDate(rec.delivery_date),
+            remittance_date: safeDate(rec.remittance_date),
+            utr: safeStr(rec.utr_no) || null,
+            settled: !!safeStr(rec.utr_no),           // the discriminator
+        };
+    }
+    return map;
+}
+
+/* ── Remittance-state helpers ────────────────────────────────────────────────
+   An empty UTR is NOT proof of non-payment — it is absence of proof either way.
+   The courier reports cod_amount as collected and remittance_date as a FORECAST
+   until the transfer happens, so a blank UTR means "collected, transfer
+   unconfirmed". Measured on D'Chicha, Velocity's cycle runs 4-6 days from
+   delivery to payout, so a blank UTR well past that is a question to ask rather
+   than a balance to trust. */
+const REMITTANCE_OVERDUE_DAYS = 18;   // ~3x the observed 4-6 day cycle
+
+function codCollectedNotRemitted(row) {
+    return safeNum(row.courier_cod_amount) > 0 && !row.courier_utr;
+}
+
+function daysSince(d) {
+    const dt = safeDate(d);
+    if (!dt) return null;
+    return Math.floor((Date.now() - dt.getTime()) / 86400000);
+}
+
+function fmtMoney(v) {
+    const n = safeNum(v);
+    return '\u20B9' + n.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+function fmtDate(d) {
+    const dt = safeDate(d);
+    return dt ? dt.toISOString().slice(0, 10) : 'an unknown date';
+}
+
 // ── Workbook styling helpers ──────────────────────────────────────────────────
+
+/* Shipping platforms we have a remittance feed for. Anything else ships fine but
+   we cannot see its COD or confirmed delivery, and the report must SAY so rather
+   than leave an unexplained blank for someone to chase. */
+const REMITTANCE_FEEDS = ['Velocity'];
+
+/* Money to 2dp. Subtracting floats leaves residue — a fully settled order was
+   showing a balance of 5.4e-13 instead of 0, which looks like a defect in a
+   report an accountant reads and breaks any downstream total formatting. */
+function round2(v) {
+    const n = safeNum(v);
+    return Math.round(n * 100) / 100;
+}
+
+/* Status fills. Green/red match the Validation Summary sheet already in this
+   workbook; amber and orange are new and sit deliberately between them — a
+   collected-but-unconfirmed COD is neither settled nor a shortfall. */
+const STATUS_FILL = {
+    'RECONCILED':             'FF92D050',  // green  — matched
+    'AWAITING REMITTANCE':    'FFFFD966',  // amber  — collected, transfer unconfirmed
+    'UNREMITTED - QUERY':     'FFED7D31',  // orange — unconfirmed well past the cycle
+    'PENDING RECEIVABLE':     'FFD9D9D9',  // grey   — nothing collected yet
+    'OVERPAID / INVESTIGATE': 'FFFF4444',  // red    — more received than due
+    'ADVANCE':                'FFB4C7E7',  // blue   — returned yet money moved
+};
 
 function styleHeader(row, argb = 'FF1E3A5F') {
     row.font = { bold: true, color: { argb: 'FFFFFFFF' } };
@@ -576,6 +785,9 @@ async function orderCycleShopifyProcessor(
                 invoice_number: invoiceNo,
                 awb_number: awbNo,
                 shipping_partner: safeStr(getCol(row, 'Shipping Provider', 'Shipping Partner', 'Courier')),
+                // The platform that booked the shipment and remits its COD —
+                // distinct from the carrier that delivers it.
+                shipping_platform: safeStr(getCol(row, 'Shipping Platform')),
                 dispatch_date: safeDate(getCol(row, 'Dispatch Date/Cancellation Date', 'Date', 'Dispatch Date', 'Invoice Date')),
                 sales_amount: 0,
                 // Step 2
@@ -590,8 +802,15 @@ async function orderCycleShopifyProcessor(
                 snapmint_settlement_date: null, snapmint_settlement_amount: 0,
                 bharatx_settlement_date: null, bharatx_settlement_amount: 0,
                 razorpay_settlement_date: null, razorpay_settlement_amount: 0,
+                cashfree_settlement_date: null, cashfree_settlement_amount: 0,
+                // Populated only by fee-reporting gateways (GATEWAY_REPORTS_FEES).
+                gateway_fee: 0, gateway_fee_gst: 0, gateway_fee_source: null,
+                // COD from the shipping platform. courier_cod_amount is only
+                // treated as RECEIVED when courier_utr is present.
+                courier_cod_amount: 0, courier_delivery_date: null,
+                courier_remittance_date: null, courier_utr: null, courier_source: null,
                 // Steps 10-12 (internal — not in output sheet but stored in DB for dashboard)
-                total_settlement_received: 0, balance_amount_receivable: 0, reconciliation_status: ''
+                total_settlement_received: 0, balance_amount_receivable: 0, reconciliation_status: '', remark: ''
             };
         } else if (invoiceNo) {
             // Same invoice key already exists — duplicate invoice number
@@ -794,7 +1013,7 @@ async function orderCycleShopifyProcessor(
 
     // ── STEPS 7-9: Gateway settlements ───────────────────────────────────────
     const gatewayTyped = collectPartnerRows(gatewayData,
-        { snapmint: 'snapmint', bharatx: 'bharatx', bharat: 'bharatx', razorpay: 'razorpay' },
+        { snapmint: 'snapmint', bharatx: 'bharatx', bharat: 'bharatx', razorpay: 'razorpay', cashfree: 'cashfree' },
         detectGatewayType
     );
 
@@ -802,8 +1021,25 @@ async function orderCycleShopifyProcessor(
     const bharatxLookup = buildBharatXLookup(gatewayTyped.bharatx || []);
 
     // Razorpay joins via Combined SO: order_receipt → Payment References → Order No
-    const paymentRefLookup = buildPaymentRefLookup(salesOrderJson);
+    // Razorpay's own receipts tell us which Combined SO column really holds them,
+    // regardless of what its header row claims (see detectPaymentRefColumn).
+    const razorpayReceipts = new Set(
+        (gatewayTyped.razorpay || [])
+            .map((r) => safeStr(getCol(r, 'order_receipt', 'Order Receipt')))
+            .filter(Boolean)
+    );
+    const refKey = detectPaymentRefColumn(salesOrderJson, razorpayReceipts);
+    const paymentRefLookup = buildPaymentRefLookup(salesOrderJson, refKey);
     const razorpayLookup = buildRazorpayLookup(gatewayTyped.razorpay || [], paymentRefLookup);
+
+    // Cashfree joins on its own numeric-safe reference map (see buildCashfreeRefLookup).
+    const cashfreeRefLookup = buildCashfreeRefLookup(salesOrderJson);
+    const cashfreeLookup = buildCashfreeLookup(gatewayTyped.cashfree || [], cashfreeRefLookup);
+
+    // Shipping-platform COD (Velocity). Arrives via logisticsData under the
+    // platform's name, alongside any uploaded per-carrier files.
+    const velocityRows = logisticsData.Velocity || logisticsData.velocity || [];
+    const velocityLookup = buildVelocityLookup(velocityRows);
 
     // Sale Order Number is reused across unrelated invoices/transactions — including
     // inside the gateway files themselves — so a matching order number alone doesn't
@@ -846,6 +1082,45 @@ async function orderCycleShopifyProcessor(
         }
     }
 
+    // Cashfree — same shape as Razorpay: one gateway payment per order, split
+    // across invoices only when the order itself was split across invoices.
+    for (const [orderNo, rowsForOrder] of Object.entries(masterByOrderForGateway)) {
+        const cf = cashfreeLookup[orderNo];
+        if (!cf) continue;
+        const applyCashfree = (row, c) => {
+            row.cashfree_settlement_date = c.settlement_date;
+            row.cashfree_settlement_amount = c.settlement_amount;
+            if (GATEWAY_REPORTS_FEES.cashfree) {
+                row.gateway_fee = safeNum(c.fee);
+                row.gateway_fee_gst = safeNum(c.fee_gst);
+                row.gateway_fee_source = 'Cashfree';
+            }
+        };
+        if (rowsForOrder.length === 1) {
+            applyCashfree(rowsForOrder[0], cf);
+        } else {
+            assignGatewayCandidates(rowsForOrder,
+                [{ order_value: cf.settlement_amount, settlement_date: cf.settlement_date,
+                   settlement_amount: cf.settlement_amount, fee: cf.fee, fee_gst: cf.fee_gst }],
+                applyCashfree, 'Cashfree', gatewayIssues);
+        }
+    }
+
+    // ── Shipping-platform COD, matched on AWB ─────────────────────────────────
+    // Written for every matched AWB so the delivery date and the forecast are
+    // visible, but Step 10 only counts it once a UTR exists.
+    for (const row of masterRows) {
+        const awb = normalizeAWB(row.awb_number);
+        if (!awb) continue;
+        const v = velocityLookup[awb];
+        if (!v) continue;
+        row.courier_cod_amount = v.cod_amount;
+        row.courier_delivery_date = v.delivery_date;
+        row.courier_remittance_date = v.remittance_date;
+        row.courier_utr = v.utr;
+        row.courier_source = 'Velocity';
+    }
+
     // ── STEP 10: Total Settlement Received ────────────────────────────────────
     for (const row of masterRows) {
         row.total_settlement_received =
@@ -854,12 +1129,28 @@ async function orderCycleShopifyProcessor(
             row.xpressbees_net_payment +
             row.snapmint_settlement_amount +
             row.bharatx_settlement_amount +
-            row.razorpay_settlement_amount;
+            row.razorpay_settlement_amount +
+            row.cashfree_settlement_amount +
+            // Unremitted COD is money still owed, not money received — counting it
+            // on the forecast date would invert the receivables position.
+            (row.courier_utr ? safeNum(row.courier_cod_amount) : 0);
     }
 
     // ── STEP 11: Balance Amount Receivable ────────────────────────────────────
+    // A gateway fee is a COST OF COLLECTION, not an unpaid receivable: the customer
+    // paid in full and the gateway kept its cut before remitting. Subtracting it
+    // here is what makes a fully settled order reconcile to zero instead of sitting
+    // as PENDING RECEIVABLE forever (D'Chicha: ~₹8,678 of phantom receivable per
+    // fortnight, on 1,205 orders, none of it actually owed).
+    //
+    // Safe for every other brand: gateway_fee/_gst are 0 unless a gateway on the
+    // GATEWAY_REPORTS_FEES allowlist populated them, so this evaluates to exactly
+    // `net_amount - total_settlement_received` — the previous behaviour — for
+    // Snapmint, BharatX, Razorpay and all courier-COD settlements.
     for (const row of masterRows) {
-        row.balance_amount_receivable = row.net_amount - row.total_settlement_received;
+        const costOfCollection = safeNum(row.gateway_fee) + safeNum(row.gateway_fee_gst);
+        row.balance_amount_receivable =
+            row.net_amount - row.total_settlement_received - costOfCollection;
     }
 
     // ── STEP 12: Reconciliation Status ───────────────────────────────────────
@@ -871,7 +1162,9 @@ async function orderCycleShopifyProcessor(
     for (const row of masterRows) {
         const hasSettlement =
             row.ekart_cod_amount !== 0 || row.delhivery_cod_amount !== 0 || row.xpressbees_net_payment !== 0 ||
-            row.snapmint_settlement_amount !== 0 || row.bharatx_settlement_amount !== 0 || row.razorpay_settlement_amount !== 0;
+            row.snapmint_settlement_amount !== 0 || row.bharatx_settlement_amount !== 0 || row.razorpay_settlement_amount !== 0 ||
+            row.cashfree_settlement_amount !== 0 ||
+            (!!row.courier_utr && safeNum(row.courier_cod_amount) !== 0);
 
         if (row.delivery_status === 'RTO') {
             row.reconciliation_status = 'RTO';
@@ -886,10 +1179,39 @@ async function orderCycleShopifyProcessor(
             row.reconciliation_status = 'ADVANCE';
         } else if (Math.abs(row.balance_amount_receivable) <= RECONCILIATION_TOLERANCE) {
             row.reconciliation_status = 'RECONCILED';
+        } else if (codCollectedNotRemitted(row)) {
+            // COD was collected from the customer but the platform has not
+            // confirmed remitting it. Asserting "unpaid" here would be as wrong
+            // as asserting "paid" — the money exists, its transfer is unproven.
+            // So we withhold the verdict and say which it is and how old.
+            const days = daysSince(row.courier_remittance_date);
+            const overdue = days !== null && days > REMITTANCE_OVERDUE_DAYS;
+            row.reconciliation_status = overdue ? 'UNREMITTED - QUERY' : 'AWAITING REMITTANCE';
+            row.remark = overdue
+                ? `COD ${fmtMoney(row.courier_cod_amount)} collected but no UTR ${days} days after the expected remittance date — query ${row.courier_source || 'the courier'}.`
+                : `COD ${fmtMoney(row.courier_cod_amount)} collected; ${row.courier_source || 'courier'} remittance not yet confirmed (no UTR). Expected ${fmtDate(row.courier_remittance_date)}.`;
         } else if (row.balance_amount_receivable > 0) {
             row.reconciliation_status = 'PENDING RECEIVABLE';
         } else {
             row.reconciliation_status = 'OVERPAID / INVESTIGATE';
+        }
+
+        // Explain any blank the reader would otherwise have to ask about. A
+        // missing delivery status or COD figure is nearly always a coverage gap,
+        // not a data error, and saying which is cheaper than being asked.
+        if (!row.remark) {
+            const platform = row.shipping_platform;
+            const unfed = platform && !REMITTANCE_FEEDS.includes(platform);
+            if (!row.awb_number && !row.dispatch_date) {
+                row.remark = 'Not yet shipped — no AWB assigned.';
+            } else if (unfed) {
+                row.remark = `Shipped via ${platform}, which has no remittance feed connected — `
+                           + `delivery status and COD collection cannot be confirmed for this order.`;
+            } else if (!row.delivery_status && row.awb_number) {
+                row.remark = 'Shipped; carrier has not reported delivery yet.';
+            } else if (row.reconciliation_status === 'PENDING RECEIVABLE') {
+                row.remark = 'Delivered but no settlement found against this order yet.';
+            }
         }
     }
 
@@ -1014,6 +1336,10 @@ async function orderCycleShopifyProcessor(
         'Snapmint merchant settlement date', 'Snapmint settlement value',
         'BharatX settlement timestamp', 'BharatX ledger amount',
         'Razorpay settlement date', 'Razorpay settlement amount',
+        // Appended, never inserted — anything keyed on an existing column
+        // position (a downstream VLOOKUP, a saved filter) keeps working.
+        'Courier COD amount', 'Courier delivery date', 'Courier remittance date', 'Courier UTR',
+        'Delivery status', 'Total settlement received', 'Balance receivable', 'Status', 'Remark',
     ];
 
     // Source file labels for Row 0 (matches Order Cycle.xlsx reference format)
@@ -1041,6 +1367,8 @@ async function orderCycleShopifyProcessor(
         `Snapmint settlement report - ${fyLabel}`, '',
         `BharatX settlement report - ${fyLabel}`, '',
         `Razorpay settlement report - ${fyLabel}`, '',
+        'Courier COD remittance (API)', '', '', '',
+        'Computed', '', '', '', '',
     ];
 
     const mainSheet = outputWorkbook.addWorksheet('Reconciliation Report');
@@ -1065,11 +1393,25 @@ async function orderCycleShopifyProcessor(
             r.snapmint_settlement_date, r.snapmint_settlement_amount || '',
             r.bharatx_settlement_date, r.bharatx_settlement_amount || '',
             r.razorpay_settlement_date, r.razorpay_settlement_amount || '',
+            r.courier_cod_amount || '', r.courier_delivery_date, r.courier_remittance_date, r.courier_utr || '',
+            r.delivery_status || '',
+            round2(r.total_settlement_received), round2(r.balance_amount_receivable),
+            r.reconciliation_status, r.remark || '',
         ];
-        mainSheet.addRow(rowData);
+        const added = mainSheet.addRow(rowData);
+
+        // Colour the Status cell so the sheet is scannable. AWAITING REMITTANCE
+        // is deliberately amber rather than red or green: the money is collected
+        // but its transfer is unconfirmed, and the row asserts neither.
+        const fill = STATUS_FILL[r.reconciliation_status];
+        if (fill) {
+            const statusCell = added.getCell(HEADERS.indexOf('Status') + 1);
+            statusCell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: fill } };
+            if (r.reconciliation_status === 'UNREMITTED - QUERY') statusCell.font = { bold: true };
+        }
     }
 
-    // Column widths (25 cols)
+    // Column widths (32 cols: 25 original + 7 appended)
     const colMeta = [
         18, 20, 22, 22, 20, // A-E  (SaleOrderNo, Shopify, Invoice, AWB, ShippingPartner)
         22, 16,              // F-G  (DispatchDate, SumOfTotal)
@@ -1079,7 +1421,9 @@ async function orderCycleShopifyProcessor(
         22, 24, 16,          // Q-S  (XpressbeesDeliveryDate, XpressbeesTransDate, XpressbeesNetPay)
         22, 16,              // T-U  (SnapmintDate, SnapmintValue)
         22, 16,              // V-W  (BharatXTimestamp, BharatXLedger)
-        22, 16               // X-Y  (RazorpayDate, RazorpayAmt)
+        22, 16,              // X-Y  (RazorpayDate, RazorpayAmount)
+        16, 22, 22, 20,      // Z-AC (CourierCOD, CourierDelivDate, CourierRemitDate, CourierUTR)
+        18, 20, 18, 22, 70,  // AD-AH(DeliveryStatus, TotalSettled, Balance, Status, Remark)
     ];
     mainSheet.columns.forEach((col, i) => { col.width = colMeta[i] || 18; });
 

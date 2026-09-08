@@ -33,7 +33,10 @@ const listToolkits = async (req, res, next) => {
   try {
     const force = req.query.refresh === '1' || req.query.refresh === 'true';
     const toolkits = await composio.listToolkits(force);
-    res.json({ toolkits, count: toolkits.length });
+    // Slugs we've configured with our own OAuth app (Shopify) — these are
+    // connectable even though Composio hosts no managed app for them.
+    const customAuthSlugs = await composio.listCustomAuthConfigSlugs(force).catch(() => []);
+    res.json({ toolkits, count: toolkits.length, customAuthSlugs });
   } catch (e) { next(e); }
 };
 
@@ -83,7 +86,11 @@ const connect = async (req, res, next) => {
     // can toast and re-show the right brand's connections after the redirect.
     const brandParam = brandId ? `&brand=${encodeURIComponent(brandId)}` : '';
     const callbackUrl = `${FRONT_URL}?composio_connected=${encodeURIComponent(slug)}${brandParam}`;
-    const result = await composio.connect(userId, slug, callbackUrl);
+    // Per-connection values some OAuth toolkits need before the consent URL exists
+    // (Shopify: { subdomain: 'dchica' } → dchica.myshopify.com). Ignored when absent.
+    const { fields } = req.body || {};
+    const initFields = (fields && typeof fields === 'object' && !Array.isArray(fields)) ? fields : null;
+    const result = await composio.connect(userId, slug, callbackUrl, initFields);
     if (!result.redirectUrl) {
       // Non-OAuth toolkits (API key / basic auth) can't be auto-connected yet.
       return res.status(422).json({

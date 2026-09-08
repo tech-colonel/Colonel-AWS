@@ -185,15 +185,52 @@ async function connectWithCredentials(userId, slug, authScheme, credentials) {
  * For OAuth toolkits redirectUrl points at the provider consent page; after the
  * user authorizes, Composio redirects the browser to `callbackUrl`.
  */
-async function connect(userId, slug, callbackUrl) {
+async function connect(userId, slug, callbackUrl, fields = null) {
   const composio = getClient();
   const authConfigId = await ensureAuthConfig(slug);
-  const request = await composio.connectedAccounts.link(userId, authConfigId, { callbackUrl });
+
+  // Some OAuth toolkits need per-connection values BEFORE the consent URL can even
+  // be built — Shopify needs `subdomain`, because the authorize endpoint lives at
+  // https://<subdomain>.myshopify.com/admin/oauth/authorize. link() has no way to
+  // carry those, so when we have them we go through initiate() with an explicit
+  // config instead. No fields → unchanged link() path (Google etc. are unaffected).
+  const hasFields = fields && typeof fields === 'object' && Object.keys(fields).length > 0;
+  const request = hasFields
+    ? await composio.connectedAccounts.initiate(userId, authConfigId, {
+        config: { authScheme: 'OAUTH2', val: fields },
+        callbackUrl,
+      })
+    : await composio.connectedAccounts.link(userId, authConfigId, { callbackUrl });
+
   return {
     connectedAccountId: request.id || null,
     redirectUrl: request.redirectUrl || null,
     status: request.status || 'INITIATED',
   };
+}
+
+/* ── Which toolkits we've configured with our OWN OAuth app ──────────────────── */
+let _customCfgCache = { at: 0, slugs: [] };
+/**
+ * Toolkit slugs that have a developer-provided (non Composio-managed) auth config.
+ * Lets the marketplace tell "needs OAuth setup" apart from toolkits we HAVE set up
+ * with our own client id/secret (Shopify), which are connectable like any other.
+ */
+async function listCustomAuthConfigSlugs(force = false) {
+  const composio = getClient();
+  if (!force && Date.now() - _customCfgCache.at < CATALOG_TTL_MS) return _customCfgCache.slugs;
+  try {
+    const res = await composio.authConfigs.list({});
+    const items = res.items || res.data || [];
+    const slugs = [...new Set(items
+      .filter((a) => a && a.isComposioManaged === false)
+      .map((a) => String((a.toolkit && (a.toolkit.slug || a.toolkit)) || '').toLowerCase())
+      .filter(Boolean))];
+    _customCfgCache = { at: Date.now(), slugs };
+    return slugs;
+  } catch (_) {
+    return _customCfgCache.slugs;   // stale-but-usable beats breaking the page
+  }
 }
 
 /**
@@ -294,6 +331,7 @@ module.exports = {
   listToolkits,
   ensureAuthConfig,
   getAuthFields,
+  listCustomAuthConfigSlugs,
   connect,
   connectWithCredentials,
   listConnections,

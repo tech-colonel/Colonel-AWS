@@ -9,6 +9,7 @@ import { sidebarFor } from '../../lib/adminNav';
 import { useAuth } from '../../context/AuthContext';
 import BrandLogo from '../../components/BrandLogos';
 import ComposioMarketplace from './ComposioMarketplace';
+import ShopifyCard from './ShopifyCard';
 import CentralAccountPanel from '../../components/CentralAccountPanel';
 
 /* ── Status pill (matches ToolResultDashboard pill atoms) ───────────────────── */
@@ -446,6 +447,8 @@ const IntegrationsPage = () => {
         {isAdmin && <CentralAccountPanel />}
 
         {/* Composio marketplace — 1000+ connectable apps (additive, self-contained) */}
+        <ShopifyCard />
+
         <ComposioMarketplace />
       </div>
     </DashboardLayout>

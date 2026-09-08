@@ -34,6 +34,7 @@ const BASE = '/brands/:brandId/agents/:agentId/order-cycle-shopify';
 
 // ─── Two-phase generation ─────────────────────────────────────────────────────
 router.post(`${BASE}/generate/preview`, authenticateToken, uploadMulti, ctrl.generatePreview);
+router.get(`${BASE}/sources`, ctrl.getSources);
 router.post(`${BASE}/generate/commit`,  authenticateToken, ctrl.generateCommit);
 router.post(`${BASE}/generate/discard`, authenticateToken, ctrl.generateDiscard);
 
