@@ -92,7 +92,10 @@ export default function Landing() {
     if (user.role === 'admin') navigate('/admin');
     else if (user.role === 'developer') navigate('/feedback');
     else if (user.role === 'accountant') navigate('/brands');
-    else navigate('/dashboard');
+    // Restricted brand_executive (and any other role) → brand picker, not the
+    // dead '/dashboard' route which 404s.
+    else if (user.role === 'brand_executive') navigate('/brands');
+    else navigate('/brands');
   };
 
   return (

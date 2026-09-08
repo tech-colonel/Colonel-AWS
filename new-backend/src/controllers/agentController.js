@@ -1,4 +1,4 @@
-const { Agent, Brand, BrandAgent, User } = require('../models/master');
+const { Agent, Brand, BrandAgent, User, UserAgent } = require('../models/master');
 const { Task } = require('../models/task');
 const { getBrandConnection, masterSequelize } = require('../config/database');
 const { getBrandAgentModel, getDynamicModel } = require('../models/brand');
@@ -98,7 +98,22 @@ const getBrandAgents = async (req, res, next) => {
       return res.status(404).json({ error: 'Brand not found' });
     }
 
-    res.json(brand.Agents || []);
+    let agents = brand.Agents || [];
+
+    // RESTRICTED users (role 'brand_executive') see only the agents on their
+    // personal allowlist (user_agents), intersected with what this brand has.
+    // Everyone else (admin/accountant/developer) sees the brand's full set — so
+    // this filter can never narrow an existing accountant's access.
+    if (req.user && req.user.role === 'brand_executive') {
+      const allowed = await UserAgent.findAll({
+        where: { user_id: req.user.id },
+        attributes: ['agent_id']
+      });
+      const allowedIds = new Set(allowed.map((r) => r.agent_id));
+      agents = agents.filter((a) => allowedIds.has(a.id));
+    }
+
+    res.json(agents);
   } catch (error) {
     next(error);
   }

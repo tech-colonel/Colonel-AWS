@@ -14,7 +14,7 @@ import BrandLogo from '../../components/BrandLogos';
 import MeetingDetailModal from '../../components/MeetingDetailModal';
 import api from '../../lib/api';
 import { toast } from 'sonner';
-import { sidebarFor } from '../../lib/adminNav';
+import { sidebarFor, isBrandExecutiveUser } from '../../lib/adminNav';
 import { useAuth } from '../../context/AuthContext';
 import { fetchAccounts } from '../../lib/googleAccount';
 
@@ -117,6 +117,11 @@ const BrandDashboard = () => {
   const navigate = useNavigate();
   const { user } = useAuth();
 
+  // Restricted brand-side client (brand_executive): sees a stripped dashboard —
+  // NO firm meetings/tasks/statutory, NO team@ Drive "Sources to chat with", and
+  // NO Colonel AI. Only the welcome header + this brand's own KPI numbers.
+  const restricted = isBrandExecutiveUser();
+
   const [brand, setBrand] = useState(null);
   const [showGoogleNudge, setShowGoogleNudge] = useState(false);
   const [myBrands, setMyBrands] = useState([]);
@@ -164,12 +169,13 @@ const BrandDashboard = () => {
   // Nudge to connect the user's OWN Google account when they have none (the firm's central
   // team@ account is separate + already shared). Clicking the banner opens the profile popover.
   useEffect(() => {
+    if (restricted) return;           // brand-client: no Google-account nudge (and no 403 call)
     let alive = true;
     fetchAccounts()
       .then((a) => { if (alive) setShowGoogleNudge(!!a?.configured && (Array.isArray(a?.personal) ? a.personal.length : 0) === 0); })
       .catch(() => {});
     return () => { alive = false; };
-  }, []);
+  }, [restricted]);
 
   const sidebarItems = sidebarFor([
     { path: `/brands/${brandId}/dashboard`, label: 'Dashboard', icon: LayoutDashboard, testId: 'nav-dashboard' },
@@ -192,23 +198,28 @@ const BrandDashboard = () => {
     }
     // Secondary data — never blocks the dashboard; failures degrade gracefully.
     api.get(`/api/dashboard/summary/${brandId}`).then((r) => setSummary(r.data)).catch(() => setSummary(null));
-    api.get('/api/tasks').then((r) => setTasks(Array.isArray(r.data) ? r.data : [])).catch(() => setTasks([]));
-    // Compliance Tracker (brand + user scoped) — second source for Today/My Tasks.
-    api.get(`/api/brands/${brandId}/compliance`)
-      .then((r) => setCompliance(Array.isArray(r.data?.tasks) ? r.data.tasks : (Array.isArray(r.data) ? r.data : [])))
-      .catch(() => setCompliance([]));
-    // Statutory filings (owner-gated → 403 for non-owners; swallow to []).
-    api.get(`/api/brands/${brandId}/statutory`)
-      .then((r) => setStatutory(Array.isArray(r.data?.filings) ? r.data.filings : (Array.isArray(r.data) ? r.data : [])))
-      .catch(() => setStatutory([]));
     api.get('/api/brands/my-brands').then((r) => setMyBrands(Array.isArray(r.data) ? r.data : [])).catch(() => setMyBrands([]));
-    // Drive contents are loaded (and navigable) via loadDrive() below.
-    api.get('/api/meetings/upcoming').then((r) => setUpcoming(Array.isArray(r.data?.events) ? r.data.events : [])).catch(() => setUpcoming([]));
-    api.get('/api/meetings/recent').then((r) => setRecentMeetings(Array.isArray(r.data?.meetings) ? r.data.meetings : [])).catch(() => setRecentMeetings([]));
-    // Real per-user Google (via Composio) — recent Drive files + connection state.
-    api.get('/api/meetings/drive-recent').then((r) => setDriveRecent(Array.isArray(r.data?.files) ? r.data.files : [])).catch(() => setDriveRecent([]));
-    api.get('/api/meetings/connection').then((r) => setConn({ calendar: !!r.data?.calendar, drive: !!r.data?.drive })).catch(() => {});
-  }, [brandId]);
+    // Restricted brand-client: DO NOT load any firm-internal data (tasks, statutory,
+    // meetings/Fireflies, team@ Drive). The cards that use it are hidden, and these
+    // endpoints would 403 for this role anyway.
+    if (!restricted) {
+      api.get('/api/tasks').then((r) => setTasks(Array.isArray(r.data) ? r.data : [])).catch(() => setTasks([]));
+      // Compliance Tracker (brand + user scoped) — second source for Today/My Tasks.
+      api.get(`/api/brands/${brandId}/compliance`)
+        .then((r) => setCompliance(Array.isArray(r.data?.tasks) ? r.data.tasks : (Array.isArray(r.data) ? r.data : [])))
+        .catch(() => setCompliance([]));
+      // Statutory filings (owner-gated → 403 for non-owners; swallow to []).
+      api.get(`/api/brands/${brandId}/statutory`)
+        .then((r) => setStatutory(Array.isArray(r.data?.filings) ? r.data.filings : (Array.isArray(r.data) ? r.data : [])))
+        .catch(() => setStatutory([]));
+      // Drive contents are loaded (and navigable) via loadDrive() below.
+      api.get('/api/meetings/upcoming').then((r) => setUpcoming(Array.isArray(r.data?.events) ? r.data.events : [])).catch(() => setUpcoming([]));
+      api.get('/api/meetings/recent').then((r) => setRecentMeetings(Array.isArray(r.data?.meetings) ? r.data.meetings : [])).catch(() => setRecentMeetings([]));
+      // Real per-user Google (via Composio) — recent Drive files + connection state.
+      api.get('/api/meetings/drive-recent').then((r) => setDriveRecent(Array.isArray(r.data?.files) ? r.data.files : [])).catch(() => setDriveRecent([]));
+      api.get('/api/meetings/connection').then((r) => setConn({ calendar: !!r.data?.calendar, drive: !!r.data?.drive })).catch(() => {});
+    }
+  }, [brandId, restricted]);
 
   useEffect(() => { fetchData(); }, [fetchData]);
 
@@ -225,12 +236,14 @@ const BrandDashboard = () => {
 
   // Per-brand Drive listing — supports drilling into subfolders (?folderId).
   const loadDrive = useCallback((folderId) => {
+    // Restricted brand-client never gets the firm's team@ Drive ("Sources to chat with").
+    if (restricted) { setDriveFiles([]); return; }
     const qs = folderId ? `?folderId=${encodeURIComponent(folderId)}` : '';
     api.get(`/api/brands/${brandId}/drive${qs}`).then((r) => {
       setDriveFiles(Array.isArray(r.data?.files) ? r.data.files : []);
       setDriveFolderId(r.data?.folderId || folderId || null);
     }).catch(() => setDriveFiles([]));
-  }, [brandId]);
+  }, [brandId, restricted]);
   useEffect(() => { setDrivePath([{ id: null, name: 'Drive' }]); loadDrive(null); }, [loadDrive]);
 
   // Files opened from the UI (persisted per brand) → feed Previously viewed.
@@ -523,6 +536,9 @@ const BrandDashboard = () => {
           </div>
         )}
 
+        {/* ── Overview body — hidden entirely for a restricted brand-client
+              (no firm meetings/tasks/statutory, no team@ Drive sources). ── */}
+        {!restricted && (<>
         {/* ── Tabs + quick pills ─────────────────────────────────────────── */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 16 }}>
           <button style={tabBtn(true)} data-testid="tab-overview"><LayoutDashboard style={{ width: 15, height: 15 }} /> Overview</button>
@@ -761,6 +777,7 @@ const BrandDashboard = () => {
             </div>
           )}
         </Panel>
+        </>)}
 
         {/* ── Slim KPI strip (quick glance; full analytics in the Analysis tab) ── */}
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(210px, 1fr))', gap: '12px', marginBottom: '8px' }}>
@@ -771,7 +788,8 @@ const BrandDashboard = () => {
         </div>
       </div>
 
-      {/* ── Sticky bottom Ask Colonel AI bar (Overview) ──────────────────── */}
+      {/* ── Sticky bottom Ask Colonel AI bar (Overview) — hidden for restricted brand-client ── */}
+      {!restricted && (
       <div style={{ position: 'sticky', bottom: 16, zIndex: 30, padding: '0 24px', maxWidth: 1320, margin: '0 auto', pointerEvents: 'none' }}>
         <div className="glass-card" style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 8px 8px 14px', borderRadius: 16, boxShadow: '0 -2px 10px rgba(16,24,64,.04), 0 12px 34px rgba(16,24,64,.14)', pointerEvents: 'auto' }}>
           <span style={{ width: 30, height: 30, borderRadius: 9, flexShrink: 0, display: 'grid', placeItems: 'center', background: 'linear-gradient(135deg, #0748EE, #7C3AED)' }}>
@@ -785,6 +803,7 @@ const BrandDashboard = () => {
           </button>
         </div>
       </div>
+      )}
 
       {/* ── CFO agent picker (unchanged) ─────────────────────────────────── */}
       <Dialog open={showAgentPicker} onOpenChange={setShowAgentPicker}>

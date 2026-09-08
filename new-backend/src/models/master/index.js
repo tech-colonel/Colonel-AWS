@@ -145,6 +145,34 @@ const BrandAgent = masterSequelize.define('brand_agents', {
 Brand.belongsToMany(Agent, { through: BrandAgent, foreignKey: 'brand_id', otherKey: 'agent_id' });
 Agent.belongsToMany(Brand, { through: BrandAgent, foreignKey: 'agent_id', otherKey: 'brand_id' });
 
+// Per-user agent allowlist. ONLY consulted for RESTRICTED users (role
+// 'brand_executive'): such a user sees exactly the agents listed here (intersected
+// with what their brand actually has), instead of the brand's whole agent set.
+// Admins/accountants ignore this table entirely, so seeding rows here can never
+// narrow an existing accountant's access. To grant a restricted user another
+// agent, just add a row (see add-stroom-zepto-user.js for the pattern).
+const UserAgent = masterSequelize.define('user_agents', {
+  id: {
+    type: DataTypes.UUID,
+    defaultValue: DataTypes.UUIDV4,
+    primaryKey: true
+  },
+  user_id: {
+    type: DataTypes.UUID,
+    allowNull: false
+  },
+  agent_id: {
+    type: DataTypes.UUID,
+    allowNull: false
+  }
+}, {
+  tableName: 'user_agents',
+  freezeTableName: true
+});
+
+User.belongsToMany(Agent, { through: UserAgent, foreignKey: 'user_id', otherKey: 'agent_id' });
+Agent.belongsToMany(User, { through: UserAgent, foreignKey: 'agent_id', otherKey: 'user_id' });
+
 // Agent workflows (multi-sheet output templates: filters, master-data lookup, column mapping)
 const AgentWorkflow = masterSequelize.define('AgentWorkflow', {
   id:             { type: DataTypes.UUID, defaultValue: DataTypes.UUIDV4, primaryKey: true },
@@ -228,6 +256,7 @@ module.exports = {
   Agent,
   BrandUser,
   BrandAgent,
+  UserAgent,
   Plan,
   Integration,
   Conversation,

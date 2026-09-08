@@ -6,7 +6,7 @@ import { LayoutDashboard, Bot, TrendingUp, ChevronRight, ShoppingBag, GitBranch 
 import { Card, CardContent } from '../../components/ui/card';
 import api from '../../lib/api';
 import { toast } from 'sonner';
-import { sidebarFor } from '../../lib/adminNav';
+import { sidebarFor, isBrandExecutiveUser } from '../../lib/adminNav';
 import { RECO_ID_TO_TYPE } from './AgentDispatch';
 import WorkflowApplyModal from './WorkflowApplyModal';
 
@@ -351,23 +351,29 @@ const BrandAgentsInventory = () => {
     /order[-\s]?cycle/i.test(a.name || '') ||
     ['nykaa', 'settlement-amazon', 'total-sales-analyzer', 'ajio', 'meesho', 'myntra ticket finder'].includes((a.name || '').toLowerCase());
   const isInvoice = (a) => (a.name || '').toLowerCase() === 'invoice process';
-  const visibleAgents = RECO_ONLY
-    ? allAgents.filter(agent => (RECO_ID_TO_TYPE[agent.id] || isSalesMarketplace(agent) || isInvoice(agent)) && !HIDDEN_WHEN_RECO_ONLY.has(agent.id))
-    : allAgents;
+  // RESTRICTED brand executives see ONLY the agents on their personal allowlist —
+  // which the backend already returns as `assignedAgents` for them. No full
+  // catalog, no demo cards, no workflows.
+  const restricted = isBrandExecutiveUser();
+  const visibleAgents = restricted
+    ? assignedAgents
+    : (RECO_ONLY
+        ? allAgents.filter(agent => (RECO_ID_TO_TYPE[agent.id] || isSalesMarketplace(agent) || isInvoice(agent)) && !HIDDEN_WHEN_RECO_ONLY.has(agent.id))
+        : allAgents);
 
   // Group visible agents into category sections; inject the fake receivables
   // demo cards into the Receivables section, then drop empty sections.
   const bySection = SECTIONS
     .map(s => {
       let items = visibleAgents.filter(a => sectionOf(a) === s.key);
-      if (s.key === 'receivables') items = [...items, ...FAKE_RECEIVABLES];
+      if (!restricted && s.key === 'receivables') items = [...items, ...FAKE_RECEIVABLES];
       return { ...s, items };
     })
     .filter(s => s.items.length > 0);
 
   // Only surface workflows whose parent agent is actually assigned to this brand —
-  // same gate as agent cards themselves.
-  const visibleWorkflows = workflows.filter(wf => isAssigned(wf.agent_id));
+  // same gate as agent cards themselves. Restricted executives see none.
+  const visibleWorkflows = restricted ? [] : workflows.filter(wf => isAssigned(wf.agent_id));
 
   const handleAgentClick = (agent) => {
     if (!isAssigned(agent.id)) {

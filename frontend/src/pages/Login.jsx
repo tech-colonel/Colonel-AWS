@@ -24,8 +24,11 @@ const Login = () => {
     // Accountants land on the brand picker; they choose a brand, then the card
     // opens that brand's Dashboard.
     else if (user.role === 'accountant') navigate('/brands');
-    else if (user.role === 'brand_executive') navigate('/dashboard');
-    else navigate('/dashboard');
+    // Restricted brand executive: land on the brand picker (their scoped
+    // /api/brands/my-brands returns only their brand), then the card opens that
+    // brand's Dashboard. (Old '/dashboard' target was a dead route.)
+    else if (user.role === 'brand_executive') navigate('/brands');
+    else navigate('/brands');
   };
 
   // Complete the Google flow when Composio redirects back to /login?google_login=<nonce>.

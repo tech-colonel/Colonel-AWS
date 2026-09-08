@@ -260,7 +260,8 @@ export default function AskColonelAI() {
   };
 
   // Never render on public screens or when signed out.
-  if (!user || PUBLIC_ROUTES.has(location.pathname)) return null;
+  // Restricted brand-client (brand_executive) has no Colonel AI access at all.
+  if (!user || user.role === 'brand_executive' || PUBLIC_ROUTES.has(location.pathname)) return null;
 
   return (
     <>

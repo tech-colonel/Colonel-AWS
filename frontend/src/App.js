@@ -105,7 +105,7 @@ function App() {
           <Route
             path="/brands"
             element={
-              <ProtectedRoute allowedRoles={['accountant', 'admin']}>
+              <ProtectedRoute allowedRoles={['accountant', 'admin', 'brand_executive']}>
                 <BrandSelection />
               </ProtectedRoute>
             }
@@ -183,7 +183,7 @@ function App() {
           <Route
             path="/brands/:brandId/dashboard"
             element={
-              <ProtectedRoute allowedRoles={['accountant', 'admin']}>
+              <ProtectedRoute allowedRoles={['accountant', 'admin', 'brand_executive']}>
                 <BrandDashboard />
               </ProtectedRoute>
             }
@@ -248,7 +248,7 @@ function App() {
           <Route
             path="/brands/:brandId/agents"
             element={
-              <ProtectedRoute allowedRoles={['accountant', 'admin']}>
+              <ProtectedRoute allowedRoles={['accountant', 'admin', 'brand_executive']}>
                 <BrandAgentsInventory />
               </ProtectedRoute>
             }
@@ -256,7 +256,7 @@ function App() {
           <Route
             path="/brands/:brandId/agents/:agentId"
             element={
-              <ProtectedRoute allowedRoles={['accountant', 'admin']}>
+              <ProtectedRoute allowedRoles={['accountant', 'admin', 'brand_executive']}>
                 <AgentDispatch />
               </ProtectedRoute>
             }

@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const multer = require('multer');
 const { authenticateToken, authorize } = require('../middleware/authMiddleware');
+const { UserAgent, Agent } = require('../models/master');
 const { runReco, exportReco, openInSheets, checkHealth, getLedgerStatus, deleteRecoJob, detectZeptoFiles, purgeSessionMaster } = require('../controllers/recoController');
 const { routeDriveFiles } = require('../controllers/driveRouteController');
 const { listDriveFiles, getDriveFileContent } = require('../controllers/driveFetchController');
@@ -28,18 +29,50 @@ const flexibleAuthorize = (req, res, next) => {
   return authorize('accountant', 'admin')(req, res, next);
 };
 
+// Same as flexibleAuthorize but ALSO lets a restricted 'brand_executive' through.
+// Used only on the endpoints a brand_executive legitimately needs (run/scan/export/
+// ledger/history) — NOT on mutations like delete-job. The run endpoint pairs this
+// with enforceExecAllowlist below so they can still only run their allowlisted agent.
+const flexibleAuthorizeExec = (req, res, next) => {
+  if (req.user?.id === 'demo') return next();
+  return authorize('accountant', 'admin', 'brand_executive')(req, res, next);
+};
+
+// For a 'brand_executive', the requested reco_type MUST be one of their allowlisted
+// agents (user_agents). This is what keeps "only Zepto" true on the EXECUTION path:
+// even a hand-crafted /reco/run body with another reco_type is rejected. Other roles
+// pass straight through. Runs AFTER multer so req.body.reco_type is populated.
+const enforceExecAllowlist = async (req, res, next) => {
+  try {
+    if (req.user?.role !== 'brand_executive') return next();
+    const recoType = req.body?.reco_type;
+    if (!recoType) return res.status(403).json({ error: 'Access denied: no agent specified.' });
+    const rows = await UserAgent.findAll({ where: { user_id: req.user.id }, attributes: ['agent_id'] });
+    const ids = rows.map((r) => r.agent_id);
+    if (ids.length === 0) return res.status(403).json({ error: 'Access denied: no agents assigned to this user.' });
+    const allowed = await Agent.findAll({ where: { id: ids }, attributes: ['name'] });
+    const names = new Set(allowed.map((a) => a.name));
+    if (!names.has(recoType)) {
+      return res.status(403).json({ error: `Access denied: you are not permitted to run "${recoType}".` });
+    }
+    return next();
+  } catch (e) { return next(e); }
+};
+
 // Health check (no auth needed)
 router.get('/reco/health', checkHealth);
 
 // Ephemeral master-data reset for the "Other" catch-all brand (no-op for real brands)
 router.post('/brands/:brandId/purge-session-master', authenticateToken, purgeSessionMaster);
 
-// Run reconciliation — supports demo mode
+// Run reconciliation — supports demo mode. brand_executive allowed, but
+// enforceExecAllowlist (after multer) restricts them to their allowlisted agent.
 router.post(
   '/reco/run',
   flexibleAuth,
-  flexibleAuthorize,
+  flexibleAuthorizeExec,
   upload.any(),
+  enforceExecAllowlist,
   runReco
 );
 
@@ -47,7 +80,7 @@ router.post(
 router.get(
   '/reco/export/:jobId',
   flexibleAuth,
-  flexibleAuthorize,
+  flexibleAuthorizeExec,
   exportReco
 );
 
@@ -55,7 +88,7 @@ router.get(
 router.post(
   '/reco/open-in-sheets/:jobId',
   flexibleAuth,
-  flexibleAuthorize,
+  flexibleAuthorizeExec,
   openInSheets
 );
 
@@ -63,7 +96,7 @@ router.post(
 router.get(
   '/reco/ledger-status/:brandId',
   flexibleAuth,
-  flexibleAuthorize,
+  flexibleAuthorizeExec,
   getLedgerStatus
 );
 
@@ -76,7 +109,7 @@ router.delete(
 );
 
 // Preview — scan a Zepto Drive folder and return classified file counts (no download)
-router.post('/reco/detect-files', flexibleAuth, flexibleAuthorize, detectZeptoFiles);
+router.post('/reco/detect-files', flexibleAuth, flexibleAuthorizeExec, detectZeptoFiles);
 
 // Generic preview — recognize which Drive file maps to which agent slot (no download, no run)
 router.post('/drive/route', flexibleAuth, flexibleAuthorize, routeDriveFiles);

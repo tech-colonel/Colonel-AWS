@@ -12,10 +12,10 @@ const flexibleAuth = (req, res, next) => {
   return authenticateToken(req, res, next);
 };
 
-router.get('/dashboard/summary/:brandId',       flexibleAuth, authorize('accountant','admin'), getDashboardSummary);
-router.get('/dashboard/reco/history/:brandId',  flexibleAuth, authorize('accountant','admin'), getRecoHistory);
-router.get('/dashboard/reco/results/:jobId',    flexibleAuth, authorize('accountant','admin'), getJobResults);
-router.get('/dashboard/reco/job/:jobId',        flexibleAuth, authorize('accountant','admin'), getJobById);
+router.get('/dashboard/summary/:brandId',       flexibleAuth, authorize('accountant','admin','brand_executive'), getDashboardSummary);
+router.get('/dashboard/reco/history/:brandId',  flexibleAuth, authorize('accountant','admin','brand_executive'), getRecoHistory);
+router.get('/dashboard/reco/results/:jobId',    flexibleAuth, authorize('accountant','admin','brand_executive'), getJobResults);
+router.get('/dashboard/reco/job/:jobId',        flexibleAuth, authorize('accountant','admin','brand_executive'), getJobById);
 router.get('/dashboard/receivables/:brandId',   flexibleAuth, authorize('accountant','admin'), getReceivableDashboard);
 router.get('/dashboard/receivables/:brandId/journey', flexibleAuth, authorize('accountant','admin'), getReceivableJourney);
 router.get('/dashboard/receivables/:brandId/sheet', flexibleAuth, authorize('accountant','admin'), getReceivableSheetRows);

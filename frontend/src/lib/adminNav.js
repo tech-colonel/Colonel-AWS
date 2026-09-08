@@ -11,6 +11,10 @@ export const isAdminUser = () => readRole() === 'admin';
 // Is the logged-in user the developer/engineer?
 export const isDeveloperUser = () => readRole() === 'developer';
 
+// Is the logged-in user a RESTRICTED brand executive? (brand-side user locked to
+// a single brand + a small agent allowlist — see user_agents on the backend.)
+export const isBrandExecutiveUser = () => readRole() === 'brand_executive';
+
 // The developer (engineer) shell — focused on the feedback queue + plans.
 export const DEVELOPER_SIDEBAR = [
   { path: '/chat',     label: 'Colonel AI', icon: Sparkles, testId: 'nav-chat' },
@@ -54,6 +58,23 @@ const lastBrandId = () => { try { return localStorage.getItem('lastBrandId') || 
 export const sidebarFor = (brandItems = []) => {
   if (isAdminUser() || onAdminRoute()) return ADMIN_SIDEBAR;
   if (isDeveloperUser()) return DEVELOPER_SIDEBAR;
+  // Restricted brand executive: EXACTLY two items — Dashboard + Agents — and
+  // nothing else. Derive the brand-scoped paths from whatever the current page
+  // passed (both BrandDashboard and BrandAgentsInventory pass the real brandId),
+  // falling back to the last-opened brand, then the brand picker.
+  if (isBrandExecutiveUser()) {
+    const bid = lastBrandId();
+    const fromItems = (suffix) => {
+      const hit = (brandItems || []).find((it) => (it.path || '').endsWith(suffix));
+      return hit && hit.path;
+    };
+    const dashPath = fromItems('/dashboard') || (bid ? `/brands/${bid}/dashboard` : '/brands');
+    const agentsPath = fromItems('/agents') || (bid ? `/brands/${bid}/agents` : '/brands');
+    return [
+      { path: dashPath,   label: 'Dashboard', icon: LayoutDashboard, testId: 'nav-dashboard' },
+      { path: agentsPath, label: 'Agents',    icon: Bot,             testId: 'nav-agents' },
+    ];
+  }
   // Accountant: the SAME full menu on every page, so navigating to Meetings/
   // Tasks/etc. never drops Dashboard/Agents from the shell. Brand-scoped items
   // link to the last-visited brand (falls back to the brand picker).
