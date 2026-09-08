@@ -138,37 +138,209 @@ async function firstcryProcessor(
     return processedRow;
   });
 
-  // Working Sheet
-  const workingSheetData = processedData.map(row => {
-    const total = safeNumber(row['Total']);
-    const taxable = safeNumber(row['Gross Amount']);
-    const cgstAmount = safeNumber(row['CGST Amount']);
-    const sgstAmount = safeNumber(row['SGST Amount']);
-    const igstAmount = total - taxable - cgstAmount - sgstAmount;
+  // ============================================================
+  // WORKING SHEET — every raw column verbatim (sourced from rawData, so the
+  // debit-note sign-flip applied to `processedData` above never touches it),
+  // plus an FG column right after "Product ID" on with-inventory runs, plus
+  // eight calculated columns. Built as an array of arrays so the calculated
+  // "HSN Code" can sit next to the raw "HSN Code" without a key collision.
+  // ============================================================
+  const num = safeNumber;
+  const round2 = (n) => Math.round((num(n) + Number.EPSILON) * 100) / 100;
 
-    return {
-      'Invoice Date': safeDate(row['Shipping Date']),
-      'Invoice no.':
-        row['Vendor Invoice no.'] ||
-        row['Vendor Invoice No.'] ||
-        row['Invoice no.'] ||
-        '',
-      'FG': safeString(row['FG']),
-      'Quantity': safeNumber(row['Qty'] || row['Quantity']),
-      'Taxable value': taxable,
-      'CGST Amount': cgstAmount,
-      'SGST Amount': sgstAmount,
-      'IGST Amount': igstAmount
-    };
+  // Raw header list in first-seen order across all rows (nothing hardcoded).
+  const rawHeaders = [];
+  {
+    const seen = new Set();
+    rawData.forEach(r => Object.keys(r).forEach(k => {
+      if (!seen.has(k)) { seen.add(k); rawHeaders.push(k); }
+    }));
+  }
+
+  // ---- raw-column getters (tolerate the header-name variants seen in the wild)
+  const getGross     = (r) => num(r['Gross Amount']);
+  const getCgstAmt   = (r) => num(r['CGST Amount']);
+  const getSgstAmt   = (r) => num(r['SGST Amount']);
+  const getQty       = (r) => num(r['Qty'] != null ? r['Qty'] : r['Quantity']);
+  const getBaseCost  = (r) => num(r['Base Cost'] != null ? r['Base Cost'] : r['Rate']);
+  const getSrQty     = (r) => num(r['SR Qty']);
+  const getVendorInv = (r) => (r['Vendor Invoice no.'] != null ? r['Vendor Invoice no.']
+                             : r['Vendor Invoice No.'] != null ? r['Vendor Invoice No.'] : '');
+  const getShipDate  = (r) => (r['Shipping Date'] != null ? r['Shipping Date']
+                             : r['Shipping date'] != null ? r['Shipping date'] : '');
+  const getDebitNote = (r) => (r['Debit note no.'] != null ? r['Debit note no.']
+                             : r['Debit Note No.'] != null ? r['Debit Note No.'] : '');
+
+  // "GST Rate " = CGST % + SGST %  (raw whole-number percentages, e.g. 9 + 9 = 18)
+  const gstRateOf = (r) => num(r['CGST %'] != null ? r['CGST %'] : r['CGST%'])
+                         + num(r['SGST %'] != null ? r['SGST %'] : r['SGST%']);
+
+  // Calc "HSN Code" / "HSN Code2" = text before "@" in the raw HSN cell, trimmed
+  const hsn2Of = (r) => {
+    const raw = r['HSN Code'] != null ? r['HSN Code'] : (r['HSN'] != null ? r['HSN'] : '');
+    return String(raw).split('@')[0].trim();
+  };
+
+  // Per-row calculated block — shared by the working sheet and the GSTR pivots
+  const calcOf = (r) => {
+    const srQty    = getSrQty(r);
+    const rtoQty   = num(r['RTO Qty']);
+    const srGross  = num(r['SR Gross Amount']);
+    const rtoGross = num(r['RTO Gross Amount']);
+    const srTotal  = num(r['SR Total Amount']);
+    const rtoTotal = num(r['RTO Total Amount']);
+    const gstRate  = gstRateOf(r);
+
+    // IFS(RTO Gross > 0 -> "RTO", SR Gross > 0 -> "SR", else 0)
+    let type = 0;
+    if (rtoGross > 0) type = 'RTO';
+    else if (srGross > 0) type = 'SR';
+
+    const srRtoQty   = srQty + rtoQty;
+    const srRtoGross = rtoGross + srGross;
+    const srRtoCgst  = round2((srRtoGross * gstRate) / 200);
+    const srRtoSgst  = srRtoCgst;
+    const check      = round2((srRtoGross + srRtoCgst + srRtoSgst) - (rtoTotal + srTotal));
+
+    return { type, srRtoQty, srRtoGross: round2(srRtoGross), srRtoCgst, srRtoSgst, check, hsn2: hsn2Of(r), gstRate };
+  };
+
+  // SKU -> FG (skuMap built earlier; only populated on with-inventory runs)
+  const fgOf = (r) => {
+    if (!withInventory) return '';
+    const productId = safeString(r['Product ID'] || r['ProductID'] || r['Product Id']);
+    return (productId && skuMap[productId]) ? skuMap[productId] : '';
+  };
+
+  const CALC_HEADERS = [
+    'Type',
+    'SR and RTO Qty',
+    'SR and RTO Gross Amount',
+    'SR and RTO CGST ',
+    'SR and RTO SGST ',
+    'Check',
+    'HSN Code',
+    'GST Rate '
+  ];
+
+  const workingHeaders = [];
+  {
+    let fgInserted = false;
+    rawHeaders.forEach(h => {
+      workingHeaders.push(h);
+      if (withInventory && h === 'Product ID') { workingHeaders.push('FG'); fgInserted = true; }
+    });
+    if (withInventory && !fgInserted) workingHeaders.push('FG');
+    workingHeaders.push(...CALC_HEADERS);
+  }
+
+  const workingAoa = [workingHeaders];
+  const workingSheetData = []; // plain objects, for the controller's preview summary
+
+  rawData.forEach(r => {
+    const c = calcOf(r);
+    const fg = fgOf(r);
+
+    const arr = [];
+    let fgInserted = false;
+    rawHeaders.forEach(h => {
+      arr.push(r[h] != null ? r[h] : null);
+      if (withInventory && h === 'Product ID') { arr.push(fg); fgInserted = true; }
+    });
+    if (withInventory && !fgInserted) arr.push(fg);
+    arr.push(c.type, c.srRtoQty, c.srRtoGross, c.srRtoCgst, c.srRtoSgst, c.check, c.hsn2, c.gstRate);
+    workingAoa.push(arr);
+
+    workingSheetData.push({
+      ...r,
+      FG: fg,
+      'Type': c.type,
+      'SR and RTO Qty': c.srRtoQty,
+      'SR and RTO Gross Amount': c.srRtoGross,
+      'SR and RTO CGST ': c.srRtoCgst,
+      'SR and RTO SGST ': c.srRtoSgst,
+      'Check': c.check,
+      'GST Rate ': c.gstRate
+    });
   });
 
-  // Output Workbook
+  // ============================================================
+  // GSTR PIVOT SHEETS — plain group-by + sum over every raw row, emitted as
+  // arrays of arrays. Values rounded to 2dp; grouping keys kept exact.
+  // ============================================================
+  const keyPart = (v) => (v instanceof Date ? `D${v.getTime()}` : String(v == null ? '' : v));
+
+  const buildPivot = (headerRow, keyGetters, sumGetters) => {
+    const map = new Map();
+    rawData.forEach(r => {
+      const keyVals = keyGetters.map(g => g(r));
+      const key = keyVals.map(keyPart).join('||');
+      let entry = map.get(key);
+      if (!entry) { entry = { keyVals, sums: sumGetters.map(() => 0) }; map.set(key, entry); }
+      sumGetters.forEach((g, i) => { entry.sums[i] += num(g(r)); });
+    });
+    const aoa = [headerRow];
+    for (const { keyVals, sums } of map.values()) aoa.push([...keyVals, ...sums.map(round2)]);
+    return XLSX.utils.aoa_to_sheet(aoa);
+  };
+
+  // GSTR B2B — by Vendor Invoice no. + Shipping Date + GST Rate
+  const gstrB2bHeader = ['Vendor Invoice no.', 'Shipping Date', 'GST Rate ',
+    'Gross Amount (Sum)', 'CGST Amount (Sum)', 'SGST Amount (Sum)'];
+  const gstrB2bSums = [getGross, getCgstAmt, getSgstAmt];
+  if (withInventory) {
+    gstrB2bHeader.push('Qty', 'base cost');
+    gstrB2bSums.push(getQty, getBaseCost);
+  }
+  const gstrB2bSheet = buildPivot(gstrB2bHeader, [getVendorInv, getShipDate, gstRateOf], gstrB2bSums);
+
+  // GSTR CN — by Debit note no. + GST Rate
+  const gstrCnHeader = ['Debit note no.', 'GST Rate ',
+    'SR and RTO Gross Amount (Sum)', 'SR and RTO CGST  (Sum)', 'SR and RTO SGST  (Sum)'];
+  const gstrCnSums = [
+    (r) => calcOf(r).srRtoGross,
+    (r) => calcOf(r).srRtoCgst,
+    (r) => calcOf(r).srRtoSgst
+  ];
+  if (withInventory) {
+    gstrCnHeader.push('SR Qty');
+    gstrCnSums.push(getSrQty);
+  }
+  const gstrCnSheet = buildPivot(gstrCnHeader, [getDebitNote, gstRateOf], gstrCnSums);
+
+  // GSTR B2B HSN — by HSN Code2 + GST Rate
+  const gstrB2bHsnSheet = buildPivot(
+    ['HSN Code2', 'GST Rate ', 'Qty (Sum)', 'Gross Amount (Sum)', 'CGST Amount (Sum)', 'SGST Amount (Sum)'],
+    [hsn2Of, gstRateOf],
+    [getQty, getGross, getCgstAmt, getSgstAmt]
+  );
+
+  // GSTR CN HSN — by HSN Code2 + GST Rate
+  const gstrCnHsnSheet = buildPivot(
+    ['HSN Code2', 'GST Rate ', 'SR and RTO Qty (Sum)', 'SR and RTO Gross Amount (Sum)',
+      'SR and RTO CGST  (Sum)', 'SR and RTO SGST  (Sum)'],
+    [hsn2Of, gstRateOf],
+    [
+      (r) => calcOf(r).srRtoQty,
+      (r) => calcOf(r).srRtoGross,
+      (r) => calcOf(r).srRtoCgst,
+      (r) => calcOf(r).srRtoSgst
+    ]
+  );
+
+  // ============================================================
+  // OUTPUT WORKBOOK
+  // ============================================================
   const outputWorkbook = XLSX.utils.book_new();
+
   const processedSheet = XLSX.utils.json_to_sheet(processedData);
   XLSX.utils.book_append_sheet(outputWorkbook, processedSheet, 'Processed Data');
 
-  const workingSheet = XLSX.utils.json_to_sheet(workingSheetData);
-  XLSX.utils.book_append_sheet(outputWorkbook, workingSheet, 'working');
+  XLSX.utils.book_append_sheet(outputWorkbook, XLSX.utils.aoa_to_sheet(workingAoa), 'working');
+  XLSX.utils.book_append_sheet(outputWorkbook, gstrB2bSheet, 'GSTR B2B');
+  XLSX.utils.book_append_sheet(outputWorkbook, gstrCnSheet, 'GSTR CN');
+  XLSX.utils.book_append_sheet(outputWorkbook, gstrB2bHsnSheet, 'GSTR B2B HSN');
+  XLSX.utils.book_append_sheet(outputWorkbook, gstrCnHsnSheet, 'GSTR CN HSN');
 
   // X2Beta working — same 108-column Tally e-invoice import template used by
   // the other marketplace processors.

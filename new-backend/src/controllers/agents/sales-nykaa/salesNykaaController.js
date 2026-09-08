@@ -41,10 +41,11 @@ const uploadLedgerMaster = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
-function mapRowToSchema(row, monthName, year, filename) {
+function mapRowToSchema(row, monthName, year, filename, inventoryType) {
   return {
     year: parseInt(year, 10),
     month: MONTH_NUMS[monthName] || parseInt(monthName, 10) || 0,
+    inventory_type:   inventoryType,
     filename,
     externorderno:    row.externorderno,
     product_sku:      row.product_sku,
@@ -67,8 +68,10 @@ function mapRowToSchema(row, monthName, year, filename) {
 const generatePreview = async (req, res, next) => {
   try {
     const { brandId, agentId } = req.params;
-    const { month, year } = req.body;
+    const { month, year, inventory_type } = req.body;
     if (!month || !year) return res.status(400).json({ error: 'month and year are required' });
+    const withInventory = inventory_type !== 'Without';
+    const inventoryLabel = withInventory ? 'With' : 'Without';
     const cycle1Buffer = req.files && req.files.cycle1File ? req.files.cycle1File[0].buffer : null;
     const cycle2Buffer = req.files && req.files.cycle2File ? req.files.cycle2File[0].buffer : null;
     if (!cycle1Buffer || !cycle2Buffer)
@@ -76,7 +79,8 @@ const generatePreview = async (req, res, next) => {
     const brand = await Brand.findByPk(brandId);
     const agent = await Agent.findByPk(agentId);
     if (!brand || !agent) return res.status(404).json({ error: 'Brand or Agent not found' });
-    const result = nykaaProcessor(cycle1Buffer, cycle2Buffer, month, year);
+    const masterData = await salesService.getMasterData(brandId, agentId);
+    const result = nykaaProcessor(cycle1Buffer, cycle2Buffer, month, year, masterData.sku_master, withInventory);
     if (!result || !result.workingFileData || result.workingFileData.length === 0)
       return res.status(400).json({ error: 'No processable data found in the uploaded files' });
     const brandDb   = getBrandConnection(brand.db_name);
@@ -85,7 +89,7 @@ const generatePreview = async (req, res, next) => {
     const taskId    = uuidv4();
     const filename  = `nykaa_${brand.name}_${month}_${year}_${taskId}.xlsx`;
     const filepath  = path.join(OUTPUT_DIR, filename);
-    const dbRows    = result.workingFileData.map(row => mapRowToSchema(row, month, year, filename));
+    const dbRows    = result.workingFileData.map(row => mapRowToSchema(row, month, year, filename, inventoryLabel));
     setPending(taskId, { workbook: result.outputWorkbook, dbRows, filepath, filename, Model, agentType: 'nykaa' });
     res.json({ success: true, taskId, filename, summary: result.summary });
   } catch (err) { next(err); }

@@ -819,9 +819,10 @@ async function flipkartProcessor(rawFileBuffer, skuData, stateConfigData, brandN
     let finalIgstShipping = 0;
 
     if (isIntraState) {
-      // Intra-state: CGST and SGST
-      finalCgstTaxable = finalTaxableSalesValue * (finalGstRate / 100);
-      finalSgstTaxable = finalTaxableSalesValue * (finalGstRate / 100);
+      // Intra-state: CGST and SGST. finalGstRate is the combined rate (CGST Rate
+      // + SGST Rate), so each half is finalGstRate / 2.
+      finalCgstTaxable = (finalTaxableSalesValue * (finalGstRate / 100)) / 2;
+      finalSgstTaxable = (finalTaxableSalesValue * (finalGstRate / 100)) / 2;
       finalCgstShipping = finalShippingTaxableValue * (finalGstRate / 100);
       finalSgstShipping = finalShippingTaxableValue * (finalGstRate / 100);
     } else {
@@ -1437,13 +1438,14 @@ async function flipkartProcessor(rawFileBuffer, skuData, stateConfigData, brandN
     { header: 'Is Vch?', get: () => null },
     { header: 'Party Ledger*', get: r => r.tally_ledgers || '' },
     { header: 'Sales Ledger*', get: r => `Sales Flipkart-${getSellerStateAbbr(r.seller_gstin) || ''} ${Number(r.final_gst_rate || 0)}%` },
-    // Stock-item detail dropped per user request — this sheet is now a
-    // ledger-only voucher import (no stock movement), so Stock Item/Qty/Rate/
-    // Unit are blanked/zeroed and rows sharing a voucher are grouped below.
-    { header: 'Stock Item', get: () => null },
+    // With-inventory runs carry a stock item: map the SKU to its FG name (same
+    // source as the tally-ready / x2beta-shipping sheets). Ledger-only runs keep
+    // this blank. Qty/Rate stay zeroed; rows still group by voucher + Stock Item
+    // below, so distinct FGs under one voucher split into their own rows.
+    { header: 'Stock Item', get: r => (withInventory ? (r.fg || '') : null) },
     { header: 'Description', get: () => null },
     { header: 'Godown', get: r => r.order_shipped_from_state || '' },
-    { header: 'Quantity', get: () => 0 },
+    { header: 'Quantity', get: r => (withInventory ? Number(r.item_quantity || 0) : 0) },
     { header: 'Rate', get: () => 0 },
     { header: 'Unit', get: () => null },
     { header: 'Discount', get: () => null },
@@ -1516,10 +1518,10 @@ async function flipkartProcessor(rawFileBuffer, skuData, stateConfigData, brandN
   const x2betaHeaders = x2betaColumns.map(c => c.header);
   const x2betaRawRows = workingFileData.map(row => x2betaColumns.map(c => c.get(row)));
 
-  // Group rows sharing the same voucher (Stock Item/Description are now blank
-  // and Qty/Rate are zeroed above, so per-SKU line items would otherwise show
-  // up as duplicate rows) — sum Amount* and every dynamic Output IGST/CGST/SGST
-  // column across the group, keep the rest as-is (identical within a group).
+  // Group rows sharing the same voucher + Stock Item — sum Amount*, Quantity and
+  // every dynamic Output IGST/CGST/SGST column across the group, keep the rest
+  // as-is (identical within a group). On ledger-only runs Stock Item/Description
+  // are blank and Quantity is 0, so per-SKU line items collapse into one row.
   const x2betaGroupByHeaders = [
     'Vch. Date* ', 'Vch. Type*', 'Vch. No.*', 'Ref. No.', 'Ref. Date',
     'Is CN?', 'Is Vch?', 'Party Ledger*', 'Sales Ledger*', 'Stock Item',
@@ -1528,7 +1530,7 @@ async function flipkartProcessor(rawFileBuffer, skuData, stateConfigData, brandN
   const x2betaGroupByIdx = x2betaGroupByHeaders.map(h => x2betaHeaders.indexOf(h));
   const x2betaSumIdx = x2betaColumns
     .map((c, i) => ({ header: c.header, i }))
-    .filter(({ header }) => header === 'Amount*' || (typeof header === 'string' && header.startsWith('Output ')))
+    .filter(({ header }) => header === 'Amount*' || header === 'Quantity' || (typeof header === 'string' && header.startsWith('Output ')))
     .map(({ i }) => i);
 
   const x2betaGroupedMap = new Map();

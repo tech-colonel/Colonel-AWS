@@ -26,7 +26,7 @@ const NykaaWorkspace = ({ agent }) => {
   const [loadingFiles, setLoadingFiles] = useState(true);
   const [showGenerateModal, setShowGenerateModal] = useState(false);
   const [isGenerating, setIsGenerating] = useState(false);
-  const [formData, setFormData] = useState({ month:'', year: new Date().getFullYear().toString(), cycle1File:null, cycle2File:null });
+  const [formData, setFormData] = useState({ month:'', year: new Date().getFullYear().toString(), inventory_type:'With', cycle1File:null, cycle2File:null });
   const [showPreviewModal, setShowPreviewModal] = useState(false);
   const [previewData, setPreviewData] = useState(null);
   const [isCommitting, setIsCommitting] = useState(false);
@@ -102,7 +102,7 @@ const NykaaWorkspace = ({ agent }) => {
     } catch { toast.error('Delete failed'); }
   };
 
-  const resetForm = () => setFormData({ month:'', year: new Date().getFullYear().toString(), cycle1File:null, cycle2File:null });
+  const resetForm = () => setFormData({ month:'', year: new Date().getFullYear().toString(), inventory_type:'With', cycle1File:null, cycle2File:null });
 
   const handleGeneratePreview = async (e) => {
     e.preventDefault();
@@ -111,6 +111,7 @@ const NykaaWorkspace = ({ agent }) => {
     if (!formData.cycle2File) { toast.error('Please upload the Cycle 2 (16–30) file'); return; }
     const data = new FormData();
     data.append('month', formData.month); data.append('year', formData.year);
+    data.append('inventory_type', formData.inventory_type || 'With');
     data.append('cycle1File', formData.cycle1File); data.append('cycle2File', formData.cycle2File);
     setIsGenerating(true);
     try {
@@ -208,7 +209,7 @@ const NykaaWorkspace = ({ agent }) => {
               <span className="text-red-600 font-medium">Return</span> → Credit Note
             </p>
           </div>
-          <p className="text-xs text-slate-400 pt-1">Output: Tally-ready "Excel to Tally" sheet with 109 columns and state-wise voucher grouping.</p>
+          <p className="text-xs text-slate-400 pt-1">Output: Tally-ready "Excel to Tally" sheet with 110 columns — an FG column (Product SKU → Stock Name) sits immediately after Stock Item — and state-wise voucher grouping.</p>
         </CardContent>
       </Card>
 
@@ -231,6 +232,7 @@ const NykaaWorkspace = ({ agent }) => {
                 <TableHeader>
                   <TableRow>
                     <TableHead>Month</TableHead><TableHead>Year</TableHead>
+                    <TableHead>Inventory</TableHead>
                     <TableHead>Created</TableHead><TableHead className="text-right">Actions</TableHead>
                   </TableRow>
                 </TableHeader>
@@ -239,6 +241,7 @@ const NykaaWorkspace = ({ agent }) => {
                     <TableRow key={file.id}>
                       <TableCell className="font-medium">{file.month}</TableCell>
                       <TableCell>{file.year}</TableCell>
+                      <TableCell>{file.inventory_type || '—'}</TableCell>
                       <TableCell className="text-sm text-slate-500">
                         {file.created_at ? format(new Date(file.created_at), 'dd MMM yyyy') : '—'}
                       </TableCell>
@@ -276,6 +279,22 @@ const NykaaWorkspace = ({ agent }) => {
                 <Input id="nykaa-year" type="number" value={formData.year}
                   onChange={(e) => setFormData({ ...formData, year: e.target.value })} required className="mt-2" />
               </div>
+            </div>
+
+            <div>
+              <Label htmlFor="nykaa-inventory-type">Inventory *</Label>
+              <select id="nykaa-inventory-type" value={formData.inventory_type}
+                onChange={(e) => setFormData({ ...formData, inventory_type: e.target.value })}
+                className="flex h-9 w-full rounded-md border border-slate-200 bg-transparent px-3 py-2 text-sm mt-2">
+                <option value="With">With Inventory</option>
+                <option value="Without">Without Inventory</option>
+              </select>
+              <p className="text-xs text-slate-500 mt-2">
+                "With Inventory" fills Stock Item (Product SKU), Quantity, Rate, Unit and the FG column
+                immediately after Stock Item (Product SKU → Stock Name from the SKU Master). "Without
+                Inventory" produces ledger-only vouchers — those columns stay blank. Amounts and taxes
+                are identical either way.
+              </p>
             </div>
 
             {/* Cycle 1 */}
@@ -329,7 +348,7 @@ const NykaaWorkspace = ({ agent }) => {
           {s && (
             <div className="space-y-5 py-1">
               <p className="text-sm text-slate-600">
-                Files processed for <span className="font-semibold text-slate-900">{formData.month} {formData.year}</span>. Review the totals below before saving.
+                Files processed for <span className="font-semibold text-slate-900">{formData.month} {formData.year}</span> ({formData.inventory_type} Inventory). Review the totals below before saving.
               </p>
               <div className="grid grid-cols-2 gap-3">
                 <div className="rounded-lg border border-blue-200 bg-blue-50 p-3 text-center">
@@ -419,7 +438,7 @@ const NykaaWorkspace = ({ agent }) => {
               <Label htmlFor="nykaa-sku-file">Select Excel File *</Label>
               <Input id="nykaa-sku-file" type="file" accept=".xlsx,.xls" className="mt-2"
                 onChange={(e) => setSkuFile(e.target.files[0] || null)} />
-              <p className="text-xs text-slate-500 mt-2">Upload Excel file with columns: Sales Portal SKU, Tally New SKU</p>
+              <p className="text-xs text-slate-500 mt-2">Upload Excel file with columns: Product SKU, Stock Name</p>
             </div>
             <div className="flex gap-3 pt-2">
               <Button type="button" variant="secondary" className="flex-1" onClick={() => setShowUploadSkuModal(false)} disabled={isUploadingMaster}>Cancel</Button>
@@ -461,15 +480,15 @@ const NykaaWorkspace = ({ agent }) => {
               <Table>
                 <TableHeader>
                   <TableRow>
-                    <TableHead className="text-xs font-semibold">Sales Portal SKU</TableHead>
-                    <TableHead className="text-xs font-semibold">Tally New SKU</TableHead>
+                    <TableHead className="text-xs font-semibold">Product SKU</TableHead>
+                    <TableHead className="text-xs font-semibold">Stock Name (FG)</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
                   {masterData.sku_master.slice(0, 100).map((row, idx) => (
                     <TableRow key={idx}>
-                      <TableCell className="text-xs">{row['Sales portal SKU'] || row['Sales Portal SKU'] || row.salesPortalSku || row.sku || <span className="text-slate-400 italic">—</span>}</TableCell>
-                      <TableCell className="text-xs">{row['Tally new SKU'] || row['Tally New SKU'] || row.tallyNewSku || row.fg || <span className="text-slate-400 italic">—</span>}</TableCell>
+                      <TableCell className="text-xs">{row['Product SKU'] || row['Product Sku'] || row['Sales portal SKU'] || row['Sales Portal SKU'] || row.product_sku || row.salesPortalSku || row.sku || <span className="text-slate-400 italic">—</span>}</TableCell>
+                      <TableCell className="text-xs">{row['Stock Name'] || row['StockName'] || row['Tally new SKU'] || row['Tally New SKU'] || row.stock_name || row.tallyNewSku || row.fg || <span className="text-slate-400 italic">—</span>}</TableCell>
                     </TableRow>
                   ))}
                 </TableBody>

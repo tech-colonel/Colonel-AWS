@@ -999,13 +999,11 @@ async function amazonB2BProcessor(
     // same way here instead of trusting the row-level field.
     const getRowGstRate = row => Number(row['Cgst Rate'] || 0) + Number(row['Sgst Rate'] || 0) + Number(row['Igst Rate'] || 0);
 
-    // Intra/Inter-State for the Debtor ledger name and Vch No must match Ship From/To State
-    // (place of supply for goods), not Ship From/Bill To State (this processor's `fromStateCol` /
-    // `toStateCol` — used for the CGST/SGST/IGST split) — verified against the reference file:
-    // rows with matching Ship states but a differing Bill To state are still "Intra-State" here.
-    const x2betaShipFromCol = findHeader('ship from state');
-    const x2betaShipToCol = findHeader('ship to state');
-    const isRowIntraState = row => row[x2betaShipFromCol] === row[x2betaShipToCol];
+    // Intra/Inter-State for the Debtor ledger name and Vch No use the SAME comparison as
+    // the CGST/SGST/IGST split — Ship From State vs Bill To State (this processor's
+    // `fromStateCol` / `toStateCol`) — so the party ledger name / Vch series and the tax
+    // nature actually booked on the row can never disagree.
+    const isRowIntraState = row => row[fromStateCol] === row[toStateCol];
 
     const sortedStateCodes = [...uniqueStateCodes].sort();
 

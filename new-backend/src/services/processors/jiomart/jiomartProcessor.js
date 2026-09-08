@@ -397,9 +397,9 @@ async function jiomartProcessor(
         'Rate': rate,
         'Quantity': 0,
         'Final Taxable Sales Value': 0,
+        'Final IGST Tax': 0,
         'Final CGST Tax': 0,
-        'Final SGST Tax': 0,
-        'Final IGST Tax': 0
+        'Final SGST Tax': 0
       };
     }
     hsnBySellerMap[key]['Quantity'] += num(r['Item Quantity']);

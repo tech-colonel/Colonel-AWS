@@ -3,6 +3,32 @@ const XLSX = require('xlsx-js-style');
 
 function safeNum(v) { const n = Number(v); return isNaN(n) ? 0 : n; }
 
+// Normalize a SKU value for map lookup (trim + uppercase, collapse internal whitespace)
+function normSku(v) {
+  return String(v == null ? '' : v).trim().toUpperCase().replace(/\s+/g, ' ');
+}
+
+// Build { normalizedProductSku -> Stock Name } from the uploaded SKU master sheet.
+// Expected columns: "Product SKU", "Stock Name" (lenient on header casing / variants).
+function buildSkuMap(skuMaster) {
+  const map = {};
+  if (!Array.isArray(skuMaster)) return map;
+  for (const item of skuMaster) {
+    if (!item || typeof item !== 'object') continue;
+    const sku =
+      item['Product SKU'] || item['Product Sku'] || item['product sku'] || item['ProductSKU'] ||
+      item['Sales portal SKU'] || item['Sales Portal SKU'] || item['SKU'] || item['sku'] ||
+      item.product_sku || item.productSku || item.salesPortalSku || '';
+    const stockName =
+      item['Stock Name'] || item['Stock name'] || item['stock name'] || item['StockName'] ||
+      item['FG'] || item['fg'] || item['Tally new SKU'] || item['Tally New SKU'] ||
+      item.stock_name || item.stockName || '';
+    const key = normSku(sku);
+    if (key) map[key] = String(stockName == null ? '' : stockName).trim();
+  }
+  return map;
+}
+
 function toExcelDate(date) {
   if (!date) return null;
   const d = new Date(date);
@@ -100,10 +126,15 @@ const TALLY_HEADERS = [
   'Status','Note Reason','Orig. Inv. No.','Orig. Inv. Date',
 ];
 
+// FG (Stock Name from the SKU master) is inserted right after "Stock Item" (index 9),
+// shifting every following Tally column one place to the right.
+const FG_COL = 10;
+
 function parseBuffer(buffer) {
   const wb = XLSX.read(buffer, { type:'buffer', cellDates:true, raw:false });
   const sheetName = wb.SheetNames[0];
-  return { rows: XLSX.utils.sheet_to_json(wb.Sheets[sheetName], { defval:null }), sheetName };
+  const ws = wb.Sheets[sheetName];
+  return { rows: XLSX.utils.sheet_to_json(ws, { defval:null }), sheetName, ws };
 }
 
 // Determine entry type based on FinalStatus + Previous Final Status from the input file.
@@ -120,7 +151,8 @@ function classifyEntry(row) {
   return null;
 }
 
-function buildTallyRow(entry, vchDate, monthPadded) {
+function buildTallyRow(entry, vchDate, monthPadded, skuMap, withInventory) {
+  const wantInv = withInventory !== false;
   const isCN  = entry.entryType === 'Credit Note';
   const rawState = String(entry.order_shipping_state || '').trim();
   const state = normalizeStateName(rawState);       // for Party Ledger (col 7)
@@ -154,13 +186,16 @@ function buildTallyRow(entry, vchDate, monthPadded) {
   row[6]  = null;
   row[7]  = `Nykaa Debtor-${state}`;
   row[8]  = getSalesLedger(safeNum(entry.tax_percent));
-  row[9]  = entry.product_name || '';
+  // Stock Item now carries the raw-file Product SKU (was product_name).
+  // Without-inventory runs are ledger-only vouchers: no stock item / qty / rate / unit / FG.
+  const productSku = entry.product_sku != null ? String(entry.product_sku).trim() : '';
+  row[9]  = wantInv ? productSku : null;
   row[10] = null;
   row[11] = 'Main Location';
   row[12] = null;
-  row[13] = qty;
-  row[14] = Math.abs(base);         // Rate: taxable base per unit (always positive)
-  row[15] = 'Pcs';
+  row[13] = wantInv ? qty : null;
+  row[14] = wantInv ? Math.abs(base) : null;   // Rate: taxable base per unit (always positive)
+  row[15] = wantInv ? 'Pcs' : null;
   row[16] = null;
   row[17] = sign * base;            // Amount*: negative for CN
   row[18] = null;
@@ -178,37 +213,155 @@ function buildTallyRow(entry, vchDate, monthPadded) {
   row[51] = stateDisplay;
   row[52] = 'Unregistered/Consumer';
   row[53] = null;
+  // FG: Stock Name mapped from the SKU master by Product SKU (with-inventory only).
+  // Inserted right after Stock Item (index 9) — pushes Description..onward one column right.
+  const fgValue = wantInv ? ((skuMap && skuMap[normSku(productSku)]) || '') : null;
+  row.splice(FG_COL, 0, fgValue);
   return row;
 }
 
+// GSTR-1 B2C summary sheet — one row per Seller GSTIN + Final GST Rate +
+// Customer's Delivery State, netting Credit Notes against Sales.
+// Source columns (from the raw cycle files):
+//   Seller GSTIN              <- "Child Vendor GST"
+//   Final GST Rate            <- tax_percent
+//   Customer's Delivery State <- order_shipping_state
+//   Taxable / IGST / CGST / SGST(+UTGST) <- base_value / igst / cgst / sgst + ugst
+const GSTR1_HEADERS = [
+  'Seller GSTIN',
+  'Final GST Rate',
+  "Customer's Delivery State",
+  'Sum of Taxable Value (Final Invoice Amount -Taxes)',
+  'Sum of IGST Amount',
+  'Sum of CGST Amount',
+  'Sum of SGST Amount (Or UTGST as applicable)',
+];
+
+function buildGstr1Rows(allEntries) {
+  const map = {};
+  for (const e of allEntries) {
+    const sign  = e.entryType === 'Credit Note' ? -1 : 1;
+    const gstin = String(e['Child Vendor GST'] || '').trim();
+    const rate  = safeNum(e.tax_percent);
+    const state = String(e.order_shipping_state || '').trim();
+    const key   = `${gstin}|${rate}|${state.toLowerCase()}`;
+    if (!map[key]) {
+      map[key] = {
+        'Seller GSTIN': gstin,
+        'Final GST Rate': rate,
+        "Customer's Delivery State": state,
+        'Sum of Taxable Value (Final Invoice Amount -Taxes)': 0,
+        'Sum of IGST Amount': 0,
+        'Sum of CGST Amount': 0,
+        'Sum of SGST Amount (Or UTGST as applicable)': 0,
+      };
+    }
+    const g = map[key];
+    g['Sum of Taxable Value (Final Invoice Amount -Taxes)'] += sign * safeNum(e.base_value);
+    g['Sum of IGST Amount'] += sign * safeNum(e.igst);
+    g['Sum of CGST Amount'] += sign * safeNum(e.cgst);
+    g['Sum of SGST Amount (Or UTGST as applicable)'] += sign * (safeNum(e.sgst) + safeNum(e.ugst));
+  }
+  const round2 = n => parseFloat(n.toFixed(2));
+  return Object.values(map).map(g => ({
+    ...g,
+    'Sum of Taxable Value (Final Invoice Amount -Taxes)': round2(g['Sum of Taxable Value (Final Invoice Amount -Taxes)']),
+    'Sum of IGST Amount': round2(g['Sum of IGST Amount']),
+    'Sum of CGST Amount': round2(g['Sum of CGST Amount']),
+    'Sum of SGST Amount (Or UTGST as applicable)': round2(g['Sum of SGST Amount (Or UTGST as applicable)']),
+  }));
+}
+
+// GSTR-1 HSN summary sheet — one row per Seller Gstin + Hsn/sac + Rate,
+// netting Credit Notes against Sales (same value/tax convention as the gstr1 sheet).
+// Source columns (from the raw cycle files):
+//   Seller Gstin <- "Child Vendor GST"   Hsn/sac <- hsn_code   Rate <- tax_percent
+//   Quantity <- Quantity/quantity   Final Taxable Sales Value <- base_value
+//   Final CGST/SGST/IGST Tax <- cgst / sgst + ugst / igst
+const GSTR_HSN_HEADERS = [
+  'Seller Gstin',
+  'Hsn/sac',
+  'Rate',
+  'Quantity',
+  'Final Taxable Sales Value',
+  'Final IGST Tax',
+  'Final CGST Tax',
+  'Final SGST Tax',
+];
+
+function buildGstrHsnRows(allEntries) {
+  const map = {};
+  for (const e of allEntries) {
+    const sign  = e.entryType === 'Credit Note' ? -1 : 1;
+    const gstin = String(e['Child Vendor GST'] || '').trim();
+    const hsn   = String(e.hsn_code == null ? '' : e.hsn_code).trim();
+    const rate  = safeNum(e.tax_percent);
+    const qty   = safeNum(e.Quantity || e.quantity) || 1;
+    const key   = `${gstin}|${hsn}|${rate}`;
+    if (!map[key]) {
+      map[key] = {
+        'Seller Gstin': gstin,
+        'Hsn/sac': hsn,
+        'Rate': rate,
+        'Quantity': 0,
+        'Final Taxable Sales Value': 0,
+        'Final IGST Tax': 0,
+        'Final CGST Tax': 0,
+        'Final SGST Tax': 0,
+      };
+    }
+    const h = map[key];
+    h['Quantity']                  += sign * qty;
+    h['Final Taxable Sales Value']  += sign * safeNum(e.base_value);
+    h['Final IGST Tax']            += sign * safeNum(e.igst);
+    h['Final CGST Tax']            += sign * safeNum(e.cgst);
+    h['Final SGST Tax']            += sign * (safeNum(e.sgst) + safeNum(e.ugst));
+  }
+  const round2 = n => parseFloat(n.toFixed(2));
+  return Object.values(map).map(h => ({
+    ...h,
+    'Quantity': round2(h['Quantity']),
+    'Final Taxable Sales Value': round2(h['Final Taxable Sales Value']),
+    'Final IGST Tax': round2(h['Final IGST Tax']),
+    'Final CGST Tax': round2(h['Final CGST Tax']),
+    'Final SGST Tax': round2(h['Final SGST Tax']),
+  }));
+}
+
 function buildWorkbook(tallyRows) {
+  // tallyRows already have FG spliced in at index 10, so the numeric columns
+  // sit one place further right than the raw TALLY_HEADERS template.
   let totalQty=0, totalAmt=0, totalIGST=0, totalCGST=0, totalSGST=0;
   for (const r of tallyRows) {
-    totalQty  += safeNum(r[13]);
-    totalAmt  += safeNum(r[17]);
-    totalIGST += safeNum(r[19]);
-    totalCGST += safeNum(r[20]);
-    totalSGST += safeNum(r[21]);
+    totalQty  += safeNum(r[14]);   // Quantity
+    totalAmt  += safeNum(r[18]);   // Amount*
+    totalIGST += safeNum(r[20]);   // Output IGST
+    totalCGST += safeNum(r[21]);   // Output CGST
+    totalSGST += safeNum(r[22]);   // Output SGST
   }
-  const summaryRow = new Array(109).fill(null);
-  summaryRow[13] = Math.round(totalQty);
-  summaryRow[17] = parseFloat(totalAmt.toFixed(3));
-  summaryRow[19] = parseFloat(totalIGST.toFixed(3));
-  summaryRow[20] = parseFloat(totalCGST.toFixed(3));
-  summaryRow[21] = parseFloat(totalSGST.toFixed(3));
-  const aoa = [summaryRow, TALLY_HEADERS, ...tallyRows];
+  const summaryRow = new Array(110).fill(null);
+  summaryRow[14] = Math.round(totalQty);
+  summaryRow[18] = parseFloat(totalAmt.toFixed(3));
+  summaryRow[20] = parseFloat(totalIGST.toFixed(3));
+  summaryRow[21] = parseFloat(totalCGST.toFixed(3));
+  summaryRow[22] = parseFloat(totalSGST.toFixed(3));
+  const headers = TALLY_HEADERS.slice();
+  headers.splice(FG_COL, 0, 'FG');
+  const aoa = [summaryRow, headers, ...tallyRows];
   const ws  = XLSX.utils.aoa_to_sheet(aoa);
   const wb  = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, 'Excel to Tally');
   return wb;
 }
 
-function nykaaProcessor(cycle1Buffer, cycle2Buffer, monthName, yearStr) {
+function nykaaProcessor(cycle1Buffer, cycle2Buffer, monthName, yearStr, skuMaster, withInventory = true) {
   const year     = parseInt(yearStr, 10);
   const monthNum = MONTH_NUMS[monthName.toLowerCase()] || 5;
   const monthPad = String(monthNum).padStart(2, '0');
-  const { rows: c1Raw, sheetName: s1 } = parseBuffer(cycle1Buffer);
-  const { rows: c2Raw, sheetName: s2 } = parseBuffer(cycle2Buffer);
+  const wantInv  = withInventory !== false;
+  const skuMap   = wantInv ? buildSkuMap(skuMaster) : {};
+  const { rows: c1Raw, sheetName: s1, ws: c1Ws } = parseBuffer(cycle1Buffer);
+  const { rows: c2Raw, sheetName: s2, ws: c2Ws } = parseBuffer(cycle2Buffer);
 
   const c1Narration = (c1Raw[0] && c1Raw[0].Period) ? c1Raw[0].Period : s1;
   const c2Narration = (c2Raw[0] && c2Raw[0].Period) ? c2Raw[0].Period : s2;
@@ -231,11 +384,12 @@ function nykaaProcessor(cycle1Buffer, cycle2Buffer, monthName, yearStr) {
   }
 
   const allEntries = [...c1Entries, ...c2Entries];
-  const tallyRows = allEntries.map(e => buildTallyRow(e, vchDate, monthPad));
+  const tallyRows = allEntries.map(e => buildTallyRow(e, vchDate, monthPad, skuMap, wantInv));
 
   const workingFileData = allEntries.map(e => ({
     externorderno: e.externorderno||null, product_sku: e.product_sku||null,
     invoiceno: e.invoiceno||null, product_name: e.product_name||null,
+    fg: wantInv ? (skuMap[normSku(e.product_sku)] || null) : null,
     cycle: e._cycle, entry_type: e.entryType,
     final_status: String(e['FinalStatus']||'').trim(),
     prev_status: String(e['Previous Final Status']||'').trim(),
@@ -276,7 +430,26 @@ function nykaaProcessor(cycle1Buffer, cycle2Buffer, monthName, yearStr) {
     totalSGST:    parseFloat((salesSGST - cnSGST).toFixed(2)),
   };
 
-  return { outputWorkbook: buildWorkbook(tallyRows), workingFileData, summary };
+  const outputWorkbook = buildWorkbook(tallyRows);
+  const gstr1Rows = buildGstr1Rows(allEntries);
+  XLSX.utils.book_append_sheet(
+    outputWorkbook,
+    XLSX.utils.json_to_sheet(gstr1Rows, { header: GSTR1_HEADERS }),
+    'gstr1'
+  );
+  const gstrHsnRows = buildGstrHsnRows(allEntries);
+  XLSX.utils.book_append_sheet(
+    outputWorkbook,
+    XLSX.utils.json_to_sheet(gstrHsnRows, { header: GSTR_HSN_HEADERS }),
+    'gstr-hsn'
+  );
+
+  // Carry both uploaded raw files through into the output workbook, verbatim.
+  const rawSheet = (ws, rows) => (ws && ws['!ref']) ? ws : XLSX.utils.json_to_sheet(rows || []);
+  XLSX.utils.book_append_sheet(outputWorkbook, rawSheet(c1Ws, c1Raw), 'raw 1-15');
+  XLSX.utils.book_append_sheet(outputWorkbook, rawSheet(c2Ws, c2Raw), 'raw 16-30');
+
+  return { outputWorkbook, workingFileData, summary, gstr1Rows, gstrHsnRows };
 }
 
 module.exports = { nykaaProcessor };
