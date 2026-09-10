@@ -28,6 +28,7 @@
 
 const BASE_URL = process.env.VELOCITY_BASE_URL || 'https://shazam.velocity.in';
 const MAX_AWBS_PER_CALL = 100;      // hard API limit — 400 beyond it
+const MAX_RETURNS_PER_PAGE = 100;   // /returns caps here; asking 500 silently returns 100
 const REQUEST_SPACING_MS = 13_000;  // 5 req/min with headroom
 const TOKEN_TTL_MS = 23 * 60 * 60 * 1000;  // refresh an hour before the 24h expiry
 const TIMEOUT_MS = 30_000;
@@ -174,6 +175,60 @@ async function fetchShippingCharges(awbs, opts) {
   return queryByAwbs('/custom/api/v1/shipping-charges', awbs, opts);
 }
 
+/**
+ * Reverse-logistics returns — the lane Shopify cannot see.
+ *
+ * Shopify only records a return if somebody also issued a refund there; the
+ * goods physically move through Velocity either way. On August 2026 Shopify
+ * held 7 refunds against Velocity's 285 returns, which is the whole reason
+ * the report's Returns line read ₹11,478.
+ *
+ * PAGINATION — found by probing, not documented to us:
+ *   • `per_page` caps at 100 (asking for 500 silently returns 100).
+ *   • The page selector is `page: { number: N }`. A bare `page: 2` 500s with
+ *     "Integer does not have #dig method", and `search_after` / the advertised
+ *     `meta.next_search_after` cursor both quietly re-serve page 1 — so a
+ *     cursor loop looks like it works while reading the same rows forever.
+ *     Pages are therefore de-duplicated by id here and the walk stops when a
+ *     page adds nothing new, so a silent repeat can never spin.
+ *   • No date filter is honoured (`from_date`/`start_date` are ignored), so the
+ *     caller filters by request_date after the fact.
+ *
+ * @param {object} opts { maxPages, onProgress }
+ * @returns {Promise<Array>} raw return records ({ id, type, attributes })
+ */
+async function fetchReturns({ maxPages = 50, onProgress } = {}) {
+  const seen = new Map();
+  let total = null;
+
+  for (let page = 1; page <= maxPages; page++) {
+    if (page > 1) await sleep(REQUEST_SPACING_MS);
+    const json = await post('/custom/api/v1/returns',
+      { per_page: MAX_RETURNS_PER_PAGE, page: { number: page } });
+
+    const rows = json.data || [];
+    if (total === null && json.meta && json.meta.total != null) total = Number(json.meta.total);
+
+    const before = seen.size;
+    for (const r of rows) if (r && r.id) seen.set(r.id, r);
+    if (onProgress) onProgress(seen.size, total);
+
+    // Stop on a short page, an empty page, or a page that added nothing — the
+    // last of those is what a silently-repeating cursor looks like.
+    if (!rows.length || seen.size === before || rows.length < MAX_RETURNS_PER_PAGE) break;
+    if (total !== null && seen.size >= total) break;
+  }
+
+  const out = [...seen.values()];
+  if (total !== null && out.length < total) {
+    // Surfaced, never silent: a short read here understates returns, which
+    // overstates net sales — the exact failure this module exists to prevent.
+    out.incomplete = { fetched: out.length, expected: total };
+    console.warn(`[velocity] returns: fetched ${out.length} of ${total} — page walk ended early`);
+  }
+  return out;
+}
+
 /** Cheap credential check — one tiny call. */
 async function ping() {
   await getToken(true);
@@ -183,5 +238,6 @@ async function ping() {
 module.exports = {
   BASE_URL, MAX_AWBS_PER_CALL, REQUEST_SPACING_MS,
   isConfigured, isEnabledForBrand, enabledBrandIds,
-  getToken, fetchCodRemittance, fetchShippingCharges, ping,
+  MAX_RETURNS_PER_PAGE,
+  getToken, fetchCodRemittance, fetchShippingCharges, fetchReturns, ping,
 };

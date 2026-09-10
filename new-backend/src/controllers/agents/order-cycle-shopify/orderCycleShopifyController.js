@@ -22,6 +22,9 @@ const shopifyCombinedSO = require('../../../services/shopifyCombinedSO');
 const cashfreeClient = require('../../../services/cashfreeClient');
 const velocityClient = require('../../../services/velocityClient');
 const shopifyPrimaryMaster = require('../../../services/shopifyPrimaryMaster');
+const velocityReturns = require('../../../services/velocityReturns');
+const eshopboxClient = require('../../../services/eshopboxClient');
+const eshopboxTracking = require('../../../services/eshopboxTracking');
 
 const path = require('path');
 const fs = require('fs-extra');
@@ -34,6 +37,14 @@ const OUTPUT_DIR = path.join(__dirname, '../../../../outputs');
    Tally GST export. Deliberately an explicit allowlist rather than "any brand with
    a Shopify connection": connecting a store must never silently change how that
    brand's books are assembled. D'Chicha only — it has no Tally export. */
+/** Brands cleared for the extended Order Cycle report. Empty ⇒ nobody, which is
+    the safe default: every other brand keeps the exact 34-column report and the
+    exact net-sales basis its accountant already signed off on. */
+const orderCycleExtendedForBrand = (brandId) =>
+    !!brandId && String(process.env.ORDER_CYCLE_EXTENDED_BRAND_IDS || '')
+        .split(',').map((x) => x.trim()).filter(Boolean)
+        .includes(String(brandId));
+
 const shopifyPrimaryAllowed = (brandId) =>
     String(process.env.SHOPIFY_PRIMARY_BRAND_IDS || '')
         .split(',').map((x) => x.trim()).filter(Boolean)
@@ -225,7 +236,7 @@ const generatePreview = async (req, res, next) => {
         } else {
             unicommerceJson = await parseExcelBuffer(unicommerceBuffer, 'Export-Tally GST Report');
         }
-        const returnGSTJson = returnGSTBuffer
+        let returnGSTJson = returnGSTBuffer
             ? await parseExcelBuffer(returnGSTBuffer, 'Return GST Report')
             : (shopifyReturnRows || []);   // Shopify refunds stand in for the Return GST report
         // Same row shape either way — the processor cannot tell them apart.
@@ -276,7 +287,7 @@ const generatePreview = async (req, res, next) => {
         // AWBs come from the Tally master (which carries awb_number) — that is the
         // authoritative set of shipments this period, and Velocity is keyed on AWB.
         const wantsVelocityApi = String(req.body.logisticsSource || '').toLowerCase() === 'velocity_api';
-        let velocityPullStats = null, velocityRows = [];
+        let velocityPullStats = null, velocityRows = [], velocityReturnStats = null;
         if (wantsVelocityApi) {
             if (!velocityClient.isEnabledForBrand(brandId)) {
                 return res.status(409).json({ error: 'Velocity API is not enabled for this brand.' });
@@ -299,6 +310,81 @@ const generatePreview = async (req, res, next) => {
                 };
                 console.log('[OrderCycle] Velocity COD remittance —', JSON.stringify(velocityPullStats));
             }
+
+            // RETURNS — the lane Shopify cannot see. A return only reaches Shopify
+            // if somebody also issued a refund there; the goods move through
+            // Velocity either way. Measured on August 2026: Shopify held 7 refunds
+            // (₹11,478) against Velocity's 285 returns (₹4.26L of live ones), which
+            // is why the report's Returns line was effectively empty.
+            try {
+                const velReturns = await velocityClient.fetchReturns();
+                const merged = velocityReturns.mergeWithShopifyReturns(returnGSTJson, velReturns);
+                returnGSTJson = merged.rows;
+                velocityReturnStats = {
+                    ...merged.summary,
+                    velocityValue: Number(merged.summary.velocityValue.toFixed(2)),
+                    incomplete: velReturns.incomplete || null,
+                };
+                console.log('[OrderCycle] Velocity returns —', JSON.stringify({
+                    fetched: velocityReturnStats.velocityTotal,
+                    mapped: velocityReturnStats.mapped,
+                    value: velocityReturnStats.velocityValue,
+                    supersededShopify: velocityReturnStats.supersededShopify,
+                }));
+            } catch (e) {
+                // A returns failure must not lose the COD remittance already pulled,
+                // which is the expensive half of this call. Surface and carry on.
+                velocityReturnStats = { error: e.message };
+                console.warn(`[OrderCycle] Velocity returns failed (${e.message}) — continuing without them`);
+            }
+        }
+
+        // OPT-IN, BRAND-GATED: Eshopbox shipment tracking. This is the lane
+        // Shopify cannot see — 1,754 rows in the August report carry a
+        // capitalised carrier name with no COD and no UTR, and every one of them
+        // ships through Eshopbox. It is also the ONLY source that can say a
+        // parcel came back (RTO); without it the RTO tile is structurally 0.
+        const wantsEshopboxApi = String(req.body.eshopboxSource || '').toLowerCase() === 'eshopbox_api';
+        let eshopboxPullStats = null, eshopboxRows = [];
+        if (wantsEshopboxApi) {
+            if (!eshopboxClient.isEnabledForBrand(brandId)) {
+                return res.status(409).json({ error: 'Eshopbox API is not enabled for this brand.' });
+            }
+            const awbs = [...new Set(unicommerceJson
+                .map((r) => String(r['AWB num'] ?? r['AWB Number'] ?? r['AWB'] ?? '').trim())
+                .filter(Boolean))];
+            if (awbs.length) {
+                try {
+                    eshopboxRows = await eshopboxClient.fetchTracking(awbs);
+                    const lookup = eshopboxTracking.buildLookup(eshopboxRows);
+                    // Reverse journeys become return rows, merged the same way
+                    // Velocity's are. They carry no amount (Eshopbox tracking
+                    // reports none), so they mark that a return happened without
+                    // inventing a value.
+                    const esbReturnRows = eshopboxTracking.toReturnRows(lookup);
+                    if (esbReturnRows.length) returnGSTJson = [...returnGSTJson, ...esbReturnRows];
+                    eshopboxPullStats = {
+                        awbsQueried: awbs.length,
+                        tracked: lookup.stats.total,
+                        rto: lookup.stats.rto,
+                        lost: lookup.stats.lost,
+                        failedDelivery: lookup.stats.failed,
+                        reverseJourneys: lookup.stats.reverse,
+                        returnRowsAdded: esbReturnRows.length,
+                        statuses: lookup.stats.statuses,
+                        failedAwbs: (eshopboxRows.failedAwbs || []).length || 0,
+                    };
+                    console.log('[OrderCycle] Eshopbox tracking —', JSON.stringify({
+                        awbsQueried: awbs.length, tracked: lookup.stats.total,
+                        rto: lookup.stats.rto, lost: lookup.stats.lost, reverse: lookup.stats.reverse,
+                    }));
+                } catch (e) {
+                    // Never lose the whole run over a status feed. Everything
+                    // else in the report is still valid without it.
+                    eshopboxPullStats = { error: e.message };
+                    console.warn(`[OrderCycle] Eshopbox tracking failed (${e.message}) — continuing without it`);
+                }
+            }
         }
 
         const logisticsDataJson = {};
@@ -308,6 +394,7 @@ const generatePreview = async (req, res, next) => {
 
         // Run processor
         if (velocityRows.length) logisticsDataJson['Velocity'] = velocityRows;
+        if (eshopboxRows.length) logisticsDataJson['Eshopbox'] = eshopboxRows;
 
         const result = await orderCycleShopifyProcessor(
             unicommerceJson,
@@ -316,7 +403,13 @@ const generatePreview = async (req, res, next) => {
             gatewayDataJson,
             logisticsDataJson,
             brand.name,
-            `${month}-${year}`
+            `${month}-${year}`,
+            // Extended report (RTO amount, Gateway refund, Payment type, and the
+            // Gross-excludes-cancelled / Net-minus-RTO basis) is OPT-IN PER BRAND.
+            // Gated on brand ID, never on brand.name — the same brand is called
+            // "D'Chicha" locally and "Dichika" in production, so a name check
+            // would silently switch the wrong brands on in the wrong environment.
+            { extended: orderCycleExtendedForBrand(brandId) }
         );
 
         // Prepare DB model
@@ -372,6 +465,50 @@ const generatePreview = async (req, res, next) => {
             }
         }
 
+        // 3. Returns feed health. Understating returns overstates net sales, so a
+        //    partial read is reported rather than quietly accepted.
+        if (velocityReturnStats && velocityReturnStats.error) {
+            warnings.push({
+                level: 'warn',
+                message: `Velocity returns could not be read (${velocityReturnStats.error}). `
+                       + `Returns in this report come from Shopify refunds alone, which historically capture only a small fraction of actual returns.`,
+            });
+        } else if (velocityReturnStats && velocityReturnStats.incomplete) {
+            const { fetched, expected } = velocityReturnStats.incomplete;
+            warnings.push({
+                level: 'warn',
+                message: `Only ${fetched} of ${expected} Velocity returns were retrieved. Returns — and therefore net sales — are understated in this run.`,
+            });
+        }
+
+        // 4. Eshopbox status feed. An RTO booked as a receivable is money
+        //    recorded as owed for goods sitting back in the warehouse, so both
+        //    the finding and the absence of the feed are worth saying out loud.
+        if (eshopboxPullStats && eshopboxPullStats.error) {
+            warnings.push({
+                level: 'warn',
+                message: `Eshopbox tracking could not be read (${eshopboxPullStats.error}). `
+                       + `RTO and delivery status are unavailable for Eshopbox shipments in this run — `
+                       + `returned parcels may still be counted as receivable.`,
+            });
+        } else if (eshopboxPullStats && (eshopboxPullStats.rto || eshopboxPullStats.lost)) {
+            warnings.push({
+                level: 'info',
+                message: `Eshopbox reported ${eshopboxPullStats.rto} RTO and ${eshopboxPullStats.lost} lost shipment(s). `
+                       + `These are no longer counted as receivable.`
+                       + (eshopboxPullStats.failedDelivery
+                          ? ` A further ${eshopboxPullStats.failedDelivery} shipment(s) have a failed delivery attempt and may become RTO.`
+                          : ''),
+            });
+        }
+
+        // The preview can take 10+ minutes (Velocity is rate-limited to 5 req/min),
+        // which is long enough for an HTTP client to time out or be killed before
+        // it ever receives this taskId — and without the id the finished run is
+        // unreachable, since the pending store has no listing endpoint. Logging it
+        // costs nothing and makes a completed run recoverable.
+        console.log(`[OrderCycle] preview ready — taskId=${taskId} rows=${result.rowCount}`);
+
         // Stash for commit phase
         setPending(taskId, {
             agentType: 'order-cycle-shopify',
@@ -396,6 +533,8 @@ const generatePreview = async (req, res, next) => {
             shopifyPull: shopifyPullStats,
             cashfreePull: cashfreePullStats,
             velocityPull: velocityPullStats,
+            velocityReturns: velocityReturnStats,
+            eshopboxPull: eshopboxPullStats,
             shopifyMaster: shopifyMasterStats,
             warnings,
             summary: {
@@ -1615,11 +1754,12 @@ const getSources = async (req, res) => {
             },
             logistics: {
                 velocity: velocityClient.isEnabledForBrand(brandId),
+                eshopbox: eshopboxClient.isEnabledForBrand(brandId),
             },
         });
     } catch (e) {
         // Never block the workspace on a capability probe — fall back to files.
-        res.json({ master: { shopify: false }, salesOrder: { shopify: false, shop: null }, gateways: { cashfree: false }, logistics: { velocity: false } });
+        res.json({ master: { shopify: false }, salesOrder: { shopify: false, shop: null }, gateways: { cashfree: false }, logistics: { velocity: false, eshopbox: false } });
     }
 };
 

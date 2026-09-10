@@ -17,6 +17,9 @@ const LOGISTICS_PARTNERS = [
     // api: COD remittance pulled from the shipping platform's own API rather
     // than an uploaded settlement file. Only offered to enabled brands.
     { id: 'velocity',   label: 'Velocity Shipping',    color: '#10b981', api: true },
+    // Tracking + RTO rather than COD remittance — Eshopbox is the only source
+    // that can tell us a parcel came back.
+    { id: 'eshopbox',   label: 'Eshopbox',              color: '#0ea5e9', api: true },
     { id: 'delhivery',  label: 'Delhivery',            color: '#6366f1' },
     { id: 'xpressbees', label: 'Xpressbees (Busybees)', color: '#f59e0b' },
     { id: 'ekart',      label: 'Instakart (Ekart)',     color: '#10b981' },
@@ -521,6 +524,11 @@ const initModal = () => ({
     masterSource: 'upload',       // 'upload' | 'shopify_primary'
     salesOrderSource: 'upload',   // 'upload' | 'shopify_api'
     since: '', until: '',         // pull window, prefilled from month/year
+    // Set the moment the user edits a date by hand. Until then the window keeps
+    // following the selected month — the modal opens on the CURRENT month, so a
+    // "non-empty means don't touch it" guard would freeze the window on that
+    // month and silently pull the wrong period once the user picks another.
+    datesTouched: false,
     gatewayFiles:  {},
     // Per-gateway input source for API-capable gateways: 'api' | 'upload'.
     // Defaults to 'api' — that is the point of enabling one — but a brand can
@@ -1764,13 +1772,24 @@ const OrderCycleShopifyWorkspace = ({ agent }) => {
         const pad = (d, days) => { const x = new Date(d); x.setDate(x.getDate() + days); return x.toISOString().slice(0, 10); };
         const first = new Date(Number(modal.year), mi, 1);
         const last  = new Date(Number(modal.year), mi + 1, 0);
-        setModal(p => (p.since || p.until) ? p : { ...p, since: pad(first, -15), until: pad(last, 15) });
+        setModal(p => p.datesTouched ? p : { ...p, since: pad(first, -15), until: pad(last, 15) });
     }, [modal.month, modal.year, modal.open]);
 
-    const openModal  = () => setModal({ ...initModal(), open: true });
+    // Open on whatever this brand can actually pull. D'Chicha has no Tally GST
+    // export at all, so opening on 'upload' guaranteed a "Upload the Tally GST
+    // file" dead end for the one brand the API path exists for. Brands without a
+    // connection get all-false sources and so still open on 'upload' as before.
+    const openModal  = () => setModal({
+        ...initModal(),
+        open: true,
+        masterSource:     sources?.master?.shopify     ? 'shopify_primary' : 'upload',
+        salesOrderSource: sources?.salesOrder?.shopify ? 'shopify_api'     : 'upload',
+    });
     const closeModal = () => { if (isGenerating) return; setModal(initModal()); setPreviewData(null); };
 
     const setField        = (k, v) => setModal(p => ({ ...p, [k]: v }));
+    // Editing either date pins the window; the month picker stops overwriting it.
+    const setDate         = (k, v) => setModal(p => ({ ...p, [k]: v, datesTouched: true }));
     const toggleGateway   = (id) => setModal(p => {
         const has = p.selectedGateways.includes(id);
         return { ...p, selectedGateways: has ? p.selectedGateways.filter(g => g !== id) : [...p.selectedGateways, id],
@@ -1848,6 +1867,10 @@ const OrderCycleShopifyWorkspace = ({ agent }) => {
         }
         if (apiGateways.includes('cashfree')) fd.append('gatewaySource', 'cashfree_api');
         if (apiLogistics.includes('velocity')) fd.append('logisticsSource', 'velocity_api');
+        // Its own field, not a second value on logisticsSource — both can be on
+        // at once, and they answer different questions (COD money vs delivery
+        // outcome), so neither should exclude the other.
+        if (apiLogistics.includes('eshopbox')) fd.append('eshopboxSource', 'eshopbox_api');
         if (modal.since) fd.append('since', modal.since);
         if (modal.until) fd.append('until', modal.until);
         if (modal.returnGSTFile) fd.append('returnGSTFile', modal.returnGSTFile);
@@ -2222,10 +2245,10 @@ const OrderCycleShopifyWorkspace = ({ agent }) => {
                                         a month are often invoiced in the next one, and payments settle later still.
                                     </p>
                                     <div className="flex items-center gap-2">
-                                        <input type="date" value={modal.since} onChange={e => setField('since', e.target.value)}
+                                        <input type="date" value={modal.since} onChange={e => setDate('since', e.target.value)}
                                             className="text-xs border border-slate-200 rounded px-2 py-1" />
                                         <span className="text-xs text-slate-400">to</span>
-                                        <input type="date" value={modal.until} onChange={e => setField('until', e.target.value)}
+                                        <input type="date" value={modal.until} onChange={e => setDate('until', e.target.value)}
                                             className="text-xs border border-slate-200 rounded px-2 py-1" />
                                     </div>
                                 </div>
@@ -2275,12 +2298,16 @@ const OrderCycleShopifyWorkspace = ({ agent }) => {
                                             // Same Upload ⇄ API control as Sales Order and Cashfree.
                                             if (lp?.api) {
                                                 const isApi = (modal.logisticsSources[id] || 'api') === 'api';
-                                                const tgl = <SourceToggle isApi={isApi} apiLabel="Velocity API"
+                                                const tgl = <SourceToggle isApi={isApi}
+                                                    apiLabel={id === 'eshopbox' ? 'Eshopbox API' : 'Velocity API'}
                                                     onUpload={() => setLogisticsSource(id, 'upload')}
                                                     onApi={() => setLogisticsSource(id, 'api')} />;
                                                 return isApi ? (
                                                     <ApiSourceZone key={id} label={lp.label} icon={Package}
-                                                        note="COD remittance & UTR pulled directly" toggle={tgl} />
+                                                        note={id === 'eshopbox'
+                                                            ? 'Delivery status, RTO & returns pulled directly'
+                                                            : 'COD remittance & UTR pulled directly'}
+                                                        toggle={tgl} />
                                                 ) : (
                                                     <FileDropZone key={id} id={`lp-file-${id}`} label={lp.label} icon={Package} color={lp.color}
                                                         accept=".xlsx,.xls,.csv" value={modal.logisticsFiles[id]}

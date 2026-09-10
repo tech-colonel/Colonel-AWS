@@ -20,6 +20,7 @@
 'use strict';
 const XLSX = require('exceljs');
 const { PassThrough } = require('stream');
+const eshopboxTracking = require('../eshopboxTracking');
 
 // ── Utility helpers ───────────────────────────────────────────────────────────
 
@@ -88,6 +89,22 @@ function normalizeAWB(v) {
 
 function normalizeOrderNum(v) {
     return safeStr(v).replace(/^#/, '').trim();
+}
+
+/**
+ * COD vs PREPAID, normalised from whatever the master file called it.
+ *
+ * Returns '' when the source said nothing — deliberately NOT a guess. A blank
+ * is filled in Step 12b from evidence (courier COD collected / gateway settled)
+ * and the remark says which, so the accountant can tell a stated payment type
+ * from an inferred one.
+ */
+function normalizePaymentType(v) {
+    const t = safeStr(v).toUpperCase().replace(/[^A-Z]/g, '');
+    if (!t) return '';
+    if (/^(COD|CASHONDELIVERY|CASHONDELIVERYCOD|PAYONDELIVERY)$/.test(t)) return 'COD';
+    if (/^(PREPAID|PREPAY|ONLINE|PAID)$/.test(t)) return 'PREPAID';
+    return safeStr(v).trim();
 }
 
 function normalizeDeliveryStatus(s) {
@@ -640,6 +657,52 @@ function buildCashfreeLookup(reconRows, refLookup = {}) {
 }
 
 /**
+ * Cashfree money PAID BACK OUT, keyed by Shopify order number.
+ *
+ * These events arrive in the same settlement payload as the payments and were
+ * being dropped by the `!== 'PAYMENT'` guard above — so a prepaid order that was
+ * refunded still read as fully collected. Over the August 2026 window the feed
+ * carried 15 REFUND events worth ₹17,648, plus CHARGEBACK and CORRECTION_DEBIT
+ * events that move money the same direction.
+ *
+ * WHY THIS IS NOT A "RETURN"
+ * A return is goods coming back (Velocity's lane, which reduces gross sales).
+ * A refund is cash going back. The SAME order usually appears in both, so
+ * adding the refund to return_amount would count one reversal twice. It belongs
+ * against settlement instead: money that reached the bank and then left it.
+ *
+ * `sale_type: "DEBIT"` on these events is the API's own confirmation of
+ * direction. Amounts are accumulated positive here and subtracted by the caller.
+ */
+const CASHFREE_DEBIT_EVENTS = new Set(['REFUND', 'CHARGEBACK', 'CORRECTION_DEBIT']);
+
+function buildCashfreeRefundLookup(reconRows, refLookup = {}) {
+    const map = {};
+    for (const rec of reconRows) {
+        const ev = rec.event_details || {};
+        const type = String(ev.event_type || '').toUpperCase();
+        if (!CASHFREE_DEBIT_EVENTS.has(type)) continue;
+
+        const txnId = safeStr((rec.payment_details || {}).cf_payment_id);
+        if (!txnId) continue;
+        const orderNo = refLookup[txnId];
+        if (!orderNo) continue;   // no bridge to a Shopify order — cannot attribute
+
+        // Settlement amount is what actually left the account; fall back to the
+        // event amount when the settlement leg has not been booked yet.
+        const amt = Math.abs(safeNum(ev.event_settlement_amount) || safeNum(ev.event_amount));
+        if (amt <= 0) continue;
+
+        if (!map[orderNo]) map[orderNo] = { refund_amount: 0, refund_date: null, types: new Set() };
+        map[orderNo].refund_amount += amt;
+        map[orderNo].types.add(type);
+        const d = safeDate((rec.settlement_details || {}).settlement_date) || safeDate(ev.event_time);
+        if (d && !map[orderNo].refund_date) map[orderNo].refund_date = d;
+    }
+    return map;
+}
+
+/**
  * Velocity COD remittance keyed by AWB.
  *
  * Velocity is the shipping PLATFORM, not the carrier — Delhivery delivers the
@@ -704,10 +767,15 @@ function fmtDate(d) {
 
 // ── Workbook styling helpers ──────────────────────────────────────────────────
 
-/* Shipping platforms we have a remittance feed for. Anything else ships fine but
-   we cannot see its COD or confirmed delivery, and the report must SAY so rather
-   than leave an unexplained blank for someone to chase. */
+/* Two different feeds, deliberately separate — a platform can give us one and
+   not the other, and conflating them produced a remark that told the accountant
+   delivery could not be confirmed on rows where we had just confirmed it.
+     REMITTANCE_FEEDS — reports COD money collected and remitted (UTR).
+     STATUS_FEEDS     — reports what happened to the parcel (delivered / RTO / lost).
+   Eshopbox is status-only: it is the sole source that can say a parcel came back,
+   but it tells us nothing about COD cash. */
 const REMITTANCE_FEEDS = ['Velocity'];
+const STATUS_FEEDS = ['Eshopbox'];
 
 /* Money to 2dp. Subtracting floats leaves residue — a fully settled order was
    showing a balance of 5.4e-13 instead of 0, which looks like a defect in a
@@ -727,6 +795,7 @@ const STATUS_FILL = {
     'PENDING RECEIVABLE':     'FFD9D9D9',  // grey   — nothing collected yet
     'OVERPAID / INVESTIGATE': 'FFFF4444',  // red    — more received than due
     'ADVANCE':                'FFB4C7E7',  // blue   — returned yet money moved
+    'REFUNDED - NO RETURN RECORD': 'FFCC99FF', // purple — cash reversed, goods lane silent
 };
 
 function styleHeader(row, argb = 'FF1E3A5F') {
@@ -746,6 +815,16 @@ function styleHeader(row, argb = 'FF1E3A5F') {
  * @param {string}   brandName
  * @param {string}   period          e.g. "Oct-2024" or "10-2024"
  */
+/**
+ * @param {object} opts
+ *   opts.extended — OPT-IN, ONE BRAND AT A TIME. When false (every brand except
+ *   the enabled one) this function must produce a byte-identical report to the
+ *   one it produced before the D'Chicha work: 34 columns, and Net = Gross −
+ *   Return with cancelled orders left inside Gross. 19 brands share this agent
+ *   and their accountants have signed off on those numbers; changing them
+ *   silently because one brand needed more detail is not a refactor, it is a
+ *   restatement of someone else's books.
+ */
 async function orderCycleShopifyProcessor(
     gstJson = [],
     returnGSTJson = [],
@@ -753,8 +832,10 @@ async function orderCycleShopifyProcessor(
     gatewayData = {},
     logisticsData = {},
     brandName = '',
-    period = ''
+    period = '',
+    opts = {}
 ) {
+    const EXT = !!opts.extended;   // see the note above — default OFF
     console.log(`\n[OrderCycleProcessor] ── brand="${brandName}", period="${period}" ──`);
 
     const parseStats = {
@@ -788,10 +869,18 @@ async function orderCycleShopifyProcessor(
                 // The platform that booked the shipment and remits its COD —
                 // distinct from the carrier that delivers it.
                 shipping_platform: safeStr(getCol(row, 'Shipping Platform')),
+                // COD vs PREPAID. Shopify-primary supplies this directly from
+                // payment_gateway_names; a Tally/Unicommerce master usually does
+                // not, so a blank here is filled by inference in Step 12b rather
+                // than being reported as fact.
+                payment_type: normalizePaymentType(getCol(row, 'Payment Method', 'Payment Type', 'Payment Mode')),
                 dispatch_date: safeDate(getCol(row, 'Dispatch Date/Cancellation Date', 'Date', 'Dispatch Date', 'Invoice Date')),
                 sales_amount: 0,
                 // Step 2
                 return_date: null, srn: '', return_amount: 0, net_amount: 0,
+                // Set in Step 12c. RTO deducts alongside Return; cancelled is
+                // pulled out of Gross entirely (see the accountant's rule there).
+                rto_amount: 0, cancelled_amount: 0,
                 // Step 3 (internal — not in output sheet but stored in DB for dashboard)
                 delivery_status: null,
                 // Steps 4-6 (logistics)
@@ -805,6 +894,10 @@ async function orderCycleShopifyProcessor(
                 cashfree_settlement_date: null, cashfree_settlement_amount: 0,
                 // Populated only by fee-reporting gateways (GATEWAY_REPORTS_FEES).
                 gateway_fee: 0, gateway_fee_gst: 0, gateway_fee_source: null,
+                // Cash paid BACK OUT through the gateway (refund/chargeback).
+                // Reduces settlement received; never touches return_amount, which
+                // is the goods lane — see buildCashfreeRefundLookup.
+                gateway_refund: 0, gateway_refund_date: null,
                 // COD from the shipping platform. courier_cod_amount is only
                 // treated as RECEIVED when courier_utr is present.
                 courier_cod_amount: 0, courier_delivery_date: null,
@@ -976,6 +1069,25 @@ async function orderCycleShopifyProcessor(
         if (status) row.delivery_status = status;
     }
 
+    // ── STEP 3b: Eshopbox delivery status (RTO / LOST) ───────────────────────
+    // Runs AFTER Step 3 deliberately. Step 3 sets delivery_status from the Sales
+    // Order source, which in Shopify-primary mode is fulfillment_status — and
+    // that still says "fulfilled" for a parcel that has since come back.
+    // Applying Eshopbox first would let Shopify overwrite RTO with DELIVERED,
+    // which is precisely the defect this data exists to correct.
+    // Belt and braces: the controller already refuses to pull Eshopbox for a
+    // brand that isn't enabled, so this array should always be empty elsewhere.
+    // Gating here too means an uploaded file that happens to be named "Eshopbox"
+    // cannot start rewriting another brand's delivery statuses.
+    const eshopboxRows = EXT ? (logisticsData.Eshopbox || logisticsData.eshopbox || []) : [];
+    let eshopboxStats = null;
+    if (eshopboxRows.length) {
+        const lookup = eshopboxTracking.buildLookup(eshopboxRows);
+        const applied = eshopboxTracking.applyToMasterRows(masterRows, lookup);
+        eshopboxStats = { ...applied, feed: lookup.stats };
+        console.log('[OrderCycleProcessor] Eshopbox status applied —', JSON.stringify(applied));
+    }
+
     // ── STEPS 4-6: Logistics settlements ─────────────────────────────────────
     const logisticsTyped = collectPartnerRows(logisticsData,
         { ekart: 'ekart', delhivery: 'delhivery', xpressbees: 'xpressbees', xpress: 'xpressbees' },
@@ -1035,6 +1147,7 @@ async function orderCycleShopifyProcessor(
     // Cashfree joins on its own numeric-safe reference map (see buildCashfreeRefLookup).
     const cashfreeRefLookup = buildCashfreeRefLookup(salesOrderJson);
     const cashfreeLookup = buildCashfreeLookup(gatewayTyped.cashfree || [], cashfreeRefLookup);
+    const cashfreeRefundLookup = buildCashfreeRefundLookup(gatewayTyped.cashfree || [], cashfreeRefLookup);
 
     // Shipping-platform COD (Velocity). Arrives via logisticsData under the
     // platform's name, alongside any uploaded per-carrier files.
@@ -1080,6 +1193,17 @@ async function orderCycleShopifyProcessor(
                 (row, c) => { row.razorpay_settlement_date = c.settlement_date; row.razorpay_settlement_amount = c.settlement_amount; },
                 'Razorpay', gatewayIssues);
         }
+    }
+
+    // Cashfree refunds/chargebacks — money that reached the bank and then left it.
+    // Applied per ORDER, and when an order spans several invoices the refund lands
+    // on the first row only: splitting it pro-rata would invent a precision the
+    // gateway never reported, and the order-level total stays correct either way.
+    for (const [orderNo, rowsForOrder] of Object.entries(masterByOrderForGateway)) {
+        const rf = cashfreeRefundLookup[orderNo];
+        if (!rf || !rowsForOrder.length) continue;
+        rowsForOrder[0].gateway_refund = round2(rf.refund_amount);
+        rowsForOrder[0].gateway_refund_date = rf.refund_date;
     }
 
     // Cashfree — same shape as Razorpay: one gateway payment per order, split
@@ -1133,7 +1257,10 @@ async function orderCycleShopifyProcessor(
             row.cashfree_settlement_amount +
             // Unremitted COD is money still owed, not money received — counting it
             // on the forecast date would invert the receivables position.
-            (row.courier_utr ? safeNum(row.courier_cod_amount) : 0);
+            (row.courier_utr ? safeNum(row.courier_cod_amount) : 0) -
+            // Refunded/charged-back cash was received and then returned. Netting it
+            // here is what stops a refunded prepaid order reading as fully collected.
+            safeNum(row.gateway_refund);
     }
 
     // ── STEP 11: Balance Amount Receivable ────────────────────────────────────
@@ -1151,6 +1278,29 @@ async function orderCycleShopifyProcessor(
         const costOfCollection = safeNum(row.gateway_fee) + safeNum(row.gateway_fee_gst);
         row.balance_amount_receivable =
             row.net_amount - row.total_settlement_received - costOfCollection;
+    }
+
+    // ── STEP 11b: Payment type ───────────────────────────────────────────────
+    // Stated by the master file where it says so (Shopify gives it directly).
+    // Otherwise inferred from evidence, and the row records WHICH so a reader is
+    // never left treating a guess as a fact:
+    //   COD     — a courier collected cash against this AWB
+    //   PREPAID — a payment gateway settled it, and no courier COD exists
+    // Anything with neither is left UNKNOWN rather than defaulted; defaulting to
+    // PREPAID would silently classify every unshipped order as money collected.
+    for (const row of masterRows) {
+        if (!EXT) { row.payment_type = ''; row.payment_type_source = null; continue; }
+        if (row.payment_type) { row.payment_type_source = 'stated'; continue; }
+
+        const courierCollected = safeNum(row.courier_cod_amount) > 0 ||
+            safeNum(row.ekart_cod_amount) > 0 || safeNum(row.delhivery_cod_amount) > 0;
+        const gatewaySettled = safeNum(row.cashfree_settlement_amount) > 0 ||
+            safeNum(row.razorpay_settlement_amount) > 0 || safeNum(row.snapmint_settlement_amount) > 0 ||
+            safeNum(row.bharatx_settlement_amount) > 0 || safeNum(row.xpressbees_net_payment) > 0;
+
+        if (courierCollected)      { row.payment_type = 'COD';     row.payment_type_source = 'inferred'; }
+        else if (gatewaySettled)   { row.payment_type = 'PREPAID'; row.payment_type_source = 'inferred'; }
+        else                       { row.payment_type = 'UNKNOWN'; row.payment_type_source = 'none'; }
     }
 
     // ── STEP 12: Reconciliation Status ───────────────────────────────────────
@@ -1179,6 +1329,17 @@ async function orderCycleShopifyProcessor(
             row.reconciliation_status = 'ADVANCE';
         } else if (Math.abs(row.balance_amount_receivable) <= RECONCILIATION_TOLERANCE) {
             row.reconciliation_status = 'RECONCILED';
+        } else if (EXT && safeNum(row.gateway_refund) > 0 && row.return_amount <= 0) {
+            // The gateway paid the customer back, but no return reached the goods
+            // lane (Velocity/Return GST), so net_amount still carries the full sale
+            // and the balance reads as money owed TO US. It is the opposite: this
+            // sale was reversed in cash and the goods side simply has not caught up.
+            // Calling it PENDING RECEIVABLE would put a refunded order on a
+            // collections list.
+            row.reconciliation_status = 'REFUNDED - NO RETURN RECORD';
+            row.remark = `${fmtMoney(row.gateway_refund)} refunded via the payment gateway on `
+                       + `${fmtDate(row.gateway_refund_date)}, but no matching return was found in the `
+                       + `logistics feed — confirm whether the goods came back.`;
         } else if (codCollectedNotRemitted(row)) {
             // COD was collected from the customer but the platform has not
             // confirmed remitting it. Asserting "unpaid" here would be as wrong
@@ -1201,18 +1362,110 @@ async function orderCycleShopifyProcessor(
         // not a data error, and saying which is cheaper than being asked.
         if (!row.remark) {
             const platform = row.shipping_platform;
-            const unfed = platform && !REMITTANCE_FEEDS.includes(platform);
+            const noMoney  = platform && !REMITTANCE_FEEDS.includes(platform);
+            // Only the enabled brand has a status feed; for everyone else the
+            // original single-feed wording is still the truthful one.
+            const noStatus = !EXT || (platform && !STATUS_FEEDS.includes(platform) && !row.eshopbox_status);
             if (!row.awb_number && !row.dispatch_date) {
                 row.remark = 'Not yet shipped — no AWB assigned.';
-            } else if (unfed) {
-                row.remark = `Shipped via ${platform}, which has no remittance feed connected — `
+            } else if (EXT && row.delivery_status === 'RTO') {
+                row.remark = `Returned to origin — ${platform || 'the courier'} reports the parcel came back undelivered`
+                           + `${row.eshopbox_status ? ` (status "${row.eshopbox_status}")` : ''}. `
+                           + `No money is due on this order; the goods are back with the brand.`;
+            } else if (EXT && row.delivery_status === 'LOST') {
+                row.remark = `Lost or damaged in transit per ${platform || 'the courier'} — neither the goods nor the cash `
+                           + `will arrive. Raise a claim with the carrier.`;
+            } else if (noMoney && noStatus) {
+                row.remark = `Shipped via ${platform}, which has no feed connected — `
                            + `delivery status and COD collection cannot be confirmed for this order.`;
+            } else if (noMoney) {
+                // Status is known (Eshopbox), money is not. Say only what is true.
+                row.remark = `Delivery confirmed by ${platform}, but it reports no COD remittance — `
+                           + `any cash collected on this order cannot be traced to a payout.`;
             } else if (!row.delivery_status && row.awb_number) {
                 row.remark = 'Shipped; carrier has not reported delivery yet.';
             } else if (row.reconciliation_status === 'PENDING RECEIVABLE') {
-                row.remark = 'Delivered but no settlement found against this order yet.';
+                // This branch PRE-DATES the D'Chicha work — it must keep firing for
+                // every brand. Only the COD-specific wording is new; gating the
+                // whole branch blanked the Remark on other brands' reports.
+                row.remark = (EXT && row.payment_type === 'COD')
+                    ? 'COD order, delivered — no collection reported by the courier yet.'
+                    : 'Delivered but no settlement found against this order yet.';
+            } else if (EXT && row.reconciliation_status === 'RECONCILED') {
+                row.remark = row.payment_type === 'COD'
+                    ? 'COD collected and remitted in full.'
+                    : 'Prepaid and settled in full.';
+            } else if (EXT && row.reconciliation_status === 'CANCELLED') {
+                row.remark = 'Order cancelled — counted in gross sales, no money expected.';
+            } else if (EXT && row.reconciliation_status === 'OVERPAID / INVESTIGATE') {
+                row.remark = `Received ${fmtMoney(row.total_settlement_received)} against a net of `
+                           + `${fmtMoney(row.net_amount)} — more than due; check for a duplicate settlement.`;
+            } else if (EXT && row.reconciliation_status === 'ADVANCE') {
+                row.remark = 'Returned, yet money still moved against this order — treat as an advance to recover, not a live sale.';
             }
         }
+
+        // Last resort: a row must never reach the accountant with an empty
+        // Remark. A blank reads as "nothing to say"; in practice it always
+        // meant "nobody wrote a branch for this case", and the question came
+        // back to us anyway.
+        if (EXT && !row.remark) {
+            row.remark = `${row.reconciliation_status} — ${fmtMoney(row.net_amount)} net, `
+                       + `${fmtMoney(row.total_settlement_received)} received.`;
+        }
+
+        // Say so when COD/PREPAID was deduced rather than stated, so an inferred
+        // classification is never mistaken for one the source system asserted.
+        if (EXT && row.payment_type_source === 'inferred') {
+            row.remark += ` (Payment type inferred from ${row.payment_type === 'COD' ? 'courier cash collection' : 'gateway settlement'}, not stated by the source.)`;
+        } else if (EXT && row.payment_type_source === 'none') {
+            row.remark += ' (Payment type unknown — no gateway settlement or courier collection to deduce it from.)';
+        }
+    }
+
+    // ── STEP 12c: Sales basis ────────────────────────────────────────────────
+    // The accountant's rule, stated plainly:
+    //     Gross INCLUDES returned and RTO orders, EXCLUDES cancelled ones.
+    //     Net = Gross − (Return + RTO)
+    //
+    // Two things were leaking into Net before this:
+    //   • an RTO parcel is back in the warehouse and nobody paid — but the sale
+    //     was still counted in full;
+    //   • a cancelled order never shipped, yet sat inside Gross.
+    // Measured on August 2026: ₹21,077 of RTO and ₹13,587 of cancelled, so Net
+    // overstated real sales by ₹34,664.
+    //
+    // RTO deducts the REMAINING value (net after any return already recorded),
+    // never the gross — an RTO row that also carries a partial return would
+    // otherwise be deducted twice for the same goods.
+    for (const row of masterRows) {
+        if (!EXT) { row.rto_amount = 0; row.cancelled_amount = 0; continue; }
+        if (row.reconciliation_status === 'CANCELLED' || row.delivery_status === 'CANCELLED') {
+            // Never a sale. Dropped from Gross rather than deducted, so the
+            // Return column keeps meaning "goods that came back".
+            row.cancelled_amount = round2(row.sales_amount);
+            row.sales_amount = 0;
+            row.return_amount = 0;
+            row.net_amount = 0;
+            row.rto_amount = 0;
+        } else if (row.delivery_status === 'RTO') {
+            row.rto_amount = round2(row.net_amount);
+            row.net_amount = 0;
+            row.cancelled_amount = 0;
+        } else {
+            row.rto_amount = 0;
+            row.cancelled_amount = 0;
+        }
+    }
+
+    // Balance must be recomputed: it was derived from net_amount in Step 11, and
+    // the lines above just changed net for RTO and cancelled rows. Leaving the
+    // old balance would show money receivable against a sale we no longer count.
+    if (EXT) for (const row of masterRows) {
+        const costOfCollection = safeNum(row.gateway_fee) + safeNum(row.gateway_fee_gst);
+        row.balance_amount_receivable = round2(
+            row.net_amount - row.total_settlement_received - costOfCollection
+        );
     }
 
     // ── STEPS 13-14: Validations & Exceptions ────────────────────────────────
@@ -1224,7 +1477,8 @@ async function orderCycleShopifyProcessor(
     validations.push({ check: 'Total Sales Amount', value: totalSales.toFixed(2), status: 'INFO' });
 
     // V2: Net Amount integrity
-    const netMismatch = masterRows.filter(r => Math.abs((r.sales_amount - r.return_amount) - r.net_amount) > 0.01).length;
+    const netMismatch = masterRows.filter(r =>
+        Math.abs((r.sales_amount - r.return_amount - safeNum(r.rto_amount)) - r.net_amount) > 0.01).length;
     validations.push({ check: 'Net Amount Integrity', value: netMismatch, status: netMismatch === 0 ? 'PASS' : 'FAIL' });
 
     // V3: Duplicate invoices
@@ -1329,7 +1583,7 @@ async function orderCycleShopifyProcessor(
     const HEADERS = [
         'Sale Order Number', 'Shopify', 'Invoice number', 'AWB num', 'Shipping partner',
         'Dispatch Date/Cancellation Date', 'Sum of Total',
-        'Return Date', 'SRN', 'Return amount', 'Net amount',
+        'Return Date', 'SRN', 'Return amount', ...(EXT ? ['RTO amount'] : []), 'Net amount',
         'Ekart remittance date', 'Ekart Actual Date of Remittance', 'Ekart COD amount',
         'Delhivery delivery date', 'Delhivery COD amount',
         'Xpressbees delivery date', 'Xpressbees transaction date', 'Xpressbees net payment',
@@ -1339,6 +1593,7 @@ async function orderCycleShopifyProcessor(
         // Appended, never inserted — anything keyed on an existing column
         // position (a downstream VLOOKUP, a saved filter) keeps working.
         'Courier COD amount', 'Courier delivery date', 'Courier remittance date', 'Courier UTR',
+        ...(EXT ? ['Gateway refund', 'Gateway refund date', 'Payment type'] : []),
         'Delivery status', 'Total settlement received', 'Balance receivable', 'Status', 'Remark',
     ];
 
@@ -1360,7 +1615,8 @@ async function orderCycleShopifyProcessor(
     const SOURCE_ROW = [
         `Export-Tally GST Report 3.0 ${period}`, '', '', '', '', '', '',
         `Return GST Report ${period}`, '', '',
-        '(G)-(J)',
+        ...(EXT ? ['Logistics (RTO)'] : []),
+        EXT ? '(G)-(J)-(K)' : '(G)-(J)',
         `Ekart settlement report - ${fyLabel}`, '', '',
         `Delhivery settlement report - ${fyLabel}`, '',
         `Xpressbees settlement report - ${fyLabel}`, '', '',
@@ -1368,6 +1624,7 @@ async function orderCycleShopifyProcessor(
         `BharatX settlement report - ${fyLabel}`, '',
         `Razorpay settlement report - ${fyLabel}`, '',
         'Courier COD remittance (API)', '', '', '',
+        ...(EXT ? ['Cashfree refunds (API)', '', ''] : []),
         'Computed', '', '', '', '',
     ];
 
@@ -1386,7 +1643,7 @@ async function orderCycleShopifyProcessor(
         const rowData = [
             r.sale_order_number, r.shopify, r.invoice_number, r.awb_number, r.shipping_partner,
             r.dispatch_date, r.sales_amount,
-            r.return_date, r.srn, r.return_amount || '', r.net_amount,
+            r.return_date, r.srn, r.return_amount || '', ...(EXT ? [r.rto_amount || ''] : []), r.net_amount,
             r.ekart_remittance_date, r.ekart_actual_remittance_date, r.ekart_cod_amount || '',
             r.delhivery_delivery_date, r.delhivery_cod_amount || '',
             r.xpressbees_delivery_date, r.xpressbees_transaction_date, r.xpressbees_net_payment || '',
@@ -1394,10 +1651,18 @@ async function orderCycleShopifyProcessor(
             r.bharatx_settlement_date, r.bharatx_settlement_amount || '',
             r.razorpay_settlement_date, r.razorpay_settlement_amount || '',
             r.courier_cod_amount || '', r.courier_delivery_date, r.courier_remittance_date, r.courier_utr || '',
+            ...(EXT ? [r.gateway_refund || '', r.gateway_refund_date, r.payment_type || ''] : []),
             r.delivery_status || '',
             round2(r.total_settlement_received), round2(r.balance_amount_receivable),
             r.reconciliation_status, r.remark || '',
         ];
+        if (rowData.length !== HEADERS.length) {
+            throw new Error(
+                `Order Cycle row/header mismatch — row has ${rowData.length} values, ` +
+                `HEADERS has ${HEADERS.length}. A column was added to HEADERS without ` +
+                `adding its value to rowData (or vice versa).`
+            );
+        }
         const added = mainSheet.addRow(rowData);
 
         // Colour the Status cell so the sheet is scannable. AWAITING REMITTANCE
@@ -1415,7 +1680,7 @@ async function orderCycleShopifyProcessor(
     const colMeta = [
         18, 20, 22, 22, 20, // A-E  (SaleOrderNo, Shopify, Invoice, AWB, ShippingPartner)
         22, 16,              // F-G  (DispatchDate, SumOfTotal)
-        18, 20, 16, 16,      // H-K  (ReturnDate, SRN, ReturnAmt, NetAmt)
+        18, 20, 16, ...(EXT ? [14] : []), 16,  // ReturnDate, SRN, ReturnAmt, [RTOAmt], NetAmt
         22, 26, 16,          // L-N  (EkartRemitDate, EkartActualDate, EkartCOD)
         22, 16,              // O-P  (DelhiveryDate, DelhiveryCOD)
         22, 24, 16,          // Q-S  (XpressbeesDeliveryDate, XpressbeesTransDate, XpressbeesNetPay)
@@ -1423,19 +1688,57 @@ async function orderCycleShopifyProcessor(
         22, 16,              // V-W  (BharatXTimestamp, BharatXLedger)
         22, 16,              // X-Y  (RazorpayDate, RazorpayAmount)
         16, 22, 22, 20,      // Z-AC (CourierCOD, CourierDelivDate, CourierRemitDate, CourierUTR)
-        18, 20, 18, 22, 70,  // AD-AH(DeliveryStatus, TotalSettled, Balance, Status, Remark)
+        ...(EXT ? [16, 22, 14] : []),   // GatewayRefund, GatewayRefundDate, PaymentType
+        18, 20, 18, 22, 70,  // AG-AK(DeliveryStatus, TotalSettled, Balance, Status, Remark)
     ];
+    // ── COLUMN ALIGNMENT GUARD ───────────────────────────────────────────────
+    // Four things must stay the same length and order: the band labels, the
+    // headers, the widths, and the per-row value array. Historically they drifted
+    // one at a time and the workbook still built — the data just landed one column
+    // to the left from that point on, which looks like a data bug, not a code bug,
+    // and is invisible until an accountant queries a number. Fail loudly here
+    // instead: a wrong report is worse than no report.
+    if (SOURCE_ROW.length !== HEADERS.length || colMeta.length !== HEADERS.length) {
+        throw new Error(
+            `Order Cycle column mismatch — HEADERS ${HEADERS.length}, ` +
+            `SOURCE_ROW ${SOURCE_ROW.length}, colMeta ${colMeta.length}. ` +
+            `All three must match; a column was added to one and not the others.`
+        );
+    }
+
     mainSheet.columns.forEach((col, i) => { col.width = colMeta[i] || 18; });
 
     // Date format for date columns (1-based, offset by 1 for the source row)
     // These are column indices in the sheet
-    [6, 8, 12, 13, 15, 17, 18, 20, 22, 24].forEach(idx =>
-        mainSheet.getColumn(idx).numFmt = 'dd-mmm-yyyy'
-    );
-    // Number format for amount columns
-    [7, 10, 11, 14, 16, 19, 21, 23, 25].forEach(idx =>
-        mainSheet.getColumn(idx).numFmt = '#,##0.00'
-    );
+    // Formats are resolved BY COLUMN NAME, never by hardcoded index. Every time a
+    // column was appended here, these arrays were the thing that silently went
+    // stale — the sheet still built, it just formatted the wrong columns, which
+    // no test catches and no error reports. Naming them means inserting a column
+    // can no longer shift a format onto its neighbour.
+    const DATE_COLS = [
+        'Dispatch Date/Cancellation Date', 'Return Date',
+        'Ekart remittance date', 'Ekart Actual Date of Remittance',
+        'Delhivery delivery date', 'Xpressbees delivery date', 'Xpressbees transaction date',
+        'Snapmint merchant settlement date', 'BharatX settlement timestamp', 'Razorpay settlement date',
+        'Courier delivery date', 'Courier remittance date', 'Gateway refund date',
+    ];
+    const MONEY_COLS = [
+        'Sum of Total', 'Return amount', 'RTO amount', 'Net amount',
+        'Ekart COD amount', 'Delhivery COD amount', 'Xpressbees net payment',
+        'Snapmint settlement value', 'BharatX ledger amount', 'Razorpay settlement amount',
+        'Courier COD amount', 'Gateway refund',
+        'Total settlement received', 'Balance receivable',
+    ];
+    const applyFmt = (names, fmt) => {
+        for (const name of names) {
+            const idx = HEADERS.indexOf(name);
+            // A renamed-away column is a bug worth seeing, not worth crashing on.
+            if (idx === -1) { console.warn(`[OrderCycleProcessor] format target "${name}" not in HEADERS`); continue; }
+            mainSheet.getColumn(idx + 1).numFmt = fmt;
+        }
+    };
+    applyFmt(DATE_COLS, 'dd-mmm-yyyy');
+    applyFmt(MONEY_COLS, '#,##0.00');
 
     // ── Sheet 2: Exceptions ───────────────────────────────────────────────────
     const excSheet = outputWorkbook.addWorksheet('Exceptions');
@@ -1461,6 +1764,7 @@ async function orderCycleShopifyProcessor(
         outputWorkbook,
         summaryRows: masterRows,
         rowCount: masterRows.length,
+        eshopboxStats,
         parseStats
     };
 }

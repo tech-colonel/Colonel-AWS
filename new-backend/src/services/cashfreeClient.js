@@ -24,6 +24,7 @@ const BASE_URL = process.env.CASHFREE_BASE_URL || 'https://api.cashfree.com/pg';
 const API_VERSION = process.env.CASHFREE_API_VERSION || '2026-01-01';
 const PAGE_LIMIT = 1000;          // API maximum
 const MAX_PAGES = 50;             // 50k events — well past a month for any brand
+const MAX_WINDOW_MS = 30 * 864e5; // API rejects any window wider than 30 days (HTTP 400)
 const TIMEOUT_MS = 30_000;
 
 /** Brands allowed to use the Cashfree API, from env. Empty ⇒ nobody. */
@@ -66,10 +67,36 @@ const isoUtc = (d) => new Date(d).toISOString().replace(/\.\d{3}Z$/, 'Z');
  * @returns {Promise<object[]>} raw recon records, nested shape preserved
  */
 async function fetchSettlementRecon({ since, until, maxPages = MAX_PAGES } = {}) {
+  const from = new Date(since || Date.now() - 30 * 864e5);
+  const to = new Date(until || Date.now());
+
+  // HARD API LIMIT: "The max no. of days allow b/w startDateInitiatedOn and
+  // endDateInitiatedOn is 30 for this report" — an HTTP 400, not a truncation.
+  // The Order Cycle's default pull window is the month padded 15 days each side
+  // (~60 days), so the ordinary case exceeds this. Split into <=30-day slices
+  // and concatenate rather than making the caller think about it.
+  if (to - from > MAX_WINDOW_MS) {
+    const out = [];
+    for (let start = new Date(from); start < to; start = new Date(start.getTime() + MAX_WINDOW_MS)) {
+      const end = new Date(Math.min(start.getTime() + MAX_WINDOW_MS, to.getTime()));
+      out.push(...await fetchSettlementRecon({ since: start, until: end, maxPages }));
+    }
+    // Slices can overlap at a boundary; de-duplicate on the event id so a
+    // settlement is never counted twice.
+    const seen = new Set();
+    return out.filter((r) => {
+      const id = (r.event_details || {}).event_id;
+      if (!id) return true;
+      if (seen.has(id)) return false;
+      seen.add(id);
+      return true;
+    });
+  }
+
   const { appId, secret } = credentials();
   const filters = {
-    start_date_initiated_on: isoUtc(since || Date.now() - 30 * 864e5),
-    end_date_initiated_on: isoUtc(until || Date.now()),
+    start_date_initiated_on: isoUtc(from),
+    end_date_initiated_on: isoUtc(to),
   };
 
   const out = [];
