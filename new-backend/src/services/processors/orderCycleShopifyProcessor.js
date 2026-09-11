@@ -678,12 +678,22 @@ function buildCashfreeLookup(reconRows, refLookup = {}) {
  */
 const CASHFREE_DEBIT_EVENTS = new Set(['REFUND', 'CHARGEBACK', 'CORRECTION_DEBIT']);
 
+/* Money coming BACK after a debit. A chargeback that the bank later decides in
+   the merchant's favour arrives as CHARGEBACK_REVERSAL; counting the original
+   debit without its reversal leaves a dispute permanently booked against a
+   merchant who won it. CORRECTION_CREDIT is the same shape on the adjustment
+   side. Seen live on the September window: 1 CHARGEBACK_REVERSAL, 1
+   CORRECTION_CREDIT. */
+const CASHFREE_CREDIT_EVENTS = new Set(['CHARGEBACK_REVERSAL', 'CORRECTION_CREDIT', 'REFUND_REVERSAL']);
+
 function buildCashfreeRefundLookup(reconRows, refLookup = {}) {
     const map = {};
     for (const rec of reconRows) {
         const ev = rec.event_details || {};
         const type = String(ev.event_type || '').toUpperCase();
-        if (!CASHFREE_DEBIT_EVENTS.has(type)) continue;
+        const isDebit = CASHFREE_DEBIT_EVENTS.has(type);
+        const isCredit = CASHFREE_CREDIT_EVENTS.has(type);
+        if (!isDebit && !isCredit) continue;
 
         const txnId = safeStr((rec.payment_details || {}).cf_payment_id);
         if (!txnId) continue;
@@ -695,8 +705,9 @@ function buildCashfreeRefundLookup(reconRows, refLookup = {}) {
         const amt = Math.abs(safeNum(ev.event_settlement_amount) || safeNum(ev.event_amount));
         if (amt <= 0) continue;
 
-        if (!map[orderNo]) map[orderNo] = { refund_amount: 0, refund_date: null, types: new Set() };
-        map[orderNo].refund_amount += amt;
+        if (!map[orderNo]) map[orderNo] = { refund_amount: 0, reversed_amount: 0, refund_date: null, types: new Set() };
+        if (isDebit) map[orderNo].refund_amount += amt;
+        else map[orderNo].reversed_amount += amt;
         map[orderNo].types.add(type);
         const d = safeDate((rec.settlement_details || {}).settlement_date) || safeDate(ev.event_time);
         if (d && !map[orderNo].refund_date) map[orderNo].refund_date = d;
@@ -899,7 +910,7 @@ async function orderCycleShopifyProcessor(
                 // Cash paid BACK OUT through the gateway (refund/chargeback).
                 // Reduces settlement received; never touches return_amount, which
                 // is the goods lane — see buildCashfreeRefundLookup.
-                gateway_refund: 0, gateway_refund_date: null,
+                gateway_refund: 0, gateway_refund_date: null, gateway_refund_reversed: 0,
                 // COD from the shipping platform. courier_cod_amount is only
                 // treated as RECEIVED when courier_utr is present.
                 eshopbox_cod_basis: null,
@@ -1207,8 +1218,14 @@ async function orderCycleShopifyProcessor(
     for (const [orderNo, rowsForOrder] of Object.entries(masterByOrderForGateway)) {
         const rf = cashfreeRefundLookup[orderNo];
         if (!rf || !rowsForOrder.length) continue;
-        rowsForOrder[0].gateway_refund = round2(rf.refund_amount);
+        // Net the reversals off. Floored at zero on purpose: when a reversal
+        // exceeds the debits we can see, the original debit fell outside this
+        // window, and turning that into a negative refund would silently ADD
+        // money to a settlement we have no evidence arrived.
+        const netRefund = round2(Math.max(0, rf.refund_amount - rf.reversed_amount));
+        rowsForOrder[0].gateway_refund = netRefund;
         rowsForOrder[0].gateway_refund_date = rf.refund_date;
+        rowsForOrder[0].gateway_refund_reversed = round2(rf.reversed_amount);
     }
 
     // Cashfree — same shape as Razorpay: one gateway payment per order, split
@@ -1363,6 +1380,12 @@ async function orderCycleShopifyProcessor(
             row.reconciliation_status = 'ADVANCE';
         } else if (Math.abs(row.balance_amount_receivable) <= RECONCILIATION_TOLERANCE) {
             row.reconciliation_status = 'RECONCILED';
+        } else if (EXT && safeNum(row.gateway_refund_reversed) > 0 && safeNum(row.gateway_refund) <= 0) {
+            // Debited then reversed — a dispute resolved in the brand's favour.
+            // Worth saying, because the order looks untouched otherwise and an
+            // accountant chasing the original chargeback would find nothing.
+            row.remark = `A gateway chargeback/correction of ${fmtMoney(row.gateway_refund_reversed)} on this order was `
+                       + `later reversed — the money stayed with the brand. No action needed.`;
         } else if (EXT && safeNum(row.gateway_refund) > 0 && row.return_amount <= 0) {
             // The gateway paid the customer back, but no return reached the goods
             // lane (Velocity/Return GST), so net_amount still carries the full sale

@@ -26,7 +26,10 @@
 
 const BASE_URL = process.env.RETURN_PRIME_BASE_URL || 'https://api.returnprime.co';
 const PAGE_SIZE = 100;
-const MAX_PAGES = 50;
+// 50 pages x 100 was hit exactly on the first production run — 5,000 is not a
+// real total, it is the cap. A silent cap understates exchange counts and
+// top-ups, so the ceiling is raised and a truncated walk now says so.
+const MAX_PAGES = 500;
 const TIMEOUT_MS = 30_000;
 const REQUEST_SPACING_MS = 400;
 const MAX_5XX_RETRIES = 3;
@@ -94,15 +97,26 @@ async function get(path, { attempt = 0 } = {}) {
  */
 async function fetchRequests({ maxPages = MAX_PAGES } = {}) {
   const seen = new Map();
+  let hitCap = true;
   for (let page = 1; page <= maxPages; page++) {
     if (page > 1) await sleep(REQUEST_SPACING_MS);
     const json = await get(`/return-exchange/v2?page=${page}&limit=${PAGE_SIZE}`);
     const list = (json.data && json.data.list) || [];
     const before = seen.size;
     for (const r of list) if (r && r.id) seen.set(r.id, r);
-    if (!list.length || seen.size === before || list.length < PAGE_SIZE) break;
+    // A short page, an empty page, or a page that adds nothing new all mean the
+    // walk finished on its own terms rather than being cut off.
+    if (!list.length || seen.size === before || list.length < PAGE_SIZE) { hitCap = false; break; }
   }
-  return [...seen.values()];
+  const out = [...seen.values()];
+  if (hitCap) {
+    // Surfaced, never silent: a truncated pull understates exchanges and top-ups,
+    // and a round number like 5,000 looks like data until someone notices it is
+    // exactly maxPages x PAGE_SIZE.
+    out.truncated = { fetched: out.length, maxPages };
+    console.warn(`[return-prime] page cap reached at ${out.length} requests (${maxPages} pages) — there may be more`);
+  }
+  return out;
 }
 
 /** Cheap credential check — the webhook list is the smallest authenticated call. */
