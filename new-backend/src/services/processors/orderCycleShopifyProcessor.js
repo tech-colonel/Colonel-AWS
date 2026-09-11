@@ -22,6 +22,7 @@ const XLSX = require('exceljs');
 const { PassThrough } = require('stream');
 const eshopboxTracking = require('../eshopboxTracking');
 const eshopboxCod = require('../eshopboxCod');
+const returnPrimeExchanges = require('../returnPrimeExchanges');
 
 // ── Utility helpers ───────────────────────────────────────────────────────────
 
@@ -902,6 +903,8 @@ async function orderCycleShopifyProcessor(
                 // COD from the shipping platform. courier_cod_amount is only
                 // treated as RECEIVED when courier_utr is present.
                 eshopbox_cod_basis: null,
+                // Display only — see returnPrimeExchanges.js. Never part of the money math.
+                exchange_status: '', exchange_ref: null, exchange_topup: 0, exchange_gateway: null,
                 courier_cod_amount: 0, courier_delivery_date: null,
                 courier_remittance_date: null, courier_utr: null, courier_source: null,
                 // Steps 10-12 (internal — not in output sheet but stored in DB for dashboard)
@@ -1511,6 +1514,30 @@ async function orderCycleShopifyProcessor(
         );
     }
 
+    // ── STEP 12d: Return Prime exchanges (DISPLAY ONLY) ──────────────────────
+    // Runs last, after the sales basis is already final, so it is structurally
+    // incapable of altering Gross, Return, RTO or Net. An exchange swaps goods
+    // and keeps the money; deducting it would understate revenue for a sale that
+    // was never reversed.
+    const returnPrimeRows = logisticsData.ReturnPrime || [];
+    let returnPrimeStats = null;
+    if (EXT && returnPrimeRows.length) {
+        const lookup = returnPrimeExchanges.buildLookup(returnPrimeRows);
+        const applied = returnPrimeExchanges.applyToMasterRows(masterRows, lookup);
+        returnPrimeStats = { ...applied, feed: lookup.stats };
+
+        // The remark is appended HERE, not in Step 12. Step 12 runs before this
+        // one, so exchange_topup was still 0 there and the sentence never fired.
+        for (const row of masterRows) {
+            if (safeNum(row.exchange_topup) <= 0) continue;
+            const via = row.exchange_gateway ? ` via ${row.exchange_gateway}` : '';
+            const sentence = `Customer paid ${fmtMoney(row.exchange_topup)} as an exchange top-up${via}`
+                           + ` — not counted in settlements, as this report has no feed from that gateway.`;
+            row.remark = row.remark ? `${row.remark} ${sentence}` : sentence;
+        }
+        console.log('[OrderCycleProcessor] Return Prime exchanges —', JSON.stringify(applied));
+    }
+
     // ── STEPS 13-14: Validations & Exceptions ────────────────────────────────
     const exceptions = [];
     const validations = [];
@@ -1638,6 +1665,9 @@ async function orderCycleShopifyProcessor(
         'Courier COD amount', 'Courier delivery date', 'Courier remittance date', 'Courier UTR',
         ...(EXT ? ['Gateway refund', 'Gateway refund date', 'Payment type'] : []),
         'Delivery status', 'Total settlement received', 'Balance receivable', 'Status', 'Remark',
+        // Appended AFTER Remark: display-only columns must not push any existing
+        // column sideways for anyone keying on position.
+        ...(EXT ? ['Exchange', 'Exchange top-up'] : []),
     ];
 
     // Source file labels for Row 0 (matches Order Cycle.xlsx reference format)
@@ -1669,6 +1699,7 @@ async function orderCycleShopifyProcessor(
         'Courier COD remittance (API)', '', '', '',
         ...(EXT ? ['Cashfree refunds (API)', '', ''] : []),
         'Computed', '', '', '', '',
+        ...(EXT ? ['Return Prime', ''] : []),
     ];
 
     const mainSheet = outputWorkbook.addWorksheet('Reconciliation Report');
@@ -1698,6 +1729,7 @@ async function orderCycleShopifyProcessor(
             r.delivery_status || '',
             round2(r.total_settlement_received), round2(r.balance_amount_receivable),
             r.reconciliation_status, r.remark || '',
+            ...(EXT ? [r.exchange_status || '', r.exchange_topup || ''] : []),
         ];
         if (rowData.length !== HEADERS.length) {
             throw new Error(
@@ -1733,6 +1765,7 @@ async function orderCycleShopifyProcessor(
         16, 22, 22, 20,      // Z-AC (CourierCOD, CourierDelivDate, CourierRemitDate, CourierUTR)
         ...(EXT ? [16, 22, 14] : []),   // GatewayRefund, GatewayRefundDate, PaymentType
         18, 20, 18, 22, 70,  // AG-AK(DeliveryStatus, TotalSettled, Balance, Status, Remark)
+        ...(EXT ? [26, 16] : []),      // Exchange, Exchange top-up
     ];
     // ── COLUMN ALIGNMENT GUARD ───────────────────────────────────────────────
     // Four things must stay the same length and order: the band labels, the
@@ -1769,14 +1802,21 @@ async function orderCycleShopifyProcessor(
         'Sum of Total', 'Return amount', 'RTO amount', 'Net amount',
         'Ekart COD amount', 'Delhivery COD amount', 'Xpressbees net payment',
         'Snapmint settlement value', 'BharatX ledger amount', 'Razorpay settlement amount',
-        'Courier COD amount', 'Gateway refund',
+        'Courier COD amount', 'Gateway refund', 'Exchange top-up',
         'Total settlement received', 'Balance receivable',
     ];
+    const EXT_ONLY_COLS = new Set(['RTO amount', 'Gateway refund', 'Gateway refund date', 'Payment type', 'Exchange', 'Exchange top-up']);
     const applyFmt = (names, fmt) => {
         for (const name of names) {
             const idx = HEADERS.indexOf(name);
             // A renamed-away column is a bug worth seeing, not worth crashing on.
-            if (idx === -1) { console.warn(`[OrderCycleProcessor] format target "${name}" not in HEADERS`); continue; }
+            // EXT-only columns are legitimately absent for other brands, so they
+            // are skipped silently — a warning that fires on every ordinary run
+            // teaches people to ignore the one that matters.
+            if (idx === -1) {
+                if (!EXT_ONLY_COLS.has(name)) console.warn(`[OrderCycleProcessor] format target "${name}" not in HEADERS`);
+                continue;
+            }
             mainSheet.getColumn(idx + 1).numFmt = fmt;
         }
     };
@@ -1809,6 +1849,7 @@ async function orderCycleShopifyProcessor(
         rowCount: masterRows.length,
         eshopboxStats,
         eshopboxCodStats,
+        returnPrimeStats,
         parseStats
     };
 }

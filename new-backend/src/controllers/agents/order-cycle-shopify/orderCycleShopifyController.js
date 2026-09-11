@@ -25,6 +25,7 @@ const shopifyPrimaryMaster = require('../../../services/shopifyPrimaryMaster');
 const velocityReturns = require('../../../services/velocityReturns');
 const eshopboxClient = require('../../../services/eshopboxClient');
 const eshopboxTracking = require('../../../services/eshopboxTracking');
+const returnPrimeClient = require('../../../services/returnPrimeClient');
 
 const path = require('path');
 const fs = require('fs-extra');
@@ -410,6 +411,31 @@ const generatePreview = async (req, res, next) => {
             }
         }
 
+        // Return Prime — DISPLAY ONLY. Exchanges and their top-ups, which no other
+        // feed can see. Never merged into returnGSTJson: an exchange is not a
+        // return, and D'Chicha's actual returns already come from Velocity.
+        let returnPrimeRows = [], returnPrimePullStats = null;
+        if (returnPrimeClient.isEnabledForBrand(brandId)) {
+            try {
+                returnPrimeRows = await returnPrimeClient.fetchRequests();
+                const ex = returnPrimeRows.filter((r) => String(r.request_type).toLowerCase() === 'exchange');
+                const topup = returnPrimeRows.reduce((t, r) => {
+                    const pd = r.payment_details || {};
+                    return t + (String(pd.status || '').toLowerCase() === 'successful' ? (Number(pd.amount) || 0) : 0);
+                }, 0);
+                returnPrimePullStats = {
+                    requests: returnPrimeRows.length,
+                    exchanges: ex.length,
+                    returns: returnPrimeRows.length - ex.length,
+                    topupValue: Math.round(topup * 100) / 100,
+                };
+                console.log('[OrderCycle] Return Prime —', JSON.stringify(returnPrimePullStats));
+            } catch (e) {
+                returnPrimePullStats = { error: e.message };
+                console.warn(`[OrderCycle] Return Prime failed (${e.message}) — continuing without it`);
+            }
+        }
+
         const logisticsDataJson = {};
         for (const lp of logisticsFiles) {
             logisticsDataJson[lp.name] = await parseExcelBuffer(lp.buffer, `Logistics: ${lp.name}`);
@@ -420,6 +446,7 @@ const generatePreview = async (req, res, next) => {
         if (eshopboxRows.length) logisticsDataJson['Eshopbox'] = eshopboxRows;
         if (eshopboxCodOrders.length) logisticsDataJson['EshopboxCod'] = eshopboxCodOrders;
         if (eshopboxPayouts.length) logisticsDataJson['EshopboxPayouts'] = eshopboxPayouts;
+        if (returnPrimeRows.length) logisticsDataJson['ReturnPrime'] = returnPrimeRows;
 
         const result = await orderCycleShopifyProcessor(
             unicommerceJson,
@@ -561,6 +588,7 @@ const generatePreview = async (req, res, next) => {
             velocityReturns: velocityReturnStats,
             eshopboxPull: eshopboxPullStats,
             eshopboxCod: eshopboxCodPullStats,
+            returnPrime: returnPrimePullStats,
             shopifyMaster: shopifyMasterStats,
             warnings,
             summary: {
