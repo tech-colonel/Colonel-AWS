@@ -52,7 +52,6 @@ const zohoRoutes            = require('./routes/zohoRoutes');
 const composioRoutes        = require('./routes/composioRoutes');
 const shopifyRoutes         = require('./routes/shopifyRoutes');
 const returnPrimeRoutes     = require('./routes/returnPrimeRoutes');
-const amazonRoutes          = require('./routes/amazonRoutes');
 const googleAccountsRoutes  = require('./routes/googleAccountsRoutes');
 const driveConfigRoutes     = require('./routes/driveConfigRoutes');
 // ── Compliance Tracker ────────────────────────────────────────────────────────
@@ -90,7 +89,6 @@ app.use('/api',           zohoRoutes);
 app.use('/api',           composioRoutes);
 app.use('/api',           shopifyRoutes);
 app.use('/api',           returnPrimeRoutes);
-app.use('/api',           amazonRoutes);
 app.use('/api',           googleAccountsRoutes);
 app.use('/api',           driveConfigRoutes);
 app.use('/api',           complianceRoutes);
