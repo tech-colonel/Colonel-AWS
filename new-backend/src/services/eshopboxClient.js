@@ -36,6 +36,10 @@
 
 const AUTH_URL = process.env.ESHOPBOX_AUTH_URL || 'https://auth.myeshopbox.com/api/v1/generateToken';
 const WMS_URL = process.env.ESHOPBOX_WMS_URL || 'https://wms.eshopbox.com';
+// The COD money endpoints do NOT live on wms.eshopbox.com — they are served from
+// the account's own workspace host. Same token, different origin; sending a COD
+// call to WMS_URL just 404s, which looks exactly like "no data".
+const WORKSPACE_URL = process.env.ESHOPBOX_WORKSPACE_URL || 'https://dchica-fashion-lifestyle.myeshopbox.com';
 const MAX_AWBS_PER_CALL = 50;        // hard API limit
 const REQUEST_SPACING_MS = 900;      // no published rate limit; measured safe
 const TOKEN_TTL_MS = 24 * 60 * 60 * 1000;  // token lives 30 days; refresh daily anyway
@@ -96,11 +100,11 @@ async function getToken(force = false) {
 }
 
 /* ── one GET, retrying an expired token once and 5xx a few times ────────────── */
-async function get(path, { retryOnAuth = true, attempt = 0 } = {}) {
+async function get(path, { retryOnAuth = true, attempt = 0, base = WMS_URL } = {}) {
   const token = await getToken();
   let res;
   try {
-    res = await fetch(`${WMS_URL}${path}`, {
+    res = await fetch(`${base}${path}`, {
       method: 'GET',
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
       signal: AbortSignal.timeout(TIMEOUT_MS),
@@ -108,14 +112,14 @@ async function get(path, { retryOnAuth = true, attempt = 0 } = {}) {
   } catch (e) {
     if (attempt < MAX_5XX_RETRIES) {
       await sleep(BACKOFF_BASE_MS * 2 ** attempt);
-      return get(path, { retryOnAuth, attempt: attempt + 1 });
+      return get(path, { retryOnAuth, attempt: attempt + 1, base });
     }
     throw e;
   }
 
   if (res.status === 401 && retryOnAuth) {
     await getToken(true);
-    return get(path, { retryOnAuth: false, attempt });
+    return get(path, { retryOnAuth: false, attempt, base });
   }
   if (res.status === 429) {
     const err = new Error('Eshopbox rate limit hit.');
@@ -125,7 +129,7 @@ async function get(path, { retryOnAuth = true, attempt = 0 } = {}) {
   }
   if (res.status >= 500 && attempt < MAX_5XX_RETRIES) {
     await sleep(BACKOFF_BASE_MS * 2 ** attempt);
-    return get(path, { retryOnAuth, attempt: attempt + 1 });
+    return get(path, { retryOnAuth, attempt: attempt + 1, base });
   }
 
   const json = await res.json().catch(() => ({}));
@@ -175,6 +179,55 @@ async function fetchTracking(awbs, { onProgress } = {}) {
   return out;
 }
 
+/* ── COD money ──────────────────────────────────────────────────────────────
+   Two endpoints, found by reading the portal's own JS bundle — neither is in
+   the published docs, and the paths I guessed (19 of them) all 404'd:
+
+     /payments/cod/api/v1/orders    per-order COD that is STILL OWED
+     /payments/cod/api/v1/payment   the payout ledger (bank references)
+
+   THE ASYMMETRY THAT SHAPES EVERYTHING BELOW
+   The per-order endpoint only ever returns orders still AWAITING PAYMENT —
+   ?status=PAID returns 0, and every historical per-order route is either 400 or
+   403 for this token. So we can prove per-order what is OWED, but only prove
+   payout-level what was PAID. The mapper must say which kind of evidence it has
+   rather than implying an order-level receipt it cannot produce.
+
+   Measured live: 18 orders awaiting (₹31,794); 103 payouts of which 85 PAID,
+   ₹11,56,221 collected against ₹11,07,503 actually received — Eshopbox nets its
+   fees off before paying, so netAmount is the only figure that reached the bank.
+   ────────────────────────────────────────────────────────────────────────── */
+
+/** Per-order COD still outstanding. Rows carry customerOrderId ("#112048"),
+    forwardTrackingId (the AWB), codAmount, status, deliveryDate, paymentDate. */
+async function fetchCodOrders({ perPage = 200, maxPages = 20 } = {}) {
+  const out = [];
+  for (let page = 1; page <= maxPages; page++) {
+    const j = await get(`/payments/cod/api/v1/orders?page=${page}&perPage=${perPage}`, { base: WORKSPACE_URL });
+    const rows = j.data || [];
+    out.push(...rows);
+    if (rows.length < perPage || (j.total != null && out.length >= Number(j.total))) break;
+    await sleep(REQUEST_SPACING_MS);
+  }
+  return out;
+}
+
+/** The payout ledger. `netAmount` is what reached the bank; `paymentAmount` is
+    what was collected before Eshopbox deducted its fees — never reconcile on the
+    latter. `bankReferenceId` reads "Settlement in progress" while ONGOING, so it
+    is only a real reference when status === 'PAID'. */
+async function fetchCodPayouts({ perPage = 200, maxPages = 20 } = {}) {
+  const out = [];
+  for (let page = 1; page <= maxPages; page++) {
+    const j = await get(`/payments/cod/api/v1/payment?page=${page}&perPage=${perPage}`, { base: WORKSPACE_URL });
+    const rows = j.data || [];
+    out.push(...rows);
+    if (rows.length < perPage || (j.total != null && out.length >= Number(j.total))) break;
+    await sleep(REQUEST_SPACING_MS);
+  }
+  return out;
+}
+
 /** Cheap credential check — auth only, no data pulled. */
 async function ping() {
   await getToken(true);
@@ -182,7 +235,7 @@ async function ping() {
 }
 
 module.exports = {
-  WMS_URL, MAX_AWBS_PER_CALL, REQUEST_SPACING_MS,
+  WMS_URL, WORKSPACE_URL, MAX_AWBS_PER_CALL, REQUEST_SPACING_MS,
   isConfigured, isEnabledForBrand, enabledBrandIds,
-  getToken, fetchTracking, ping,
+  getToken, fetchTracking, fetchCodOrders, fetchCodPayouts, ping,
 };

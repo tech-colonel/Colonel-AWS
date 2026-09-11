@@ -346,6 +346,7 @@ const generatePreview = async (req, res, next) => {
         // parcel came back (RTO); without it the RTO tile is structurally 0.
         const wantsEshopboxApi = String(req.body.eshopboxSource || '').toLowerCase() === 'eshopbox_api';
         let eshopboxPullStats = null, eshopboxRows = [];
+        let eshopboxCodOrders = [], eshopboxPayouts = [], eshopboxCodPullStats = null;
         if (wantsEshopboxApi) {
             if (!eshopboxClient.isEnabledForBrand(brandId)) {
                 return res.status(409).json({ error: 'Eshopbox API is not enabled for this brand.' });
@@ -385,6 +386,28 @@ const generatePreview = async (req, res, next) => {
                     console.warn(`[OrderCycle] Eshopbox tracking failed (${e.message}) — continuing without it`);
                 }
             }
+
+            // COD money. Separate try/catch from tracking on purpose: delivery
+            // status and cash are independent answers, and losing one should not
+            // cost the other.
+            try {
+                eshopboxCodOrders = await eshopboxClient.fetchCodOrders();
+                eshopboxPayouts = await eshopboxClient.fetchCodPayouts();
+                const paid = eshopboxPayouts.filter((p) => String(p.status || '').toUpperCase() === 'PAID');
+                const n = (v) => Number(String(v ?? '').replace(/[^0-9.-]/g, '')) || 0;
+                eshopboxCodPullStats = {
+                    awaitingOrders: eshopboxCodOrders.length,
+                    awaitingValue: Math.round(eshopboxCodOrders.reduce((t, o) => t + n(o.codAmount), 0)),
+                    payouts: eshopboxPayouts.length,
+                    paidPayouts: paid.length,
+                    paidNet: Math.round(paid.reduce((t, p) => t + n(p.netAmount), 0)),
+                    feesKept: Math.round(paid.reduce((t, p) => t + n(p.paymentAmount) - n(p.netAmount), 0)),
+                };
+                console.log('[OrderCycle] Eshopbox COD —', JSON.stringify(eshopboxCodPullStats));
+            } catch (e) {
+                eshopboxCodPullStats = { error: e.message };
+                console.warn(`[OrderCycle] Eshopbox COD failed (${e.message}) — continuing without it`);
+            }
         }
 
         const logisticsDataJson = {};
@@ -395,6 +418,8 @@ const generatePreview = async (req, res, next) => {
         // Run processor
         if (velocityRows.length) logisticsDataJson['Velocity'] = velocityRows;
         if (eshopboxRows.length) logisticsDataJson['Eshopbox'] = eshopboxRows;
+        if (eshopboxCodOrders.length) logisticsDataJson['EshopboxCod'] = eshopboxCodOrders;
+        if (eshopboxPayouts.length) logisticsDataJson['EshopboxPayouts'] = eshopboxPayouts;
 
         const result = await orderCycleShopifyProcessor(
             unicommerceJson,
@@ -535,6 +560,7 @@ const generatePreview = async (req, res, next) => {
             velocityPull: velocityPullStats,
             velocityReturns: velocityReturnStats,
             eshopboxPull: eshopboxPullStats,
+            eshopboxCod: eshopboxCodPullStats,
             shopifyMaster: shopifyMasterStats,
             warnings,
             summary: {

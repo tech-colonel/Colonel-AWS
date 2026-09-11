@@ -21,6 +21,7 @@
 const XLSX = require('exceljs');
 const { PassThrough } = require('stream');
 const eshopboxTracking = require('../eshopboxTracking');
+const eshopboxCod = require('../eshopboxCod');
 
 // ── Utility helpers ───────────────────────────────────────────────────────────
 
@@ -900,6 +901,7 @@ async function orderCycleShopifyProcessor(
                 gateway_refund: 0, gateway_refund_date: null,
                 // COD from the shipping platform. courier_cod_amount is only
                 // treated as RECEIVED when courier_utr is present.
+                eshopbox_cod_basis: null,
                 courier_cod_amount: 0, courier_delivery_date: null,
                 courier_remittance_date: null, courier_utr: null, courier_source: null,
                 // Steps 10-12 (internal — not in output sheet but stored in DB for dashboard)
@@ -1303,6 +1305,35 @@ async function orderCycleShopifyProcessor(
         else                       { row.payment_type = 'UNKNOWN'; row.payment_type_source = 'none'; }
     }
 
+    // ── STEP 11c: Eshopbox COD money ─────────────────────────────────────────
+    // Sits here, not with the other logistics steps, because it needs
+    // payment_type (Step 11b) to know which rows are COD at all — and because it
+    // writes courier_* columns that Step 10 already consumed, the settlement
+    // total and balance are recomputed immediately below rather than left stale.
+    const eshopboxCodRows = logisticsData.EshopboxCod || [];
+    const eshopboxPayoutRows = logisticsData.EshopboxPayouts || [];
+    let eshopboxCodStats = null;
+    if (EXT && (eshopboxCodRows.length || eshopboxPayoutRows.length)) {
+        const lookup = eshopboxCod.buildLookup(eshopboxCodRows, eshopboxPayoutRows);
+        const applied = eshopboxCod.applyToMasterRows(masterRows, lookup);
+        eshopboxCodStats = { ...applied, payout: lookup.payout, awaiting: lookup.stats };
+
+        // Recompute both figures the lines above just invalidated.
+        for (const row of masterRows) {
+            row.total_settlement_received =
+                row.ekart_cod_amount + row.delhivery_cod_amount + row.xpressbees_net_payment +
+                row.snapmint_settlement_amount + row.bharatx_settlement_amount +
+                row.razorpay_settlement_amount + row.cashfree_settlement_amount +
+                (row.courier_utr ? safeNum(row.courier_cod_amount) : 0) -
+                safeNum(row.gateway_refund);
+            const costOfCollection = safeNum(row.gateway_fee) + safeNum(row.gateway_fee_gst);
+            row.balance_amount_receivable = round2(
+                row.net_amount - row.total_settlement_received - costOfCollection
+            );
+        }
+        console.log('[OrderCycleProcessor] Eshopbox COD applied —', JSON.stringify(applied));
+    }
+
     // ── STEP 12: Reconciliation Status ───────────────────────────────────────
     // Courier settlement files report COD amounts rounded to the nearest whole rupee,
     // so a genuinely fully-settled order can differ from its own (paise-precise) net
@@ -1378,6 +1409,18 @@ async function orderCycleShopifyProcessor(
             } else if (noMoney && noStatus) {
                 row.remark = `Shipped via ${platform}, which has no feed connected — `
                            + `delivery status and COD collection cannot be confirmed for this order.`;
+            } else if (EXT && row.eshopbox_cod_basis === 'settled_payout_level') {
+                // Deliberately explicit: Eshopbox proves this at payout level,
+                // not per order. Saying "COD received" flat would imply a receipt
+                // we cannot produce if the accountant is ever asked for one.
+                row.remark = `COD settled by Eshopbox. Evidence is payout-level, not per order — `
+                           + `Eshopbox no longer lists this order as outstanding and its COD payouts are `
+                           + `paid up to ${fmtDate(row.courier_remittance_date)}`
+                           + `${row.courier_utr && row.courier_utr !== 'PAYOUT-LEVEL' ? ` (latest bank ref ${row.courier_utr})` : ''}.`;
+            } else if (EXT && row.eshopbox_cod_basis === 'awaiting') {
+                row.remark = `COD ${fmtMoney(row.courier_cod_amount)} collected on delivery; Eshopbox still lists it as `
+                           + `AWAITING PAYMENT${row.courier_remittance_date ? `, expected ${fmtDate(row.courier_remittance_date)}` : ''}. `
+                           + `Not yet received.`;
             } else if (noMoney) {
                 // Status is known (Eshopbox), money is not. Say only what is true.
                 row.remark = `Delivery confirmed by ${platform}, but it reports no COD remittance — `
@@ -1765,6 +1808,7 @@ async function orderCycleShopifyProcessor(
         summaryRows: masterRows,
         rowCount: masterRows.length,
         eshopboxStats,
+        eshopboxCodStats,
         parseStats
     };
 }
