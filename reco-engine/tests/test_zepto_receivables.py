@@ -1282,6 +1282,129 @@ def test_summary_excess_paid_bucket_and_dynamic_brand():
     print("test_summary_excess_paid_bucket_and_dynamic_brand OK")
 
 
+def test_parse_grn_accepts_excel_export_and_csv():
+    # GRN arrives in TWO shapes: the monthly CSV ("PO ID"/"GRN ID"/"Created On")
+    # and the Excel export ("po_code"/"grn_no"/"grn_date", one row per SKU line).
+    # Both must parse, and the Excel's repeated PO must collapse first-win.
+    from recon.zepto_receivables import parse_grn, parse_grn_by_invoice
+    csv_b = (b"GRN ID,PO ID,Created On,Status\r\n"
+             b"GrnCode111,P100,4/2/2026 16:20,CONFIRMED\r\n")
+    xlsx_b = _xlsx({"sqllab_untitled_query": [
+        ["inbound_no", "po_code", "grn_no", "invoice_no", "grn_date", "sku"],
+        ["IN1", "MUM174P5WHJ", "GrnCode222", "INV26-27/000009", "2026-03-04 00:00:00", "S1"],
+        ["IN1", "MUM174P5WHJ", "GrnCode222", "INV26-27/000009", "2026-03-04 00:00:00", "S2"],  # same PO, 2nd line
+    ]})
+    pool = parse_grn([csv_b, xlsx_b])
+    assert pool["P100"]["grn_id"] == "GrnCode111"            # CSV shape still works
+    assert pool["MUM174P5WHJ"]["grn_id"] == "GrnCode222"     # Excel shape now works
+    assert len(pool) == 2                                    # repeated PO collapsed
+    # the invoice-keyed index is fed ONLY by sources carrying an invoice column
+    by_inv = parse_grn_by_invoice([csv_b, xlsx_b])
+    assert list(by_inv) == ["INV26-27/000009"]
+    assert by_inv["INV26-27/000009"]["grn_id"] == "GrnCode222"
+    print("test_parse_grn_accepts_excel_export_and_csv OK")
+
+
+def test_grn_invoice_fallback_po_first_then_invoice_and_mismatch_remark():
+    # PO stays first priority; the invoice fallback only fills what the PO left
+    # empty, and a GRN No disagreement is flagged in Remark rather than resolved.
+    import datetime
+    invd = _xlsx({"Invoice Details": [["t"],
+        ["invoice_number","reference_number","customer_name","date","bcy_total","tax_amount",
+         "amount_without_tax","place_of_supply","gst_no","billing_state","shipping_state"],
+        ["INV-PO","SO1","ZEPTO A","2026-04-01",1000,0,1000,"MH","27AAICK4821A1Z5","MH","MH"],
+        ["INV-FB","SO2","ZEPTO B","2026-04-01",2000,0,2000,"MH","27AAICK4821A1Z5","MH","MH"],
+        ["INV-MM","SO3","ZEPTO C","2026-04-01",3000,0,3000,"MH","27AAICK4821A1Z5","MH","MH"],
+    ]})
+    # Track: INV-PO has a PO in the GRN CSV; the other two do not (PO absent from
+    # the CSV pool) but the track carries their GRN numbers.
+    pay = _xlsx({"Zepto Payment track": [
+        ["Zepto Payment track PO Number","Invoice Number","Cities","Delivery Date","LRN","GRN"],
+        ["P100","INV-PO","X","2026-04-05","LR1","GrnCode111"],
+        ["P900","INV-FB","X","2026-04-05","LR2","GrnCode222"],
+        ["P901","INV-MM","X","2026-04-05","LR3","GrnCode333"],
+    ]})
+    grn_csv = b"GRN ID,PO ID,Created On,Status\r\nGrnCode111,P100,4/2/2026 16:20,CONFIRMED\r\n"
+    # Excel: INV-FB agrees with the track's GRN; INV-MM DISAGREES (999 vs 333).
+    grn_xlsx = _xlsx({"q": [
+        ["po_code","grn_no","invoice_no","grn_date"],
+        ["MUM174AAA","GrnCode222","INV-FB","2026-03-04 00:00:00"],
+        ["MUM174BBB","GrnCode999","INV-MM","2026-03-06 00:00:00"],
+    ]})
+    cn = _xlsx({"Credit Note Details": [["t"], ["invoice_number","bcy_total"]]})
+    files = {"zepto_payment": _file(pay), "grn_list": [_file(grn_csv), _file(grn_xlsx)],
+             "invoice_details": _file(invd), "payment_advice": [], "credit_note": _file(cn)}
+    by = {r["invoice_number"]: r for r in reconcile_zepto(files, today=datetime.date(2026, 7, 15))}
+
+    # Tier 1 — PO match wins and is untouched by the fallback.
+    assert by["INV-PO"]["grn_no"] == "GrnCode111"
+    assert by["INV-PO"]["grn_date"] == "2026-04-02"
+    assert "GRN No mismatch" not in by["INV-PO"]["remark"]
+
+    # Tier 2 — PO missed; invoice matched AND the GRN No agrees -> date filled.
+    assert by["INV-FB"]["grn_no"] == "GrnCode222"
+    assert by["INV-FB"]["grn_date"] == "2026-03-04"
+    assert "Missing GRN Date" not in by["INV-FB"]["remark"]
+    assert "GRN No mismatch" not in by["INV-FB"]["remark"]
+
+    # Disagreement — keep the track's GRN No, borrow the date, FLAG it.
+    assert by["INV-MM"]["grn_no"] == "GrnCode333"          # track's value kept
+    assert by["INV-MM"]["grn_date"] == "2026-03-06"        # date still borrowed
+    assert "GRN No mismatch" in by["INV-MM"]["remark"]
+    assert "GrnCode333" in by["INV-MM"]["remark"] and "GrnCode999" in by["INV-MM"]["remark"]
+
+    # The PO column is NEVER overwritten by the GRN export's internal PO series.
+    assert by["INV-FB"]["po"] == "P900" and by["INV-MM"]["po"] == "P901"
+    print("test_grn_invoice_fallback_po_first_then_invoice_and_mismatch_remark OK")
+
+
+
+def test_grn_date_derived_from_payment_due_date_last_resort():
+    # Last resort: no GRN report covers the row, so back the GRN Date out of the
+    # track's own `Payment Due Date` (Due - 30). Must reproduce that same due date
+    # and say in Remark that it is an estimate — and must NOT fire when a real
+    # GRN date exists.
+    import datetime
+    invd = _xlsx({"Invoice Details": [["t"],
+        ["invoice_number","reference_number","customer_name","date","bcy_total","tax_amount",
+         "amount_without_tax","place_of_supply","gst_no","billing_state","shipping_state"],
+        ["INV-REAL","SO1","ZEPTO A","2026-04-01",1000,0,1000,"MH","27AAICK4821A1Z5","MH","MH"],
+        ["INV-EST","SO2","ZEPTO B","2026-04-01",2000,0,2000,"MH","27AAICK4821A1Z5","MH","MH"],
+        ["INV-NONE","SO3","ZEPTO C","2026-04-01",3000,0,3000,"MH","27AAICK4821A1Z5","MH","MH"],
+    ]})
+    # INV-REAL: PO is in the GRN CSV -> real date, must be left alone.
+    # INV-EST : no GRN report, but the track has a Payment Due Date -> derive.
+    # INV-NONE: no GRN report and no due date -> stays blank.
+    pay = _xlsx({"Zepto Payment track": [
+        ["Zepto Payment track PO Number","Invoice Number","Cities","Delivery Date","LRN","GRN","Payment Due Date"],
+        ["P100","INV-REAL","X","2026-04-05","LR1","GrnCode111","2026-09-30"],
+        ["P900","INV-EST","X","2026-04-05","LR2","GrnCode222","2026-08-30"],
+        ["P901","INV-NONE","X","2026-04-05","LR3","GrnCode333",""],
+    ]})
+    grn_csv = b"GRN ID,PO ID,Created On,Status\r\nGrnCode111,P100,4/2/2026 16:20,CONFIRMED\r\n"
+    cn = _xlsx({"Credit Note Details": [["t"], ["invoice_number","bcy_total"]]})
+    files = {"zepto_payment": _file(pay), "grn_list": [_file(grn_csv)],
+             "invoice_details": _file(invd), "payment_advice": [], "credit_note": _file(cn)}
+    by = {r["invoice_number"]: r for r in reconcile_zepto(files, today=datetime.date(2026, 7, 15))}
+
+    # A real GRN date wins — the derivation must NOT overwrite or flag it.
+    assert by["INV-REAL"]["grn_date"] == "2026-04-02"
+    assert "estimated" not in by["INV-REAL"]["remark"]
+
+    # Derived: 2026-08-30 due -> GRN 2026-07-31, and the Due Date column must come
+    # back to exactly the track's due date (proves the +30/-30 inversion is exact).
+    assert by["INV-EST"]["grn_date"] == "2026-07-31"
+    assert by["INV-EST"]["due_date"] == "2026-08-30"
+    assert "GRN Date estimated (Due Date - 30)" in by["INV-EST"]["remark"]
+
+    # No due date to work from -> still blank, flagged as missing, never guessed.
+    assert by["INV-NONE"]["grn_date"] == ""
+    assert "Missing GRN Date" in by["INV-NONE"]["remark"]
+    assert "estimated" not in by["INV-NONE"]["remark"]
+    print("test_grn_date_derived_from_payment_due_date_last_resort OK")
+
+
+
 if __name__ == "__main__":
     test_normalizers_and_dn_transform()
     test_norm_inv_does_not_strip_trailing_slash()

@@ -144,20 +144,101 @@ def parse_zepto_payment(data: bytes) -> list[dict]:
     return out
 
 
+# GRN sources arrive in TWO shapes, so every field is looked up by alias:
+#   1. the monthly `GRN_List*.csv`      -> "PO ID" / "GRN ID" / "Created On"
+#   2. the `GRN List - <range>.xlsx`    -> "po_code" / "grn_no" / "grn_date"
+#      (a SQL/Superset export, ONE ROW PER SKU LINE, so a PO repeats — the
+#      first-win-per-PO rule below collapses it to one GRN per PO exactly as
+#      the CSV already behaves). It carries the older months the monthly CSVs
+#      don't cover, so both are read together.
+_GRN_PO_ALIASES = ["PO ID", "PO Id", "po_code"]
+_GRN_ID_ALIASES = ["GRN ID", "GRN Id", "GRN Code", "grn_no"]
+_GRN_DATE_ALIASES = ["Created On", "Created on", "grn_date"]
+# Header-token sets tried in order (CSV layout first, then the Excel layout).
+_GRN_HEADER_TOKENSETS = [["po id"], ["po_code"]]
+
+
+def _read_grn_grid(data: bytes) -> list[list]:
+    """Read a GRN source into a grid, sniffing the bytes so a spreadsheet is
+    never decoded as CSV text: `PK..` = xlsx (zip), `\xd0\xcf\x11\xe0` = legacy
+    .xls (OLE2, converted by `_read_sheet`); anything else is treated as CSV."""
+    head = bytes(data[:4])
+    if head == b"PK\x03\x04" or head == b"\xd0\xcf\x11\xe0":
+        return _read_sheet(data, 0)
+    return _read_csv(data)
+
+
 def parse_grn(datas: list[bytes]) -> dict[str, dict]:
     """First-win per PO. Each value carries both the GRN ID (for the
-    'GRN No.' column) and the Created On date (for the 'GRN Date' column)."""
+    'GRN No.' column) and the Created On date (for the 'GRN Date' column).
+    Accepts both the monthly CSV and the Excel export (see aliases above); an
+    unreadable file is skipped rather than failing the whole run, matching
+    `_merge_invoice_details` / `_merge_credit_notes`."""
     pool: dict[str, dict] = {}
     for data in datas:
-        grid = _read_csv(data)
-        h = _find_header(grid, ["po id"])
+        try:
+            grid = _read_grn_grid(data)
+        except Exception:
+            continue
+        h = None
+        for tokens in _GRN_HEADER_TOKENSETS:
+            try:
+                h = _find_header(grid, tokens)
+                break
+            except ValueError:
+                continue
+        if h is None:
+            continue
         for r in _rows_as_dicts(grid, h):
-            po = norm_po(_get(r, ["PO ID", "PO Id"]))
+            po = norm_po(_get(r, _GRN_PO_ALIASES))
             if po and po not in pool:
                 pool[po] = {
-                    "grn_id": _get(r, ["GRN ID", "GRN Id", "GRN Code"]),
-                    "created_on": _get(r, ["Created On", "Created on"]),
+                    "grn_id": _get(r, _GRN_ID_ALIASES),
+                    "created_on": _get(r, _GRN_DATE_ALIASES),
                 }
+    return pool
+
+
+_GRN_INVOICE_ALIASES = ["invoice_no", "Invoice No", "Invoice No.", "Invoice Number", "invoice_number"]
+
+
+def parse_grn_by_invoice(datas: list[bytes]) -> dict[str, dict]:
+    """GRN indexed by INVOICE number — the fallback used when the PO doesn't match.
+
+    Only GRN sources that actually carry an invoice column feed this (today the
+    `GRN List - <range>.xlsx` export). The monthly CSVs have no invoice column, so
+    they contribute nothing and this stays inert for them. First-win per invoice,
+    and only rows whose GRN code is real (`_is_real_grn`).
+
+    The export's own `po_code` is deliberately NOT read: it is Zepto's INTERNAL
+    warehouse PO (e.g. `MUM174P5WHJ`) and a DIFFERENT identifier from the Payment
+    track's PO (`P3111795`) — measured 582/582 different for the same invoice on
+    real data. So this index supplies the GRN No + GRN Date only; the PO column
+    keeps coming from the Payment track alone.
+    """
+    pool: dict[str, dict] = {}
+    for data in datas:
+        try:
+            grid = _read_grn_grid(data)
+        except Exception:
+            continue
+        h = None
+        for tokens in _GRN_HEADER_TOKENSETS:
+            try:
+                h = _find_header(grid, tokens)
+                break
+            except ValueError:
+                continue
+        if h is None:
+            continue
+        for r in _rows_as_dicts(grid, h):
+            inv = norm_inv(_get(r, _GRN_INVOICE_ALIASES))
+            if not inv or inv in pool:
+                continue
+            gid = _get(r, _GRN_ID_ALIASES)
+            if not _is_real_grn(gid):
+                continue
+            pool[inv] = {"grn_id": gid, "created_on": _get(r, _GRN_DATE_ALIASES)}
     return pool
 
 
@@ -300,12 +381,19 @@ def _grn_date_only(v: Any) -> str:
     return s2 or s
 
 
+# Payment terms: Zepto's due date sits this many days after the GRN. Used BOTH
+# forward (Due Date = GRN Date + _DUE_DAYS) and inverted (GRN Date = Due Date -
+# _DUE_DAYS, the last-resort derivation in `reconcile_zepto`), so the two can
+# never drift apart.
+_DUE_DAYS = 30
+
+
 def _due_date(base_date):
-    """#00001: Due Date = base date + 30 calendar days. The base is the GRN
-    Date (payment clock starts on delivery/GRN, not on the invoice) — see the
+    """#00001: Due Date = base date + `_DUE_DAYS` calendar days. The base is the
+    GRN Date (payment clock starts on delivery/GRN, not on the invoice) — see the
     caller. Returns None when there is no base date (e.g. GRN not yet raised)."""
     import datetime as _dt
-    return base_date + _dt.timedelta(days=30) if base_date else None
+    return base_date + _dt.timedelta(days=_DUE_DAYS) if base_date else None
 
 
 _EXCESS_PAID_THRESHOLD = -10.0   # Net Outstanding more negative than this -> overpaid
@@ -864,15 +952,21 @@ def parse_payment_track_pod(data: bytes) -> dict[str, dict]:
         grn = _get(r, ["GRN", "GRN No", "GRN Code"])
         if not _is_real_grn(grn):     # blank / "Missing GRN" note / #ERROR! -> treat as no GRN
             grn = ""
-        if not lrn and not pod_date and not grn:
+        # `Payment Due Date` — Zepto's own due date for the invoice. Used ONLY as
+        # the last-resort way to back out a GRN Date (due - 30) when no GRN report
+        # covers the row; see the derivation in `reconcile_zepto`.
+        due_date = _fmt_date_strict(_raw_get(r, ["Payment Due Date"]))
+        if not lrn and not pod_date and not grn and not due_date:
             continue
-        cur = out.setdefault(inv, {"pod_no": "", "pod_date": "", "grn_no": ""})
+        cur = out.setdefault(inv, {"pod_no": "", "pod_date": "", "grn_no": "", "due_date": ""})
         if lrn and not cur["pod_no"]:
             cur["pod_no"] = lrn
         if pod_date and not cur["pod_date"]:
             cur["pod_date"] = pod_date
         if grn and not cur["grn_no"]:
             cur["grn_no"] = grn
+        if due_date and not cur.get("due_date"):
+            cur["due_date"] = due_date
     return out
 
 
@@ -1053,8 +1147,8 @@ def _merge_payment_track(datas: list[bytes]):
         except Exception:
             part = {}
         for inv, d in part.items():
-            cur = pod_track.setdefault(inv, {"pod_no": "", "pod_date": "", "grn_no": ""})
-            for k in ("pod_no", "pod_date", "grn_no"):
+            cur = pod_track.setdefault(inv, {"pod_no": "", "pod_date": "", "grn_no": "", "due_date": ""})
+            for k in ("pod_no", "pod_date", "grn_no", "due_date"):
                 if d.get(k) and not cur[k]:
                     cur[k] = d[k]
     return payments_raw, pod_track
@@ -1080,6 +1174,13 @@ def reconcile_zepto(files: dict, today=None, advice_tolerance: float = 100.0) ->
     invoice_details = _merge_invoice_details(_many(files, "invoice_details"))
     payments_raw, pod_track = _merge_payment_track(_many(files, "zepto_payment"))
     grn = parse_grn(_many(files, "grn_list"))
+    # Same GRN sources, indexed by INVOICE number, for the PO-miss fallback below.
+    # Resolved through the usual exact -> unique-canonical matcher, so trailing
+    # slashes / NV-V prefixes / 2425-vs-24-25 variants line up and an ambiguous
+    # invoice is never guessed at.
+    grn_by_inv = parse_grn_by_invoice(_many(files, "grn_list"))
+    _grn_inv_keys = set(grn_by_inv)
+    _grn_inv_canon = _build_canon_index(_grn_inv_keys)
     pay_map, dn_map, pmdn_total = parse_payment_advice_pdf(
         _many(files, "payment_advice"), details,
         advice_tolerance=advice_tolerance, rejected=rejected_advices)
@@ -1147,17 +1248,56 @@ def reconcile_zepto(files: dict, today=None, advice_tolerance: float = 100.0) ->
         # GRN list. The GRN No./Date columns stay gated on the GRN list.
         po = inv_to_po.get(inv.rstrip("/"), "")
         row["po"] = po
+        # --- Tier 1: PO -> GRN_List. Authoritative, unchanged. ---
         if po and po in grn and _is_real_grn(grn[po]["grn_id"]):
             row["grn_no"] = grn[po]["grn_id"]
             row["grn_date"] = _grn_date_only(grn[po]["created_on"])   # date only, no time
-        # Fallback: the Payment track carries its own GRN column, which covers
-        # rows the monthly GRN_List CSVs (Apr-Jun only) don't — e.g. July
-        # deliveries. Use it when the GRN_List gave no match. (GRN Date stays
-        # blank here: the Payment track has no separate GRN timestamp.)
-        if not row["grn_no"]:
-            pt = pod_track.get(inv.rstrip("/"))
-            if pt and pt.get("grn_no"):
-                row["grn_no"] = pt["grn_no"]
+        # The Payment track's own GRN column: a GRN NUMBER but no timestamp.
+        _pt = pod_track.get(inv.rstrip("/")) or {}
+        _track_grn = _pt.get("grn_no", "")
+        # --- Tiers 2/3: fall back to the INVOICE number. ---
+        # The GRN export numbers POs on Zepto's internal warehouse series
+        # (`MUM174P5WHJ`), which never matches the Payment track's PO
+        # (`P3111795`), so a PO lookup can miss even when that GRN report has the
+        # delivery. Its invoice_no IS the tracker's invoice, so use it when the PO
+        # gave us no GRN or (more often) no GRN DATE — the date is what drives
+        # Due Date = GRN Date + 30.
+        #   Tier 2 = invoice matched AND its GRN No agrees with the Payment track.
+        #   Tier 3 = invoice matched, with no track GRN to cross-check.
+        # Purely additive: never overwrites a Tier-1 value and never touches the
+        # PO column. When the two sources name DIFFERENT GRNs the existing
+        # (track) GRN No is kept and the row is flagged in Remark instead.
+        grn_no_mismatch = ""
+        if grn_by_inv and (not row["grn_no"] or not row["grn_date"]):
+            _u = _resolve_invoice_key(inv, _grn_inv_keys, _grn_inv_canon)
+            _rec = grn_by_inv.get(_u) if _u else None
+            if _rec:
+                _fgrn = _rec["grn_id"]
+                if (_track_grn and _fgrn
+                        and str(_track_grn).strip().upper() != str(_fgrn).strip().upper()):
+                    grn_no_mismatch = f"{_track_grn} vs {_fgrn}"
+                # Only adopt the export's GRN No when NOTHING else supplied one.
+                # If the Payment track has a GRN we keep the accountant's value
+                # (even when it disagrees) and borrow just the date.
+                if not row["grn_no"] and not _track_grn:
+                    row["grn_no"] = _fgrn
+                if not row["grn_date"]:
+                    row["grn_date"] = _grn_date_only(_rec["created_on"])
+        # Last resort: the Payment track's GRN column (number only, no date).
+        if not row["grn_no"] and _track_grn:
+            row["grn_no"] = _track_grn
+        # --- Tier 4: still no GRN Date -> back it out of the track's own
+        # `Payment Due Date`. Zepto sets that due date 30 days after the GRN, so
+        # GRN Date = Due Date - 30 (measured on 993 rows carrying both: exactly 30
+        # days in 77.6%, median 30). Inverting the SAME +30 rule means the Due Date
+        # column still reproduces the track's date, so nothing drifts. This is an
+        # ESTIMATE, not a real GRN timestamp, so the row says so in Remark.
+        grn_date_estimated = False
+        if not row["grn_date"] and _pt.get("due_date"):
+            _due = _parse_date(_pt["due_date"])
+            if _due:
+                row["grn_date"] = (_due - _dt.timedelta(days=_DUE_DAYS)).isoformat()
+                grn_date_estimated = True
 
         for f in ("date","sales_order_no","name","place_of_supply","gstin","billing_state","shipping_state"):
             row[f] = det[f]
@@ -1231,6 +1371,16 @@ def reconcile_zepto(files: dict, today=None, advice_tolerance: float = 100.0) ->
             flags.append("Missing GRN Date")
         if not row["pod_no"]:
             flags.append("Missing POD")
+        # The Payment track and the GRN report name DIFFERENT GRNs for this
+        # invoice. We keep the track's GRN No and only borrowed the date, but the
+        # accountant needs to see the disagreement rather than have it silently
+        # resolved one way.
+        if grn_no_mismatch:
+            flags.append(f"GRN No mismatch ({grn_no_mismatch})")
+        if grn_date_estimated:
+            # The date is derived, not observed — say so, so nobody reads it as a
+            # real GRN timestamp.
+            flags.append("GRN Date estimated (Due Date - 30)")
         row["remark"] = "; ".join(flags)
         results.append(row)
 
