@@ -70,16 +70,21 @@ function safeNum(value) {
     return isNaN(num) ? 0 : num;
 }
 
+// Coerce a source "Order Date" cell to a YYYY-MM-DD string, or null.
+// Guards against junk values ("Invalid date", blank, unparseable text) that
+// Postgres rejects with `invalid input syntax for type timestamp`.
+function toDateOnly(value) {
+    if (value === null || value === undefined || value === '') return null;
+    const d = value instanceof Date ? value : new Date(value);
+    return isNaN(d.getTime()) ? null : d.toISOString().split('T')[0];
+}
+
 const mapRowToCreadSchema = (row, month, year, filename) => ({
     year: parseInt(year),
     month: monthToNumber(month),
     filename,
 
-    order_date: row['Order Date']
-        ? (row['Order Date'] instanceof Date
-            ? row['Order Date'].toISOString().split('T')[0]
-            : String(row['Order Date']))
-        : null,
+    order_date: toDateOnly(row['Order Date']),
     reference_code: String(row['Reference Code'] || ''),
     ee_invoice_no: String(row['EE Invoice No'] || ''),
     order_status: String(row['Order Status'] || ''),

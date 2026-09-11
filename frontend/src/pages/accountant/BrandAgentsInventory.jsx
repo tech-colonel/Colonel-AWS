@@ -53,6 +53,11 @@ const RECO_AGENT_META = {
     color: '#7C3AED', bg: '#F5F3FF', border: '#C4B5FD', accuracy: null,
     fields: ['E-Invoice PDFs', 'Google Drive Folder'],
   },
+  'PO Extractor': {
+    displayName: 'PO Extractor', icon: '📑', category: 'Extraction',
+    color: '#0748EE', bg: '#E8EFFE', border: '#A3BFF8', accuracy: null,
+    fields: ['Google Drive Folder (PO PDFs)', 'Google Sheet output'],
+  },
   gstr_3b_tally_entry: {
     displayName: 'GSTR-3B Tally Entry', icon: '📒', category: 'Journal Entry',
     color: '#0F766E', bg: '#F0FDFA', border: '#99F6E4', accuracy: '99.9%',
@@ -176,6 +181,7 @@ const channelBrand = (name) => {
 const sectionOf = (agent) => {
   const n = (agent.name || '').toLowerCase();
   if (n === 'einvoice_extract') return 'invoice';   // grouped with Invoice Process under "Extraction"
+  if (n === 'po extractor') return 'invoice';       // PO Extractor → "Extraction" section
   if (/receivabl/.test(n)) return 'receivables';   // zepto_receivables, receivable_cycle, *_receivables
   if (RECO_AGENT_META[agent.name]) {
     if (n === 'universal_bank_statement' || n === 'pdf_bank_extract' || n === 'bank_tally_reco'

@@ -8,6 +8,7 @@ import CreditCardWorkspace from './CreditCardWorkspace';
 import MyntraTicketFinderWorkspace from './MyntraTicketFinderWorkspace';
 import Gstr3bTallyWorkspace from './Gstr3bTallyWorkspace';
 import EInvoiceWorkspace from './EInvoiceWorkspace';
+import PoExtractWorkspace from './PoExtractWorkspace';
 
 // Stable UUIDs assigned by seed.js — one per RECO agent
 export const RECO_ID_TO_TYPE = {
@@ -20,6 +21,7 @@ export const RECO_ID_TO_TYPE = {
   '974ac4f2-1437-4ccc-826c-c2ea68e5b5e3': 'pdf_bank_extract',
   'f3a91c47-0d62-4b8e-9a5d-6c2e83417bd9': 'credit_card_booking',
   '10f75577-5c05-45ab-a123-2e9745466036': 'einvoice_extract',
+  '0a9f6d2e-5c31-4b88-9e77-1f4a2c6b8d05': 'po_extract',
   'dcb5d5e9-9857-4925-b55d-b581bd6dec1e': 'einvoice_reco',
   '6fcb5c0e-7397-495c-af1e-9b1fe5faa2ad': 'myntra_ticket_finder',
   'ebcc3f8c-3e05-4132-860c-70e63b2380f1': 'zepto_receivables',
@@ -36,6 +38,7 @@ export default function AgentDispatch() {
   if (recoType === 'pdf_bank_extract') return <PdfBankExtractorWorkspace />;
   if (recoType === 'credit_card_booking') return <CreditCardWorkspace />;
   if (recoType === 'einvoice_extract') return <EInvoiceWorkspace />;
+  if (recoType === 'po_extract') return <PoExtractWorkspace />;
   if (recoType === 'myntra_ticket_finder') return <MyntraTicketFinderWorkspace />;
   if (recoType === 'gstr_3b_tally_entry') return <Gstr3bTallyWorkspace />;
   // key by agentId so switching between two RecoWorkspace-backed agents (e.g. Universal → Bank Reco)

@@ -190,6 +190,7 @@ router.post('/brands/:brandId/agents/:agentId/total-sales-analyzer/dashboard', a
 
 const salesMirrowController = require('../controllers/agents/sales-mirrow/salesMirrowController');
 const salesCreadController = require('../controllers/agents/sales-cread/salesCreadController');
+const salesAjioController = require('../controllers/agents/sales-ajio/salesAjioController');
 const salesLimeroadController = require('../controllers/agents/sales-limeroad/salesLimeroadController');
 const salesVareeController = require('../controllers/agents/sales-varee/salesVareeController');
 
@@ -212,6 +213,20 @@ router.post('/brands/:brandId/agents/:agentId/cread/generate', authenticateToken
 router.post('/brands/:brandId/agents/:agentId/cread/generate/preview', authenticateToken, upload.single('file'), reattachUserContext, salesCreadController.generatePreview);
 router.post('/brands/:brandId/agents/:agentId/cread/generate/commit', authenticateToken, salesCreadController.generateCommit);
 router.post('/brands/:brandId/agents/:agentId/cread/generate/discard', authenticateToken, salesCreadController.generateDiscard);
+
+// ─── AJIO Routes ──────────────────────────────────────────────────────────────
+// Two raw inputs: `file` = DropShip Order Report, `returnsFile` = DropShip RTV Report.
+const ajioUpload = upload.fields([
+    { name: 'file', maxCount: 1 },
+    { name: 'returnsFile', maxCount: 1 }
+]);
+router.get('/brands/:brandId/agents/:agentId/ajio/master', authenticateToken, salesAjioController.getMasterData);
+router.post('/brands/:brandId/agents/:agentId/ajio/master/sku', authenticateToken, upload.single('file'), reattachUserContext, salesAjioController.uploadSkuMaster);
+router.post('/brands/:brandId/agents/:agentId/ajio/master/ledger', authenticateToken, upload.single('file'), reattachUserContext, salesAjioController.uploadLedgerMaster);
+router.post('/brands/:brandId/agents/:agentId/ajio/generate', authenticateToken, ajioUpload, reattachUserContext, salesAjioController.generate);
+router.post('/brands/:brandId/agents/:agentId/ajio/generate/preview', authenticateToken, ajioUpload, reattachUserContext, salesAjioController.generatePreview);
+router.post('/brands/:brandId/agents/:agentId/ajio/generate/commit', authenticateToken, salesAjioController.generateCommit);
+router.post('/brands/:brandId/agents/:agentId/ajio/generate/discard', authenticateToken, salesAjioController.generateDiscard);
 
 // ─── LimeRoad Routes ───────────────────────────────────────────────────────────
 router.get('/brands/:brandId/agents/:agentId/limeroad/master', authenticateToken, salesLimeroadController.getMasterData);

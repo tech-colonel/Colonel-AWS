@@ -45,6 +45,16 @@ function snapGstRate(rawRate) {
   );
 }
 
+// Normalise a master "GST Rate" cell to a percent number (18, 5, 12, 28).
+// Accepts "18", "18%", " 18 % ", or a fraction like 0.18.
+function parseGstRatePercent(value) {
+  if (value === null || value === undefined || value === '') return null;
+  let n = Number(String(value).replace(/[%\s]/g, ''));
+  if (isNaN(n)) return null;
+  if (n > 0 && n <= 1) n = n * 100;   // 0.18 -> 18
+  return n;
+}
+
 async function creadProcessor(
   rawFileBuffer,
   skuData = [],
@@ -78,15 +88,22 @@ async function creadProcessor(
   const missingMasterTracker = createMissingMasterTracker();
 
   // SKU map: portal SKU (lowercase) → Final SKU (Tally Item Name)
+  // SKU GST map: portal SKU (lowercase) → GST Rate percent from the master
+  // Master headers: "Sales Portal SKU" | "Tally New SKU" | "GST Rate"
   const skuMap = {};
+  const skuGstMap = {};
   skuData.forEach(item => {
     const key = safeString(
       findField(item, 'Sales Portal SKU', 'Portal SKU', 'SKU', 'sku') ?? ''
     ).toLowerCase();
     if (!key) return;
     skuMap[key] = safeString(
-      findField(item, 'Tally new SKU', 'Tally SKU', 'Tally Item Name', 'Final SKU', 'FG', 'fg') ?? ''
+      findField(item, 'Tally New SKU', 'Tally new SKU', 'Tally SKU', 'Tally Item Name', 'Final SKU', 'FG', 'fg') ?? ''
     );
+    const gstPct = parseGstRatePercent(
+      findField(item, 'GST Rate', 'GST Rate %', 'GST %', 'GST', 'gstRate')
+    );
+    if (gstPct !== null) skuGstMap[key] = gstPct;
   });
 
   // Ledger map: state name (lowercase) → { partyName, invoicePrefix }
@@ -135,6 +152,13 @@ async function creadProcessor(
       missingMasterTracker.track({ masterType: 'sku', matchField: 'SKU', value: sku || misSku });
     }
 
+    // GST Rate from the SKU master (percent, e.g. 18) + conversion rate (1 + rate/100, e.g. 1.18)
+    const masterGstPct = skuGstMap[sku.toLowerCase()] ?? skuGstMap[misSku.toLowerCase()] ?? null;
+    const gstRateCol = masterGstPct;
+    const conversionRate = masterGstPct !== null
+      ? parseFloat((1 + masterGstPct / 100).toFixed(4))
+      : null;
+
     // Ledger master lookup for Party Name and Invoice No.
     const ledgerEntry = ledgerMap[shippingState.toLowerCase()] || {};
     if (!ledgerEntry.partyName && shippingState) {
@@ -151,20 +175,26 @@ async function creadProcessor(
     const itemPriceExTax = safeNumber(row['Item Price Excluding Tax']);
     const taxableAmount = itemPriceExTax;
 
-    // GST rate: use Tax Rate column directly if present, otherwise derive + snap to standard slab
+    // GST rate (fraction): SKU-master GST Rate first, then the source Tax Rate
+    // column, then a derived rate snapped to the nearest standard slab.
     const rawRate = taxableAmount > 0 ? tax / taxableAmount : 0;
-    const gstRate = row['Tax Rate'] != null
-      ? safeNumber(row['Tax Rate']) / 100
-      : snapGstRate(rawRate);
-    const computedTax = parseFloat((taxableAmount * gstRate).toFixed(7));
+    const gstRate = masterGstPct !== null
+      ? masterGstPct / 100
+      : (row['Tax Rate'] != null ? safeNumber(row['Tax Rate']) / 100 : snapGstRate(rawRate));
 
-    // GST logic: Delhi (seller) → CGST + SGST; all other states → IGST
+    // Intra- vs inter-state: selling state (chosen from the ledger master) vs
+    // the row's Shipping State. Same state → CGST + SGST (rate split in half);
+    // any other state → IGST (full rate).
+    const isIntraState =
+      normalizedState.toLowerCase() === sellingStateLower ||
+      shippingState.toLowerCase() === sellingStateLower;
+
     let cgst = 0, sgst = 0, igst = 0;
-    if (normalizedState.toLowerCase() === sellingStateLower) {
-      cgst = parseFloat((computedTax / 2).toFixed(7));
-      sgst = parseFloat((computedTax / 2).toFixed(7));
+    if (isIntraState) {
+      cgst = parseFloat((taxableAmount * (gstRate / 2)).toFixed(7));
+      sgst = parseFloat((taxableAmount * (gstRate / 2)).toFixed(7));
     } else {
-      igst = computedTax;
+      igst = parseFloat((taxableAmount * gstRate).toFixed(7));
     }
 
     return {
@@ -191,6 +221,8 @@ async function creadProcessor(
       'CGST ': cgst,
       'SGST': sgst,
       'IGST': igst,
+      'GST Rate': gstRateCol,
+      'conversion rate': conversionRate,
       'Final Status': safeString(row['Final Status'] || row['As Per Sourabh'] || '')
     };
   });
@@ -281,6 +313,12 @@ function buildX2betaSheet(workingData, month, year, sellingState) {
   }
 
   function rowRate(row) {
+    // Same source of truth as the Working sheet: the SKU-master GST Rate (percent)
+    // drives the Sales Ledger name + Output-tax rate columns when present;
+    // otherwise derive from the booked tax and snap to the nearest standard slab.
+    if (row['GST Rate'] != null && row['GST Rate'] !== '') {
+      return safeNumber(row['GST Rate']) / 100;
+    }
     const taxable = safeNumber(row['Taxable Amount']);
     const totalTax = safeNumber(row['CGST ']) + safeNumber(row['SGST']) + safeNumber(row['IGST']);
     return taxable > 0 ? snapGstRate(totalTax / taxable) : 0;
@@ -388,7 +426,8 @@ function buildWorkingSheet(workingData) {
     'SKU', 'Final SKU', 'MIS SKU', 'Shipping Zip Code',
     'Shipping States', 'Party Name', 'Invoice No.',
     'Order Invoice Amount', 'Tax', 'Item Price Excluding Tax',
-    'Cred Status', 'Taxable Amount', 'CGST ', 'SGST', 'IGST', 'Final Status'
+    'Cred Status', 'Taxable Amount', 'CGST ', 'SGST', 'IGST',
+    'GST Rate', 'conversion rate', 'Final Status'
   ];
 
   // Row 1: empty (matches reference output), Row 2: headers, Rows 3+: data

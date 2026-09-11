@@ -1,0 +1,242 @@
+{
+  "name": "PO Extract — TEMPLATE (duplicate per brand)",
+  "active": false,
+  "settings": { "executionOrder": "v1" },
+  "pinData": {},
+  "meta": {},
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "po-extract",
+        "responseMode": "onReceived",
+        "options": {}
+      },
+      "id": "b1a10000-0000-4000-8000-000000000001",
+      "name": "PO Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [-1180, 300],
+      "webhookId": "po-extract-template"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            { "id": "c0000001", "name": "backendBaseUrl", "value": "https://agent.accountant", "type": "string" },
+            { "id": "c0000002", "name": "geminiModel", "value": "gemini-2.0-flash", "type": "string" },
+            { "id": "c0000003", "name": "geminiApiKey", "value": "PUT_GEMINI_API_KEY_HERE", "type": "string" },
+            { "id": "c0000004", "name": "driveFolderId", "value": "PUT_PO_INPUT_FOLDER_ID", "type": "string" },
+            { "id": "c0000005", "name": "processedFolderId", "value": "PUT_PROCESSED_FOLDER_ID", "type": "string" },
+            { "id": "c0000006", "name": "spreadsheetId", "value": "PUT_PER_BRAND_SPREADSHEET_ID", "type": "string" },
+            { "id": "c0000007", "name": "sheetName", "value": "Sheet1", "type": "string" },
+            { "id": "c0000008", "name": "brandId", "value": "={{ $json.body?.brandId || $json.brandId || '' }}", "type": "string" },
+            { "id": "c0000009", "name": "brandName", "value": "={{ $json.body?.brandName || $json.brandName || 'PUT_BRAND_NAME' }}", "type": "string" },
+            { "id": "c0000010", "name": "agentId", "value": "={{ $json.body?.agentId || $json.agentId || '' }}", "type": "string" },
+            { "id": "c0000011", "name": "agentName", "value": "={{ $json.body?.agentName || $json.agentName || 'PO Extractor' }}", "type": "string" }
+          ]
+        },
+        "options": {}
+      },
+      "id": "b1a10000-0000-4000-8000-000000000002",
+      "name": "Config",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [-960, 300]
+    },
+    {
+      "parameters": {
+        "url": "https://www.googleapis.com/drive/v3/files",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "googleDriveOAuth2Api",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "q", "value": "={{ \"'\" + $('Config').item.json.driveFolderId + \"' in parents and mimeType = 'application/pdf' and trashed = false\" }}" },
+            { "name": "fields", "value": "files(id,name,webViewLink,mimeType)" },
+            { "name": "pageSize", "value": "1000" },
+            { "name": "supportsAllDrives", "value": "true" },
+            { "name": "includeItemsFromAllDrives", "value": "true" }
+          ]
+        },
+        "options": {}
+      },
+      "id": "b1a10000-0000-4000-8000-000000000003",
+      "name": "List PO PDFs",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-740, 300],
+      "credentials": { "googleDriveOAuth2Api": { "id": "", "name": "Google Drive account (n8n)" } }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Config').item.json.backendBaseUrl }}/api/n8n/progress",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { \"brandId\": $('Config').item.json.brandId, \"agentId\": $('Config').item.json.agentId, \"brandName\": $('Config').item.json.brandName, \"agentName\": $('Config').item.json.agentName, \"phase\": \"start\", \"total\": ($json.files || []).length } }}",
+        "options": {}
+      },
+      "id": "b1a10000-0000-4000-8000-000000000004",
+      "name": "Progress: start",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-520, 300],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const files = ($('List PO PDFs').first().json.files) || [];\nreturn files.map(f => ({ json: {\n  id: f.id,\n  name: f.name,\n  webViewLink: f.webViewLink,\n  batch_total: files.length\n} }));\n"
+      },
+      "id": "b1a10000-0000-4000-8000-000000000005",
+      "name": "Split Files",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-300, 300]
+    },
+    {
+      "parameters": { "options": { "reset": false } },
+      "id": "b1a10000-0000-4000-8000-000000000006",
+      "name": "Loop Over POs",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [-80, 300]
+    },
+    {
+      "parameters": {
+        "url": "={{ 'https://www.googleapis.com/drive/v3/files/' + $json.id + '?alt=media&supportsAllDrives=true' }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "googleDriveOAuth2Api",
+        "options": { "response": { "response": { "responseFormat": "file", "outputPropertyName": "data" } } }
+      },
+      "id": "b1a10000-0000-4000-8000-000000000007",
+      "name": "Download PDF",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [220, 420],
+      "credentials": { "googleDriveOAuth2Api": { "id": "", "name": "Google Drive account (n8n)" } }
+    },
+    {
+      "parameters": {
+        "jsCode": "const b64 = $input.item.binary.data.data;\nconst prompt = [\n  'You are a data-extraction engine. The attached PDF is (or may be) a PURCHASE ORDER (PO) raised by a customer on a supplier.',\n  'Return ONE JSON object only. No markdown, no commentary. Use exactly this schema:',\n  '{',\n  '  \"is_purchase_order\": true,',\n  '  \"po_number\": \"\",',\n  '  \"po_date\": \"\",',\n  '  \"supplier_gstin\": \"\",',\n  '  \"buyer_gstin\": \"\",',\n  '  \"billing_address\": \"\",',\n  '  \"line_items\": [ { \"description\": \"\", \"unit_cost\": 0, \"gst_rate\": 0 } ]',\n  '}',\n  'Field guide:',\n  '- po_number: the Purchase Order No. / PO No.',\n  '- po_date: the PO Date, formatted DD-MM-YYYY.',\n  '- supplier_gstin: the GSTIN in the SUPPLIER / \"Vendor Details\" block (the party fulfilling the order).',\n  '- buyer_gstin: the GSTIN in the \"Billing Address\" / \"Bill To\" / Buyer block (the party that raised the PO).',\n  '- billing_address: the full billing / \"Deliver to\" address as ONE line (collapse newlines to spaces, strip HTML like <br>).',\n  '- line_items: ONE entry per ordered product row. description = the item description. unit_cost = the per-unit \"Unit Cost\" / \"Basic Cost\" (NOT MRP, NOT taxable value, NOT line total). gst_rate = the GST percentage as a number (e.g. 18).',\n  'Numbers as plain numbers (no currency symbols, no thousands separators). Missing text -> \"\". Missing number -> 0.',\n  'If the document is clearly NOT a purchase order (a sales invoice, bank statement, unrelated doc), set is_purchase_order to false and still return the object. Never invent values.'\n].join('\\n');\nreturn { json: { geminiBody: {\n  contents: [ { role: 'user', parts: [\n    { inline_data: { mime_type: 'application/pdf', data: b64 } },\n    { text: prompt }\n  ] } ],\n  generationConfig: { temperature: 0, response_mime_type: 'application/json' }\n} } };\n"
+      },
+      "id": "b1a10000-0000-4000-8000-000000000008",
+      "name": "Build Gemini Body",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [440, 420]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ 'https://generativelanguage.googleapis.com/v1beta/models/' + $('Config').item.json.geminiModel + ':generateContent' }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "x-goog-api-key", "value": "={{ $('Config').item.json.geminiApiKey }}" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json.geminiBody }}",
+        "options": { "timeout": 120000 }
+      },
+      "id": "b1a10000-0000-4000-8000-000000000009",
+      "name": "Gemini: extract PO",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [660, 420]
+    },
+    {
+      "parameters": {
+        "jsCode": "const cfg  = $('Config').first().json;\nconst file = $('Loop Over POs').item.json;\nconst resp = $input.item.json;\n\nlet text = '';\ntry { text = resp.candidates[0].content.parts[0].text; } catch (e) { text = ''; }\nlet po = {};\ntry { po = JSON.parse(text); } catch (e) { po = {}; }\n\nconst items = (Array.isArray(po.line_items) && po.line_items.length) ? po.line_items : [{}];\nconst runId = $execution.id;\nconst num = (v) => { const n = parseFloat(String(v ?? '').replace(/[,\\s\\u20b9]/g, '')); return isNaN(n) ? 0 : n; };\nconst s   = (v) => (v === undefined || v === null) ? '' : String(v).replace(/<br\\s*\\/?>(?:\\s*)/gi, ' ').replace(/\\s+/g, ' ').trim();\nconst isPO = po.is_purchase_order !== false && (s(po.po_number) || items.some((it) => s(it.description)));\n\nconst rows = items.map((it) => ({\n  run_id: runId,\n  batch_total: file.batch_total || 0,\n  brandId: cfg.brandId, brandName: cfg.brandName,\n  agentId: cfg.agentId, agentName: cfg.agentName,\n  source_file: s(file.name),\n  po_pdf_link: s(file.webViewLink),\n  po_number: s(po.po_number),\n  po_date: s(po.po_date),\n  supplier_gstin: s(po.supplier_gstin),\n  buyer_gstin: s(po.buyer_gstin),\n  billing_address: s(po.billing_address),\n  product_description: s(it.description),\n  unit_cost: num(it.unit_cost),\n  gst_rate: num(it.gst_rate),\n  status: !isPO ? 'Not a PO' : ((s(po.po_number) && s(it.description)) ? 'Extracted' : 'Needs Review')\n}));\n\n// Google Sheet — exactly the 8 columns of \"PO Data for Automation.xlsx\", one row per line item.\nconst sheetValues = rows.map((r) => [\n  r.po_number, r.po_date, r.supplier_gstin, r.buyer_gstin,\n  r.billing_address, r.product_description, r.unit_cost, r.gst_rate\n]);\n\nreturn { json: { rows, sheetValues, po_number: rows[0].po_number, status: rows[0].status } };\n"
+      },
+      "id": "b1a10000-0000-4000-8000-00000000000a",
+      "name": "Build Rows",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [880, 420]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ 'https://sheets.googleapis.com/v4/spreadsheets/' + $('Config').item.json.spreadsheetId + '/values/' + encodeURIComponent($('Config').item.json.sheetName) + '!A:H:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS' }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "googleSheetsOAuth2Api",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { \"values\": $json.sheetValues } }}",
+        "options": {}
+      },
+      "id": "b1a10000-0000-4000-8000-00000000000b",
+      "name": "Append to Sheet",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1100, 420],
+      "credentials": { "googleSheetsOAuth2Api": { "id": "", "name": "Google Sheets account (n8n)" } }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Config').item.json.backendBaseUrl }}/api/n8n/po/feed",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json.rows }}",
+        "options": {}
+      },
+      "id": "b1a10000-0000-4000-8000-00000000000c",
+      "name": "Feed backend",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1320, 420],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "method": "PATCH",
+        "url": "={{ 'https://www.googleapis.com/drive/v3/files/' + $('Loop Over POs').item.json.id + '?addParents=' + $('Config').item.json.processedFolderId + '&removeParents=' + $('Config').item.json.driveFolderId + '&supportsAllDrives=true' }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "googleDriveOAuth2Api",
+        "options": {}
+      },
+      "id": "b1a10000-0000-4000-8000-00000000000d",
+      "name": "Move to Processed",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1540, 420],
+      "onError": "continueRegularOutput",
+      "credentials": { "googleDriveOAuth2Api": { "id": "", "name": "Google Drive account (n8n)" } }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Config').item.json.backendBaseUrl }}/api/n8n/progress",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { \"brandId\": $('Config').item.json.brandId, \"agentId\": $('Config').item.json.agentId, \"brandName\": $('Config').item.json.brandName, \"agentName\": $('Config').item.json.agentName, \"phase\": \"done\" } }}",
+        "options": {}
+      },
+      "id": "b1a10000-0000-4000-8000-00000000000e",
+      "name": "Progress: done",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [220, 180],
+      "onError": "continueRegularOutput"
+    }
+  ],
+  "connections": {
+    "PO Webhook":        { "main": [ [ { "node": "Config", "type": "main", "index": 0 } ] ] },
+    "Config":            { "main": [ [ { "node": "List PO PDFs", "type": "main", "index": 0 } ] ] },
+    "List PO PDFs":      { "main": [ [ { "node": "Progress: start", "type": "main", "index": 0 } ] ] },
+    "Progress: start":   { "main": [ [ { "node": "Split Files", "type": "main", "index": 0 } ] ] },
+    "Split Files":       { "main": [ [ { "node": "Loop Over POs", "type": "main", "index": 0 } ] ] },
+    "Loop Over POs":     { "main": [ [ { "node": "Progress: done", "type": "main", "index": 0 } ], [ { "node": "Download PDF", "type": "main", "index": 0 } ] ] },
+    "Download PDF":      { "main": [ [ { "node": "Build Gemini Body", "type": "main", "index": 0 } ] ] },
+    "Build Gemini Body": { "main": [ [ { "node": "Gemini: extract PO", "type": "main", "index": 0 } ] ] },
+    "Gemini: extract PO":{ "main": [ [ { "node": "Build Rows", "type": "main", "index": 0 } ] ] },
+    "Build Rows":        { "main": [ [ { "node": "Append to Sheet", "type": "main", "index": 0 } ] ] },
+    "Append to Sheet":   { "main": [ [ { "node": "Feed backend", "type": "main", "index": 0 } ] ] },
+    "Feed backend":      { "main": [ [ { "node": "Move to Processed", "type": "main", "index": 0 } ] ] },
+    "Move to Processed": { "main": [ [ { "node": "Loop Over POs", "type": "main", "index": 0 } ] ] }
+  }
+}

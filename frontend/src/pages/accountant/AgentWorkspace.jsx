@@ -119,6 +119,7 @@ const AgentWorkspace = () => {
     rtoFile: null,
     rtFile: null,
     packedFile: null,
+    returnsFile: null,
     selling_state: '',
     multi_state_sale: false
   });
@@ -196,6 +197,7 @@ const AgentWorkspace = () => {
       if (name.includes('jiomart')) return 'jiomart';
       if (name.includes('tatacliq')) return 'tatacliq';
       if (name.includes('cread')) return 'cread';
+      if (name.includes('ajio')) return 'ajio';
       if (name.includes('limeroad')) return 'limeroad';
       if (name.includes('mirrow')) return 'mirrow';
       if (name.includes('nykaa')) return 'nykaa';
@@ -431,6 +433,15 @@ const AgentWorkspace = () => {
         toast.error('Please upload at least one Myntra report');
         return;
       }
+    } else if (isAjio) {
+      if (!formData.salesFile) {
+        toast.error('Please upload the AJIO DropShip Order Report');
+        return;
+      }
+      if (!formData.returnsFile) {
+        toast.error('Please upload the AJIO DropShip RTV (returns) Report');
+        return;
+      }
     } else {
       if (!formData.salesFile) {
         toast.error('Please select a sales file');
@@ -443,6 +454,10 @@ const AgentWorkspace = () => {
     }
     if (isZepto && !formData.selling_state?.trim()) {
       toast.error('Please enter the Selling State for Zepto');
+      return;
+    }
+    if (isCread && !formData.selling_state?.trim()) {
+      toast.error('Please select the Selling State');
       return;
     }
 
@@ -465,6 +480,9 @@ const AgentWorkspace = () => {
       if (formData.rtoFile) data.append('rtoFile', formData.rtoFile);
       if (formData.packedFile) data.append('packedFile', formData.packedFile);
       if (formData.rtFile) data.append('rtFile', formData.rtFile);
+    } else if (isAjio) {
+      data.append('file', formData.salesFile);
+      if (formData.returnsFile) data.append('returnsFile', formData.returnsFile);
     } else {
       data.append('file', formData.salesFile);
     }
@@ -472,7 +490,7 @@ const AgentWorkspace = () => {
     data.append('year', formData.year);
     data.append('file_type', formData.file_type);
     data.append('inventory_type', formData.inventory_type);
-    if (isZepto && formData.selling_state) {
+    if ((isZepto || isCread) && formData.selling_state) {
       data.append('selling_state', formData.selling_state);
     }
     if (isAmazon) {
@@ -520,7 +538,7 @@ const AgentWorkspace = () => {
       setShowVerificationModal(false);
       setVerificationData(null);
       fetchData();
-      setFormData({ ...formData, salesFile: null, rtoFile: null, packedFile: null, rtFile: null, selling_state: '' });
+      setFormData({ ...formData, salesFile: null, rtoFile: null, packedFile: null, rtFile: null, returnsFile: null, selling_state: '' });
     } catch (error) {
       toast.error(error.response?.data?.error || 'Failed to save file');
     } finally {
@@ -653,6 +671,7 @@ const AgentWorkspace = () => {
   const isPepperfry = agent?.name?.toLowerCase().includes('pepperfry');
   const isMirrow = agent?.name?.toLowerCase().includes('mirrow');
   const isCread = agent?.name?.toLowerCase().includes('cread');
+  const isAjio = agent?.name?.toLowerCase().includes('ajio');
   const isLimeroad = agent?.name?.toLowerCase().includes('limeroad');
 
   return (
@@ -1098,6 +1117,10 @@ const AgentWorkspace = () => {
                   <p className="text-xs text-slate-500 mt-2">
                     {isZepto
                       ? 'Upload Excel file with columns: Tally New SKU, Sales Portal SKU, Rate'
+                      : isCread
+                      ? 'Upload Excel file with columns: Sales Portal SKU, Tally New SKU, GST Rate'
+                      : isAjio
+                      ? 'Upload Excel file with columns: Seller SKU, Stock Name as per tally, COST'
                       : 'Upload Excel file with columns: Sales Portal SKU, Tally New SKU'}
                   </p>
                 </div>
@@ -1292,7 +1315,7 @@ const AgentWorkspace = () => {
                         <TableRow>
                           <TableHead className="text-xs">Tally New SKU</TableHead>
                           <TableHead className="text-xs">Sales Portal SKU</TableHead>
-                          {isShopify && <TableHead className="text-xs">GST Rate</TableHead>}
+                          {(isShopify || isCread) && <TableHead className="text-xs">GST Rate</TableHead>}
                           {isZepto && <TableHead className="text-xs">Rate (%)</TableHead>}
                           <TableHead className="text-right text-xs">Action</TableHead>
                         </TableRow>
@@ -1301,12 +1324,12 @@ const AgentWorkspace = () => {
                         {filtered.map((row, idx) => {
                           const tallySku = row['Tally new SKU'] || row['Tally New SKU'] || row.tallyNewSku || row.fg || row.FG || '';
                           const portalSku = row['Sales portal SKU'] || row['Sales Portal SKU'] || row.salesPortalSku || row.sku || '';
-                          const gstRate = row['gst'] || row['gst '] || row['GST Rate'] || row.gst || '';
+                          const gstRate = row['GST Rate'] || row['gst'] || row['gst '] || row['GST Rate %'] || row.gstRate || row.gst || '';
                           return (
                             <TableRow key={idx}>
                               <TableCell className="text-xs font-medium">{tallySku || <span className="text-slate-400 italic">—</span>}</TableCell>
                               <TableCell className="text-xs">{portalSku || <span className="text-slate-400 italic">—</span>}</TableCell>
-                              {isShopify && <TableCell className="text-xs">{gstRate || '0'}</TableCell>}
+                              {(isShopify || isCread) && <TableCell className="text-xs">{gstRate !== '' ? gstRate : (isCread ? <span className="text-slate-400 italic">—</span> : '0')}</TableCell>}
                               {isZepto && <TableCell className="text-xs">{row['Rate'] || row.rate || <span className="text-slate-400 italic">—</span>}</TableCell>}
                               <TableCell className="text-right">
                                 <Button
@@ -1639,6 +1662,31 @@ const AgentWorkspace = () => {
                   </div>
                 )}
 
+                {isCread && (
+                  <div>
+                    <Label htmlFor="selling-state-cread">Selling State *</Label>
+                    <select
+                      id="selling-state-cread"
+                      value={formData.selling_state}
+                      onChange={(e) => setFormData({ ...formData, selling_state: e.target.value })}
+                      required
+                      className="flex h-9 w-full rounded-md border border-slate-200 bg-transparent px-3 py-2 text-sm mt-2"
+                    >
+                      <option value="">Select</option>
+                      {[...new Set(
+                        (masterData.ledger_master || [])
+                          .map(r => (r['States'] || r['State'] || r.states || r.state || '').toString().trim())
+                          .filter(Boolean)
+                      )].sort().map(s => (
+                        <option key={s} value={s}>{s}</option>
+                      ))}
+                    </select>
+                    <p className="text-xs text-slate-500 mt-2">
+                      State from which Cread ships (from the ledger master) — if it matches a row's Shipping State the tax is split CGST/SGST, otherwise IGST
+                    </p>
+                  </div>
+                )}
+
                 {isMyntra ? (
                   <div className="space-y-4">
                     <div>
@@ -1667,6 +1715,37 @@ const AgentWorkspace = () => {
                         onChange={(e) => setFormData({ ...formData, rtFile: e.target.files[0] })}
                         className="mt-2"
                       />
+                    </div>
+                  </div>
+                ) : isAjio ? (
+                  <div className="space-y-4">
+                    <div>
+                      <Label htmlFor="ajio-order-file">DropShip Order Report *</Label>
+                      <Input
+                        id="ajio-order-file"
+                        type="file"
+                        accept=".xlsx,.xls"
+                        onChange={(e) => setFormData({ ...formData, salesFile: e.target.files[0] })}
+                        data-testid="sales-file-upload"
+                        className="mt-2"
+                      />
+                      <p className="text-xs text-slate-500 mt-2">
+                        AJIO DropShip Order Report (sales)
+                      </p>
+                    </div>
+                    <div>
+                      <Label htmlFor="ajio-rtv-file">DropShip RTV Report *</Label>
+                      <Input
+                        id="ajio-rtv-file"
+                        type="file"
+                        accept=".xlsx,.xls"
+                        onChange={(e) => setFormData({ ...formData, returnsFile: e.target.files[0] })}
+                        data-testid="returns-file-upload"
+                        className="mt-2"
+                      />
+                      <p className="text-xs text-slate-500 mt-2">
+                        AJIO DropShip RTV Report (returns / credit notes)
+                      </p>
                     </div>
                   </div>
                 ) : (

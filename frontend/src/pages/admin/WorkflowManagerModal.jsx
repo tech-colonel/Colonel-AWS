@@ -83,6 +83,42 @@ function getFormulaColumns(sheetIndex, allSheets, upToColIndex) {
 
 // ─── Formula Builder ──────────────────────────────────────────────────────────
 
+// Row-local helper functions available in BOTH Math and Excel formulas.
+// Backed by workflowEngine.SCALAR_HELPERS.
+const TEXT_FUNCTIONS = [
+  { label: 'LEFT',      tpl: 'LEFT(, 2)',        hint: 'First N characters' },
+  { label: 'RIGHT',     tpl: 'RIGHT(, 2)',       hint: 'Last N characters' },
+  { label: 'MID',       tpl: 'MID(, 1, 2)',      hint: 'N chars from position (1-indexed)' },
+  { label: 'LEN',       tpl: 'LEN()',            hint: 'Text length' },
+  { label: 'TRIM',      tpl: 'TRIM()',           hint: 'Strip leading/trailing spaces' },
+  { label: 'UPPER',     tpl: 'UPPER()',          hint: 'Uppercase' },
+  { label: 'LOWER',     tpl: 'LOWER()',          hint: 'Lowercase' },
+  { label: 'CONCAT',    tpl: 'CONCAT(, )',       hint: 'Join text pieces' },
+  { label: 'VALUE',     tpl: 'VALUE()',          hint: 'Text → number' },
+  { label: 'ROUND',     tpl: 'ROUND(, 2)',       hint: 'Round to N decimals' },
+  { label: 'ABS',       tpl: 'ABS()',            hint: 'Absolute value' },
+  { label: 'GSTSTATE',  tpl: 'GSTSTATE()',       hint: 'GSTIN / 2-digit code / messy name → canonical state name' },
+  { label: 'GSTCODE',   tpl: 'GSTCODE()',        hint: 'GSTIN or state name → 2-digit GST state code' },
+  { label: 'GSTABBR',   tpl: 'GSTABBR()',        hint: 'GSTIN or state name → 2-letter code (UP, MH …) for Tally voucher/ledger names' },
+  { label: 'SAMESTATE', tpl: 'SAMESTATE(, )',    hint: 'True if both args resolve to the same GST state (intra-state → CGST+SGST)' },
+];
+
+// Static class strings only — Tailwind can't see interpolated class names.
+const FnChips = ({ onInsert }) => (
+  <div className="p-2 bg-emerald-50 border border-emerald-200 rounded-lg">
+    <p className="text-xs font-semibold text-emerald-700 mb-1.5">Text &amp; GST functions:</p>
+    <div className="flex flex-wrap gap-1">
+      {TEXT_FUNCTIONS.map(f => (
+        <button key={f.label} type="button" title={f.hint}
+          onClick={() => onInsert(f.tpl)}
+          className="rounded px-2 py-0.5 text-xs font-semibold bg-emerald-600 text-white hover:bg-emerald-700 cursor-pointer">
+          {f.label}
+        </button>
+      ))}
+    </div>
+  </div>
+);
+
 const FormulaBuilder = ({ formula, onChange, availableColumns }) => {
   const inputRef = useRef(null);
 
@@ -145,12 +181,14 @@ const FormulaBuilder = ({ formula, onChange, availableColumns }) => {
         </div>
       )}
 
+      <FnChips onInsert={insertAt} />
+
       {/* Formula input */}
       <Input
         ref={inputRef}
         value={formula}
         onChange={e => onChange(e.target.value)}
-        placeholder='e.g. {Revenue} - {Cost}  or  IF({Qty} > 0, {Price} * {Qty}, 0)'
+        placeholder='e.g. {Revenue} - {Cost}  ·  IF(SAMESTATE({Seller GST Num}, {Shipping State}), {Taxable} * {Rate} / 2, 0)'
         className="font-mono text-sm"
       />
 
@@ -269,6 +307,8 @@ const ExcelFormulaBuilder = ({ formula, onChange, availableColumns }) => {
           ))}
         </div>
       </div>
+
+      <FnChips onInsert={insertAt} />
 
       {/* Column chips — two groups */}
       {availableColumns.length > 0 && (

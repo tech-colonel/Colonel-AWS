@@ -1,12 +1,13 @@
 /**
  * 04-agent-workflows.js
  *
- * Agent-workflow delta seeder — adds the 4 workflows built locally in the
+ * Agent-workflow delta seeder — adds the 5 workflows built locally in the
  * admin Workflow Manager to colonel-master's agent_workflows table:
  *   - Shopify urban        (agent: Sales-Shopify)
  *   - Firstcry M Brands    (agent: Sales-FirstCry)
  *   - shopify-koparo       (agent: Sales-Shopify)
  *   - koparo-cread         (agent: Sales-cread)
+ *   - Shopify-Dchica       (agent: Sales-Shopify)
  *
  * Idempotent: ON CONFLICT (id) DO NOTHING — safe to re-run.
  *
@@ -1420,7 +1421,8 @@ const AGENT_WORKFLOWS = [
             "key": "Shipping Province Name",
             "type": "source",
             "label": "Shipping Province Name",
-            "order": 7
+            "order": 7,
+            "fillDown": true
           },
           {
             "id": "c_priceexcl",
@@ -1562,7 +1564,8 @@ const AGENT_WORKFLOWS = [
             "key": "Shipping Province Name",
             "type": "source",
             "label": "Shipping Province Name",
-            "order": 7
+            "order": 7,
+            "fillDown": true
           },
           {
             "id": "c_priceexcl",
@@ -1947,10 +1950,13 @@ const AGENT_WORKFLOWS = [
           },
           {
             "id": "gt_src_15",
-            "key": "FG",
-            "type": "source",
+            "type": "master_lookup",
             "label": "FG",
-            "order": 15
+            "order": 15,
+            "masterType": "sku",
+            "matchField": "Sales portal SKU",
+            "returnField": "Tally new SKU",
+            "lookupColumn": "SKU Match Key"
           },
           {
             "id": "gt_tallyname",
@@ -2893,6 +2899,572 @@ const AGENT_WORKFLOWS = [
     ],
     createdAt: "2026-08-14T11:42:02.683Z",
     updatedAt: "2026-08-14T11:51:04.771Z",
+  },
+  {
+    id: "fe181c08-222e-4ecd-8c78-4ab7ae783227",
+    agentName: "Sales-Shopify",
+    name: "Shopify-Dchica",
+    description: "Dchica ('D'chica') Shopify sales -> GST-ready working file (no-data-row remarks, SKU/Order-ID Product Type resolution, HSN/GST Rate lookup, IGST/CGST/SGST bifurcation). Built from client SOP (test files receivables/shopify dchica/DChica_Shopify_Data_SOP.docx). Seller state is fixed to Delhi (D'chica bills every Shopify order from Delhi): CGST+SGST when Shipping region = Delhi, IGST otherwise. Two brand masters are required before running: sku_master with columns \"SKU\", \"Order ID\", \"Product type\" (SKU-keyed rows for normal line items, Order-ID-keyed rows for shipping-charge line items that carry no SKU of their own) and ledger_master with columns \"Shopify Product type\", \"HSN\", \"GST Rate\". Known deviation: validated against the client's Jul-26 working file at 100% parity on every downstream GST figure (Invoice Value, Taxable, IGST, CGST, SGST) whenever Product Type resolves correctly; the reference file's own embedded SKU-Product Type master is a stale/coarser snapshot than what was actually used to build it, so Product Type resolution (and everything downstream of it) will only fully match once a current SKU-Product Type master is uploaded for the brand.",
+    sample_columns: [
+          "Day",
+          "Order ID",
+          "Product type",
+          "Product title",
+          "Product variant SKU",
+          "Shipping region",
+          "Gross sales",
+          "Discounts",
+          "Net sales",
+          "Total sales",
+          "Quantity ordered",
+          "Quantity returned"
+    ],
+    columns: [],
+    sheets: [
+            {
+                    "id": "sheet_pt",
+                    "name": "Product Type Resolution",
+                    "order": 0,
+                    "sourceType": "raw",
+                    "fileInputId": "file_0",
+                    "rawSheetName": null,
+                    "filters": [],
+                    "columns": [
+                            {
+                                    "id": "src_0",
+                                    "key": "Day",
+                                    "type": "source",
+                                    "label": "Day",
+                                    "order": 0
+                            },
+                            {
+                                    "id": "src_1",
+                                    "key": "Order ID",
+                                    "type": "source",
+                                    "label": "Order ID",
+                                    "order": 1
+                            },
+                            {
+                                    "id": "src_2",
+                                    "key": "Bundle ID",
+                                    "type": "source",
+                                    "label": "Bundle ID",
+                                    "order": 2
+                            },
+                            {
+                                    "id": "src_3",
+                                    "key": "Product ID",
+                                    "type": "source",
+                                    "label": "Product ID",
+                                    "order": 3
+                            },
+                            {
+                                    "id": "src_4",
+                                    "key": "Product type",
+                                    "type": "source",
+                                    "label": "Product type",
+                                    "order": 4
+                            },
+                            {
+                                    "id": "src_5",
+                                    "key": "Product title",
+                                    "type": "source",
+                                    "label": "Product title",
+                                    "order": 5
+                            },
+                            {
+                                    "id": "src_6",
+                                    "key": "Product variant ID",
+                                    "type": "source",
+                                    "label": "Product variant ID",
+                                    "order": 6
+                            },
+                            {
+                                    "id": "src_7",
+                                    "key": "Product variant SKU",
+                                    "type": "source",
+                                    "label": "Product variant SKU",
+                                    "order": 7
+                            },
+                            {
+                                    "id": "src_8",
+                                    "key": "Product variant title",
+                                    "type": "source",
+                                    "label": "Product variant title",
+                                    "order": 8
+                            },
+                            {
+                                    "id": "src_9",
+                                    "key": "Product vendor",
+                                    "type": "source",
+                                    "label": "Product vendor",
+                                    "order": 9
+                            },
+                            {
+                                    "id": "src_10",
+                                    "key": "Sale ID",
+                                    "type": "source",
+                                    "label": "Sale ID",
+                                    "order": 10
+                            },
+                            {
+                                    "id": "src_11",
+                                    "key": "Sales channel",
+                                    "type": "source",
+                                    "label": "Sales channel",
+                                    "order": 11
+                            },
+                            {
+                                    "id": "src_12",
+                                    "key": "Sales channel ID",
+                                    "type": "source",
+                                    "label": "Sales channel ID",
+                                    "order": 12
+                            },
+                            {
+                                    "id": "src_13",
+                                    "key": "Billing region",
+                                    "type": "source",
+                                    "label": "Billing region",
+                                    "order": 13
+                            },
+                            {
+                                    "id": "src_14",
+                                    "key": "Shipping region",
+                                    "type": "source",
+                                    "label": "Shipping region",
+                                    "order": 14
+                            },
+                            {
+                                    "id": "src_15",
+                                    "key": "Order name",
+                                    "type": "source",
+                                    "label": "Order name",
+                                    "order": 15
+                            },
+                            {
+                                    "id": "src_16",
+                                    "key": "Gross sales",
+                                    "type": "source",
+                                    "label": "Gross sales",
+                                    "order": 16
+                            },
+                            {
+                                    "id": "src_17",
+                                    "key": "Discounts",
+                                    "type": "source",
+                                    "label": "Discounts",
+                                    "order": 17
+                            },
+                            {
+                                    "id": "src_18",
+                                    "key": "Returns",
+                                    "type": "source",
+                                    "label": "Returns",
+                                    "order": 18
+                            },
+                            {
+                                    "id": "src_19",
+                                    "key": "Net sales",
+                                    "type": "source",
+                                    "label": "Net sales",
+                                    "order": 19
+                            },
+                            {
+                                    "id": "src_20",
+                                    "key": "Shipping charges",
+                                    "type": "source",
+                                    "label": "Shipping charges",
+                                    "order": 20
+                            },
+                            {
+                                    "id": "src_21",
+                                    "key": "Return fees",
+                                    "type": "source",
+                                    "label": "Return fees",
+                                    "order": 21
+                            },
+                            {
+                                    "id": "src_22",
+                                    "key": "Taxes",
+                                    "type": "source",
+                                    "label": "Taxes",
+                                    "order": 22
+                            },
+                            {
+                                    "id": "src_23",
+                                    "key": "Total sales",
+                                    "type": "source",
+                                    "label": "Total sales",
+                                    "order": 23
+                            },
+                            {
+                                    "id": "src_24",
+                                    "key": "Orders",
+                                    "type": "source",
+                                    "label": "Orders",
+                                    "order": 24
+                            },
+                            {
+                                    "id": "src_25",
+                                    "key": "Quantity ordered",
+                                    "type": "source",
+                                    "label": "Quantity ordered",
+                                    "order": 25
+                            },
+                            {
+                                    "id": "src_26",
+                                    "key": "Quantity returned",
+                                    "type": "source",
+                                    "label": "Quantity returned",
+                                    "order": 26
+                            },
+                            {
+                                    "id": "c_remark",
+                                    "type": "computed",
+                                    "label": "Remark",
+                                    "order": 27,
+                                    "formula": "(({Gross sales}==0)&&({Discounts}==0)&&({Returns}==0)&&({Net sales}==0)&&({Shipping charges}==0)&&({Return fees}==0)&&({Taxes}==0)&&({Total sales}==0)&&({Orders}==0)&&({Quantity ordered}==0)&&({Quantity returned}==0)) ? \"No data, Blank Cell\" : (((({Gross sales}==0)&&({Discounts}==0)&&({Returns}==0)&&({Net sales}==0)&&({Shipping charges}==0)&&({Return fees}==0)&&({Taxes}==0)&&({Total sales}==0))&&(({Quantity ordered}!=0)||({Quantity returned}!=0))) ? \"No data, Only Qty\" : \"\")"
+                            },
+                            {
+                                    "id": "c_pt_sku",
+                                    "type": "master_lookup",
+                                    "label": "Product Type (SKU Master)",
+                                    "order": 28,
+                                    "masterType": "sku",
+                                    "matchField": "SKU",
+                                    "returnField": "Product type",
+                                    "lookupColumn": "Product variant SKU"
+                            },
+                            {
+                                    "id": "c_pt_order",
+                                    "type": "master_lookup",
+                                    "label": "Product Type (Order Master)",
+                                    "order": 29,
+                                    "masterType": "sku",
+                                    "matchField": "Order ID",
+                                    "returnField": "Product type",
+                                    "lookupColumn": "Order ID"
+                            },
+                            {
+                                    "id": "c_pt_final",
+                                    "type": "computed",
+                                    "label": "Product Type",
+                                    "order": 30,
+                                    "formula": "({Product type}==0) ? (({Product Type (SKU Master)}==0) ? {Product Type (Order Master)} : {Product Type (SKU Master)}) : {Product type}"
+                            }
+                    ],
+                    "groupBy": {
+                            "enabled": false,
+                            "columns": [],
+                            "aggregations": {}
+                    }
+            },
+            {
+                    "id": "sheet_working",
+                    "name": "Sales Working",
+                    "order": 1,
+                    "sourceType": "prev_sheet",
+                    "prevSheetName": "Product Type Resolution",
+                    "fileInputId": null,
+                    "rawSheetName": null,
+                    "filters": [],
+                    "columns": [
+                            {
+                                    "id": "pass_0",
+                                    "key": "Day",
+                                    "type": "source",
+                                    "label": "Day",
+                                    "order": 0
+                            },
+                            {
+                                    "id": "pass_1",
+                                    "key": "Order ID",
+                                    "type": "source",
+                                    "label": "Order ID",
+                                    "order": 1
+                            },
+                            {
+                                    "id": "pass_2",
+                                    "key": "Bundle ID",
+                                    "type": "source",
+                                    "label": "Bundle ID",
+                                    "order": 2
+                            },
+                            {
+                                    "id": "pass_3",
+                                    "key": "Product ID",
+                                    "type": "source",
+                                    "label": "Product ID",
+                                    "order": 3
+                            },
+                            {
+                                    "id": "pass_4",
+                                    "key": "Product type",
+                                    "type": "source",
+                                    "label": "Product type",
+                                    "order": 4
+                            },
+                            {
+                                    "id": "pass_5",
+                                    "key": "Product title",
+                                    "type": "source",
+                                    "label": "Product title",
+                                    "order": 5
+                            },
+                            {
+                                    "id": "pass_6",
+                                    "key": "Product variant ID",
+                                    "type": "source",
+                                    "label": "Product variant ID",
+                                    "order": 6
+                            },
+                            {
+                                    "id": "pass_7",
+                                    "key": "Product variant SKU",
+                                    "type": "source",
+                                    "label": "Product variant SKU",
+                                    "order": 7
+                            },
+                            {
+                                    "id": "pass_8",
+                                    "key": "Product variant title",
+                                    "type": "source",
+                                    "label": "Product variant title",
+                                    "order": 8
+                            },
+                            {
+                                    "id": "pass_9",
+                                    "key": "Product vendor",
+                                    "type": "source",
+                                    "label": "Product vendor",
+                                    "order": 9
+                            },
+                            {
+                                    "id": "pass_10",
+                                    "key": "Sale ID",
+                                    "type": "source",
+                                    "label": "Sale ID",
+                                    "order": 10
+                            },
+                            {
+                                    "id": "pass_11",
+                                    "key": "Sales channel",
+                                    "type": "source",
+                                    "label": "Sales channel",
+                                    "order": 11
+                            },
+                            {
+                                    "id": "pass_12",
+                                    "key": "Sales channel ID",
+                                    "type": "source",
+                                    "label": "Sales channel ID",
+                                    "order": 12
+                            },
+                            {
+                                    "id": "pass_13",
+                                    "key": "Billing region",
+                                    "type": "source",
+                                    "label": "Billing region",
+                                    "order": 13
+                            },
+                            {
+                                    "id": "pass_14",
+                                    "key": "Shipping region",
+                                    "type": "source",
+                                    "label": "Shipping region",
+                                    "order": 14
+                            },
+                            {
+                                    "id": "pass_15",
+                                    "key": "Order name",
+                                    "type": "source",
+                                    "label": "Order name",
+                                    "order": 15
+                            },
+                            {
+                                    "id": "pass_16",
+                                    "key": "Gross sales",
+                                    "type": "source",
+                                    "label": "Gross sales",
+                                    "order": 16
+                            },
+                            {
+                                    "id": "pass_17",
+                                    "key": "Discounts",
+                                    "type": "source",
+                                    "label": "Discounts",
+                                    "order": 17
+                            },
+                            {
+                                    "id": "pass_18",
+                                    "key": "Returns",
+                                    "type": "source",
+                                    "label": "Returns",
+                                    "order": 18
+                            },
+                            {
+                                    "id": "pass_19",
+                                    "key": "Net sales",
+                                    "type": "source",
+                                    "label": "Net sales",
+                                    "order": 19
+                            },
+                            {
+                                    "id": "pass_20",
+                                    "key": "Shipping charges",
+                                    "type": "source",
+                                    "label": "Shipping charges",
+                                    "order": 20
+                            },
+                            {
+                                    "id": "pass_21",
+                                    "key": "Return fees",
+                                    "type": "source",
+                                    "label": "Return fees",
+                                    "order": 21
+                            },
+                            {
+                                    "id": "pass_22",
+                                    "key": "Taxes",
+                                    "type": "source",
+                                    "label": "Taxes",
+                                    "order": 22
+                            },
+                            {
+                                    "id": "pass_23",
+                                    "key": "Total sales",
+                                    "type": "source",
+                                    "label": "Total sales",
+                                    "order": 23
+                            },
+                            {
+                                    "id": "pass_24",
+                                    "key": "Orders",
+                                    "type": "source",
+                                    "label": "Orders",
+                                    "order": 24
+                            },
+                            {
+                                    "id": "pass_25",
+                                    "key": "Quantity ordered",
+                                    "type": "source",
+                                    "label": "Quantity ordered",
+                                    "order": 25
+                            },
+                            {
+                                    "id": "pass_26",
+                                    "key": "Quantity returned",
+                                    "type": "source",
+                                    "label": "Quantity returned",
+                                    "order": 26
+                            },
+                            {
+                                    "id": "pass_27",
+                                    "key": "Remark",
+                                    "type": "source",
+                                    "label": "Remark",
+                                    "order": 27
+                            },
+                            {
+                                    "id": "pass_28",
+                                    "key": "Product Type (SKU Master)",
+                                    "type": "source",
+                                    "label": "Product Type (SKU Master)",
+                                    "order": 28
+                            },
+                            {
+                                    "id": "pass_29",
+                                    "key": "Product Type (Order Master)",
+                                    "type": "source",
+                                    "label": "Product Type (Order Master)",
+                                    "order": 29
+                            },
+                            {
+                                    "id": "pass_30",
+                                    "key": "Product Type",
+                                    "type": "source",
+                                    "label": "Product Type",
+                                    "order": 30
+                            },
+                            {
+                                    "id": "c_hsn",
+                                    "type": "master_lookup",
+                                    "label": "HSN Code",
+                                    "order": 31,
+                                    "masterType": "ledger",
+                                    "matchField": "Shopify Product type",
+                                    "returnField": "HSN",
+                                    "lookupColumn": "Product Type"
+                            },
+                            {
+                                    "id": "c_gstrate",
+                                    "type": "master_lookup",
+                                    "label": "GST Rate",
+                                    "order": 32,
+                                    "masterType": "ledger",
+                                    "matchField": "Shopify Product type",
+                                    "returnField": "GST Rate",
+                                    "lookupColumn": "Product Type"
+                            },
+                            {
+                                    "id": "c_netqty",
+                                    "type": "computed",
+                                    "label": "Net Qty",
+                                    "order": 33,
+                                    "formula": "{Quantity ordered} - {Quantity returned}"
+                            },
+                            {
+                                    "id": "c_invval",
+                                    "type": "computed",
+                                    "label": "Invoice Value",
+                                    "order": 34,
+                                    "formula": "{Total sales} - {Discounts}"
+                            },
+                            {
+                                    "id": "c_taxable",
+                                    "type": "computed",
+                                    "label": "Taxable",
+                                    "order": 35,
+                                    "formula": "{Invoice Value} / (1 + ({GST Rate} / 100))"
+                            },
+                            {
+                                    "id": "c_igst",
+                                    "type": "computed",
+                                    "label": "IGST",
+                                    "order": 36,
+                                    "formula": "SAMESTATE(\"Delhi\", {Shipping region}) ? 0 : ({Taxable} * {GST Rate} / 100)"
+                            },
+                            {
+                                    "id": "c_cgst",
+                                    "type": "computed",
+                                    "label": "CGST",
+                                    "order": 37,
+                                    "formula": "SAMESTATE(\"Delhi\", {Shipping region}) ? ({Taxable} * {GST Rate} / 200) : 0"
+                            },
+                            {
+                                    "id": "c_sgst",
+                                    "type": "computed",
+                                    "label": "SGST",
+                                    "order": 38,
+                                    "formula": "SAMESTATE(\"Delhi\", {Shipping region}) ? ({Taxable} * {GST Rate} / 200) : 0"
+                            }
+                    ],
+                    "groupBy": {
+                            "enabled": false,
+                            "columns": [],
+                            "aggregations": {}
+                    }
+            }
+    ],
+    file_inputs: [
+          {
+                "id": "file_0",
+                "label": "Dchica Shopify Sales Dump (Total sales breakdown CSV)"
+          }
+    ],
+    createdAt: "2026-09-11T07:47:11.154Z",
+    updatedAt: "2026-09-11T07:47:11.154Z",
   }
 ];
 

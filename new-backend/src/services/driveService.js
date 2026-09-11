@@ -259,6 +259,64 @@ async function getOAuthClient() {
   }
 }
 
+let _sheets = null;
+/**
+ * Lazily build an authenticated Sheets client on the SAME service account as
+ * getDrive() — but with the `spreadsheets` scope added (the Sheets API checks
+ * its own scope, `drive` alone isn't always enough for values.get/update).
+ * The target spreadsheet must be shared with the service-account email
+ * (serviceAccountEmail()) as Editor, same requirement as uploadFile().
+ */
+function getSheets() {
+  if (_sheets) return _sheets;
+  if (!fs.existsSync(CREDENTIALS_PATH)) {
+    throw new Error(`Google credentials not found at ${CREDENTIALS_PATH}.`);
+  }
+  const auth = new google.auth.GoogleAuth({
+    keyFile: CREDENTIALS_PATH,
+    scopes: ['https://www.googleapis.com/auth/drive', 'https://www.googleapis.com/auth/spreadsheets'],
+  });
+  _sheets = google.sheets({ version: 'v4', auth });
+  return _sheets;
+}
+
+/**
+ * Find the first data row (below the header, 1-indexed sheet row 2+) in
+ * `sheetName` whose cells match `matchValues` at `matchColIdx` (0-based column
+ * indexes, e.g. [0,5,6] for columns A/F/G), then overwrite that entire row
+ * with `newRowValues`. Used to keep a Google Sheet in sync when a row is
+ * edited from the app UI (best-effort — callers should catch and not block
+ * the DB save on failure, since it depends on the sheet being shared with
+ * the service account).
+ * @returns {Promise<boolean>} true if a matching row was found and updated.
+ */
+async function findAndUpdateRow(spreadsheetId, sheetName, matchColIdx, matchValues, newRowValues) {
+  const sheets = getSheets();
+  const lastCol = String.fromCharCode('A'.charCodeAt(0) + newRowValues.length - 1);
+  const range = `${sheetName}!A2:${lastCol}100000`;
+  const res = await sheets.spreadsheets.values.get({ spreadsheetId, range, valueRenderOption: 'UNFORMATTED_VALUE' });
+  const rows = res.data.values || [];
+  // Numeric columns round-trip as "171.4400" (Postgres numeric) vs 171.44 (Sheet) —
+  // compare numerically when both sides parse as numbers, else as trimmed strings.
+  const eq = (a, b) => {
+    const na = Number(a), nb = Number(b);
+    if (a !== '' && b !== '' && Number.isFinite(na) && Number.isFinite(nb)) return Math.abs(na - nb) < 0.005;
+    return String(a ?? '').trim() === String(b ?? '').trim();
+  };
+  const rowIdx = rows.findIndex((row) =>
+    matchColIdx.every((colIdx, i) => eq(row[colIdx], matchValues[i]))
+  );
+  if (rowIdx === -1) return false;
+  const sheetRow = rowIdx + 2; // +1 header, +1 for 1-indexing
+  await sheets.spreadsheets.values.update({
+    spreadsheetId,
+    range: `${sheetName}!A${sheetRow}:${lastCol}${sheetRow}`,
+    valueInputOption: 'RAW',
+    requestBody: { values: [newRowValues] },
+  });
+  return true;
+}
+
 /** True if `childId` is `rootId` or nested under it (parent walk, capped). Used
  *  to keep brand Drive navigation inside that brand's own folder tree. */
 async function isDescendant(childId, rootId, maxHops = 8) {
@@ -294,5 +352,7 @@ module.exports = {
   uploadXlsxAsSheetOAuth,
   makeAnyoneReader,
   getOAuthClient,
+  getSheets,
+  findAndUpdateRow,
   hasOutputFolder: () => !!OUTPUT_FOLDER_ID,
 };
