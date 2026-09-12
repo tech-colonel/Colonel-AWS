@@ -34,7 +34,10 @@ const BASE = '/brands/:brandId/agents/:agentId/order-cycle-shopify';
 
 // ─── Two-phase generation ─────────────────────────────────────────────────────
 router.post(`${BASE}/generate/preview`, authenticateToken, uploadMulti, ctrl.generatePreview);
-router.get(`${BASE}/sources`, ctrl.getSources);
+// authenticateToken was missing here while every sibling route had it. The reply
+// names the brand's connected integrations and its Shopify store domain, so it
+// was readable by anyone holding a brand id.
+router.get(`${BASE}/sources`, authenticateToken, ctrl.getSources);
 router.post(`${BASE}/generate/commit`,  authenticateToken, ctrl.generateCommit);
 router.post(`${BASE}/generate/discard`, authenticateToken, ctrl.generateDiscard);
 
