@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useParams } from 'react-router-dom';
-import { Upload, FileText, Download, Trash2, Loader2, Eye, X, BarChart3 } from 'lucide-react';
+import { Upload, FileText, Download, Trash2, Loader2, Eye, X, BarChart3, CloudDownload, CheckCircle2, RefreshCw } from 'lucide-react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../../components/ui/card';
 import { Button } from '../../components/ui/button';
 import { Input } from '../../components/ui/input';
@@ -18,6 +18,13 @@ const SettlementAmazonWorkspace = ({ agent }) => {
   const [files, setFiles] = useState([]);
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
+
+  /* Amazon connection for THIS brand. Null means the brand has no connection,
+     and the "Fetch from Amazon" button stays hidden — so today it appears for
+     Koparo only, and for any brand connected later without a code change. */
+  const [amazonConn, setAmazonConn] = useState(null);
+  const [fetchingAmazon, setFetchingAmazon] = useState(false);
+  const [amazonSummary, setAmazonSummary] = useState(null);
 
   // Upload modal
   const [showUploadModal, setShowUploadModal] = useState(false);
@@ -38,6 +45,27 @@ const SettlementAmazonWorkspace = ({ agent }) => {
 
   useEffect(() => {
     fetchFiles();
+  }, [brandId, agentId]);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const r = await api.get(`/api/amazon/${brandId}/connection`);
+        if (cancelled) return;
+        const conn = r.data?.connection || null;
+        setAmazonConn(conn);
+        if (conn) {
+          const sum = await api
+            .get(`/api/brands/${brandId}/agents/${agentId}/settlement-amazon/summary`)
+            .catch(() => null);
+          if (!cancelled && sum) setAmazonSummary(sum.data);
+        }
+      } catch {
+        if (!cancelled) setAmazonConn(null);   // not connected, or no permission
+      }
+    })();
+    return () => { cancelled = true; };
   }, [brandId, agentId]);
 
   const fetchFiles = async () => {
@@ -76,6 +104,43 @@ const SettlementAmazonWorkspace = ({ agent }) => {
       toast.error(error.response?.data?.error || 'Upload failed');
     } finally {
       setUploading(false);
+    }
+  };
+
+  /* Pull settlements straight from Amazon. The server refuses to store a
+     settlement whose figures do not balance, so a rejection is reported here
+     rather than silently swallowed. */
+  const handleFetchFromAmazon = async () => {
+    setFetchingAmazon(true);
+    try {
+      const res = await api.post(
+        `/api/brands/${brandId}/agents/${agentId}/settlement-amazon/fetch-amazon?limit=5&days=90`
+      );
+      const { imported = [], skipped = [], rejected = [] } = res.data || {};
+
+      if (rejected.length) {
+        toast.error(
+          `${rejected.length} settlement(s) could not be imported — the figures did not balance. Nothing was stored.`
+        );
+      }
+      if (imported.length) {
+        const rows = imported.reduce((n, s) => n + (s.stored_rows || 0), 0);
+        toast.success(`Imported ${imported.length} settlement(s) · ${rows} rows`);
+      } else if (!rejected.length) {
+        toast.info(
+          skipped.length
+            ? 'Already up to date — those settlements are imported.'
+            : 'No new settlements found in the last 90 days.'
+        );
+      }
+      fetchFiles();
+      api.get(`/api/brands/${brandId}/agents/${agentId}/settlement-amazon/summary`)
+        .then((r) => setAmazonSummary(r.data))
+        .catch(() => {});
+    } catch (error) {
+      toast.error(error.response?.data?.error || 'Could not fetch from Amazon');
+    } finally {
+      setFetchingAmazon(false);
     }
   };
 
@@ -196,22 +261,32 @@ const SettlementAmazonWorkspace = ({ agent }) => {
     <div className="space-y-6">
       {/* Upload & MIS Card */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        <Card>
-          <CardHeader>
-            <CardTitle>Settlement File Upload</CardTitle>
-            <CardDescription>Upload Amazon settlement reports to store data</CardDescription>
-          </CardHeader>
-          <CardContent>
-            <Button
-              onClick={() => setShowUploadModal(true)}
-              className="w-full"
-              data-testid="upload-settlement-button"
-            >
-              <Upload className="mr-2 h-4 w-4" />
-              Upload Settlement File
-            </Button>
-          </CardContent>
-        </Card>
+        {amazonConn ? (
+          <AmazonSettlementPanel
+            conn={amazonConn}
+            summary={amazonSummary}
+            fetching={fetchingAmazon}
+            onFetch={handleFetchFromAmazon}
+            onUpload={() => setShowUploadModal(true)}
+          />
+        ) : (
+          <Card>
+            <CardHeader>
+              <CardTitle>Settlement File Upload</CardTitle>
+              <CardDescription>Upload Amazon settlement reports to store data</CardDescription>
+            </CardHeader>
+            <CardContent>
+              <Button
+                onClick={() => setShowUploadModal(true)}
+                className="w-full"
+                data-testid="upload-settlement-button"
+              >
+                <Upload className="mr-2 h-4 w-4" />
+                Upload Settlement File
+              </Button>
+            </CardContent>
+          </Card>
+        )}
 
         <Card>
           <CardHeader>
@@ -554,6 +629,103 @@ const SettlementAmazonWorkspace = ({ agent }) => {
           </div>
         </DialogContent>
       </Dialog>
+    </div>
+  );
+};
+
+
+/* ──────────────────────────────────────────────────────────────────────────────
+   AmazonSettlementPanel — shown only for brands with a live Amazon connection.
+
+   Brands without one keep the original upload card untouched, so this is purely
+   additive: today that means Koparo sees this and the other eighteen do not.
+
+   The figures are the brand's real imported position, not decoration — which is
+   the point of the panel. An accountant opening this should be able to see what
+   has been brought in and what it came to before deciding to do anything.
+   ────────────────────────────────────────────────────────────────────────────── */
+const inr = (n) =>
+  n === null || n === undefined || Number.isNaN(Number(n))
+    ? '—'
+    : Number(n).toLocaleString('en-IN', { maximumFractionDigits: 0 });
+
+const Stat = ({ label, value, tone = 'default', sub }) => (
+  <div className="flex flex-col gap-0.5 px-4 py-3 rounded-lg bg-slate-50/80 border border-slate-200/70">
+    <span className="text-[10.5px] font-semibold uppercase tracking-[0.08em] text-slate-500">{label}</span>
+    <span
+      className={`text-[19px] font-semibold tabular-nums leading-tight ${
+        tone === 'negative' ? 'text-rose-600' : tone === 'positive' ? 'text-emerald-600' : 'text-slate-900'
+      }`}
+    >
+      {value}
+    </span>
+    {sub ? <span className="text-[11px] text-slate-500">{sub}</span> : null}
+  </div>
+);
+
+const AmazonSettlementPanel = ({ conn, summary, fetching, onFetch, onUpload }) => {
+  const synced = summary?.lastSync ? new Date(summary.lastSync) : null;
+  const hasData = !!summary && summary.settlements > 0;
+
+  return (
+    <div className="rounded-xl border border-slate-200 bg-white shadow-sm overflow-hidden">
+      {/* connection strip */}
+      <div className="flex items-center gap-3 px-5 py-3.5 bg-gradient-to-r from-amber-50/80 to-white border-b border-slate-200">
+        <img src="/logos/amazon.svg" alt="Amazon" className="h-5 w-5 object-contain shrink-0" />
+        <div className="flex flex-col min-w-0">
+          <span className="text-[13.5px] font-semibold text-slate-900 leading-tight">Amazon Seller Central</span>
+          <span className="text-[11.5px] text-slate-500 truncate">
+            {conn.marketplace_id === 'A21TJRUUN4KGV' ? 'Amazon.in' : conn.marketplace_id}
+            {conn.selling_partner_id ? ` · ${conn.selling_partner_id}` : ''}
+          </span>
+        </div>
+        <span className="ml-auto inline-flex items-center gap-1.5 shrink-0 rounded-full bg-emerald-50 border border-emerald-200 px-2.5 py-1 text-[10.5px] font-semibold uppercase tracking-wide text-emerald-700">
+          <CheckCircle2 className="h-3 w-3" /> Connected
+        </span>
+      </div>
+
+      <div className="p-5 flex flex-col gap-4">
+        {/* imported position */}
+        {hasData ? (
+          <div className="grid grid-cols-2 xl:grid-cols-4 gap-2.5">
+            <Stat label="Settlements" value={summary.settlements} sub={`${inr(summary.rows)} lines`} />
+            <Stat label="Gross sales" value={`₹${inr(summary.grossSales)}`} />
+            <Stat label="Amazon fees" value={`₹${inr(summary.amazonFees)}`} tone="negative" />
+            <Stat label="Net payout" value={`₹${inr(summary.netPayout)}`} tone="positive" />
+          </div>
+        ) : (
+          <p className="text-[13px] text-slate-500">
+            Nothing imported yet. Fetch the last 90 days of settlements straight from Amazon.
+          </p>
+        )}
+
+        {/* actions */}
+        <div className="flex flex-col sm:flex-row gap-2">
+          <Button
+            onClick={onFetch}
+            disabled={fetching}
+            className="flex-1 bg-[#0748EE] hover:bg-[#0640d0] text-white shadow-sm"
+            data-testid="fetch-amazon-settlement-button"
+          >
+            {fetching ? (
+              <><Loader2 className="mr-2 h-4 w-4 animate-spin" /> Fetching from Amazon…</>
+            ) : (
+              <><CloudDownload className="mr-2 h-4 w-4" /> {hasData ? 'Sync latest settlements' : 'Fetch from Amazon'}</>
+            )}
+          </Button>
+          <Button onClick={onUpload} variant="outline" className="sm:w-auto" data-testid="upload-settlement-button">
+            <Upload className="mr-2 h-4 w-4" />
+            Upload file
+          </Button>
+        </div>
+
+        <div className="flex items-center gap-1.5 text-[11.5px] text-slate-500">
+          <RefreshCw className="h-3 w-3 shrink-0" />
+          {synced
+            ? <span>Last synced {synced.toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' })} · settlements already imported are skipped</span>
+            : <span>Amazon issues settlements on its own fortnightly schedule — they cannot be requested for a chosen period</span>}
+        </div>
+      </div>
     </div>
   );
 };

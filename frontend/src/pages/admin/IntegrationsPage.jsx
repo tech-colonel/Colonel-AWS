@@ -10,6 +10,7 @@ import { useAuth } from '../../context/AuthContext';
 import BrandLogo from '../../components/BrandLogos';
 import ComposioMarketplace from './ComposioMarketplace';
 import ShopifyCard from './ShopifyCard';
+import AmazonCard from './AmazonCard';
 import CentralAccountPanel from '../../components/CentralAccountPanel';
 
 /* ── Status pill (matches ToolResultDashboard pill atoms) ───────────────────── */
@@ -448,6 +449,7 @@ const IntegrationsPage = () => {
 
         {/* Composio marketplace — 1000+ connectable apps (additive, self-contained) */}
         <ShopifyCard />
+        <AmazonCard />
 
         <ComposioMarketplace />
       </div>

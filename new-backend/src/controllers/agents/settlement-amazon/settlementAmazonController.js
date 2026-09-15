@@ -6,6 +6,9 @@ const { v4: uuidv4 } = require('uuid');
 const path = require('path');
 const { Op } = require('sequelize');
 const fs = require('fs-extra');
+const amazonReports = require('../../../services/amazonReports');
+const amazonTokenStore = require('../../../services/amazonTokenStore');
+const { pivotSettlementRows, verifyBalance } = require('../../../services/processors/amazonSettlementPivot');
 
 const OUTPUT_DIR = path.join(__dirname, '../../../../outputs');
 
@@ -566,7 +569,205 @@ const generateSettlementMIS = async (req, res, next) => {
     }
 };
 
+
+/* ──────────────────────────────────────────────────────────────────────────────
+   Pull settlements straight from Amazon instead of uploading a file.
+
+   Additive: uploadSettlement above is untouched and remains the path for the
+   18 brands with no Amazon connection. This is the same agent, same table, same
+   MIS — only the source of the rows differs.
+
+   Three things this does that an upload cannot:
+     • refuses to store a settlement whose pivot does not balance, so a bad
+       parse fails loudly instead of quietly posting wrong figures;
+     • skips settlements already imported, so re-running is safe;
+     • writes the pivoted rows out as a workbook, so the existing files list,
+       download and MIS keep working exactly as they do for uploads.
+   ────────────────────────────────────────────────────────────────────────────── */
+
+/* ──────────────────────────────────────────────────────────────────────────────
+   A small position summary for the workspace header — what has actually been
+   imported for this brand, so the UI shows real figures rather than decoration.
+   Read-only and cheap; safe to call on every page load.
+   ────────────────────────────────────────────────────────────────────────────── */
+const getSettlementSummary = async (req, res, next) => {
+    try {
+        const { brandId, agentId } = req.params;
+        const brand = await Brand.findByPk(brandId);
+        const agent = await Agent.findByPk(agentId);
+        if (!brand || !agent) return res.status(404).json({ error: 'Brand or Agent not found' });
+
+        const brandDb = getBrandConnection(brand.db_name);
+        const tableName = agent.name.replace(/[^a-zA-Z0-9]/g, '_').toLowerCase();
+        const Model = getDynamicModel(brandDb, tableName, agent.columns);
+        await Model.sync({ alter: true });
+
+        const rows = await Model.findAll({
+            attributes: ['settlement_id', 'product_sales', 'selling_fees', 'fba_fees',
+                         'other_transaction_fees', 'total', 'created_at'],
+            raw: true,
+        });
+
+        const num = (v) => { const n = Number(v); return Number.isFinite(n) ? n : 0; };
+        const settlements = new Set();
+        let grossSales = 0, amazonFees = 0, netPayout = 0, lastSync = null;
+
+        for (const r of rows) {
+            if (r.settlement_id) settlements.add(String(r.settlement_id));
+            grossSales += num(r.product_sales);
+            amazonFees += num(r.selling_fees) + num(r.fba_fees) + num(r.other_transaction_fees);
+            netPayout  += num(r.total);
+            const t = r.created_at ? new Date(r.created_at) : null;
+            if (t && (!lastSync || t > lastSync)) lastSync = t;
+        }
+
+        res.json({
+            settlements: settlements.size,
+            rows: rows.length,
+            grossSales: Number(grossSales.toFixed(2)),
+            amazonFees: Number(amazonFees.toFixed(2)),   // negative — they are deductions
+            netPayout:  Number(netPayout.toFixed(2)),
+            lastSync:   lastSync ? lastSync.toISOString() : null,
+        });
+    } catch (error) { next(error); }
+};
+
+const fetchSettlementFromAmazon = async (req, res, next) => {
+    try {
+        const { brandId, agentId } = req.params;
+        const limit = Math.min(Number(req.query.limit) || 1, 10);
+        const days  = Math.min(Number(req.query.days)  || 90, 365);
+
+        const brand = await Brand.findByPk(brandId);
+        const agent = await Agent.findByPk(agentId);
+        if (!brand || !agent) return res.status(404).json({ error: 'Brand or Agent not found' });
+
+        const connection = await amazonTokenStore.getConnection(brandId);
+        if (!connection) {
+            return res.status(409).json({
+                error: `${brand.name} is not connected to Amazon yet. Connect it on the Integrations page, or upload the settlement file instead.`,
+                code: 'AMAZON_NOT_CONNECTED',
+            });
+        }
+
+        const brandDb = getBrandConnection(brand.db_name);
+        const tableName = agent.name.replace(/[^a-zA-Z0-9]/g, '_').toLowerCase();
+        const Model = getDynamicModel(brandDb, tableName, agent.columns);
+        await Model.sync({ alter: true });
+
+        // Which settlements do we already hold? Re-importing would double-count.
+        const existing = await Model.findAll({ attributes: ['settlement_id'], group: ['settlement_id'], raw: true });
+        const already = new Set(existing.map((r) => String(r.settlement_id)).filter(Boolean));
+
+        const pulled = await amazonReports.fetchSettlementReports(brandId, {
+            since: new Date(Date.now() - days * 24 * 3600 * 1000),
+            limit,
+            rowLimit: null,
+        });
+
+        await ensureDir();
+        const imported = [], skipped = [], rejected = [];
+
+        for (const report of pulled.reports) {
+            const result = pivotSettlementRows(report.rows);
+            const settlementId = result.settlement && result.settlement.settlement_id;
+
+            if (settlementId && already.has(String(settlementId))) {
+                skipped.push({ settlement_id: settlementId, reason: 'already imported' });
+                continue;
+            }
+
+            /* The pivot must account for every rupee in the ledger. If it does
+               not, something in the file is shaped differently from what we
+               understand, and storing it would put wrong numbers in the books. */
+            const balance = verifyBalance(result);
+            if (!balance.ok) {
+                rejected.push({
+                    settlement_id: settlementId,
+                    reason: 'pivot did not balance',
+                    ledger: balance.ledger, pivot: balance.pivot, drift: balance.drift,
+                    unmapped: result.unmapped,
+                });
+                continue;
+            }
+
+            const filename = `settlement_amazon_${brand.name}_${settlementId || uuidv4()}.xlsx`;
+
+            /* ── all-or-nothing, and duplicate-proof ──────────────────────────
+               Two holes close here, both of which put wrong data in the books:
+
+                 • RACE — two clicks (or two users) land together, both pass the
+                   "already imported?" check, and both insert. An advisory lock
+                   keyed on brand+settlement serialises them, so the second waits
+                   and then sees the first's rows and skips.
+
+                 • PARTIAL INSERT — a bulkCreate that fails halfway leaves some
+                   rows behind. The settlement then LOOKS imported to the next
+                   run, which skips it, and the shortfall is silent. Wrapping the
+                   insert in a transaction makes it all-or-nothing.
+
+               The existence re-check sits INSIDE the lock, not outside, or the
+               lock protects nothing. */
+            let didInsert = false;
+            await brandDb.transaction(async (t) => {
+                await brandDb.query(
+                    'SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))',
+                    { replacements: { key: `settlement:${brandId}:${settlementId}` }, transaction: t }
+                );
+
+                const alreadyIn = settlementId
+                    ? await Model.count({ where: { settlement_id: String(settlementId) }, transaction: t })
+                    : 0;
+                if (alreadyIn > 0) return;              // another run won the race
+
+                await Model.bulkCreate(result.rows.map((r) => ({ ...r, filename })), { transaction: t });
+                didInsert = true;
+            });
+
+            if (!didInsert) {
+                skipped.push({ settlement_id: settlementId, reason: 'already imported' });
+                continue;
+            }
+
+            /* Written only after the rows are committed, so a failed import
+               never leaves an orphaned workbook claiming data that isn't there. */
+            const sheet = XLSX.utils.json_to_sheet(result.rows, { cellDates: true });
+            const book = XLSX.utils.book_new();
+            XLSX.utils.book_append_sheet(book, sheet, 'Settlement');
+            await fs.writeFile(path.join(OUTPUT_DIR, filename), XLSX.write(book, { type: 'buffer', bookType: 'xlsx' }));
+
+            imported.push({
+                settlement_id: settlementId,
+                period: result.settlement && `${result.settlement.start_date} → ${result.settlement.end_date}`,
+                deposit_date: result.settlement && result.settlement.deposit_date,
+                payout_total: balance.settlementHeader,
+                ledger_rows: report.count,
+                stored_rows: result.rows.length,
+                filename,
+                // Amazon's own stated payout vs what we computed — should be 0.
+                variance_vs_amazon: balance.vsHeader,
+            });
+        }
+
+        res.json({
+            success: true,
+            source: `amazon_api:${connection.marketplace_id}`,
+            imported, skipped, rejected,
+            message: imported.length
+                ? `Imported ${imported.length} settlement(s) from Amazon.`
+                : (skipped.length ? 'Nothing new — those settlements are already imported.'
+                                  : 'No settlements found in that window.'),
+        });
+    } catch (error) {
+        console.error('[settlement amazon fetch]', error.message);
+        if (error.status) return res.status(error.status).json({ error: error.message, code: error.code });
+        next(error);
+    }
+};
+
 module.exports = {
+    fetchSettlementFromAmazon,
+    getSettlementSummary,
     uploadSettlement,
     getSettlementFiles,
     downloadSettlementFile,
