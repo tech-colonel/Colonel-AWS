@@ -603,18 +603,19 @@ const getSettlementSummary = async (req, res, next) => {
         await Model.sync({ alter: true });
 
         const rows = await Model.findAll({
-            attributes: ['settlement_id', 'product_sales', 'selling_fees', 'fba_fees',
+            attributes: ['settlement_id', 'product_sales', 'gst_before_tcs', 'selling_fees', 'fba_fees',
                          'other_transaction_fees', 'total', 'created_at'],
             raw: true,
         });
 
         const num = (v) => { const n = Number(v); return Number.isFinite(n) ? n : 0; };
         const settlements = new Set();
-        let grossSales = 0, amazonFees = 0, netPayout = 0, lastSync = null;
+        let grossSales = 0, gstCollected = 0, amazonFees = 0, netPayout = 0, lastSync = null;
 
         for (const r of rows) {
             if (r.settlement_id) settlements.add(String(r.settlement_id));
-            grossSales += num(r.product_sales);
+            grossSales   += num(r.product_sales);
+            gstCollected += num(r.gst_before_tcs);
             amazonFees += num(r.selling_fees) + num(r.fba_fees) + num(r.other_transaction_fees);
             netPayout  += num(r.total);
             const t = r.created_at ? new Date(r.created_at) : null;
@@ -624,7 +625,8 @@ const getSettlementSummary = async (req, res, next) => {
         res.json({
             settlements: settlements.size,
             rows: rows.length,
-            grossSales: Number(grossSales.toFixed(2)),
+            grossSales:   Number(grossSales.toFixed(2)),    // product_sales — taxable value, ex-GST, net of refunds
+            gstCollected: Number(gstCollected.toFixed(2)),  // GST Amazon collected from buyers and passed through
             amazonFees: Number(amazonFees.toFixed(2)),   // negative — they are deductions
             netPayout:  Number(netPayout.toFixed(2)),
             lastSync:   lastSync ? lastSync.toISOString() : null,

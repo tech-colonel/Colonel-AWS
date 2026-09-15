@@ -687,11 +687,16 @@ const AmazonSettlementPanel = ({ conn, summary, fetching, onFetch, onUpload }) =
       <div className="p-5 flex flex-col gap-4">
         {/* imported position */}
         {hasData ? (
-          <div className="grid grid-cols-2 xl:grid-cols-4 gap-2.5">
+          <div className="grid grid-cols-2 xl:grid-cols-5 gap-2.5">
+            {/* Read left to right as a bridge: sales + GST − fees ≈ payout.
+                "Product sales" is taxable value — ex-GST and net of refunds — so
+                the payout can legitimately exceed it; the GST tile is what makes
+                that visible instead of looking like an error. */}
             <Stat label="Settlements" value={summary.settlements} sub={`${inr(summary.rows)} lines`} />
-            <Stat label="Gross sales" value={`₹${inr(summary.grossSales)}`} />
-            <Stat label="Amazon fees" value={`₹${inr(summary.amazonFees)}`} tone="negative" />
-            <Stat label="Net payout" value={`₹${inr(summary.netPayout)}`} tone="positive" />
+            <Stat label="Product sales" value={`₹${inr(summary.grossSales)}`} sub="ex-GST · net of refunds" />
+            <Stat label="GST collected" value={`₹${inr(summary.gstCollected)}`} sub="passed through · payable" />
+            <Stat label="Amazon fees" value={`₹${inr(summary.amazonFees)}`} tone="negative" sub="incl. GST on fees" />
+            <Stat label="Net payout" value={`₹${inr(summary.netPayout)}`} tone="positive" sub="received in bank" />
           </div>
         ) : (
           <p className="text-[13px] text-slate-500">
