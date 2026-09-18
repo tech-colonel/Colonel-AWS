@@ -617,6 +617,7 @@ const AgentsPage = () => {
         open={!!runningWorkflow}
         onClose={() => setRunningWorkflow(null)}
         agentId={runningWorkflow?.agent_id}
+        agentName={runningWorkflow?.agentName}
         brandId={SANDBOX_BRAND_ID}
         initialWorkflow={runningWorkflow}
       />

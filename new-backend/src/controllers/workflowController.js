@@ -242,6 +242,10 @@ const applyWorkflow = [
       const agentId = req.body.agentId;
       const masterData = await fetchMasterData(brandId, agentId);
 
+      // month/year: picked in the Apply Workflow modal for sales-agent workflows only.
+      // Threaded through to the engine as reserved formula vars {Month}/{MonthNumber}/{Year}.
+      const dateContext = { month: req.body.month, year: req.body.year };
+
       // Build on a worker thread, never here. This is minutes of synchronous CPU —
       // the shopify-koparo workflow emits a 136 MB workbook — and on the main thread
       // it holds the event loop for the whole run, which is what repeatedly took the
@@ -251,7 +255,7 @@ const applyWorkflow = [
       let outputBuffer, missingMasterValues;
       if (workflow.sheets && workflow.sheets.length > 0) {
         ({ buffer: outputBuffer, missingMasterValues } = await runWorkflowApply({
-          sheets: workflow.sheets, fileBufferOrMap, masterData, fileInputs,
+          sheets: workflow.sheets, fileBufferOrMap, masterData, fileInputs, dateContext,
         }));
       } else if (workflow.columns && workflow.columns.length > 0) {
         const singleBuf = Buffer.isBuffer(fileBufferOrMap) ? fileBufferOrMap : Object.values(fileBufferOrMap)[0];

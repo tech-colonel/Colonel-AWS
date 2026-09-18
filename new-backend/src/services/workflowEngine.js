@@ -602,10 +602,22 @@ function collectFormulaTokens(sheet, into) {
   return into;
 }
 
-function applyMultiSheetWorkflow(sheets, fileBufferOrMap, masterData = {}, fileInputs = []) {
+// dateContext: { month, year } — the month/year picked in the Apply Workflow modal (sales-agent
+// workflows only). Exposed to every sheet's row scope as the reserved formula vars {Month} (full
+// name, e.g. "April"), {MonthNumber} (1-12) and {Year}, so a formula can build month-stamped values
+// (e.g. an invoice number suffix) without the month being hardcoded into the sheet or master data.
+const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June',
+  'July', 'August', 'September', 'October', 'November', 'December'];
+
+function applyMultiSheetWorkflow(sheets, fileBufferOrMap, masterData = {}, fileInputs = [], dateContext = {}) {
   const missingTracker = createMissingMasterTracker();
   // One (masterType, keyField) → normalized-key map cache for the whole run.
   const masterCache = new Map();
+
+  const monthIdx = MONTH_NAMES.findIndex(m => m.toLowerCase() === String(dateContext.month || '').toLowerCase());
+  const dateVars = {};
+  if (monthIdx >= 0) { dateVars.Month = MONTH_NAMES[monthIdx]; dateVars.MonthNumber = monthIdx + 1; }
+  if (dateContext.year) dateVars.Year = Number(dateContext.year);
 
   // Every {SheetName.Label} token anywhere in the workflow. A sheet's pre-grouped
   // rows are kept in `sheetResults` only to answer such cross-references from a
@@ -713,7 +725,7 @@ function applyMultiSheetWorkflow(sheets, fileBufferOrMap, masterData = {}, fileI
     // Shipping Province Name) set only on an order's first line-item row.
     const fillDownState = {};
     const allRowsData = rawRows.map((rawRow, rowIdx) => {
-      const row = {};
+      const row = { ...dateVars };
       for (const prevIdx of neededPrevIdx) {
         const prevSheet   = sheets[prevIdx];
         const prevRowData = sheetResults[prevIdx]?.[rowIdx] || {};

@@ -36,7 +36,7 @@ function rehydrate(input) {
 }
 
 try {
-  const { sheets, masterData, fileInputs, legacyColumns } = workerData;
+  const { sheets, masterData, fileInputs, legacyColumns, dateContext } = workerData;
   const fileBufferOrMap = rehydrate(workerData.fileBufferOrMap);
 
   let result;
@@ -46,7 +46,7 @@ try {
       : Object.values(fileBufferOrMap)[0];
     result = engine.applyLegacyWorkflow(legacyColumns, buf);
   } else {
-    result = engine.applyMultiSheetWorkflow(sheets, fileBufferOrMap, masterData, fileInputs);
+    result = engine.applyMultiSheetWorkflow(sheets, fileBufferOrMap, masterData, fileInputs, dateContext);
   }
 
   const buffer = result.buffer;
