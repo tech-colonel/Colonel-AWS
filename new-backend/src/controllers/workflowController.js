@@ -484,9 +484,15 @@ function applyMultiSheetWorkflow(sheets, fileBufferOrMap, masterData = {}, fileI
     }
 
     // ── Normal sheet ──────────────────────────────────────────────────────────
-    // Source rows: from a previous sheet's output OR from a raw input sheet
+    // Source rows: from a previous sheet's output, a raw input sheet, or a
+    // brand master dump (masterData[masterKey] — e.g. sku_master / ledger_master
+    // / any other master array passed in via masterData, serialized verbatim as
+    // a sheet of rows). Used for simple "master dump" sheets that have no CSV
+    // input of their own (e.g. a "Product Type" or "HSN Code" master sheet).
     let sourceRows;
-    if (wfSheet.sourceType === 'prev_sheet' && wfSheet.prevSheetName) {
+    if (wfSheet.sourceType === 'master_dump' && wfSheet.masterKey) {
+      sourceRows = masterData[wfSheet.masterKey] || [];
+    } else if (wfSheet.sourceType === 'prev_sheet' && wfSheet.prevSheetName) {
       const prevIdx = sheets.slice(0, sheetIdx).findIndex(s => s.name === wfSheet.prevSheetName);
       sourceRows = prevIdx >= 0 && sheetOutputs[prevIdx] ? sheetOutputs[prevIdx] : sheetDefaultRows;
     } else {
@@ -496,6 +502,7 @@ function applyMultiSheetWorkflow(sheets, fileBufferOrMap, masterData = {}, fileI
     const orderedCols = [...(wfSheet.columns || [])].sort((a, b) => a.order - b.order);
 
     // Pass 1: seed source + master + cross-sheet refs for ALL rows
+    const fillDownState = {}; // col.label -> last non-blank value seen, for source columns with fillDown:true
     const allRowsData = rawRows.map((rawRow, rowIdx) => {
       const row = {};
       for (let prevIdx = 0; prevIdx < sheetIdx; prevIdx++) {
@@ -507,7 +514,16 @@ function applyMultiSheetWorkflow(sheets, fileBufferOrMap, masterData = {}, fileI
       }
       for (const col of orderedCols) {
         if (col.type === 'source') {
-          row[col.label] = rawRow[col.key] !== undefined ? rawRow[col.key] : '';
+          let val = rawRow[col.key] !== undefined ? rawRow[col.key] : '';
+          if (col.fillDown) {
+            const isBlank = val === undefined || val === null || String(val).trim() === '';
+            if (isBlank) {
+              val = fillDownState[col.label] !== undefined ? fillDownState[col.label] : val;
+            } else {
+              fillDownState[col.label] = val;
+            }
+          }
+          row[col.label] = val;
         } else if (col.type === 'master_lookup') {
           row[col.label] = resolveMasterLookup(col, rawRow, masterData, missingTracker);
         } else if (col.type === 'master_validate') {
@@ -557,12 +573,12 @@ function applyLegacyWorkflow(columns, fileBuffer) {
 // ─── Fetch Brand Master Data ──────────────────────────────────────────────────
 
 async function fetchMasterData(brandId, agentId) {
-  if (!brandId || !agentId) return { sku_master: [], ledger_master: [] };
+  if (!brandId || !agentId) return { sku_master: [], ledger_master: [], product_type_master: [] };
   try {
     const brand = await Brand.findByPk(brandId);
     if (!brand) {
       console.log(`[workflow] fetchMasterData: brand ${brandId} not found`);
-      return { sku_master: [], ledger_master: [] };
+      return { sku_master: [], ledger_master: [], product_type_master: [] };
     }
 
     const brandDb = getBrandConnection(brand.db_name);
@@ -573,15 +589,16 @@ async function fetchMasterData(brandId, agentId) {
       where: { brand_id: brandId, agent_id: agentId }
     });
 
-    console.log(`[workflow] fetchMasterData: sku=${record.sku_master?.length ?? 0} ledger=${record.ledger_master?.length ?? 0}`);
+    console.log(`[workflow] fetchMasterData: sku=${record.sku_master?.length ?? 0} ledger=${record.ledger_master?.length ?? 0} product_type=${record.product_type_master?.length ?? 0}`);
 
     return {
       sku_master:    record.sku_master    || [],
-      ledger_master: record.ledger_master || []
+      ledger_master: record.ledger_master || [],
+      product_type_master: record.product_type_master || []
     };
   } catch (err) {
     console.error('[workflow] fetchMasterData error:', err.message);
-    return { sku_master: [], ledger_master: [] };
+    return { sku_master: [], ledger_master: [], product_type_master: [] };
   }
 }
 

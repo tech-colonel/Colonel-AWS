@@ -33,6 +33,10 @@ const getBrandAgentModel = (sequelize) => {
     ledger_master: {
       type: DataTypes.JSONB,
       defaultValue: []
+    },
+    product_type_master: {
+      type: DataTypes.JSONB,
+      defaultValue: []
     }
   }, {
     tableName: 'brand_agents',

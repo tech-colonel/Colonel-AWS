@@ -15,6 +15,22 @@ const parseDate = (dString) => {
   return new Date(dString); // fallback (ISO format etc.)
 };
 
+// ─── Helper: read a per-brand .env key that's named after brand.name ───────
+// Brand names can contain characters (apostrophes, spaces) that dotenv can't
+// parse as a key, and brand.name can change over time (renames), so we try
+// the exact name plus a punctuation-stripped variant, each in a few casings.
+const readBrandEnv = (brandName, suffix) => {
+  const stripped = brandName.replace(/[^a-zA-Z0-9]/g, '');
+  const candidates = [
+    brandName, brandName.toLowerCase(), brandName.toUpperCase(),
+    stripped, stripped.toLowerCase(), stripped.toUpperCase(),
+  ];
+  for (const key of candidates) {
+    if (process.env[`${key}${suffix}`]) return process.env[`${key}${suffix}`];
+  }
+  return null;
+};
+
 // ─── POST /api/brands/:brandId/agents/:agentId/invoice/process ───────────────
 const processInvoice = async (req, res, next) => {
   try {
@@ -29,11 +45,8 @@ const processInvoice = async (req, res, next) => {
     }
 
     // Read the webhook URL from .env as: {brandname}_invoice_url
-    // Checks lowercase, UPPERCASE and exact casing
-    const webhookUrl =
-      process.env[`${brand.name.toLowerCase()}_invoice_url`] ||
-      process.env[`${brand.name.toUpperCase()}_invoice_url`] ||
-      process.env[`${brand.name}_invoice_url`];
+    // Checks lowercase, UPPERCASE, exact casing, and a punctuation-stripped variant
+    const webhookUrl = readBrandEnv(brand.name, '_invoice_url');
 
     if (!webhookUrl) {
       return res.status(400).json({
@@ -135,11 +148,7 @@ const getSheetUrl = async (req, res, next) => {
     const brand = await Brand.findByPk(brandId);
     if (!brand) return res.status(404).json({ error: 'Brand not found' });
 
-    const sheetUrl =
-      process.env[`${brand.name.toLowerCase()}_invoice_sheet`] ||
-      process.env[`${brand.name.toUpperCase()}_invoice_sheet`] ||
-      process.env[`${brand.name}_invoice_sheet`] ||
-      null;
+    const sheetUrl = readBrandEnv(brand.name, '_invoice_sheet');
 
     res.json({ sheetUrl });
   } catch (error) {
