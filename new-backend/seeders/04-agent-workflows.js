@@ -1979,6 +1979,13 @@ const AGENT_WORKFLOWS = [
             "lookupColumn": "Shipping Province Name"
           },
           {
+            "id": "gt_invno_month",
+            "type": "computed",
+            "label": "Invoice Number",
+            "order": 201.5,
+            "formula": "{Invoice Number}.replace(/-\\d+$/, '') + '-' + String({MonthNumber}).padStart(2, '0')"
+          },
+          {
             "id": "gt_gstrate",
             "type": "computed",
             "label": "GST Rate",
