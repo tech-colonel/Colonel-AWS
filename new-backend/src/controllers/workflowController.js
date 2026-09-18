@@ -421,8 +421,20 @@ function buildFormulaReferenceSheet(sheets) {
 // ─── Multi-Sheet Workflow Apply ───────────────────────────────────────────────
 
 // fileBufferOrMap: Buffer (legacy / single-file) OR { [fileInputId]: Buffer } (multi-file)
-function applyMultiSheetWorkflow(sheets, fileBufferOrMap, masterData = {}, fileInputs = []) {
+// dateContext: { month, year } — the month/year picked in the Apply Workflow modal (sales-agent
+// workflows only). Exposed to every sheet's row scope as the reserved formula vars {Month} (full
+// name, e.g. "April"), {MonthNumber} (1-12) and {Year}, so a formula can build month-stamped values
+// (e.g. an invoice number suffix) without the month being hardcoded into the sheet or master data.
+const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June',
+  'July', 'August', 'September', 'October', 'November', 'December'];
+
+function applyMultiSheetWorkflow(sheets, fileBufferOrMap, masterData = {}, fileInputs = [], dateContext = {}) {
   const missingTracker = createMissingMasterTracker();
+
+  const monthIdx = MONTH_NAMES.findIndex(m => m.toLowerCase() === String(dateContext.month || '').toLowerCase());
+  const dateVars = {};
+  if (monthIdx >= 0) { dateVars.Month = MONTH_NAMES[monthIdx]; dateVars.MonthNumber = monthIdx + 1; }
+  if (dateContext.year) dateVars.Year = Number(dateContext.year);
 
   const normalizeRow = (row) => {
     const out = {};
@@ -504,7 +516,7 @@ function applyMultiSheetWorkflow(sheets, fileBufferOrMap, masterData = {}, fileI
     // Pass 1: seed source + master + cross-sheet refs for ALL rows
     const fillDownState = {}; // col.label -> last non-blank value seen, for source columns with fillDown:true
     const allRowsData = rawRows.map((rawRow, rowIdx) => {
-      const row = {};
+      const row = { ...dateVars };
       for (let prevIdx = 0; prevIdx < sheetIdx; prevIdx++) {
         const prevSheet   = sheets[prevIdx];
         const prevRowData = sheetResults[prevIdx]?.[rowIdx] || {};
@@ -795,9 +807,11 @@ const applyWorkflow = [
       const agentId = req.body.agentId;
       const masterData = await fetchMasterData(brandId, agentId);
 
+      const dateContext = { month: req.body.month, year: req.body.year };
+
       let outputBuffer, missingMasterValues;
       if (workflow.sheets && workflow.sheets.length > 0) {
-        ({ buffer: outputBuffer, missingMasterValues } = applyMultiSheetWorkflow(workflow.sheets, fileBufferOrMap, masterData, fileInputs));
+        ({ buffer: outputBuffer, missingMasterValues } = applyMultiSheetWorkflow(workflow.sheets, fileBufferOrMap, masterData, fileInputs, dateContext));
       } else if (workflow.columns && workflow.columns.length > 0) {
         const singleBuf = Buffer.isBuffer(fileBufferOrMap) ? fileBufferOrMap : Object.values(fileBufferOrMap)[0];
         ({ buffer: outputBuffer, missingMasterValues } = applyLegacyWorkflow(workflow.columns, singleBuf));

@@ -410,6 +410,7 @@ const BrandAgentsInventory = () => {
         open={!!runningWorkflow}
         onClose={() => setRunningWorkflow(null)}
         agentId={runningWorkflow?.agent_id}
+        agentName={runningWorkflow?.agentName}
         brandId={brandId}
         initialWorkflow={runningWorkflow}
       />

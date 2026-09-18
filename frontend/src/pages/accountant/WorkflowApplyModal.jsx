@@ -107,12 +107,26 @@ const WorkflowSelector = ({ agentId, onSelect }) => {
 
 // ─── Step 2: Upload & apply ───────────────────────────────────────────────────
 
-const ApplyStep = ({ workflow, agentId, brandId, onBack, onClose }) => {
+// Same "is this a sales-marketplace agent" rule used in BrandAgentsInventory.jsx — sales
+// agents are the ones whose file is tied to a specific month, so only they get the picker.
+const isSalesAgent = (name) => {
+  const n = (name || '').toLowerCase();
+  return /^sales-/.test(n) || ['nykaa', 'settlement-amazon', 'total-sales-analyzer'].includes(n);
+};
+
+const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June',
+  'July', 'August', 'September', 'October', 'November', 'December'];
+
+const ApplyStep = ({ workflow, agentId, agentName, brandId, onBack, onClose }) => {
   const fileInputs = workflow.fileInputs?.length > 0
     ? workflow.fileInputs
     : [{ id: 'file_0', label: 'Input File' }];
 
+  const needsMonth = isSalesAgent(agentName || workflow.agentName);
+
   const [files,          setFiles]          = useState({});
+  const [month,          setMonth]          = useState('');
+  const [year,           setYear]           = useState(new Date().getFullYear().toString());
   const [applying,       setApplying]       = useState(false);
   const [outputFilename, setOutputFilename] = useState(null);
   const [downloading,    setDownloading]    = useState(false);
@@ -121,7 +135,7 @@ const ApplyStep = ({ workflow, agentId, brandId, onBack, onClose }) => {
   const [masterData,             setMasterData]             = useState({ sku_master: [], ledger_master: [] });
 
   const sheets           = workflow.sheets || [];
-  const allFilesSelected = fileInputs.every(fi => !!files[fi.id]);
+  const allFilesSelected = fileInputs.every(fi => !!files[fi.id]) && (!needsMonth || (month && year));
 
   const setFile = (fileInputId, file) => {
     setFiles(prev => ({ ...prev, [fileInputId]: file || undefined }));
@@ -150,6 +164,10 @@ const ApplyStep = ({ workflow, agentId, brandId, onBack, onClose }) => {
       }
       if (proceedWithoutMaster) {
         fd.append('proceedWithoutMaster', 'true');
+      }
+      if (needsMonth) {
+        fd.append('month', month);
+        fd.append('year', year);
       }
       const res = await api.post(`/api/workflows/${workflow.id}/apply`, fd, {
         headers: { 'Content-Type': 'multipart/form-data' }
@@ -241,6 +259,38 @@ const ApplyStep = ({ workflow, agentId, brandId, onBack, onClose }) => {
         </div>
       </div>
 
+      {/* Month / Year (sales-agent workflows only — the file being applied is for one month) */}
+      {needsMonth && (
+        <div className="grid grid-cols-2 gap-4">
+          <div>
+            <label htmlFor="wf-month" className="text-sm font-medium text-slate-700">Month *</label>
+            <select
+              id="wf-month"
+              value={month}
+              onChange={e => setMonth(e.target.value)}
+              required
+              data-testid="workflow-month-select"
+              className="flex h-9 w-full rounded-md border border-slate-200 bg-transparent px-3 py-2 text-sm mt-1.5"
+            >
+              <option value="">Select</option>
+              {MONTHS.map(m => <option key={m} value={m}>{m}</option>)}
+            </select>
+          </div>
+          <div>
+            <label htmlFor="wf-year" className="text-sm font-medium text-slate-700">Year *</label>
+            <input
+              id="wf-year"
+              type="number"
+              value={year}
+              onChange={e => setYear(e.target.value)}
+              required
+              data-testid="workflow-year-input"
+              className="flex h-9 w-full rounded-md border border-slate-200 bg-transparent px-3 py-2 text-sm mt-1.5"
+            />
+          </div>
+        </div>
+      )}
+
       {/* File upload(s) */}
       <div className="space-y-3">
         <p className="text-sm font-medium text-slate-700">
@@ -326,7 +376,10 @@ const ApplyStep = ({ workflow, agentId, brandId, onBack, onClose }) => {
 // ─── Main Modal ────────────────────────────────────────────────────────────────
 
 // initialWorkflow: if provided, skips the selector and goes straight to ApplyStep
-const WorkflowApplyModal = ({ agentId, brandId, open, onClose, initialWorkflow = null }) => {
+// agentName: parent agent's name (used to decide whether this is a sales-agent workflow, which
+// needs the Month/Year picker) — falls back to initialWorkflow.agentName / selectedWorkflow.agentName
+// when omitted, since the global "Workflows" list (getAllWorkflows) already attaches it.
+const WorkflowApplyModal = ({ agentId, agentName, brandId, open, onClose, initialWorkflow = null }) => {
   const [selectedWorkflow, setSelectedWorkflow] = useState(initialWorkflow);
 
   useEffect(() => {
@@ -354,6 +407,7 @@ const WorkflowApplyModal = ({ agentId, brandId, open, onClose, initialWorkflow =
           <ApplyStep
             workflow={selectedWorkflow}
             agentId={agentId}
+            agentName={agentName}
             brandId={brandId}
             onBack={initialWorkflow ? null : () => setSelectedWorkflow(null)}
             onClose={onClose}

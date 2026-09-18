@@ -1860,6 +1860,7 @@ const AgentWorkspace = () => {
       )}
       <WorkflowApplyModal
         agentId={agentId}
+        agentName={agent?.name}
         brandId={brandId}
         open={showWorkflowModal}
         onClose={() => setShowWorkflowModal(false)}
