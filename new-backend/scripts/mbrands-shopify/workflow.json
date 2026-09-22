@@ -1,0 +1,89 @@
+{
+  "name": "shopify mbrands",
+  "description": "Shopify M Brands — Sales Working generator. Replicates the \"SHOPIFY SALES PROCESS - M BRANDS\" SOP: Source + Stock Master are carried forward verbatim from last month's own Working file (slow-changing master data, not derivable from the raw report), only the Inv no. column's month suffix refreshed; the Sales-<Month> sheet is built fresh from this month's raw Shopify report with the same live Excel formulas (VLOOKUP/IF/SUBTOTAL) as the hand-built working paper, so the output stays auditable/editable in Excel exactly like it — open and press F9 (or let AutoCalc run) to see the numbers.",
+  "fileInputs": [
+    { "id": "raw_report", "label": "Raw Shopify Report (this month's export)" },
+    { "id": "template", "label": "Last Month's Sales Working File (carries Source + Stock Master forward)" }
+  ],
+  "sheets": [
+    {
+      "id": "source",
+      "name": "Source",
+      "type": "template",
+      "templateFileInputId": "template",
+      "templateSheetName": "Source",
+      "refresh": [
+        { "column": "D", "startRow": 2, "find": "-\\d{2}$", "replace": "-{MonthNumberPadded}" }
+      ]
+    },
+    {
+      "id": "stockmaster",
+      "name": "Stock Master",
+      "type": "template",
+      "templateFileInputId": "template",
+      "templateSheetName": "Stock Master"
+    },
+    {
+      "id": "sales",
+      "name": "Sales-{Month} {YearShort}",
+      "layout": "subtotal-formula",
+      "sourceType": "raw",
+      "fileInputId": "raw_report",
+      "filters": [],
+      "columns": [
+        { "id": "created_at", "label": "Created At", "headerLabel": "Created at", "type": "source", "key": "Created at", "order": 0 },
+        { "id": "order_id_text", "label": "Order Id Text", "headerLabel": "Order id", "type": "source", "key": "Order id", "order": 1 },
+        { "id": "order_id_num", "label": "Order Id Num", "headerLabel": "Order id", "type": "source", "key": "Order id_1", "order": 2 },
+        { "id": "exceptional_order_id", "label": "Exceptional Order Id", "headerLabel": "Exceptional order id", "type": "formula", "formula": "={Order Id Num}&\"-C\"", "order": 3 },
+        { "id": "lineitem_sku", "label": "Lineitem SKU", "headerLabel": "Lineitem sku", "type": "source", "key": "Lineitem sku", "order": 4 },
+        { "id": "lineitem_qty", "label": "Lineitem Quantity", "headerLabel": "Lineitem quantity", "type": "source", "key": "Lineitem quantity", "order": 5, "subtotal": true },
+        { "id": "mrp", "label": "Mrp", "headerLabel": "Mrp", "type": "source", "key": "Mrp", "order": 6 },
+        { "id": "cost_price", "label": "Cost Price", "headerLabel": "Cost price", "type": "source", "key": "Cost price", "order": 7 },
+        { "id": "lineitem_price", "label": "Lineitem Price", "headerLabel": "Lineitem price", "type": "source", "key": "Lineitem price", "order": 8 },
+        { "id": "total", "label": "Total", "headerLabel": "Total", "type": "source", "key": "Total", "order": 9 },
+        { "id": "discount_code", "label": "Discount Code", "headerLabel": "Discount Code", "type": "source", "key": "Discount Code", "order": 10 },
+        { "id": "discount_amount", "label": "Discount Amount", "headerLabel": "Discount Amount", "type": "source", "key": "Discount Amount", "order": 11 },
+        { "id": "taxes", "label": "Taxes", "headerLabel": "Taxes", "type": "source", "key": "Taxes", "order": 12 },
+        { "id": "shipping_province", "label": "Shipping Province Name", "headerLabel": "Shipping Province Name", "type": "source", "key": "Shipping Province Name", "order": 13, "fillDownFormula": true },
+        { "id": "payment_method", "label": "Payment Method", "headerLabel": "Payment Method", "type": "source", "key": "Payment Method", "order": 14 },
+        { "id": "confirmation_status", "label": "Confirmation Status", "headerLabel": "Confirmation status", "type": "source", "key": "Confirmation status", "order": 15 },
+        { "id": "status", "label": "Status", "headerLabel": "Status", "type": "source", "key": "Status", "order": 16, "fillDownFormula": true },
+        { "id": "delivery_status", "label": "Delivery Status", "headerLabel": "Delivery Status", "type": "source", "key": "Delivery Status", "order": 17, "fillDownFormula": true },
+        { "id": "refund_amount", "label": "Refund Amount", "headerLabel": "Refund Amount", "type": "source", "key": "Refund Amount", "order": 18 },
+        { "id": "refund_source", "label": "Refund Source", "headerLabel": "Refund source", "type": "source", "key": "Refund source", "order": 19 },
+        { "id": "payment_references", "label": "Payment References", "headerLabel": "Payment References", "type": "source", "key": "Payment References", "order": 20 },
+        { "id": "ppcod", "label": "PPCOD", "headerLabel": "PPCOD", "type": "source", "key": "PPCOD", "order": 21 },
+        { "id": "cancellation_reason", "label": "Cancellation Reason", "headerLabel": "Cancellation reason", "type": "source", "key": "Cancellation reason", "order": 22 },
+
+        { "id": "invoice_value", "label": "Invoice Value", "type": "formula", "order": 23, "subtotal": true,
+          "formula": "={Lineitem Price}-{Discount Amount}" },
+        { "id": "gst_rate", "label": "GST Rate", "type": "formula", "order": 24,
+          "formula": "=IF({Invoice Value}>2500,\"18\",\"5\")" },
+        { "id": "taxable_value", "label": "Taxable Value", "type": "formula", "order": 25, "subtotal": true,
+          "formula": "={Invoice Value}/({GST Rate}+100)*100" },
+        { "id": "rate", "label": "Rate", "type": "formula", "order": 26,
+          "formula": "=IFERROR({Taxable Value}/{Lineitem Quantity},0)" },
+        { "id": "voucher_type", "label": "Voucher Type", "type": "formula", "order": 27,
+          "formula": "=IF(OR({Delivery Status}=\"DELIVERED\",{Delivery Status}=\"IN TRANSIT\",{Delivery Status}=\"PENDING\"),IF({Taxable Value}<0,\"Credit Note\",\"Sales\"),\"\")" },
+        { "id": "debtor", "label": "Debtor", "type": "formula", "order": 28,
+          "formula": "=IF({Voucher Type}=\"\",\"\",IFERROR(VLOOKUP({Shipping Province Name},Source!$B$2:$D${SheetLastRow:Source},2,0),\"\"))" },
+        { "id": "sales_ledger", "label": "Sales Ledger", "type": "formula", "order": 29,
+          "formula": "=IF({Voucher Type}=\"\",\"\",IF(OR({Shipping Province Name}=\"Texas\",{Shipping Province Name}=\"New South Wales\"),\"Export Shopify Sales\",IF({GST Rate}=\"18\",\"Shopify Sales @18%\",\"Shopify Sales @5%\")))" },
+        { "id": "invoice_number", "label": "Invoice Number", "type": "formula", "order": 30,
+          "formula": "=IF({Voucher Type}=\"\",\"\",IF(OR({Shipping Province Name}=\"Texas\",{Shipping Province Name}=\"New South Wales\"),IFERROR(VLOOKUP({Order Id Num},Source!$F$2:$G${SheetLastRow:Source},2,0),\"\")&IF({Taxable Value}<0,\"CN\",\"\"),IFERROR(VLOOKUP({Shipping Province Name},Source!$B$2:$D${SheetLastRow:Source},3,0),\"\")&IF({GST Rate}=\"18\",\"A\",\"\")&IF({Taxable Value}<0,\"CN\",\"\")))" },
+        { "id": "stock_name", "label": "Stock Name as per Tally", "type": "formula", "order": 31,
+          "formula": "=IF({Voucher Type}=\"\",\"\",IFERROR(VLOOKUP({Lineitem SKU},'Stock Master'!$A$2:$B${SheetLastRow:Stock Master},2,0),\"\"))" },
+        { "id": "output_igst", "label": "Output IGST", "type": "formula", "order": 32, "subtotal": true,
+          "formula": "=IF({Voucher Type}=\"\",\"\",IF(OR(OR({Shipping Province Name}=\"Texas\",{Shipping Province Name}=\"New South Wales\"),{Shipping Province Name}=\"Maharashtra\"),0,{Taxable Value}*{GST Rate}%))" },
+        { "id": "output_cgst", "label": "Output CGST", "type": "formula", "order": 33, "subtotal": true,
+          "formula": "=IF({Voucher Type}=\"\",\"\",IF(AND(NOT(OR({Shipping Province Name}=\"Texas\",{Shipping Province Name}=\"New South Wales\")),{Shipping Province Name}=\"Maharashtra\"),{Taxable Value}*{GST Rate}%/2,0))" },
+        { "id": "output_sgst", "label": "Output SGST", "type": "formula", "order": 34, "subtotal": true,
+          "formula": "=IF({Voucher Type}=\"\",\"\",IF(AND(NOT(OR({Shipping Province Name}=\"Texas\",{Shipping Province Name}=\"New South Wales\")),{Shipping Province Name}=\"Maharashtra\"),{Taxable Value}*{GST Rate}%/2,0))" },
+        { "id": "cost", "label": "Cost", "type": "formula", "order": 35, "subtotal": true,
+          "formula": "=IF({Voucher Type}=\"\",\"\",IF({Voucher Type}=\"Credit Note\",-{Cost Price},{Cost Price}))" },
+        { "id": "cost_x_qty", "label": "Cost x Qty", "type": "formula", "order": 36, "subtotal": true,
+          "formula": "=IF({Cost}=\"\",\"\",{Cost}*{Lineitem Quantity})" }
+      ]
+    }
+  ]
+}

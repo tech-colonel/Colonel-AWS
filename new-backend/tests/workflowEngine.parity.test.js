@@ -54,7 +54,13 @@ function readBook(buf) {
 function assertSameOutput(label, sheets, inputMap, masterData, fileInputs) {
   const a = OLD.applyMultiSheetWorkflow(sheets, inputMap, masterData, fileInputs);
   const b = NEW.applyMultiSheetWorkflow(sheets, inputMap, masterData, fileInputs);
-  assert.deepStrictEqual(readBook(b.buffer), readBook(a.buffer), `${label}: workbook rows differ`);
+  const ra = readBook(a.buffer), rb = readBook(b.buffer);
+  // 'Formula Reference' is a human-readable doc sheet, not computed output — its
+  // wording is expected to evolve as the engine gains new column/sheet types
+  // (e.g. the 'formula'/'template' additions), independent of functional parity.
+  delete ra['Formula Reference'];
+  delete rb['Formula Reference'];
+  assert.deepStrictEqual(rb, ra, `${label}: workbook rows differ`);
   assert.deepStrictEqual(
     b.missingMasterValues, a.missingMasterValues,
     `${label}: missingMasterValues differ`,

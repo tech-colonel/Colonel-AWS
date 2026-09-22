@@ -559,23 +559,35 @@ function buildFormulaReferenceSheet(sheets) {
       continue;
     }
 
+    if (sheet.type === 'template') {
+      rows.push([sheet.name, '— Template Carry-Forward —', 'Input',
+        `Whole sheet "${sheet.templateSheetName}" copied verbatim from file input "${sheet.templateFileInputId}"`
+        + ((sheet.refresh || []).length ? ` | Refreshed: ${sheet.refresh.map(r => `col ${r.column} (${r.find} → ${r.replace})`).join(', ')}` : '')]);
+      continue;
+    }
+
     const orderedCols = [...(sheet.columns || [])].sort((a, b) => a.order - b.order);
     if (sheet.rawSheetName) rows.push([sheet.name, '— Source Sheet —', 'Input', sheet.rawSheetName]);
+    if (sheet.layout === 'subtotal-formula') {
+      rows.push([sheet.name, '— Layout —', 'subtotal-formula',
+        'Row 1 = SUBTOTAL roll-ups, row 2 = headers, row 3+ = data; formula columns write LIVE Excel formulas, not computed values']);
+    }
 
     for (const col of orderedCols) {
       let typeLabel, details;
       switch (col.type) {
-        case 'source':        typeLabel = col.fillDown ? 'Source (fill down blanks)' : 'Source';
+        case 'source':        typeLabel = col.fillDownFormula ? 'Source (fill down as live formula)' : col.fillDown ? 'Source (fill down blanks)' : 'Source';
           details = col.key || col.label; break;
         case 'computed':      typeLabel = 'Math Formula';             details = col.formula || ''; break;
-        case 'excel':         typeLabel = 'Excel Formula (cross-row)'; details = col.formula || ''; break;
+        case 'excel':         typeLabel = 'Excel Formula (cross-row, evaluated to a value)'; details = col.formula || ''; break;
+        case 'formula':       typeLabel = 'Live Excel Formula (written as a real formula)'; details = col.formula || ''; break;
         case 'master_lookup': typeLabel = 'Master Lookup';
           details = `Match column "${col.lookupColumn}" in ${col.masterType || 'sku'} master → return field "${col.returnField}"`; break;
         case 'master_validate': typeLabel = 'Master Validate';
           details = `Check "${col.lookupColumn}" exists in ${col.masterType || 'ledger'} master field "${col.matchField}" → "${col.matchLabel || 'Matched'}" / "${col.noMatchLabel || 'Not Matched'}"`; break;
         default:              typeLabel = col.type || ''; details = col.formula || '';
       }
-      rows.push([sheet.name || '', col.label || '', typeLabel, details]);
+      rows.push([sheet.name || '', col.label || '', typeLabel + (col.subtotal ? ' [SUBTOTAL row 1]' : ''), details]);
     }
 
     if (sheet.groupBy?.enabled && sheet.groupBy?.columns?.length) {
@@ -609,15 +621,163 @@ function collectFormulaTokens(sheet, into) {
 const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June',
   'July', 'August', 'September', 'October', 'November', 'December'];
 
+// Replaces {Month}/{MonthNumber}/{MonthNumberPadded}/{Year}/{YearShort} in a plain
+// string (a sheet name, a template refresh replacement) with the current run's
+// date context. Distinct from the row-formula token resolvers below, which also
+// handle {ColumnLabel} → cell-address substitution.
+function substituteDateTokens(str, dateVars) {
+  return String(str || '')
+    .replace(/\{MonthNumberPadded\}/g, dateVars.MonthNumberPadded ?? '')
+    .replace(/\{MonthNumber\}/g, dateVars.MonthNumber != null ? String(dateVars.MonthNumber) : '')
+    .replace(/\{Month\}/g, dateVars.Month ?? '')
+    .replace(/\{YearShort\}/g, dateVars.YearShort ?? '')
+    .replace(/\{Year\}/g, dateVars.Year != null ? String(dateVars.Year) : '');
+}
+
+// ─── Template Sheets (whole-sheet carry-forward) ──────────────────────────────
+// A `type: 'template'` sheet copies an entire sheet — values, formulas, styles,
+// column widths — verbatim out of a designated file input (typically "last
+// month's own output", used as this month's starting point for slow-changing
+// master sheets like a Source/state map or a Stock Master), rather than being
+// derived row-by-row from an uploaded report. Optional `refresh` ops do a
+// regex find/replace on one column's string cells (e.g. rewriting a trailing
+// "-06" month suffix to "-07"), so only the bit that actually changed month to
+// month needs touching.
+
+function deepCopySheet(ws) {
+  const out = {};
+  for (const key of Object.keys(ws)) {
+    const val = ws[key];
+    if (key.startsWith('!')) {
+      out[key] = Array.isArray(val) ? val.map(v => (v && typeof v === 'object') ? { ...v } : v)
+                                     : (val && typeof val === 'object' ? { ...val } : val);
+    } else {
+      out[key] = { ...val };
+    }
+  }
+  return out;
+}
+
+function sheetLastRowFromRef(ws) {
+  if (!ws['!ref']) return 1;
+  return XLSX.utils.decode_range(ws['!ref']).e.r + 1; // 1-based last row
+}
+
+function applyTemplateRefresh(ws, refreshOps, dateVars) {
+  if (!refreshOps || !refreshOps.length) return;
+  const lastRow = sheetLastRowFromRef(ws);
+  for (const op of refreshOps) {
+    const find = new RegExp(op.find, 'g');
+    const replace = substituteDateTokens(op.replace || '', dateVars);
+    for (let r = op.startRow || 1; r <= lastRow; r++) {
+      const cell = ws[`${op.column}${r}`];
+      if (cell && typeof cell.v === 'string') {
+        const newV = cell.v.replace(find, replace);
+        if (newV !== cell.v) {
+          cell.v = newV;
+          if (cell.w !== undefined) cell.w = newV;
+          delete cell.r; // rich-text run cache — stale after an edit, drop rather than ship mismatched
+        }
+      }
+    }
+  }
+}
+
+// ─── Live Formula Cells (`type: 'formula'` columns, `layout: 'subtotal-formula'` sheets) ──
+// Unlike `computed`/`excel` columns (evaluated to a plain value in JS), a
+// `formula` column's text is written into the cell AS a real Excel formula —
+// Excel recalculates it on open, same as a hand-built working paper. `{Label}`
+// resolves to that label's column letter + the current row (same-sheet, same-row
+// reference only); `{SheetLastRow:SheetName}` resolves to a template sheet's
+// last row, for building a VLOOKUP range against it; `{Row}` is the current row
+// number. Only meaningful on a `layout: 'subtotal-formula'` sheet (see below).
+
+function buildFormulaCellText(formula, colLetterByLabel, rowNumber, sheetRowCounts) {
+  let expr = String(formula || '').replace(/^=/, '');
+  expr = expr.replace(/\{SheetLastRow:([^}]+)\}/g, (_, name) => String(sheetRowCounts[name.trim()] ?? ''));
+  expr = expr.replace(/\{([^}]+)\}/g, (_, label) => {
+    if (label === 'Row') return String(rowNumber);
+    const letter = colLetterByLabel[label];
+    return letter ? `${letter}${rowNumber}` : `{${label}}`; // leave unresolved tokens visible, not blanked
+  });
+  return expr;
+}
+
+// Cell-by-cell sheet writer for `layout: 'subtotal-formula'` sheets: row 1 gets a
+// `=SUBTOTAL(9,...)` roll-up for every column flagged `subtotal: true`, row 2 is
+// headers, data starts row 3. Formula-tagged cells (from `formulaCells`) are
+// written with `f` (a live formula); everything else is written with `v` (a
+// plain value), matching a hand-built accountant working paper. GroupBy is not
+// supported on this layout — grouping would invalidate the row-relative formula
+// addresses.
+function buildSubtotalFormulaSheet(orderedCols, outputRows, formulaCells, dataStartRow) {
+  const ws = {};
+  const headerRow = dataStartRow - 1;
+  const lastDataRow = dataStartRow + outputRows.length - 1;
+
+  orderedCols.forEach((col, idx) => {
+    const letter = XLSX.utils.encode_col(idx);
+    if (col.subtotal) {
+      ws[`${letter}1`] = { t: 'n', v: 0, f: `SUBTOTAL(9,${letter}${dataStartRow}:${letter}${Math.max(lastDataRow, dataStartRow)})` };
+    }
+    ws[`${letter}${headerRow}`] = { t: 's', v: col.headerLabel != null ? col.headerLabel : col.label };
+  });
+
+  outputRows.forEach((row, rowIdx) => {
+    const r = dataStartRow + rowIdx;
+    orderedCols.forEach((col, idx) => {
+      const letter = XLSX.utils.encode_col(idx);
+      const addr = `${letter}${r}`;
+      const formulaText = formulaCells.get(`${rowIdx}\x00${col.label}`);
+      if (formulaText !== undefined) {
+        // `v` is a throwaway placeholder — real Excel recalculates on open
+        // (fullCalcOnLoad, set below) and overwrites it. Required anyway: SheetJS's
+        // writer silently drops a formula cell that has no cached `v` at all.
+        ws[addr] = { t: 'n', f: formulaText, v: 0 };
+        return;
+      }
+      const v = row[col.label];
+      if (v === '' || v === null || v === undefined) return;
+      ws[addr] = typeof v === 'number' ? { t: 'n', v } : { t: 's', v: String(v) };
+    });
+  });
+
+  const maxCol = Math.max(orderedCols.length - 1, 0);
+  ws['!ref'] = XLSX.utils.encode_range({ s: { r: 0, c: 0 }, e: { r: Math.max(lastDataRow, headerRow) - 1, c: maxCol } });
+  return ws;
+}
+
 function applyMultiSheetWorkflow(sheets, fileBufferOrMap, masterData = {}, fileInputs = [], dateContext = {}) {
   const missingTracker = createMissingMasterTracker();
   // One (masterType, keyField) → normalized-key map cache for the whole run.
   const masterCache = new Map();
+  // Sheet name (as configured, pre-token-substitution) -> its last row. Populated
+  // by template sheets as they're built; read by {SheetLastRow:Name} in formula
+  // columns, so a formula can VLOOKUP against a template sheet whose row count
+  // varies month to month.
+  const sheetRowCounts = {};
+  // Lazily-parsed RAW workbook per file input (values + styles + formulas), kept
+  // separate from `fileRSMs` below (which is row-JSON, stripped of everything a
+  // template-sheet copy needs to preserve). Only read for files a `template`
+  // sheet actually references.
+  const rawWorkbookCache = new Map();
+  const getRawWorkbookForFile = (fid) => {
+    if (rawWorkbookCache.has(fid)) return rawWorkbookCache.get(fid);
+    const buf = (Buffer.isBuffer(fileBufferOrMap) || ArrayBuffer.isView(fileBufferOrMap))
+      ? fileBufferOrMap : fileBufferOrMap[fid];
+    const wb = XLSX.read(buf, { type: 'buffer', cellDates: true, cellStyles: true });
+    rawWorkbookCache.set(fid, wb);
+    return wb;
+  };
 
   const monthIdx = MONTH_NAMES.findIndex(m => m.toLowerCase() === String(dateContext.month || '').toLowerCase());
   const dateVars = {};
-  if (monthIdx >= 0) { dateVars.Month = MONTH_NAMES[monthIdx]; dateVars.MonthNumber = monthIdx + 1; }
-  if (dateContext.year) dateVars.Year = Number(dateContext.year);
+  if (monthIdx >= 0) {
+    dateVars.Month = MONTH_NAMES[monthIdx];
+    dateVars.MonthNumber = monthIdx + 1;
+    dateVars.MonthNumberPadded = String(monthIdx + 1).padStart(2, '0');
+  }
+  if (dateContext.year) { dateVars.Year = Number(dateContext.year); dateVars.YearShort = String(dateContext.year).slice(-2); }
 
   // Every {SheetName.Label} token anywhere in the workflow. A sheet's pre-grouped
   // rows are kept in `sheetResults` only to answer such cross-references from a
@@ -673,8 +833,25 @@ function applyMultiSheetWorkflow(sheets, fileBufferOrMap, masterData = {}, fileI
 
   for (let sheetIdx = 0; sheetIdx < sheets.length; sheetIdx++) {
     const wfSheet       = sheets[sheetIdx];
-    const safeSheetName = (wfSheet.name || `Sheet${sheetIdx + 1}`)
+    const safeSheetName = substituteDateTokens(wfSheet.name || `Sheet${sheetIdx + 1}`, dateVars)
       .replace(/[:\\/?*[\]]/g, '').slice(0, 31);
+
+    // ── Template sheet (whole-sheet carry-forward) ─────────────────────────────
+    if (wfSheet.type === 'template') {
+      const fid = wfSheet.templateFileInputId || wfSheet.fileInputId || defaultFileId;
+      const srcWb = getRawWorkbookForFile(fid);
+      const srcWs = srcWb.Sheets[wfSheet.templateSheetName];
+      if (!srcWs) {
+        throw new Error(`applyMultiSheetWorkflow: template sheet "${wfSheet.templateSheetName}" not found in file input "${fid}"`);
+      }
+      const newWs = deepCopySheet(srcWs);
+      applyTemplateRefresh(newWs, wfSheet.refresh, dateVars);
+      sheetRowCounts[wfSheet.name] = sheetLastRowFromRef(newWs);
+      XLSX.utils.book_append_sheet(outBook, newWs, safeSheetName);
+      sheetResults.push(null);
+      sheetOutputs.push([]);
+      continue;
+    }
 
     // Resolve which file this sheet reads from
     const sheetFileId = wfSheet.fileInputId || defaultFileId;
@@ -718,6 +895,17 @@ function applyMultiSheetWorkflow(sheets, fileBufferOrMap, masterData = {}, fileI
       }
     }
 
+    // layout: 'subtotal-formula' sheets write real Excel formulas (not computed
+    // values) into `formula`-type / `fillDownFormula` cells, so they need each
+    // column's letter and know data starts one row later (row 3, under a row-1
+    // SUBTOTAL band and a row-2 header) than the default json_to_sheet layout.
+    const isFormulaLayout = wfSheet.layout === 'subtotal-formula';
+    const dataStartRow = isFormulaLayout ? 3 : 2;
+    const colLetterByLabel = {};
+    orderedCols.forEach((c, idx) => { colLetterByLabel[c.label] = XLSX.utils.encode_col(idx); });
+    // rowIdx\x00Label -> formula text (no leading '='), read by buildSubtotalFormulaSheet.
+    const formulaCells = new Map();
+
     // Pass 1: seed source + master + cross-sheet refs for ALL rows
     // fillDownState carries each fillDown-flagged source column's last
     // non-blank value across rows, in the same top-to-bottom order rows land
@@ -736,7 +924,12 @@ function applyMultiSheetWorkflow(sheets, fileBufferOrMap, masterData = {}, fileI
       for (const col of orderedCols) {
         if (col.type === 'source') {
           let val = rawRow[col.key] !== undefined ? rawRow[col.key] : '';
-          if (col.fillDown) {
+          if (col.fillDownFormula) {
+            if ((val === '' || val === null || val === undefined) && rowIdx > 0) {
+              formulaCells.set(`${rowIdx}\x00${col.label}`, `${colLetterByLabel[col.label]}${dataStartRow + rowIdx - 1}`);
+              val = '';
+            }
+          } else if (col.fillDown) {
             if (val === '' || val === null || val === undefined) {
               val = fillDownState[col.key] !== undefined ? fillDownState[col.key] : '';
             } else {
@@ -744,6 +937,12 @@ function applyMultiSheetWorkflow(sheets, fileBufferOrMap, masterData = {}, fileI
             }
           }
           row[col.label] = val;
+        } else if (col.type === 'formula') {
+          formulaCells.set(
+            `${rowIdx}\x00${col.label}`,
+            buildFormulaCellText(col.formula, colLetterByLabel, dataStartRow + rowIdx, sheetRowCounts)
+          );
+          row[col.label] = ''; // placeholder value for any {Sheet.Col} cross-reference from a later sheet
         } else if (col.type === 'master_lookup') {
           row[col.label] = resolveMasterLookup(col, rawRow, masterData, missingTracker, masterCache);
         } else if (col.type === 'master_validate') {
@@ -776,12 +975,28 @@ function applyMultiSheetWorkflow(sheets, fileBufferOrMap, masterData = {}, fileI
 
     sheetResults.push(isSheetReferenced(wfSheet.name) ? allRowsData : null); // pre-grouped, kept only if a later sheet cross-refs it
 
-    const finalRows = applyGroupBy(outputRows, wfSheet.groupBy);
-    sheetOutputs.push(finalRows); // this sheet's actual output rows, for downstream prev_sheet sourcing
-    XLSX.utils.book_append_sheet(outBook, XLSX.utils.json_to_sheet(finalRows), safeSheetName);
+    if (isFormulaLayout) {
+      // groupBy is not supported here — grouping would invalidate the
+      // row-relative formula addresses just written into formulaCells.
+      sheetOutputs.push(outputRows);
+      XLSX.utils.book_append_sheet(
+        outBook, buildSubtotalFormulaSheet(orderedCols, outputRows, formulaCells, dataStartRow), safeSheetName
+      );
+    } else {
+      const finalRows = applyGroupBy(outputRows, wfSheet.groupBy);
+      sheetOutputs.push(finalRows); // this sheet's actual output rows, for downstream prev_sheet sourcing
+      XLSX.utils.book_append_sheet(outBook, XLSX.utils.json_to_sheet(finalRows), safeSheetName);
+    }
   }
 
   XLSX.utils.book_append_sheet(outBook, buildFormulaReferenceSheet(sheets), 'Formula Reference');
+  // Any live formula cells written above have no cached value — force Excel to
+  // recalculate the whole workbook on open (rather than relying on the user's own
+  // AutoCalc setting) so they don't appear blank/stale the moment the file opens.
+  if (sheets.some(s => s.layout === 'subtotal-formula')) {
+    outBook.Workbook = outBook.Workbook || {};
+    outBook.Workbook.CalcPr = { fullCalcOnLoad: true };
+  }
   // compression: DEFLATE the xlsx parts instead of storing them — a big workflow
   // output drops from ~130 MB to a fraction of that, cutting the buffer transfer
   // back to the parent thread and the disk write with it.
@@ -814,4 +1029,10 @@ module.exports = {
   buildFormulaReferenceSheet,
   applyMultiSheetWorkflow,
   applyLegacyWorkflow,
+  substituteDateTokens,
+  deepCopySheet,
+  sheetLastRowFromRef,
+  applyTemplateRefresh,
+  buildFormulaCellText,
+  buildSubtotalFormulaSheet,
 };
