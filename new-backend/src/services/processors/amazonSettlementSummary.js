@@ -185,7 +185,8 @@ function buildSummaryAoA(ledgerRows, settlement, wideRowCount = null) {
      4.91%, which is unreadable and makes the sheet look broken. Amounts use
      Indian lakh/crore grouping — 1,56,047.65, not 156,047.65 — because that is
      how the figures will be read and checked. */
-  const FMT_PCT = '0.00%';
+  const FMT_PCT  = '0.00%';
+  const FMT_PCT3 = '0.000%';   // tax rates: 0.102% must not round to 0.10%
   const FMT_INT = '#,##0';
   /* Indian lakh grouping (1,59,387.06) was the obvious choice for this audience
      and does not survive: the format needs literal \, placeholders, which emit a
@@ -198,7 +199,8 @@ function buildSummaryAoA(ledgerRows, settlement, wideRowCount = null) {
   const FMT_AMT = '#,##0.00;-#,##0.00';
 
   const F  = (formula, z) => ({ t: 'n', v: 0, f: formula, ...(z ? { z } : {}) });
-  const Fp = (formula) => F(formula, FMT_PCT);                       // formula, shown as a %
+  const Fp  = (formula) => F(formula, FMT_PCT);                      // formula, shown as a %
+  const Fp3 = (formula) => F(formula, FMT_PCT3);                     // formula, 3-dp rate
   const Fa = (formula) => F(formula, FMT_AMT);                       // formula, shown as money
   const Fi = (formula) => F(formula, FMT_INT);                       // formula, shown as a count
   const A  = (v) => ({ t: 'n', v: Number(v) || 0, z: FMT_AMT });     // money
@@ -276,8 +278,24 @@ function buildSummaryAoA(ledgerRows, settlement, wideRowCount = null) {
 
   push();
   push('WITHHELD TAXES');
-  const rTds = push('TDS (Section 194-O)', A(d.tds), Fp(`IFERROR(B${aoa.length + 1}/$B$${rSales},0)`));
-  const rTcs = push('TCS (CGST+SGST+IGST)', A(d.tcs), Fp(`IFERROR(B${aoa.length + 1}/$B$${rSales},0)`));
+
+  /* The two taxes sit on DIFFERENT bases, which is the single most confusing
+     thing about an Amazon settlement:
+       • TDS u/s 194-O — 0.1% of GROSS sales, before returns
+       • TCS under GST — 0.5% of NET sales, after returns
+     Reading either against the wrong base makes a correct deduction look wrong,
+     so each is shown against its own base with the expected figure beside it.
+
+     TDS also runs slightly above 0.1% because Amazon computes it per order and
+     rounds up to the paisa — across 398 orders that accumulates. The variance
+     line makes that visible instead of leaving it to be discovered. */
+  const rTds = push('TDS (Section 194-O)', A(d.tds), Fp3(`IFERROR(B${aoa.length + 1}/$B$${rSales},0)`));
+  const rTdsExp = push('    Expected @ 0.1% of Gross Sales', Fa(`B${rSales}*0.001`));
+  push('    Variance (Amazon rounds each order up)', Fa(`B${rTds}-B${rTdsExp}`));
+
+  const rTcs = push('TCS (CGST+SGST+IGST)', A(d.tcs), Fp3(`IFERROR(B${aoa.length + 1}/$B$${rNet},0)`));
+  const rTcsExp = push('    Expected @ 0.5% of Net Sales', Fa(`B${rNet}*0.005`));
+  push('    Variance', Fa(`B${rTcs}-B${rTcsExp}`));
 
   /* ── reconciliation ──────────────────────────────────────────────────────
      Two independent checks, both of which must come to zero:
@@ -380,6 +398,7 @@ const SECTIONS = new Set(['AMAZON FEES', 'WITHHELD TAXES', 'RECONCILIATION', 'PA
 const TOTALS   = new Set(['Net Sales', 'Total Seller Price With GST', 'Total Amazon Fees',
                           'Expected Settlement', 'Net Settlement', 'Grand Total']);
 const META     = new Set(['Settlement Period', 'Deposit Date', 'Settlement ID']);
+const HILIGHT  = new Set(['Gross Sales (Orders)']);   // the base every % is against
 
 const border = (sides, color = RULE) =>
   Object.fromEntries(sides.map((k) => [k, { style: 'thin', color: { rgb: color } }]));
@@ -397,6 +416,8 @@ function styleSummarySheet(ws, aoa, checks) {
     const isCheck     = /must be 0/.test(label);
     const isMeta      = META.has(label);
     const isNote      = label.startsWith('An order can appear');
+    const isHilight   = HILIGHT.has(label);
+    const isSub       = label.startsWith('    ');   // expected / variance detail
     const isPayout    = label === 'Amazon stated payout';
     if (!label && !isHeaderRow) return;
 
@@ -430,6 +451,12 @@ function styleSummarySheet(ws, aoa, checks) {
         cell.s = { ...base, font: { bold: true },
                    fill: { patternType: 'solid', fgColor: { rgb: CREAM } },
                    border: border(['top']) };
+      } else if (isHilight) {
+        cell.s = { ...base, font: { bold: true, sz: 11.5, color: { rgb: '1E3A57' } },
+                   fill: { patternType: 'solid', fgColor: { rgb: 'EAF0F6' } },
+                   border: border(['top', 'bottom'], '9FB8D0') };
+      } else if (isSub) {
+        cell.s = { ...base, font: { sz: 10, color: { rgb: MUTED } } };
       } else if (isPayout) {
         cell.s = { ...base, font: { bold: true } };
       } else if (isMeta) {
