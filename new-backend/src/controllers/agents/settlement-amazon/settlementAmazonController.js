@@ -708,7 +708,7 @@ const fetchSettlementFromAmazon = async (req, res, next) => {
                is what gets checked when a figure is queried. Percentages and
                totals are live formulas, not baked values, so a reader can click
                a cell and see how it was derived. */
-            const { aoa, checks, colWidths } = buildSummaryAoA(report.rows, result.settlement);
+            const { aoa, checks, colWidths } = buildSummaryAoA(report.rows, result.settlement, result.rows.length);
             const summarySheet = XLSXStyle.utils.aoa_to_sheet(aoa);
             summarySheet['!cols'] = colWidths;
             styleSummarySheet(summarySheet, aoa, checks);

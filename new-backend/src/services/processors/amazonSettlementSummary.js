@@ -19,6 +19,21 @@
    label and its GST sits on its own line.
    ────────────────────────────────────────────────────────────────────────────── */
 
+const { parseAmazonDate } = require('./amazonSettlementPivot');
+
+/* Amazon stamps everything UTC. An Indian accountant reads IST, and a period
+   ending "30.01.2026 09:10 UTC" is the 30th either way — but the deposit date
+   can land on the next day once +5:30 is applied, and being a day out on a
+   deposit is the kind of thing that gets queried. So convert, then present
+   DD-MM-YYYY. */
+function istDate(value) {
+  const d = parseAmazonDate(value);
+  if (!d) return '';
+  const ist = new Date(d.getTime() + (5.5 * 60 * 60 * 1000));
+  const p = (n) => String(n).padStart(2, '0');
+  return `${p(ist.getUTCDate())}-${p(ist.getUTCMonth() + 1)}-${ist.getUTCFullYear()}`;
+}
+
 const has = (s, ...needles) => {
   const t = String(s || '').toLowerCase();
   return needles.some((n) => t.includes(n));
@@ -142,7 +157,7 @@ function collect(ledgerRows) {
  * Row numbers are tracked as we go rather than hardcoded, so inserting a line
  * later cannot silently break a formula that pointed at the old position.
  */
-function buildSummaryAoA(ledgerRows, settlement) {
+function buildSummaryAoA(ledgerRows, settlement, wideRowCount = null) {
   const d = collect(ledgerRows);
   const aoa = [];
 
@@ -173,6 +188,7 @@ function buildSummaryAoA(ledgerRows, settlement) {
   const F  = (formula, z) => ({ t: 'n', v: 0, f: formula, ...(z ? { z } : {}) });
   const Fp = (formula) => F(formula, FMT_PCT);                       // formula, shown as a %
   const Fa = (formula) => F(formula, FMT_AMT);                       // formula, shown as money
+  const Fi = (formula) => F(formula, FMT_INT);                       // formula, shown as a count
   const A  = (v) => ({ t: 'n', v: Number(v) || 0, z: FMT_AMT });     // money
   const I  = (v) => ({ t: 'n', v: Number(v) || 0, z: FMT_INT });     // a count
 
@@ -181,8 +197,22 @@ function buildSummaryAoA(ledgerRows, settlement) {
     return aoa.length;
   };
 
+  /* Period first. Without it the reader has to scroll to the bottom to learn
+     which week the sheet covers, which is the first thing anyone asks. */
+  push('Settlement Period', settlement ? `${istDate(settlement.start_date)}  to  ${istDate(settlement.end_date)}` : '');
+  push('Deposit Date', settlement ? istDate(settlement.deposit_date) : '');
+  push('Settlement ID', settlement ? String(settlement.settlement_id || '') : '');
+  push();
+
   push('Particulars', 'Amount (₹)', '%');
-  push('Total Orders', I(d.orders));
+
+  /* Two different counts, and conflating them is what makes the Settlement tab
+     look like it disagrees with this one:
+       • unique orders — 402
+       • order line items — 481, because an order with two SKUs is two rows
+     The detail tab holds the line items, so it is the larger number. */
+  push('Unique Orders', I(d.orders));
+  if (wideRowCount != null) push('Order Line Items (detail tab)', I(wideRowCount));
 
   /* ── what the customer paid ──────────────────────────────────────────────
      Every figure here is net of refunds and cancellations, because the ledger
@@ -278,14 +308,15 @@ function buildSummaryAoA(ledgerRows, settlement) {
   for (const t of sorted) {
     push(t.label, I(t.orders), A(t.amount), Fp(`IFERROR(C${aoa.length + 1}/$C$${rGrand},0)`));
   }
-  push('Grand Total', I(`SUM(B${rStatusFirst}:B${rGrand - 1})`),
+  /* The count column is deliberately NOT a SUM. A refunded order appears under
+     both Order and Refund, so the per-status counts overlap — adding them gave
+     410 against 402 actual orders. The total is the distinct count; the amounts
+     do sum, because each amount belongs to exactly one transaction. */
+  push('Grand Total', I(d.orders),
                       Fa(`SUM(C${rStatusFirst}:C${rGrand - 1})`),
                       Fp(`IFERROR(C${rGrand}/$C$${rGrand},0)`));
+  push('An order can appear under more than one status (sold, then refunded), so the counts above do not add up to the total.');
 
-  push();
-  push('Settlement ID', settlement ? settlement.settlement_id : '');
-  push('Period', settlement ? `${settlement.start_date || ''} → ${settlement.end_date || ''}` : '');
-  push('Deposit date', settlement ? settlement.deposit_date || '' : '');
 
   /* The two differences are computed here, not read back from the formulas,
      so the styling can colour them by what they ACTUALLY are. A green "must be
@@ -322,7 +353,7 @@ const MUTED  = '6B6660';
 const SECTIONS = new Set(['AMAZON FEES', 'WITHHELD TAXES', 'RECONCILIATION', 'PAYOUT COMPOSITION']);
 const TOTALS   = new Set(['Total Seller Price With GST', 'Total Amazon Fees',
                           'Expected Settlement', 'Net Settlement', 'Grand Total']);
-const FOOTER   = new Set(['Settlement ID', 'Period', 'Deposit date']);
+const META     = new Set(['Settlement Period', 'Deposit Date', 'Settlement ID']);
 
 const border = (sides, color = RULE) =>
   Object.fromEntries(sides.map((k) => [k, { style: 'thin', color: { rgb: color } }]));
@@ -338,7 +369,8 @@ function styleSummarySheet(ws, aoa, checks) {
     const isSection   = SECTIONS.has(label);
     const isTotal     = TOTALS.has(label);
     const isCheck     = /must be 0/.test(label);
-    const isFooter    = FOOTER.has(label);
+    const isMeta      = META.has(label);
+    const isNote      = label.startsWith('An order can appear');
     const isPayout    = label === 'Amazon stated payout';
     if (!label && !isHeaderRow) return;
 
@@ -374,9 +406,12 @@ function styleSummarySheet(ws, aoa, checks) {
                    border: border(['top']) };
       } else if (isPayout) {
         cell.s = { ...base, font: { bold: true } };
-      } else if (isFooter) {
-        cell.s = { ...base, font: { italic: true, sz: 9, color: { rgb: MUTED } },
-                   alignment: { ...base.alignment, horizontal: 'left' } };
+      } else if (isMeta) {
+        cell.s = { alignment: { vertical: 'center', horizontal: 'left' },
+                   font: { bold: c === 0, sz: 11, color: { rgb: c === 0 ? MUTED : '1E3A57' } } };
+      } else if (isNote) {
+        cell.s = { alignment: { vertical: 'center', horizontal: 'left' },
+                   font: { italic: true, sz: 9, color: { rgb: MUTED } } };
       } else {
         cell.s = { ...base, border: border(['bottom']) };
       }
@@ -385,8 +420,9 @@ function styleSummarySheet(ws, aoa, checks) {
 
   ws['!rows'] = aoa.map((row) => {
     const label = row && row[0] ? String(row[0]) : '';
-    return SECTIONS.has(label) || label === 'Particulars' || label === 'Status'
-      ? { hpt: 20 } : { hpt: 16 };
+    if (SECTIONS.has(label) || label === 'Particulars' || label === 'Status') return { hpt: 20 };
+    if (META.has(label)) return { hpt: 18 };
+    return { hpt: 16 };
   });
   return ws;
 }
