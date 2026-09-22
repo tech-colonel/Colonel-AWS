@@ -87,6 +87,12 @@ function feeGroup(amountType, amountDescription) {
 function collect(ledgerRows) {
   const f = { commission: 0, fixedFee: 0, logistics: 0, storage: 0, advertising: 0, otherCharges: 0, gstOnFees: 0 };
   let productSales = 0, shipping = 0, promotions = 0, gstCollected = 0;
+  /* Revenue split by transaction type. TDS and TCS are deducted by Amazon on
+     the GROSS order value, so a summary that only shows net sales makes those
+     rates look wrong — which is exactly the question this sheet should answer
+     rather than raise. */
+  const sales = {};
+  const bump = (txn, key, amt) => { (sales[txn] = sales[txn] || {})[key] = (sales[txn][key] || 0) + amt; };
   let tds = 0, tcs = 0, debtAdjustment = 0;
   const byType = new Map();              // Order / Refund / Cancellation → { orders:Set, amount }
   const orders = new Set();
@@ -121,11 +127,11 @@ function collect(ledgerRows) {
     if (has(type, 'itemtds') || has(desc, '194-o', '194o')) { tds += amt; continue; }
     if (has(type, 'itemtcs') || has(desc, 'tcs-')) { tcs += amt; continue; }
 
-    if (has(type, 'promotion') || has(desc, 'discount')) { promotions += amt; continue; }
+    if (has(type, 'promotion') || has(desc, 'discount')) { promotions += amt; bump(txn, 'promo', amt); continue; }
     if (has(type, 'itemprice')) {
-      if (has(desc, 'tax')) gstCollected += amt;
-      else if (has(desc, 'shipping')) shipping += amt;
-      else productSales += amt;
+      if (has(desc, 'tax')) { gstCollected += amt; bump(txn, 'gst', amt); }
+      else if (has(desc, 'shipping')) { shipping += amt; bump(txn, 'ship', amt); }
+      else { productSales += amt; bump(txn, 'principal', amt); }
       continue;
     }
 
@@ -146,6 +152,12 @@ function collect(ledgerRows) {
     tds: r2(Math.abs(tds)),
     tcs: r2(Math.abs(tcs)),
     debtAdjustment: r2(debtAdjustment),
+    grossSales:     r2((sales['Order'] || {}).principal || 0),
+    refunds:        r2((sales['Refund'] || {}).principal || 0),
+    cancellations:  r2((sales['Cancellation'] || {}).principal || 0),
+    otherSales:     r2(Object.entries(sales)
+                        .filter(([t]) => !['Order', 'Refund', 'Cancellation'].includes(t))
+                        .reduce((a, [, v]) => a + (v.principal || 0), 0)),
     byType: [...byType.entries()].map(([label, v]) => ({ label, orders: v.orders.size, amount: r2(v.amount) })),
   };
 }
@@ -204,7 +216,7 @@ function buildSummaryAoA(ledgerRows, settlement, wideRowCount = null) {
   push('Settlement ID', settlement ? String(settlement.settlement_id || '') : '');
   push();
 
-  push('Particulars', 'Amount (₹)', '%');
+  push('Particulars', 'Amount (₹)', '% of Gross');
 
   /* Two different counts, and conflating them is what makes the Settlement tab
      look like it disagrees with this one:
@@ -219,7 +231,21 @@ function buildSummaryAoA(ledgerRows, settlement, wideRowCount = null) {
      carries those as negative lines against the same categories. Stating the
      components separately is what lets the settlement below tie exactly — an
      "expected" that quietly omits shipping or promotions can never reconcile. */
-  const rSales    = push('Total Seller Price (Net)', A(d.productSales));
+  /* Gross first, then what came back out of it, then net — so the reader can
+     see the return rate, and so every percentage below sits on a base that
+     matches how Amazon actually charges: TDS and TCS on gross, fees on the
+     orders that generated them. */
+  const rSales    = push('Gross Sales (Orders)', A(d.grossSales));   // the % base
+  const rRefunds  = push('Less: Returns / Refunds', A(d.refunds),
+                         Fp(`IFERROR(B${aoa.length + 1}/$B$${rSales},0)`));
+  const rCancels  = push('Less: Cancellations', A(d.cancellations),
+                         Fp(`IFERROR(B${aoa.length + 1}/$B$${rSales},0)`));
+  const rOther    = d.otherSales
+    ? push('Other Sales Adjustments', A(d.otherSales), Fp(`IFERROR(B${aoa.length + 1}/$B$${rSales},0)`))
+    : null;
+  const rNet      = push('Net Sales',
+                         Fa(`B${rSales}+B${rRefunds}+B${rCancels}${rOther ? `+B${rOther}` : ''}`),
+                         Fp(`IFERROR(B${aoa.length + 1}/$B$${rSales},0)`));
   const rShipping = push('Shipping Charged', A(d.shipping),
                          Fp(`IFERROR(B${aoa.length + 1}/$B$${rSales},0)`));
   const rPromos   = push('Promotions / Discounts', A(d.promotions),
@@ -227,7 +253,7 @@ function buildSummaryAoA(ledgerRows, settlement, wideRowCount = null) {
   const rGst      = push('GST Collected from Buyers', A(d.gstCollected),
                          Fp(`IFERROR(B${aoa.length + 1}/$B$${rSales},0)`));
   const rGross    = push('Total Seller Price With GST',
-                         Fa(`B${rSales}+B${rShipping}+B${rPromos}+B${rGst}`));
+                         Fa(`B${rNet}+B${rShipping}+B${rPromos}+B${rGst}`));
 
   push();
   push('AMAZON FEES');
@@ -292,12 +318,12 @@ function buildSummaryAoA(ledgerRows, settlement, wideRowCount = null) {
     push(NICE[t.label] || t.label, A(t.amount), Fp(`IFERROR(B${aoa.length + 1}/$B$${rSales},0)`));
   }
   const rCompLast = aoa.length;
-  const rNet = push('Net Settlement', Fa(`SUM(B${rCompFirst}:B${rCompLast})`),
+  const rNetSettlement = push('Net Settlement', Fa(`SUM(B${rCompFirst}:B${rCompLast})`),
                                       Fp(`IFERROR(B${aoa.length + 1}/$B$${rSales},0)`));
-  push('Difference (must be 0)', Fa(`ROUND(B${rNet}-B${rAmazon},2)`));
+  push('Difference (must be 0)', Fa(`ROUND(B${rNetSettlement}-B${rAmazon},2)`));
 
   push();
-  push('Status', 'No. of Orders', 'Amount (₹)', '%');
+  push('Status', 'No. of Orders', 'Amount (₹)', '% of Total');
   const rStatusFirst = aoa.length + 1;
   const order = ['Order', 'Refund', 'Cancellation'];
   const sorted = [...d.byType].sort((a, b) => {
@@ -351,7 +377,7 @@ const BAD_BG = 'FBEBE9';  const BAD_FG = '9B2F2B';
 const MUTED  = '6B6660';
 
 const SECTIONS = new Set(['AMAZON FEES', 'WITHHELD TAXES', 'RECONCILIATION', 'PAYOUT COMPOSITION']);
-const TOTALS   = new Set(['Total Seller Price With GST', 'Total Amazon Fees',
+const TOTALS   = new Set(['Net Sales', 'Total Seller Price With GST', 'Total Amazon Fees',
                           'Expected Settlement', 'Net Settlement', 'Grand Total']);
 const META     = new Set(['Settlement Period', 'Deposit Date', 'Settlement ID']);
 
