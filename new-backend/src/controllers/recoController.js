@@ -1829,7 +1829,8 @@ const runReco = async (req, res) => {
     // proceed anyway or hand back user-entered corrections keyed by GSTIN — see
     // the `missingTradeLegalNames` catch below and MissingTradeNameModal on the
     // frontend for the confirm/resubmit round trip.
-    if (pythonRecoType === 'gstr_2b_books') {
+    // The multi-state engine runs the same missing-name flow, so forward for both.
+    if (pythonRecoType === 'gstr_2b_books' || pythonRecoType === 'gstr_2b_books_multistate') {
       if (req.body.proceedWithoutNames) form.append('proceedWithoutNames', String(req.body.proceedWithoutNames));
       if (req.body.nameCorrections) form.append('nameCorrections', String(req.body.nameCorrections));
     }

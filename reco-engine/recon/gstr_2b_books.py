@@ -3122,6 +3122,88 @@ def build_gstr2b_books_workbook(results: list[dict], payload: dict | None = None
 # Top-level entry point
 # ---------------------------------------------------------------------------
 
+def _resolve_missing_supplier_names(
+    gstr2b_records: list["NormalizedInvoice"],
+    books_records: list["NormalizedInvoice"] | None = None,
+    name_corrections: dict[str, str] | None = None,
+) -> tuple[list[dict], list[dict]]:
+    """Apply the accountant's Trade/Legal Name answers; report what is still blank,
+    each with a SUGGESTION the accountant can accept or overwrite.
+
+    Nothing is ever applied on its own: the ONLY thing that writes a name onto a
+    blank GSTR-2B row is ``name_corrections`` {GSTIN: name} — what the accountant
+    confirmed in the MissingTradeNameModal. Every GSTIN still blank after that is
+    returned as missing, and the modal prefills it with a suggestion found by
+    exact lookup, in this order:
+
+      "same GSTIN in GSTR-2B"  another row/tab of this file names this GSTIN
+      "your Purchase Register" the uploaded Books name this GSTIN
+      "same PAN (<gstin>)"     the same legal entity registered in another state
+                               (GSTIN chars 3-12 are the PAN)
+
+    The suggestion is advisory only — it travels to the UI and comes back as a
+    correction only if the accountant leaves it in place and clicks Continue.
+    Shared by the single-state and multi-state engines so both prompt the same
+    way. Additive: touches supplier_name on blank records only, and only from
+    corrections; matching logic is untouched.
+
+    Returns ``(missing, applied)``:
+      missing — [{gstin, occurrences, sample_doc_no, suggested_name, suggestion_source}]
+      applied — [{gstin, name, source: "user", rows}] corrections that landed
+    """
+    corrections = {
+        str(k).strip().upper(): str(v).strip()
+        for k, v in (name_corrections or {}).items() if str(v).strip()
+    }
+
+    # Exact-lookup tables for SUGGESTIONS only (never written to records here).
+    by_gstin_2b: dict[str, str] = {}
+    by_gstin_books: dict[str, str] = {}
+    by_pan: dict[str, tuple[str, str]] = {}          # pan -> (name, gstin it came from)
+    def _learn(rec: Any, table: dict[str, str]) -> None:
+        g = str(getattr(rec, "supplier_gstin", "") or "").strip().upper()
+        n = str(getattr(rec, "supplier_name", "") or "").strip()
+        if g and n:
+            table.setdefault(g, n)
+            if len(g) >= 12:
+                by_pan.setdefault(g[2:12], (n, g))
+    for rec in gstr2b_records:
+        _learn(rec, by_gstin_2b)
+    for rec in (books_records or []):
+        _learn(rec, by_gstin_books)
+
+    def _suggest(g: str) -> tuple[str, str]:
+        if g in by_gstin_2b:
+            return by_gstin_2b[g], "same GSTIN in GSTR-2B"
+        if g in by_gstin_books:
+            return by_gstin_books[g], "your Purchase Register"
+        pan = g[2:12] if len(g) >= 12 else ""
+        if pan and pan in by_pan and by_pan[pan][1] != g:
+            return by_pan[pan][0], f"same PAN ({by_pan[pan][1]})"
+        return "", ""
+
+    applied: dict[str, dict] = {}
+    missing: dict[str, dict] = {}
+    for rec in gstr2b_records:
+        if rec.supplier_name or not rec.supplier_gstin:
+            continue
+        g = rec.supplier_gstin.strip().upper()
+        name = corrections.get(g, "")
+        if name:
+            rec.supplier_name = name
+            entry = applied.setdefault(g, {"gstin": g, "name": name, "source": "user", "rows": 0})
+            entry["rows"] += 1
+        else:
+            if g not in missing:
+                sug, src = _suggest(g)
+                missing[g] = {
+                    "gstin": g, "occurrences": 0, "sample_doc_no": rec.doc_no,
+                    "suggested_name": sug, "suggestion_source": src,
+                }
+            missing[g]["occurrences"] += 1
+    return list(missing.values()), list(applied.values())
+
+
 def reconcile_gstr2b_vs_books(
     gstr2b_data: bytes,
     purchase_data: bytes,
@@ -3139,26 +3221,14 @@ def reconcile_gstr2b_vs_books(
     # merges the name cell across a supplier's invoice rows (see
     # _read_gstr2b_sheet), so only the first row of each block actually carries
     # it — the rest are genuinely blank in the file, not a parsing gap.
-    corrections = {
-        str(k).strip().upper(): str(v).strip()
-        for k, v in (name_corrections or {}).items() if str(v).strip()
-    }
-    missing_names: dict[str, dict] = {}
-    for rec in gstr2b_records:
-        if rec.supplier_name or not rec.supplier_gstin:
-            continue
-        corrected = corrections.get(rec.supplier_gstin)
-        if corrected:
-            rec.supplier_name = corrected
-            continue
-        entry = missing_names.setdefault(rec.supplier_gstin, {
-            "gstin": rec.supplier_gstin,
-            "occurrences": 0,
-            "sample_doc_no": rec.doc_no,
-        })
-        entry["occurrences"] += 1
-
     books_records = parse_books(purchase_data, debit_data)
+
+    # Apply the accountant's answers (nameCorrections) and surface every GSTIN
+    # that is still blank as missing_names for the UI. Nothing is guessed.
+    missing_list, _applied = _resolve_missing_supplier_names(
+        gstr2b_records, books_records, name_corrections
+    )
+    missing_names: dict[str, dict] = {m["gstin"]: m for m in missing_list}
 
     # Map Books supplier_name to supplier_gstin from GSTR-2B to avoid false negatives from spelling
     name_to_gstin = {}

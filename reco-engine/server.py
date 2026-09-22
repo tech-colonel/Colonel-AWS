@@ -608,12 +608,27 @@ class ReconciliationHandler(BaseHTTPRequestHandler):
                 # rather than one per state. GSTR-2B stays per state either way.
                 books_combined = str(fields.get("books_combined", "")).strip().lower() in ("1", "true", "yes")
 
-                gstr2b_recs, books_recs, results = reconcile_gstr2b_vs_books_multistate(
+                # Same missing-name flow as the single-state engine above: the UI
+                # sends nameCorrections {GSTIN: name} on re-run, or proceedWithoutNames.
+                proceed_without_names = str(fields.get("proceedWithoutNames", "")).strip().lower() in ("1", "true", "yes")
+                try:
+                    name_corrections = json.loads(fields.get("nameCorrections", "") or "{}")
+                except Exception:
+                    name_corrections = {}
+                gstr2b_recs, books_recs, results, missing_names = reconcile_gstr2b_vs_books_multistate(
                     gstr2b_list, purchase_list, debit_list or [b""] * len(purchase_list),
                     tolerance=tolerance,
                     entity_gstins=entity_gstins,
                     books_combined=books_combined,
+                    name_corrections=name_corrections,
+                    return_missing=True,
                 )
+                if missing_names and not proceed_without_names:
+                    self.write_json({
+                        "error": "Some suppliers in the GSTR-2B file are missing a Trade/Legal Name.",
+                        "missingTradeLegalNames": missing_names,
+                    }, 400)
+                    return
 
                 # The workbook copies a source sheet per Books file. A combined register
                 # submitted once per state slot would be copied in that many times, so

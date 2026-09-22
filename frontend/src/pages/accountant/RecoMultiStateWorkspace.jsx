@@ -15,6 +15,7 @@ import { toast } from 'sonner';
 import { StatusDonut, ByReasons, FeedbackModal, distOf } from '../../components/reco/ToolResultDashboard';
 import DriveMultiState from '../../components/DriveMultiState';
 import OpenInSheetsButton from '../../components/OpenInSheetsButton';
+import MissingTradeNameModal from '../../components/reco/MissingTradeNameModal';
 
 const COLOR  = '#7C3AED';
 const PAGE_SIZE = 100;
@@ -288,6 +289,11 @@ const RecoMultiStateWorkspace = () => {
   const [running, setRunning] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(null);
   const [phase, setPhase] = useState(null); // 'uploading' | 'reconciling' | 'preparing' | null
+  // Same missing-name flow as RecoWorkspace: the engine answers 400 with
+  // missingTradeLegalNames for GSTINs it could not name; the modal collects
+  // corrections and we re-run with them (or proceed without).
+  const [missingTradeNames, setMissingTradeNames] = useState([]);
+  const [showMissingTradeNamesModal, setShowMissingTradeNamesModal] = useState(false);
   const phaseTimer = useRef(null);
   const [result, setResult] = useState(() => {
     try { const c = sessionStorage.getItem(resultKey); return c ? JSON.parse(c) : null; }
@@ -360,7 +366,7 @@ const RecoMultiStateWorkspace = () => {
     return next;
   });
 
-  const handleRun = async () => {
+  const handleRun = async (overrides = {}) => {
     const useDrive = !!(driveStates && driveStates.length > 0);
     if (!useDrive) {
       if (combinedBooks) {
@@ -382,6 +388,10 @@ const RecoMultiStateWorkspace = () => {
       formData.append('tolerance', tolerance);
       formData.append('brand_id', brandId);
       formData.append('is_demo', localStorage.getItem('token') === 'demo-mode-token' ? 'true' : 'false');
+      if (overrides.nameCorrections && Object.keys(overrides.nameCorrections).length > 0) {
+        formData.append('nameCorrections', JSON.stringify(overrides.nameCorrections));
+      }
+      if (overrides.proceedWithoutNames) formData.append('proceedWithoutNames', 'true');
       if (useDrive) {
         // Files come from Drive, grouped per state — backend downloads via the SA.
         formData.append('drive_states', JSON.stringify(driveStates));
@@ -430,7 +440,13 @@ const RecoMultiStateWorkspace = () => {
       clearTimeout(phaseTimer.current);
       setUploadProgress(null);
       setPhase(null);
-      toast.error(err.response?.data?.error || 'Reconciliation failed');
+      const missing = err.response?.status === 400 ? err.response?.data?.missingTradeLegalNames : null;
+      if (missing?.length > 0) {
+        setMissingTradeNames(missing);
+        setShowMissingTradeNamesModal(true);
+      } else {
+        toast.error(err.response?.data?.error || 'Reconciliation failed');
+      }
     } finally { setRunning(false); }
   };
 
@@ -611,6 +627,16 @@ const RecoMultiStateWorkspace = () => {
 
   return (
     <DashboardLayout sidebarItems={sidebarItems}>
+      <MissingTradeNameModal
+        open={showMissingTradeNamesModal}
+        onOpenChange={setShowMissingTradeNamesModal}
+        missingNames={missingTradeNames}
+        submitting={running}
+        onContinue={(corrections) => {
+          setShowMissingTradeNamesModal(false);
+          handleRun({ nameCorrections: corrections, proceedWithoutNames: true });
+        }}
+      />
       <div style={{ padding: '24px 28px', maxWidth: 1200 }}>
 
         {/* Breadcrumb */}
@@ -946,7 +972,7 @@ const RecoMultiStateWorkspace = () => {
 
                 {/* Run button */}
                 <button
-                  onClick={handleRun} disabled={running}
+                  onClick={() => handleRun()} disabled={running}
                   className="btn-glow"
                   style={{ width: '100%', padding: '13px 0', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8 }}
                 >

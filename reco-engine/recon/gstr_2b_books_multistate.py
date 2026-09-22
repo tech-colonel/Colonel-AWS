@@ -30,6 +30,7 @@ from .gstr_2b_books import (
     _ensure_xlsx,
     _append_rcm_rows,
     _find_octa_sheet_name,
+    _resolve_missing_supplier_names,
 )
 
 
@@ -40,8 +41,15 @@ def reconcile_gstr2b_vs_books_multistate(
     tolerance: float = 1.0,
     entity_gstins: list[str] | None = None,
     books_combined: bool = False,
-) -> tuple[list[NormalizedInvoice], list[NormalizedInvoice], list[MatchResult]]:
+    name_corrections: dict[str, str] | None = None,
+    return_missing: bool = False,
+):
     """
+    Returns (all_gstr2b, all_books, results) — or, with ``return_missing=True``,
+    (all_gstr2b, all_books, results, missing_names) where missing_names lists the
+    GSTINs whose Trade/Legal Name could not be resolved (same shape as the
+    single-state engine's missing_names, so the UI prompt is shared).
+
     Phase 1 — parse all files, tag each record with _file_idx, merge into single pools,
                run existing reconcile_by_invoice_no() UNCHANGED.
     Phase 2 — for rows with suggested_action in {"Showing in 2B but Not in Books",
@@ -120,6 +128,13 @@ def reconcile_gstr2b_vs_books_multistate(
         for r in all_books:
             r.raw["_books_shared"] = True
 
+    # Apply the accountant's answers (nameCorrections) to blank 2B supplier
+    # names and collect every GSTIN still blank as missing_names so the UI can
+    # ask — same helper as the single-state engine. Nothing is guessed.
+    missing_list, _applied = _resolve_missing_supplier_names(
+        all_gstr2b, all_books, name_corrections
+    )
+
     # Enrich Books records with GSTIN from GSTR-2B (same as single-state engine)
     name_to_gstin: dict[str, str] = {}
     for g in all_gstr2b:
@@ -154,6 +169,8 @@ def reconcile_gstr2b_vs_books_multistate(
     # Tally state allocation". Skip Phase 2 entirely in that case; Passes 1-5 already
     # matched these rows correctly on their own merits.
     if books_shared:
+        if return_missing:
+            return all_gstr2b, all_books, results, missing_list
         return all_gstr2b, all_books, results
 
     for r in results:
@@ -250,6 +267,8 @@ def reconcile_gstr2b_vs_books_multistate(
                         )
                         break
 
+    if return_missing:
+        return all_gstr2b, all_books, results, missing_list
     return all_gstr2b, all_books, results
 
 

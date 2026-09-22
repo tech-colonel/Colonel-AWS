@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { AlertTriangle } from 'lucide-react';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../ui/modal';
 import { Button } from '../ui/button';
@@ -13,6 +13,19 @@ import { Input } from '../ui/input';
 
 const MissingTradeNameModal = ({ open, onOpenChange, missingNames = [], submitting, onContinue }) => {
   const [namesByGstin, setNamesByGstin] = useState({});
+
+  // Prefill each GSTIN with the engine's suggestion (found by exact lookup —
+  // same GSTIN elsewhere in the file, the Purchase Register, or the same PAN in
+  // another state). It is only a suggestion: nothing is applied unless the
+  // accountant leaves it in and clicks Continue, and it can be edited or cleared.
+  useEffect(() => {
+    if (!open) return;
+    const seeded = {};
+    missingNames.forEach((item) => {
+      if (item.suggested_name) seeded[item.gstin] = item.suggested_name;
+    });
+    setNamesByGstin(seeded);
+  }, [open, missingNames]);
 
   if (!open) return null;
 
@@ -59,6 +72,15 @@ const MissingTradeNameModal = ({ open, onOpenChange, missingNames = [], submitti
                 value={namesByGstin[item.gstin] || ''}
                 onChange={(e) => setName(item.gstin, e.target.value)}
               />
+              {item.suggested_name ? (
+                <p className="mt-1 text-xs text-slate-500">
+                  {namesByGstin[item.gstin] === item.suggested_name
+                    ? <>Suggested from <span className="font-medium text-slate-700">{item.suggestion_source}</span> — edit if wrong.</>
+                    : <>Suggestion was <span className="font-medium text-slate-700">{item.suggested_name}</span> ({item.suggestion_source}).</>}
+                </p>
+              ) : (
+                <p className="mt-1 text-xs text-slate-500">No name found for this GSTIN in the file, your Books, or a sister state — please type it.</p>
+              )}
             </div>
           ))}
         </div>
