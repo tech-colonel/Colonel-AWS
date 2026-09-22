@@ -160,7 +160,15 @@ function buildSummaryAoA(ledgerRows, settlement) {
      how the figures will be read and checked. */
   const FMT_PCT = '0.00%';
   const FMT_INT = '#,##0';
-  const FMT_AMT = '[>=10000000]##\\,##\\,##\\,##0.00;[>=100000]##\\,##\\,##0.00;##,##0.00';
+  /* Indian lakh grouping (1,59,387.06) was the obvious choice for this audience
+     and does not survive: the format needs literal \, placeholders, which emit a
+     stray comma when a number is too short (",,101.70"), and every conditional
+     variant that fixes THAT drops the minus sign on small negatives — rendering
+     a -4,357.66 refund as 4,357.66. A wrong sign in a settlement is far worse
+     than international grouping, so this stays plain, with an explicit negative
+     section. Verified against the format engine across positive, negative, zero
+     and lakh/crore values. */
+  const FMT_AMT = '#,##0.00;-#,##0.00';
 
   const F  = (formula, z) => ({ t: 'n', v: 0, f: formula, ...(z ? { z } : {}) });
   const Fp = (formula) => F(formula, FMT_PCT);                       // formula, shown as a %
