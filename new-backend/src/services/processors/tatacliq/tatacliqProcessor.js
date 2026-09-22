@@ -27,6 +27,16 @@ function clean(v) {
   return v === null || v === undefined ? '' : String(v).trim();
 }
 
+// Transaction IDs are long numeric strings. Some exports (OMS Sales Report included)
+// force-text them with a trailing ".0" (float round-trip) or leave a stray "'" prefix
+// (Excel's force-text marker) — strip both so the join key matches the TCS report's
+// plain numeric value.
+function cleanId(v) {
+  let s = clean(v).replace(/^'/, '');
+  if (/^\d+\.0$/.test(s)) s = s.slice(0, -2);
+  return s;
+}
+
 // The TCS report ships 4 columns with stray leading spaces (' TCS CGST', '  TCS IGST', ...).
 // Normalize once per row so lookups can use clean header names.
 function normalizeRow(row) {
@@ -55,18 +65,54 @@ function stateNameFromCode(code) {
   return GST_STATE_CODES[padded] || '';
 }
 
+// Header lookup that survives the header-naming drift the OMS export is prone to
+// (stray leading/trailing spaces, double spaces, inconsistent casing — the same
+// portal family ships the TCS report with ' TCS CGST' / '  TCS IGST' for the same
+// reason). Matches on a whitespace-collapsed, lower-cased key instead of an exact
+// string, and tries every candidate name in order.
+function pick(rowLower, candidates) {
+  for (const c of candidates) {
+    const v = rowLower[c];
+    if (v !== undefined && v !== null && String(v).trim() !== '') return v;
+  }
+  return '';
+}
+
+function normalizeKeysLower(row) {
+  const out = {};
+  Object.keys(row).forEach((k) => {
+    out[k.trim().toLowerCase().replace(/\s+/g, ' ')] = row[k];
+  });
+  return out;
+}
+
 // SKU master here = the OMS Sales Report the SOP says to VLOOKUP against, keyed by
 // Transaction ID (the TCS report itself carries no SKU). Optional — rows are left
 // blank on SKU/cost/description until this is uploaded.
+//
+// In practice the accountant's actual export is a 2-column sheet: "Sales Portal SKU"
+// (the join key — despite the name, this holds the Transaction ID, not a SKU code)
+// and "Tally New SKU" (a single descriptive stock name, used for both the SKU and
+// the Tally stock-item name since the export carries no separate description/cost).
 function buildTxnMap(skuJson) {
   const map = {};
   (skuJson || []).forEach((r) => {
-    const txnId = clean(r['Transaction ID'] ?? r['TransactionID'] ?? r['Transaction Id'] ?? r['Txn ID']);
+    const rl = normalizeKeysLower(r);
+    const txnId = cleanId(pick(rl, [
+      'transaction id', 'transactionid', 'txn id', 'txnid',
+      'sales portal sku', 'portal sku',
+    ]));
     if (!txnId) return;
+    const tallySku = clean(pick(rl, [
+      'tally new sku', 'sku', 'seller sku', 'seller sku code', 'product sku', 'vendor sku', 'item sku',
+    ]));
+    const stockName = clean(pick(rl, [
+      'stock name as per tally', 'product description', 'description', 'product name', 'item name',
+    ])) || tallySku;
     map[txnId] = {
-      sku: clean(r['SKU'] ?? r['Seller SKU'] ?? ''),
-      stockName: clean(r['Stock name as per Tally'] ?? r['Product Description'] ?? r['Description'] ?? r['Product Name'] ?? ''),
-      cost: num(r['COST'] ?? r['Cost'] ?? 0),
+      sku: tallySku,
+      stockName,
+      cost: num(pick(rl, ['cost', 'cost*qty'])),
     };
   });
   return map;
@@ -111,7 +157,7 @@ function buildRows(rawJson, skuJson) {
     const debtor = abbr ? `TATA Cliq-${abbr}` : '';
     const salesLedger = `TATA Cliq-Sales @${gstRate}%`;
 
-    const txnId = clean(r['Transaction ID']);
+    const txnId = cleanId(r['Transaction ID']);
     const skuInfo = txnMap[txnId] || {};
 
     return {

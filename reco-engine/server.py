@@ -495,12 +495,29 @@ class ReconciliationHandler(BaseHTTPRequestHandler):
                 gstr2b_bytes = _ensure_xlsx(gstr2b_file["content"])
                 purchase_bytes = _ensure_xlsx(purchase_file["content"])
                 debit_bytes = _ensure_xlsx(debit_file["content"])
-                gstr2b_records, books_records, results = reconcile_gstr2b_vs_books(
+                proceed_without_names = str(fields.get("proceedWithoutNames", "")).strip().lower() in ("1", "true", "yes")
+                try:
+                    name_corrections = json.loads(fields.get("nameCorrections", "") or "{}")
+                except Exception:
+                    name_corrections = {}
+                gstr2b_records, books_records, results, missing_names = reconcile_gstr2b_vs_books(
                     gstr2b_bytes,
                     purchase_bytes,
                     debit_bytes,
                     tolerance=tolerance,
+                    name_corrections=name_corrections,
                 )
+                # The portal export leaves Trade/Legal Name blank for every row but
+                # the first in a supplier's block (see gstr_2b_books.py). Surface
+                # those suppliers so the user can confirm/enter the name — or
+                # explicitly proceed and leave it blank — instead of silently
+                # inheriting it from the row above.
+                if missing_names and not proceed_without_names:
+                    self.write_json({
+                        "error": "Some suppliers in the GSTR-2B file are missing a Trade/Legal Name.",
+                        "missingTradeLegalNames": missing_names,
+                    }, 400)
+                    return
                 job_id = uuid4().hex
                 import base64
                 payload = {
@@ -885,6 +902,37 @@ class ReconciliationHandler(BaseHTTPRequestHandler):
                     "results":           _card_rows_for_ui(data.get("working_rows") or []),
                     "learned_keys":      data.get("learned_keys") or [],
                     "_xlsx_bytes":       data.get("excel"),
+                }
+                JOBS[job_id] = payload
+                self.write_json({k: v for k, v in payload.items() if not k.startswith("_")})
+                return
+
+            # Leisure Reco — generic two-party ledger reconciliation (any Internal
+            # Ledger vs any Counterparty Statement export). Fully self-contained
+            # engine (recon/leisure_reco.py) — does not share code with any other
+            # reco agent, and deliberately makes no assumption about the client's
+            # own chart-of-accounts columns beyond the fixed Tally ledger fields.
+            if reco_type == "leisure_reco":
+                internal_file = files.get("internal_ledger")
+                counterparty_file = files.get("counterparty_ledger")
+                if not internal_file or not counterparty_file:
+                    self.write_json({"error": "Upload the Internal Ledger and the Counterparty Statement."}, 400)
+                    return
+                from recon.leisure_reco import reconcile_leisure_ledgers
+                try:
+                    bundle = reconcile_leisure_ledgers(
+                        internal_file["content"], internal_file["filename"],
+                        counterparty_file["content"], counterparty_file["filename"],
+                        tolerance=tolerance,
+                    )
+                except ValueError as e:
+                    self.write_json({"error": str(e)}, 400)
+                    return
+                job_id = uuid4().hex
+                payload = {
+                    "job_id": job_id,
+                    "reco_type": reco_type,
+                    **bundle,
                 }
                 JOBS[job_id] = payload
                 self.write_json({k: v for k, v in payload.items() if not k.startswith("_")})
@@ -1339,6 +1387,8 @@ class ReconciliationHandler(BaseHTTPRequestHandler):
             filename_prefix = "einvoice_reco"
         elif reco_type == "receivable_cycle":
             filename_prefix = "receivable_cycle"
+        elif reco_type == "leisure_reco":
+            filename_prefix = "leisure_reco"
         elif reco_type == "pdf_bank_extract":
             acct = payload.get("account_no", "")
             filename_prefix = f"bank_statement_{acct}" if acct else "bank_statement_pdf"
@@ -1363,6 +1413,9 @@ def build_workbook(results: list[dict], summary: dict[str, int], counts: dict[st
     if reco_type == "einvoice_reco":
         from recon.einvoice_reco import build_einvoice_workbook
         return build_einvoice_workbook((payload or {}).get("_bundle") or {})
+    if reco_type == "leisure_reco":
+        from recon.leisure_reco import build_leisure_reco_workbook
+        return build_leisure_reco_workbook(results, summary, counts, payload=payload)
     if reco_type == "gstr_2b_books":
         from recon.gstr_2b_books import build_gstr2b_books_workbook
         return build_gstr2b_books_workbook(results, payload=payload)

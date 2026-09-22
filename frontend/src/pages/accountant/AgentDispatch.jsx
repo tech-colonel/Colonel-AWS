@@ -27,6 +27,7 @@ export const RECO_ID_TO_TYPE = {
   'ebcc3f8c-3e05-4132-860c-70e63b2380f1': 'zepto_receivables',
   '97702640-9642-4278-b34a-d1af684006ce': 'receivable_cycle',
   '290c797b-ec07-4caa-984f-45935e5c6b2a': 'bank_tally_reco',
+  'bec276d9-5757-4385-b21b-0edfda6ccd37': 'leisure_reco',
 };
 
 export default function AgentDispatch() {

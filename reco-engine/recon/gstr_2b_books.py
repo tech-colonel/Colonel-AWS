@@ -273,13 +273,18 @@ def _read_gstr2b_sheet(data: bytes, sheet_name: str) -> list[dict[str, Any]]:
     data_rows.columns = combined
     data_rows = data_rows.dropna(how="all")
 
-    # GSTR-2B portal exports merge supplier GSTIN and name cells across all invoices
-    # for the same supplier — pandas reads merged cells as NaN after the first row.
-    # Forward-fill those columns so every invoice row carries its supplier info.
+    # GSTR-2B portal exports merge the supplier GSTIN cell across all invoices for
+    # the same supplier — pandas reads merged cells as NaN after the first row.
+    # Forward-fill that column so every invoice row carries its supplier GSTIN,
+    # which the matching logic keys off of.
+    #
+    # Trade/Legal Name is deliberately NOT forward-filled here: the caller
+    # (reconcile_gstr2b_vs_books) surfaces rows with a blank name as
+    # missing_names so the user can confirm/enter them, rather than silently
+    # inheriting the name from the row above.
     gstin_aliases = {"gstin of supplier", "gstin"}
-    name_aliases = {"trade/legal name", "trade name", "legal name"}
     for col in data_rows.columns:
-        if _norm(col) in gstin_aliases or _norm(col) in name_aliases:
+        if _norm(col) in gstin_aliases:
             data_rows[col] = data_rows[col].replace("", pd.NA).ffill()
 
     rows = data_rows.fillna("").to_dict(orient="records")
@@ -3122,25 +3127,51 @@ def reconcile_gstr2b_vs_books(
     purchase_data: bytes,
     debit_data: bytes,
     tolerance: float = 1.0,
-) -> tuple[list[NormalizedInvoice], list[NormalizedInvoice], list[MatchResult]]:
+    name_corrections: dict[str, str] | None = None,
+) -> tuple[list[NormalizedInvoice], list[NormalizedInvoice], list[MatchResult], list[dict]]:
     gstr2b_data = _ensure_xlsx(gstr2b_data)
     purchase_data = _ensure_xlsx(purchase_data)
     debit_data = _ensure_xlsx(debit_data)
     gstr2b_records = parse_gstr2b(gstr2b_data)
+
+    # Apply any user-supplied Trade/Legal Name corrections (keyed by GSTIN), and
+    # collect suppliers whose name is still blank after that. The portal export
+    # merges the name cell across a supplier's invoice rows (see
+    # _read_gstr2b_sheet), so only the first row of each block actually carries
+    # it — the rest are genuinely blank in the file, not a parsing gap.
+    corrections = {
+        str(k).strip().upper(): str(v).strip()
+        for k, v in (name_corrections or {}).items() if str(v).strip()
+    }
+    missing_names: dict[str, dict] = {}
+    for rec in gstr2b_records:
+        if rec.supplier_name or not rec.supplier_gstin:
+            continue
+        corrected = corrections.get(rec.supplier_gstin)
+        if corrected:
+            rec.supplier_name = corrected
+            continue
+        entry = missing_names.setdefault(rec.supplier_gstin, {
+            "gstin": rec.supplier_gstin,
+            "occurrences": 0,
+            "sample_doc_no": rec.doc_no,
+        })
+        entry["occurrences"] += 1
+
     books_records = parse_books(purchase_data, debit_data)
-    
+
     # Map Books supplier_name to supplier_gstin from GSTR-2B to avoid false negatives from spelling
     name_to_gstin = {}
     for g in gstr2b_records:
         name_clean = str(g.supplier_name or "").strip().lower()
         if name_clean and g.supplier_gstin:
             name_to_gstin[name_clean] = g.supplier_gstin
-            
+
     for b in books_records:
         if not b.supplier_gstin:
             name_clean = str(b.supplier_name or "").strip().lower()
             if name_clean in name_to_gstin:
                 b.supplier_gstin = name_to_gstin[name_clean]
-                
+
     results = reconcile_by_invoice_no(gstr2b_records, books_records, tolerance=tolerance)
-    return gstr2b_records, books_records, results
+    return gstr2b_records, books_records, results, list(missing_names.values())

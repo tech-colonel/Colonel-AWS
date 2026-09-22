@@ -98,6 +98,11 @@ const RECO_AGENT_META = {
     color: '#0748EE', bg: '#EFF4FF', border: '#A3BFF8', accuracy: null,
     fields: ['Tally Daybook', 'Universal Bank Output'],
   },
+  'Leisure Reco': {
+    displayName: 'Leisure Reco', icon: '⚖️', category: 'Receivables',
+    color: '#0F766E', bg: '#F0FDFA', border: '#99F6E4', accuracy: null,
+    fields: ['Internal Ledger', 'Counterparty Statement'],
+  },
   // Fake demo cards (no backend) — matched by their synthetic agent `name`.
   'Amazon Receivables': {
     displayName: 'Amazon Receivables', icon: '📦', category: 'Receivables',

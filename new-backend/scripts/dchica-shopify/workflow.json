@@ -1,0 +1,241 @@
+{
+  "name": "shopify dchica",
+  "description": "D'Chica Shopify \"Total sales breakdown\" working file — fills Product Type / HSN / GST Rate, computes Net Qty, Invoice Value, Taxable value and the IGST vs CGST+SGST split (seller state fixed to Delhi per SOP), plus master dumps and GSTR pivot summaries.",
+  "fileInputs": [
+    { "id": "file_0", "label": "Shopify Total Sales Breakdown Dump (CSV)" }
+  ],
+  "sheets": [
+    {
+      "id": "raw_lookups",
+      "name": "Raw+Lookups",
+      "fileInputId": "file_0",
+      "rawSheetName": "Sheet1",
+      "filters": [],
+      "columns": [
+        { "order": 1, "type": "source", "label": "Day", "key": "Day" },
+        { "order": 2, "type": "source", "label": "Order ID", "key": "Order ID" },
+        { "order": 3, "type": "source", "label": "Bundle ID", "key": "Bundle ID" },
+        { "order": 4, "type": "source", "label": "Product ID", "key": "Product ID" },
+        { "order": 5, "type": "source", "label": "Product type", "key": "Product type" },
+        { "order": 6, "type": "source", "label": "Product title", "key": "Product title" },
+        { "order": 7, "type": "source", "label": "Product variant ID", "key": "Product variant ID" },
+        { "order": 8, "type": "source", "label": "Product variant SKU", "key": "Product variant SKU" },
+        { "order": 9, "type": "source", "label": "Product variant title", "key": "Product variant title" },
+        { "order": 10, "type": "source", "label": "Product vendor", "key": "Product vendor" },
+        { "order": 11, "type": "source", "label": "Sale ID", "key": "Sale ID" },
+        { "order": 12, "type": "source", "label": "Sales channel", "key": "Sales channel" },
+        { "order": 13, "type": "source", "label": "Sales channel ID", "key": "Sales channel ID" },
+        { "order": 14, "type": "source", "label": "Billing region", "key": "Billing region" },
+        { "order": 15, "type": "source", "label": "Shipping region", "key": "Shipping region" },
+        { "order": 16, "type": "source", "label": "Order name", "key": "Order name" },
+        { "order": 17, "type": "source", "label": "Gross sales", "key": "Gross sales" },
+        { "order": 18, "type": "source", "label": "Discounts", "key": "Discounts" },
+        { "order": 19, "type": "source", "label": "Returns", "key": "Returns" },
+        { "order": 20, "type": "source", "label": "Net sales", "key": "Net sales" },
+        { "order": 21, "type": "source", "label": "Shipping charges", "key": "Shipping charges" },
+        { "order": 22, "type": "source", "label": "Return fees", "key": "Return fees" },
+        { "order": 23, "type": "source", "label": "Taxes", "key": "Taxes" },
+        { "order": 24, "type": "source", "label": "Total sales", "key": "Total sales" },
+        { "order": 25, "type": "source", "label": "Orders", "key": "Orders" },
+        { "order": 26, "type": "source", "label": "Quantity ordered", "key": "Quantity ordered" },
+        { "order": 27, "type": "source", "label": "Quantity returned", "key": "Quantity returned" },
+        {
+          "order": 28, "type": "master_lookup", "label": "SKU Product Type",
+          "masterType": "sku", "lookupColumn": "Product variant SKU",
+          "matchField": "SKU", "returnField": "Product Type"
+        },
+        {
+          "order": 29, "type": "master_lookup", "label": "Shipping Product Type (Order)",
+          "masterType": "sku", "lookupColumn": "Order ID",
+          "matchField": "Order ID", "returnField": "Product Type"
+        },
+        {
+          "order": 30, "type": "computed", "label": "No Data Flag",
+          "formula": "({Gross sales}==0 && {Discounts}==0 && {Returns}==0 && {Net sales}==0 && {Shipping charges}==0 && {Return fees}==0 && {Taxes}==0 && {Total sales}==0) ? 1 : 0"
+        },
+        {
+          "order": 31, "type": "computed", "label": "Product Type Final",
+          "formula": "{Product type} ? {Product type} : ({SKU Product Type} ? {SKU Product Type} : {Shipping Product Type (Order)})"
+        },
+        {
+          "order": 32, "type": "computed", "label": "Product Type For HSN",
+          "formula": "{No Data Flag} ? '' : {Product Type Final}"
+        },
+        {
+          "order": 33, "type": "computed", "label": "Order Id Num",
+          "formula": "Number(String({Order name}).replace('#', ''))"
+        }
+      ]
+    },
+    {
+      "id": "working",
+      "name": "Working",
+      "sourceType": "prev_sheet",
+      "prevSheetName": "Raw+Lookups",
+      "filters": [],
+      "columns": [
+        { "order": 1, "type": "source", "label": "Day", "key": "Day" },
+        { "order": 2, "type": "source", "label": "Order ID", "key": "Order ID" },
+        { "order": 3, "type": "source", "label": "Bundle ID", "key": "Bundle ID" },
+        { "order": 4, "type": "source", "label": "Product ID", "key": "Product ID" },
+        {
+          "order": 5, "type": "computed", "label": "Product type",
+          "formula": "({Gross sales}==0 && {Discounts}==0 && {Returns}==0 && {Net sales}==0 && {Shipping charges}==0 && {Return fees}==0 && {Taxes}==0 && {Total sales}==0) ? '' : {Raw+Lookups.Product Type Final}"
+        },
+        { "order": 6, "type": "source", "label": "Product title", "key": "Product title" },
+        { "order": 7, "type": "source", "label": "Product variant ID", "key": "Product variant ID" },
+        { "order": 8, "type": "source", "label": "Product variant SKU", "key": "Product variant SKU" },
+        { "order": 9, "type": "source", "label": "Product variant title", "key": "Product variant title" },
+        { "order": 10, "type": "source", "label": "Product vendor", "key": "Product vendor" },
+        { "order": 11, "type": "source", "label": "Sale ID", "key": "Sale ID" },
+        { "order": 12, "type": "source", "label": "Sales channel", "key": "Sales channel" },
+        { "order": 13, "type": "source", "label": "Sales channel ID", "key": "Sales channel ID" },
+        { "order": 14, "type": "source", "label": "Billing region", "key": "Billing region" },
+        { "order": 15, "type": "source", "label": "Shipping region", "key": "Shipping region" },
+        { "order": 16, "type": "source", "label": "Order name", "key": "Order name" },
+        { "order": 17, "type": "source", "label": "Gross sales", "key": "Gross sales" },
+        { "order": 18, "type": "source", "label": "Discounts", "key": "Discounts" },
+        { "order": 19, "type": "source", "label": "Returns", "key": "Returns" },
+        { "order": 20, "type": "source", "label": "Net sales", "key": "Net sales" },
+        { "order": 21, "type": "source", "label": "Shipping charges", "key": "Shipping charges" },
+        { "order": 22, "type": "source", "label": "Return fees", "key": "Return fees" },
+        { "order": 23, "type": "source", "label": "Taxes", "key": "Taxes" },
+        { "order": 24, "type": "source", "label": "Total sales", "key": "Total sales" },
+        { "order": 25, "type": "source", "label": "Orders", "key": "Orders" },
+        { "order": 26, "type": "source", "label": "Quantity ordered", "key": "Quantity ordered" },
+        { "order": 27, "type": "source", "label": "Quantity returned", "key": "Quantity returned" },
+        { "order": 28, "type": "source", "label": "Blank", "key": "__blank_spacer__" },
+        { "order": 29, "type": "source", "label": "Order name2", "key": "Order Id Num" },
+        { "order": 30, "type": "source", "label": "Blank1", "key": "__blank_spacer__" },
+        { "order": 31, "type": "source", "label": "Blank2", "key": "__blank_spacer__" },
+        { "order": 32, "type": "source", "label": "Blank3", "key": "__blank_spacer__" },
+        { "order": 33, "type": "source", "label": "Order type", "key": "__blank_spacer__" },
+        {
+          "order": 34, "type": "computed", "label": "Remark2",
+          "formula": "({Gross sales}==0 && {Discounts}==0 && {Returns}==0 && {Net sales}==0 && {Shipping charges}==0 && {Return fees}==0 && {Taxes}==0 && {Total sales}==0) ? (({Quantity ordered}==0 && {Quantity returned}==0 && {Orders}==0) ? 'NO Data, Blank' : 'NO Data, Only Qty') : (({Quantity ordered}==0 && {Quantity returned}==0) ? 'Shipping' : '')"
+        },
+        { "order": 35, "type": "source", "label": "RTO Status (EshopBox)", "key": "__blank_spacer__" },
+        { "order": 36, "type": "source", "label": "RTO Status (Omnivio)", "key": "__blank_spacer__" },
+        {
+          "order": 37, "type": "master_lookup", "label": "HSN Code",
+          "masterType": "ledger", "lookupColumn": "Product Type For HSN",
+          "matchField": "Shopify Product type", "returnField": "HSN"
+        },
+        {
+          "order": 38, "type": "master_lookup", "label": "GST Rate",
+          "masterType": "ledger", "lookupColumn": "Product Type For HSN",
+          "matchField": "Shopify Product type", "returnField": "GST Rate"
+        },
+        { "order": 39, "type": "computed", "label": "Net Qty", "formula": "{Raw+Lookups.No Data Flag} ? '' : ({Quantity ordered} + {Quantity returned})" },
+        { "order": 40, "type": "computed", "label": "Invoice Value", "formula": "{Raw+Lookups.No Data Flag} ? '' : ({Total sales} - {Discounts})" },
+        { "order": 41, "type": "computed", "label": "Taxable", "formula": "{Raw+Lookups.No Data Flag} ? '' : ({Invoice Value} / (100 + {GST Rate}) * 100)" },
+        { "order": 42, "type": "computed", "label": "IGST", "formula": "{Raw+Lookups.No Data Flag} ? '' : ({Shipping region} == 'Delhi' ? 0 : {Taxable} * {GST Rate} / 100)" },
+        { "order": 43, "type": "computed", "label": "CGST", "formula": "{Shipping region} == 'Delhi' ? ({Taxable} * {GST Rate} / 100) / 2 : 0" },
+        { "order": 44, "type": "computed", "label": "SGST", "formula": "{Shipping region} == 'Delhi' ? ({Taxable} * {GST Rate} / 100) / 2 : 0" }
+      ]
+    },
+    {
+      "id": "product_type",
+      "name": "Product Type",
+      "sourceType": "master_dump",
+      "masterKey": "product_type_master",
+      "filters": [],
+      "columns": [
+        { "order": 1, "type": "source", "label": "SKU", "key": "SKU" },
+        { "order": 2, "type": "source", "label": "Product type", "key": "Product type" }
+      ]
+    },
+    {
+      "id": "hsn_code",
+      "name": "HSN Code",
+      "sourceType": "master_dump",
+      "masterKey": "ledger_master",
+      "filters": [
+        { "column": "_alias", "operator": "is_empty" }
+      ],
+      "columns": [
+        { "order": 1, "type": "source", "label": "Shopify Product type", "key": "Shopify Product type" },
+        { "order": 2, "type": "source", "label": "HSN", "key": "HSN" },
+        { "order": 3, "type": "source", "label": "GST Rate", "key": "GST Rate" }
+      ]
+    },
+    {
+      "id": "shipping_product_type",
+      "name": "Shipping Product Type",
+      "sourceType": "prev_sheet",
+      "prevSheetName": "Working",
+      "filters": [
+        { "column": "Remark2", "operator": "equals", "value": "Shipping" }
+      ],
+      "columns": [
+        { "order": 1, "type": "source", "label": "Order ID", "key": "Order ID" },
+        { "order": 2, "type": "source", "label": "Product type", "key": "Product type" }
+      ],
+      "groupBy": {
+        "enabled": true,
+        "columns": ["Order ID"],
+        "aggregations": { "Product type": "first" }
+      }
+    },
+    {
+      "id": "gstr_hsn",
+      "name": "GSTR HSN",
+      "sourceType": "prev_sheet",
+      "prevSheetName": "Working",
+      "filters": [
+        { "column": "Sales channel", "operator": "not_equals", "value": "Return Prime: Order Return" },
+        { "column": "Remark2", "operator": "not_equals", "value": "NO Data, Blank" },
+        { "column": "Remark2", "operator": "not_equals", "value": "NO Data, Only Qty" }
+      ],
+      "columns": [
+        { "order": 1, "type": "source", "label": "HSN Code", "key": "HSN Code" },
+        { "order": 2, "type": "source", "label": "GST Rate", "key": "GST Rate" },
+        { "order": 3, "type": "source", "label": "Sum of Net Qty", "key": "Net Qty" },
+        { "order": 4, "type": "source", "label": "Sum of Taxable", "key": "Taxable" },
+        { "order": 5, "type": "source", "label": "Sum of IGST", "key": "IGST" },
+        { "order": 6, "type": "source", "label": "Sum of CGST", "key": "CGST" },
+        { "order": 7, "type": "source", "label": "Sum of SGST", "key": "SGST" }
+      ],
+      "groupBy": {
+        "enabled": true,
+        "columns": ["HSN Code", "GST Rate"],
+        "aggregations": {
+          "Sum of Net Qty": "sum",
+          "Sum of Taxable": "sum",
+          "Sum of IGST": "sum",
+          "Sum of CGST": "sum",
+          "Sum of SGST": "sum"
+        }
+      }
+    },
+    {
+      "id": "gstr_b2c",
+      "name": "GSTR B2C",
+      "sourceType": "prev_sheet",
+      "prevSheetName": "Working",
+      "filters": [
+        { "column": "Sales channel", "operator": "not_equals", "value": "Return Prime: Order Return" },
+        { "column": "Remark2", "operator": "not_equals", "value": "NO Data, Blank" },
+        { "column": "Remark2", "operator": "not_equals", "value": "NO Data, Only Qty" }
+      ],
+      "columns": [
+        { "order": 1, "type": "source", "label": "GST Rate", "key": "GST Rate" },
+        { "order": 2, "type": "source", "label": "Shipping region", "key": "Shipping region" },
+        { "order": 3, "type": "source", "label": "Sum of Taxable", "key": "Taxable" },
+        { "order": 4, "type": "source", "label": "Sum of IGST", "key": "IGST" },
+        { "order": 5, "type": "source", "label": "Sum of CGST", "key": "CGST" },
+        { "order": 6, "type": "source", "label": "Sum of SGST", "key": "SGST" }
+      ],
+      "groupBy": {
+        "enabled": true,
+        "columns": ["GST Rate", "Shipping region"],
+        "aggregations": {
+          "Sum of Taxable": "sum",
+          "Sum of IGST": "sum",
+          "Sum of CGST": "sum",
+          "Sum of SGST": "sum"
+        }
+      }
+    }
+  ]
+}

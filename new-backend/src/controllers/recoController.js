@@ -814,6 +814,7 @@ const RECO_TYPE_MAP = {
   'zepto_receivables': 'zepto_receivables',
   'einvoice_reco': 'einvoice_reco',                    // E-Invoice Register vs Books (Sales + Credit Note)
   'receivable_cycle': 'receivable_cycle',              // Tally GST + Sales Order + courier COD settlement + SRN -> Main/COD sheets
+  'leisure_reco': 'leisure_reco',                       // Generic two-party ledger reco (any Internal Ledger vs Counterparty Statement)
 };
 
 /**
@@ -1822,6 +1823,17 @@ const runReco = async (req, res) => {
       form.append('books_combined', String(req.body.books_combined));
     }
 
+    // GSTR-2B vs Books: the portal export leaves Trade/Legal Name blank for every
+    // row but the first in a supplier's block (merged cell). The engine flags any
+    // supplier still missing a name as `missingTradeLegalNames` (400) unless we
+    // proceed anyway or hand back user-entered corrections keyed by GSTIN — see
+    // the `missingTradeLegalNames` catch below and MissingTradeNameModal on the
+    // frontend for the confirm/resubmit round trip.
+    if (pythonRecoType === 'gstr_2b_books') {
+      if (req.body.proceedWithoutNames) form.append('proceedWithoutNames', String(req.body.proceedWithoutNames));
+      if (req.body.nameCorrections) form.append('nameCorrections', String(req.body.nameCorrections));
+    }
+
     // Receivable Cycle: forward the selected period so the engine's Receivable
     // Amount calc knows which SRN/return rows fall inside this run's month(s).
     if (recoType === 'receivable_cycle') {
@@ -2010,6 +2022,11 @@ const runReco = async (req, res) => {
     const coaErr = /COA integrity check failed:[^\n]*/.exec(err.message || '');
     if (coaErr) {
       return res.status(400).json({ error: coaErr[0] });
+    }
+    // GSTR-2B vs Books: relay the engine's missing-Trade/Legal-Name gate as-is so
+    // the frontend can show the confirm/resubmit modal instead of a generic error.
+    if (err.response?.status === 400 && err.response?.data?.missingTradeLegalNames) {
+      return res.status(400).json(err.response.data);
     }
     res.status(500).json({ error: err.response?.data?.error || err.message });
   } finally {

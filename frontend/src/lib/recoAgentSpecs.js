@@ -112,6 +112,14 @@ export const RECO_AGENT_SPECS = [
       { key: 'delivery_status', label: 'Prepaid Delivery Status (opt.)', hint: '.xlsx / .xls — settles Prepaid orders once delivered', required: false },
     ],
   },
+  {
+    reco_type: 'leisure_reco',
+    name: 'Leisure Reco',
+    files: [
+      { key: 'internal_ledger', label: 'Internal Ledger', hint: '.xls / .xlsx', required: true },
+      { key: 'counterparty_ledger', label: 'Counterparty Statement', hint: '.xls / .xlsx', required: true },
+    ],
+  },
 ];
 
 export const specByType = (t) => RECO_AGENT_SPECS.find((s) => s.reco_type === t) || null;

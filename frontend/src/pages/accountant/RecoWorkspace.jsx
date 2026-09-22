@@ -21,6 +21,7 @@ import GoogleDriveFolderInput from './GoogleDriveFolderInput';
 import ZeptoFilePicker from './ZeptoFilePicker';
 import DriveOrUpload from '../../components/DriveOrUpload';
 import OpenInSheetsButton from '../../components/OpenInSheetsButton';
+import MissingTradeNameModal from '../../components/reco/MissingTradeNameModal';
 
 const HISTORY_MONTHS_SHORT = ['', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
@@ -182,6 +183,17 @@ const AGENT_CONFIG = {
     files: [
       { key: 'tally_daybook', label: 'Tally Bank Daybook', hint: '.xls / .xlsx — books side', accept: '.xls,.xlsx', required: true },
       { key: 'bank_output', label: 'Universal Bank Statement Output', hint: '.xlsx — from the Universal Bank tool (auto-loaded via handoff)', accept: '.xlsx', required: false },
+    ],
+  },
+  leisure_reco: {
+    name: 'Leisure Reco',
+    slug: 'LEDGER · ANY COUNTERPARTY',
+    icon: Scale,
+    description: 'Generic two-party ledger reconciliation — matches your Internal Ledger against any Counterparty Statement (vendor, customer, or intercompany), even when the two exports use different column layouts. Buckets timing, TDS/TCS, disputed, and omitted items separately.',
+    color: '#0F766E', bg: 'rgba(15,118,110,0.08)', border: 'rgba(15,118,110,0.2)',
+    files: [
+      { key: 'internal_ledger', label: 'Internal Ledger', hint: '.xls / .xlsx — your own books’ party ledger export', accept: '.xls,.xlsx', required: true },
+      { key: 'counterparty_ledger', label: 'Counterparty Statement', hint: '.xls / .xlsx — the other party’s ledger of you', accept: '.xls,.xlsx', required: true },
     ],
   },
 };
@@ -521,6 +533,11 @@ const RecoWorkspace = ({ agentTypeProp } = {}) => {
   const [zeptoPayload, setZeptoPayload] = useState({ assignments: {}, uploads: {}, driveUrl: '' });   // Zepto file-slot review
   const [showMonthly, setShowMonthly] = useState(true);
   const [ledgerStatus, setLedgerStatus] = useState(null);
+  // GSTR-2B vs Books: suppliers the engine found with a blank Trade/Legal Name
+  // (portal export merges that cell across a supplier's rows — only the first
+  // row of each block actually carries it). Populated from a 400 response.
+  const [missingTradeNames, setMissingTradeNames] = useState([]);
+  const [showMissingTradeNamesModal, setShowMissingTradeNamesModal] = useState(false);
 
   // GSTR-3B Tally Entry specific state
   const [active3bMonth, setActive3bMonth] = useState(0);    // index into monthly_data
@@ -698,7 +715,7 @@ const RecoWorkspace = ({ agentTypeProp } = {}) => {
 
   const handleFileChange = (key, fileOrArray) => setUploadedFiles(prev => ({ ...prev, [key]: fileOrArray }));
 
-  const handleRun = async () => {
+  const handleRun = async (overrides = {}) => {
     // Zepto Receivables: run exactly the reviewed slots (Drive files + manual uploads).
     if (agentType === 'zepto_receivables') {
       const { assignments = {}, uploads = {} } = zeptoPayload || {};
@@ -800,6 +817,12 @@ const RecoWorkspace = ({ agentTypeProp } = {}) => {
           }
         }
       }
+      // GSTR-2B vs Books: resubmitting after the "Missing Trade/Legal Name" modal —
+      // apply whatever names the user typed and accept the rest staying blank.
+      if (overrides.nameCorrections && Object.keys(overrides.nameCorrections).length > 0) {
+        formData.append('nameCorrections', JSON.stringify(overrides.nameCorrections));
+      }
+      if (overrides.proceedWithoutNames) formData.append('proceedWithoutNames', 'true');
       const response = await api.post('/api/reco/run', formData, {
         headers: { 'Content-Type': 'multipart/form-data' },
         onUploadProgress: (evt) => {
@@ -829,7 +852,13 @@ const RecoWorkspace = ({ agentTypeProp } = {}) => {
       clearTimeout(phaseTimer.current);
       setUploadProgress(null);
       setPhase(null);
-      toast.error(err.response?.data?.error || 'Reconciliation failed');
+      const missing = err.response?.status === 400 ? err.response?.data?.missingTradeLegalNames : null;
+      if (missing?.length > 0) {
+        setMissingTradeNames(missing);
+        setShowMissingTradeNamesModal(true);
+      } else {
+        toast.error(err.response?.data?.error || 'Reconciliation failed');
+      }
     } finally { setRunning(false); }
   };
 
@@ -1291,7 +1320,7 @@ const RecoWorkspace = ({ agentTypeProp } = {}) => {
           }}>
             Cancel
           </button>
-          <button onClick={handleRun} disabled={running} className="btn-glow" style={{
+          <button onClick={() => handleRun()} disabled={running} className="btn-glow" style={{
             padding: '10px 20px', display: 'flex', alignItems: 'center', gap: 8,
           }}>
             {running
@@ -1313,6 +1342,16 @@ const RecoWorkspace = ({ agentTypeProp } = {}) => {
     <DashboardLayout sidebarItems={sidebarItems}>
       {BrandPickerOverlay}
       {GenerateReceivablesModal}
+      <MissingTradeNameModal
+        open={showMissingTradeNamesModal}
+        onOpenChange={setShowMissingTradeNamesModal}
+        missingNames={missingTradeNames}
+        submitting={running}
+        onContinue={(corrections) => {
+          setShowMissingTradeNamesModal(false);
+          handleRun({ nameCorrections: corrections, proceedWithoutNames: true });
+        }}
+      />
       <div style={{ padding: '24px 28px', maxWidth: 1200 }}>
 
         {/* Breadcrumb */}
@@ -1731,7 +1770,7 @@ const RecoWorkspace = ({ agentTypeProp } = {}) => {
 
               {/* Run button */}
               <button
-                onClick={handleRun} disabled={running}
+                onClick={() => handleRun()} disabled={running}
                 className="btn-glow"
                 style={{ width: '100%', padding: '13px 0', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8 }}
               >
