@@ -146,33 +146,50 @@ function buildSummaryAoA(ledgerRows, settlement) {
   const d = collect(ledgerRows);
   const aoa = [];
 
-  /* A cell written as a bare { f } is SILENTLY DROPPED when the workbook is
-     saved — SheetJS needs a type to emit it, and the reader then sees an empty
-     cell where a formula should be. Every formula therefore carries t:'n' and a
-     placeholder v, which Excel overwrites the moment it recalculates. */
-  const F = (formula) => ({ t: 'n', v: 0, f: formula });
+  /* ── cell helpers ────────────────────────────────────────────────────────
+     Two things every cell here needs:
+
+     A TYPE. A cell written as a bare { f } is SILENTLY DROPPED when the
+     workbook is saved — SheetJS needs a type to emit it, and the reader then
+     sees an empty cell where a formula should be. Every formula carries t:'n'
+     and a placeholder v, which Excel overwrites on recalculation.
+
+     A NUMBER FORMAT. Without one a ratio renders as 0.0491316547278 instead of
+     4.91%, which is unreadable and makes the sheet look broken. Amounts use
+     Indian lakh/crore grouping — 1,56,047.65, not 156,047.65 — because that is
+     how the figures will be read and checked. */
+  const FMT_PCT = '0.00%';
+  const FMT_INT = '#,##0';
+  const FMT_AMT = '[>=10000000]##\\,##\\,##\\,##0.00;[>=100000]##\\,##\\,##0.00;##,##0.00';
+
+  const F  = (formula, z) => ({ t: 'n', v: 0, f: formula, ...(z ? { z } : {}) });
+  const Fp = (formula) => F(formula, FMT_PCT);                       // formula, shown as a %
+  const Fa = (formula) => F(formula, FMT_AMT);                       // formula, shown as money
+  const A  = (v) => ({ t: 'n', v: Number(v) || 0, z: FMT_AMT });     // money
+  const I  = (v) => ({ t: 'n', v: Number(v) || 0, z: FMT_INT });     // a count
+
   const push = (...cells) => {
     aoa.push(cells.map((c) => (c && typeof c === 'object' && c.f && c.t === undefined ? F(c.f) : c)));
     return aoa.length;
   };
 
   push('Particulars', 'Amount (₹)', '%');
-  push('Total Orders', d.orders);
+  push('Total Orders', I(d.orders));
 
   /* ── what the customer paid ──────────────────────────────────────────────
      Every figure here is net of refunds and cancellations, because the ledger
      carries those as negative lines against the same categories. Stating the
      components separately is what lets the settlement below tie exactly — an
      "expected" that quietly omits shipping or promotions can never reconcile. */
-  const rSales    = push('Total Seller Price (Net)', d.productSales);
-  const rShipping = push('Shipping Charged', d.shipping,
-                         { f: `IFERROR(B${aoa.length + 1}/$B$${rSales},0)` });
-  const rPromos   = push('Promotions / Discounts', d.promotions,
-                         { f: `IFERROR(B${aoa.length + 1}/$B$${rSales},0)` });
-  const rGst      = push('GST Collected from Buyers', d.gstCollected,
-                         { f: `IFERROR(B${aoa.length + 1}/$B$${rSales},0)` });
+  const rSales    = push('Total Seller Price (Net)', A(d.productSales));
+  const rShipping = push('Shipping Charged', A(d.shipping),
+                         Fp(`IFERROR(B${aoa.length + 1}/$B$${rSales},0)`));
+  const rPromos   = push('Promotions / Discounts', A(d.promotions),
+                         Fp(`IFERROR(B${aoa.length + 1}/$B$${rSales},0)`));
+  const rGst      = push('GST Collected from Buyers', A(d.gstCollected),
+                         Fp(`IFERROR(B${aoa.length + 1}/$B$${rSales},0)`));
   const rGross    = push('Total Seller Price With GST',
-                         { f: `B${rSales}+B${rShipping}+B${rPromos}+B${rGst}` });
+                         Fa(`B${rSales}+B${rShipping}+B${rPromos}+B${rGst}`));
 
   push();
   push('AMAZON FEES');
@@ -187,16 +204,16 @@ function buildSummaryAoA(ledgerRows, settlement) {
     ['GST on Amazon Fees',      'gstOnFees'],
   ];
   for (const [label, key] of feeLines) {
-    feeRows[key] = push(label, d.fees[key], { f: `IFERROR(B${aoa.length + 1}/$B$${rSales},0)` });
+    feeRows[key] = push(label, A(d.fees[key]), Fp(`IFERROR(B${aoa.length + 1}/$B$${rSales},0)`));
   }
   const rTotalFees = push('Total Amazon Fees',
-                          { f: `SUM(B${feeRows.commission}:B${feeRows.gstOnFees})` },
-                          { f: `IFERROR(B${aoa.length + 1}/$B$${rSales},0)` });
+                          Fa(`SUM(B${feeRows.commission}:B${feeRows.gstOnFees})`),
+                          Fp(`IFERROR(B${aoa.length + 1}/$B$${rSales},0)`));
 
   push();
   push('WITHHELD TAXES');
-  const rTds = push('TDS (Section 194-O)', d.tds, { f: `IFERROR(B${aoa.length + 1}/$B$${rSales},0)` });
-  const rTcs = push('TCS (CGST+SGST+IGST)', d.tcs, { f: `IFERROR(B${aoa.length + 1}/$B$${rSales},0)` });
+  const rTds = push('TDS (Section 194-O)', A(d.tds), Fp(`IFERROR(B${aoa.length + 1}/$B$${rSales},0)`));
+  const rTcs = push('TCS (CGST+SGST+IGST)', A(d.tcs), Fp(`IFERROR(B${aoa.length + 1}/$B$${rSales},0)`));
 
   /* ── reconciliation ──────────────────────────────────────────────────────
      Two independent checks, both of which must come to zero:
@@ -206,15 +223,15 @@ function buildSummaryAoA(ledgerRows, settlement) {
      One catches a mis-read fee; the other catches a mis-read transaction. */
   push();
   push('RECONCILIATION');
-  const rDebt     = push('Debt Adjustment (prior period)', d.debtAdjustment,
-                         { f: `IFERROR(B${aoa.length + 1}/$B$${rSales},0)` });
+  const rDebt     = push('Debt Adjustment (prior period)', A(d.debtAdjustment),
+                         Fp(`IFERROR(B${aoa.length + 1}/$B$${rSales},0)`));
   const rExpected = push('Expected Settlement',
-                         { f: `B${rGross}-B${rTotalFees}-B${rTds}-B${rTcs}+B${rDebt}` });
+                         Fa(`B${rGross}-B${rTotalFees}-B${rTds}-B${rTcs}+B${rDebt}`));
 
   const headerTotal = settlement && settlement.total_amount != null ? Number(settlement.total_amount) : null;
-  const rAmazon = push('Amazon stated payout', headerTotal,
-                       { f: `IFERROR(B${aoa.length + 1}/$B$${rSales},0)` });
-  push('Difference (must be 0)', { f: `ROUND(B${rExpected}-B${rAmazon},2)` });
+  const rAmazon = push('Amazon stated payout', A(headerTotal),
+                       Fp(`IFERROR(B${aoa.length + 1}/$B$${rSales},0)`));
+  push('Difference (must be 0)', Fa(`ROUND(B${rExpected}-B${rAmazon},2)`));
 
   push();
   push('PAYOUT COMPOSITION');
@@ -234,12 +251,12 @@ function buildSummaryAoA(ledgerRows, settlement) {
   });
   const rCompFirst = aoa.length + 1;
   for (const t of comp) {
-    push(NICE[t.label] || t.label, t.amount, { f: `IFERROR(B${aoa.length + 1}/$B$${rSales},0)` });
+    push(NICE[t.label] || t.label, A(t.amount), Fp(`IFERROR(B${aoa.length + 1}/$B$${rSales},0)`));
   }
   const rCompLast = aoa.length;
-  const rNet = push('Net Settlement', { f: `SUM(B${rCompFirst}:B${rCompLast})` },
-                                      { f: `IFERROR(B${aoa.length + 1}/$B$${rSales},0)` });
-  push('Difference (must be 0)', { f: `ROUND(B${rNet}-B${rAmazon},2)` });
+  const rNet = push('Net Settlement', Fa(`SUM(B${rCompFirst}:B${rCompLast})`),
+                                      Fp(`IFERROR(B${aoa.length + 1}/$B$${rSales},0)`));
+  push('Difference (must be 0)', Fa(`ROUND(B${rNet}-B${rAmazon},2)`));
 
   push();
   push('Status', 'No. of Orders', 'Amount (₹)', '%');
@@ -251,18 +268,120 @@ function buildSummaryAoA(ledgerRows, settlement) {
   });
   const rGrand = rStatusFirst + sorted.length;
   for (const t of sorted) {
-    push(t.label, t.orders, t.amount, { f: `IFERROR(C${aoa.length + 1}/$C$${rGrand},0)` });
+    push(t.label, I(t.orders), A(t.amount), Fp(`IFERROR(C${aoa.length + 1}/$C$${rGrand},0)`));
   }
-  push('Grand Total', { f: `SUM(B${rStatusFirst}:B${rGrand - 1})` },
-                      { f: `SUM(C${rStatusFirst}:C${rGrand - 1})` },
-                      { f: `IFERROR(C${rGrand}/$C$${rGrand},0)` });
+  push('Grand Total', I(`SUM(B${rStatusFirst}:B${rGrand - 1})`),
+                      Fa(`SUM(C${rStatusFirst}:C${rGrand - 1})`),
+                      Fp(`IFERROR(C${rGrand}/$C$${rGrand},0)`));
 
   push();
   push('Settlement ID', settlement ? settlement.settlement_id : '');
   push('Period', settlement ? `${settlement.start_date || ''} → ${settlement.end_date || ''}` : '');
   push('Deposit date', settlement ? settlement.deposit_date || '' : '');
 
-  return { aoa, colWidths: [{ wch: 34 }, { wch: 16 }, { wch: 14 }, { wch: 10 }] };
+  /* The two differences are computed here, not read back from the formulas,
+     so the styling can colour them by what they ACTUALLY are. A green "must be
+     0" row that hasn't been checked is worse than no colour at all. */
+  const totalFees = Object.values(d.fees).reduce((a, b) => a + b, 0);
+  const grossAll  = d.productSales + d.shipping + d.promotions + d.gstCollected;
+  const statedAmt = settlement && settlement.total_amount != null ? Number(settlement.total_amount) : 0;
+  const checks = {
+    recon:  r2(grossAll - totalFees - d.tds - d.tcs + d.debtAdjustment - statedAmt),
+    payout: r2(d.byType.reduce((a, t) => a + t.amount, 0) - statedAmt),
+  };
+
+  return { aoa, checks, colWidths: [{ wch: 34 }, { wch: 16 }, { wch: 13 }, { wch: 11 }] };
 }
 
-module.exports = { buildSummaryAoA, collect, feeGroup };
+/* ──────────────────────────────────────────────────────────────────────────────
+   Styling. Written with xlsx-js-style, a SheetJS fork that actually emits cell
+   styles — the stock community build silently drops them.
+
+   The palette is deliberately quiet: this is a document an accountant checks
+   figures in, not a dashboard. Colour is used only where it carries meaning —
+   the two "must be 0" rows go green when they reconcile and red when they do
+   not, which is the one thing a reader must never have to work out by squinting
+   at a number.
+   ────────────────────────────────────────────────────────────────────────────── */
+const INK    = '1E3A57';   // column headers — deep slate
+const CLAY   = 'B4633A';   // section bands — warm, reads as a divider not an alert
+const CREAM  = 'FAF6F1';   // subtotal rows
+const RULE   = 'E4DDD3';
+const OK_BG  = 'E7F1EB';  const OK_FG  = '256B4A';
+const BAD_BG = 'FBEBE9';  const BAD_FG = '9B2F2B';
+const MUTED  = '6B6660';
+
+const SECTIONS = new Set(['AMAZON FEES', 'WITHHELD TAXES', 'RECONCILIATION', 'PAYOUT COMPOSITION']);
+const TOTALS   = new Set(['Total Seller Price With GST', 'Total Amazon Fees',
+                          'Expected Settlement', 'Net Settlement', 'Grand Total']);
+const FOOTER   = new Set(['Settlement ID', 'Period', 'Deposit date']);
+
+const border = (sides, color = RULE) =>
+  Object.fromEntries(sides.map((k) => [k, { style: 'thin', color: { rgb: color } }]));
+
+function styleSummarySheet(ws, aoa, checks) {
+  const width = Math.max(...aoa.map((r) => (r ? r.length : 0)), 4);
+  const at = (r, c) => String.fromCharCode(65 + c) + (r + 1);
+  const ensure = (addr) => (ws[addr] = ws[addr] || { t: 's', v: '' });
+
+  aoa.forEach((row, r) => {
+    const label = row && row[0] !== undefined && row[0] !== null ? String(row[0]) : '';
+    const isHeaderRow = label === 'Particulars' || label === 'Status';
+    const isSection   = SECTIONS.has(label);
+    const isTotal     = TOTALS.has(label);
+    const isCheck     = /must be 0/.test(label);
+    const isFooter    = FOOTER.has(label);
+    const isPayout    = label === 'Amazon stated payout';
+    if (!label && !isHeaderRow) return;
+
+    // which check does this row report on? they appear in order: recon, payout
+    const checkVal = isCheck
+      ? (aoa.slice(0, r).filter((x) => x && /must be 0/.test(String(x[0] || ''))).length === 0
+          ? checks.recon : checks.payout)
+      : null;
+    const passed = isCheck ? Math.abs(checkVal) < 0.005 : false;
+
+    for (let c = 0; c < width; c++) {
+      const addr = at(r, c);
+      if (!ws[addr] && !(isHeaderRow || isSection || isTotal || isCheck)) continue;
+      ensure(addr);
+      const cell = ws[addr];
+      const base = { alignment: { vertical: 'center', horizontal: c === 0 ? 'left' : 'right' } };
+
+      if (isHeaderRow) {
+        cell.s = { ...base, font: { bold: true, sz: 11, color: { rgb: 'FFFFFF' } },
+                   fill: { patternType: 'solid', fgColor: { rgb: INK } },
+                   alignment: { ...base.alignment, horizontal: c === 0 ? 'left' : 'right' } };
+      } else if (isSection) {
+        cell.s = { ...base, font: { bold: true, sz: 10, color: { rgb: 'FFFFFF' } },
+                   fill: { patternType: 'solid', fgColor: { rgb: CLAY } } };
+      } else if (isCheck) {
+        cell.s = { ...base, font: { bold: true, color: { rgb: passed ? OK_FG : BAD_FG } },
+                   fill: { patternType: 'solid', fgColor: { rgb: passed ? OK_BG : BAD_BG } },
+                   border: border(['top', 'bottom'], passed ? OK_FG : BAD_FG) };
+        if (c === 0) cell.v = passed ? `${label}  ✓` : `${label}  ✗`;
+      } else if (isTotal) {
+        cell.s = { ...base, font: { bold: true },
+                   fill: { patternType: 'solid', fgColor: { rgb: CREAM } },
+                   border: border(['top']) };
+      } else if (isPayout) {
+        cell.s = { ...base, font: { bold: true } };
+      } else if (isFooter) {
+        cell.s = { ...base, font: { italic: true, sz: 9, color: { rgb: MUTED } },
+                   alignment: { ...base.alignment, horizontal: 'left' } };
+      } else {
+        cell.s = { ...base, border: border(['bottom']) };
+      }
+    }
+  });
+
+  ws['!rows'] = aoa.map((row) => {
+    const label = row && row[0] ? String(row[0]) : '';
+    return SECTIONS.has(label) || label === 'Particulars' || label === 'Status'
+      ? { hpt: 20 } : { hpt: 16 };
+  });
+  return ws;
+}
+
+module.exports = { buildSummaryAoA, styleSummarySheet, collect, feeGroup };
+

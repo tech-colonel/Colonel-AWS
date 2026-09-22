@@ -9,7 +9,10 @@ const fs = require('fs-extra');
 const amazonReports = require('../../../services/amazonReports');
 const amazonTokenStore = require('../../../services/amazonTokenStore');
 const { pivotSettlementRows, verifyBalance } = require('../../../services/processors/amazonSettlementPivot');
-const { buildSummaryAoA } = require('../../../services/processors/amazonSettlementSummary');
+const { buildSummaryAoA, styleSummarySheet } = require('../../../services/processors/amazonSettlementSummary');
+/* xlsx-js-style is SheetJS with cell styling that survives the write; the
+   stock build drops every style silently. Scoped to this workbook only. */
+const XLSXStyle = require('xlsx-js-style');
 
 const OUTPUT_DIR = path.join(__dirname, '../../../../outputs');
 
@@ -698,21 +701,23 @@ const fetchSettlementFromAmazon = async (req, res, next) => {
                rewriting it is idempotent — and it means a change to the summary
                reaches existing settlements on the next sync instead of only new
                ones. Only the database insert is conditional. */
-            const book = XLSX.utils.book_new();
+            const book = XLSXStyle.utils.book_new();
 
             /* Summary first, matching the reconciliation workbooks the team
                already reads: the summary is what gets looked at, the line detail
                is what gets checked when a figure is queried. Percentages and
                totals are live formulas, not baked values, so a reader can click
                a cell and see how it was derived. */
-            const { aoa, colWidths } = buildSummaryAoA(report.rows, result.settlement);
-            const summarySheet = XLSX.utils.aoa_to_sheet(aoa);
+            const { aoa, checks, colWidths } = buildSummaryAoA(report.rows, result.settlement);
+            const summarySheet = XLSXStyle.utils.aoa_to_sheet(aoa);
             summarySheet['!cols'] = colWidths;
-            XLSX.utils.book_append_sheet(book, summarySheet, 'Summary');
+            styleSummarySheet(summarySheet, aoa, checks);
+            XLSXStyle.utils.book_append_sheet(book, summarySheet, 'Summary');
 
-            const sheet = XLSX.utils.json_to_sheet(result.rows, { cellDates: true });
-            XLSX.utils.book_append_sheet(book, sheet, 'Settlement');
-            await fs.writeFile(path.join(OUTPUT_DIR, filename), XLSX.write(book, { type: 'buffer', bookType: 'xlsx' }));
+            const sheet = XLSXStyle.utils.json_to_sheet(result.rows, { cellDates: true });
+            XLSXStyle.utils.book_append_sheet(book, sheet, 'Settlement');
+            await fs.writeFile(path.join(OUTPUT_DIR, filename),
+                               XLSXStyle.write(book, { type: 'buffer', bookType: 'xlsx' }));
 
 
             /* ── all-or-nothing, and duplicate-proof ──────────────────────────
