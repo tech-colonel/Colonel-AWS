@@ -604,19 +604,20 @@ const getSettlementSummary = async (req, res, next) => {
 
         const rows = await Model.findAll({
             attributes: ['settlement_id', 'product_sales', 'gst_before_tcs', 'selling_fees', 'fba_fees',
-                         'other_transaction_fees', 'total', 'created_at'],
+                         'other_transaction_fees', 'other', 'total', 'created_at'],
             raw: true,
         });
 
         const num = (v) => { const n = Number(v); return Number.isFinite(n) ? n : 0; };
         const settlements = new Set();
-        let grossSales = 0, gstCollected = 0, amazonFees = 0, netPayout = 0, lastSync = null;
+        let grossSales = 0, gstCollected = 0, amazonFees = 0, adjustments = 0, netPayout = 0, lastSync = null;
 
         for (const r of rows) {
             if (r.settlement_id) settlements.add(String(r.settlement_id));
             grossSales   += num(r.product_sales);
             gstCollected += num(r.gst_before_tcs);
-            amazonFees += num(r.selling_fees) + num(r.fba_fees) + num(r.other_transaction_fees);
+            amazonFees  += num(r.selling_fees) + num(r.fba_fees) + num(r.other_transaction_fees);
+            adjustments += num(r.other);   // debt recoveries etc. — not fees
             netPayout  += num(r.total);
             const t = r.created_at ? new Date(r.created_at) : null;
             if (t && (!lastSync || t > lastSync)) lastSync = t;
@@ -628,6 +629,7 @@ const getSettlementSummary = async (req, res, next) => {
             grossSales:   Number(grossSales.toFixed(2)),    // product_sales — taxable value, ex-GST, net of refunds
             gstCollected: Number(gstCollected.toFixed(2)),  // GST Amazon collected from buyers and passed through
             amazonFees: Number(amazonFees.toFixed(2)),   // negative — they are deductions
+            adjustments: Number(adjustments.toFixed(2)), // prior-period recoveries Amazon netted off — NOT fees
             netPayout:  Number(netPayout.toFixed(2)),
             lastSync:   lastSync ? lastSync.toISOString() : null,
         });
@@ -661,10 +663,14 @@ const fetchSettlementFromAmazon = async (req, res, next) => {
         const existing = await Model.findAll({ attributes: ['settlement_id'], group: ['settlement_id'], raw: true });
         const already = new Set(existing.map((r) => String(r.settlement_id)).filter(Boolean));
 
+        // Raw ledgers are retained per brand so re-mapping or auditing a
+        // settlement never needs a second (rate-limited) trip to Amazon.
+        const ledgerDir = path.join(OUTPUT_DIR, 'amazon-ledgers', brand.name.replace(/[^a-zA-Z0-9]/g, '_'));
         const pulled = await amazonReports.fetchSettlementReports(brandId, {
             since: new Date(Date.now() - days * 24 * 3600 * 1000),
             limit,
             rowLimit: null,
+            ledgerDir,
         });
 
         await ensureDir();
@@ -746,8 +752,13 @@ const fetchSettlementFromAmazon = async (req, res, next) => {
                 ledger_rows: report.count,
                 stored_rows: result.rows.length,
                 filename,
+                ledger: report.ledgerPath ? path.basename(report.ledgerPath) : null,
                 // Amazon's own stated payout vs what we computed — should be 0.
                 variance_vs_amazon: balance.vsHeader,
+                // Categories the pivot did not recognise. Never dropped — they
+                // sit in the `other` column — but they are NOT in the fees
+                // tile, so the caller should surface them rather than bury them.
+                unmapped: result.unmapped,
             });
         }
 

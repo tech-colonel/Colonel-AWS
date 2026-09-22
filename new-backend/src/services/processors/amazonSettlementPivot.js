@@ -94,6 +94,15 @@ function bucketFor(amountType, amountDescription) {
   const type = String(amountType || '');
   const desc = String(amountDescription || '');
 
+  // ── balance adjustments (NOT fees) ──────────────────────────────────────
+  // "Debt Adjustment against COD Transactions and Non-Transactional Fee
+  // Accounts" is Amazon recovering money already owed from an earlier period
+  // — a COD shortfall, unpaid account charges. It is the settlement of a prior
+  // liability, not a cost of selling in this period, so it must NOT land in
+  // the fee columns. `other` is where Amazon's own export puts it too.
+  // Recognised explicitly here so it stops reading as an unknown category.
+  if (has(type, 'debt', 'adjustment') || has(desc, 'debt adjustment')) return 'other';
+
   // ── withheld taxes ──────────────────────────────────────────────────────
   if (has(type, 'itemtcs') || has(desc, 'tcs-')) {
     if (has(desc, 'cgst')) return 'tcs_cgst';
@@ -211,13 +220,14 @@ function pivotSettlementRows(ledgerRows) {
 
     const bucket = bucketFor(row['amount-type'], row['amount-description']);
     g._buckets[bucket] += paise;
+    const deliberateOther = bucket === 'other' && (has(row['amount-type'], 'debt', 'adjustment') || has(row['amount-description'], 'debt adjustment'));
 
     // `description` on the wide row should name the sale, not whichever
     // component happened to be seen first.
     if (has(row['amount-description'], 'principal')) g.description = row['amount-description'];
     if (!g.sku && row['sku']) g.sku = row['sku'];
 
-    if (bucket === 'other') {
+    if (bucket === 'other' && !deliberateOther) {
       const label = `${row['amount-type'] || '(none)'} / ${row['amount-description'] || '(none)'}`;
       const u = unmapped.get(label) || { count: 0, paise: 0 };
       u.count++; u.paise += paise;

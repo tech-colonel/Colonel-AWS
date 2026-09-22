@@ -126,6 +126,19 @@ const SettlementAmazonWorkspace = ({ agent }) => {
       if (imported.length) {
         const rows = imported.reduce((n, s) => n + (s.stored_rows || 0), 0);
         toast.success(`Imported ${imported.length} settlement(s) · ${rows} rows`);
+
+        /* Amounts the server could not categorise. They are stored (in the
+           `other` column) but excluded from the fees tile, so say so loudly
+           rather than let the tile quietly understate. */
+        const unmapped = imported.flatMap((s) => s.unmapped || []);
+        if (unmapped.length) {
+          const amt = unmapped.reduce((n, u) => n + (u.amount || 0), 0);
+          const names = [...new Set(unmapped.map((u) => u.label))].slice(0, 3).join(' · ');
+          toast.warning(
+            `₹${Math.abs(amt).toLocaleString('en-IN', { maximumFractionDigits: 0 })} in ${unmapped.length} unrecognised categor${unmapped.length === 1 ? 'y' : 'ies'} went to "other" — ${names}${unmapped.length > 3 ? ' …' : ''}`,
+            { duration: 12000 }
+          );
+        }
       } else if (!rejected.length) {
         toast.info(
           skipped.length
@@ -702,6 +715,19 @@ const AmazonSettlementPanel = ({ conn, summary, fetching, onFetch, onUpload }) =
           <p className="text-[13px] text-slate-500">
             Nothing imported yet. Fetch the last 90 days of settlements straight from Amazon.
           </p>
+        )}
+
+        {/* Prior-period recoveries Amazon netted off the payout. Deliberately
+            NOT folded into the fees tile — they aren't a cost of this period —
+            but a ₹16k debt recovery is exactly what an accountant should see. */}
+        {hasData && summary.adjustments !== 0 && (
+          <div className="flex items-start gap-2 -mt-1 px-3 py-2 rounded-md bg-amber-50/70 border border-amber-200/70 text-[12px] text-amber-900">
+            <span className="font-semibold shrink-0">Also netted off:</span>
+            <span>
+              ₹{inr(Math.abs(summary.adjustments))} in debt adjustments — Amazon recovering balances owed from earlier
+              periods (COD shortfalls, account charges). Not a fee; excluded from the Amazon fees tile.
+            </span>
+          </div>
         )}
 
         {/* actions */}

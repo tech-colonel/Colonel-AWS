@@ -296,7 +296,7 @@ async function fetchReport(brandId, reportType, {
  * fortnightly reports Amazon has already produced and filter by when they were
  * created. `since` therefore filters CREATION time, not the settlement period.
  */
-async function fetchSettlementReports(brandId, { since, until, limit = 5, parse = true, rowLimit = null } = {}) {
+async function fetchSettlementReports(brandId, { since, until, limit = 5, parse = true, rowLimit = null, ledgerDir = null } = {}) {
   const conn = await client.resolve(brandId);
   const list = await listReports(brandId, {
     reportTypes: [REPORT_TYPES.SETTLEMENT_V2.type],
@@ -317,6 +317,17 @@ async function fetchSettlementReports(brandId, { since, until, limit = 5, parse 
     await downloadDocument(doc, file);
     try {
       const parsed = await parseTsvFile(file, { limit: rowLimit });
+
+      /* Keep the raw ledger when asked. Amazon's document quota is one call a
+         minute, so anything we might want to re-read — a re-mapping, an audit,
+         a dispute — must come from disk, not from Amazon a second time. */
+      let ledgerPath = null;
+      if (ledgerDir) {
+        await fs.promises.mkdir(ledgerDir, { recursive: true });
+        ledgerPath = path.join(ledgerDir, `settlement_ledger_${r.reportId}.tsv`);
+        await fs.promises.copyFile(file, ledgerPath);
+      }
+
       out.push({
         reportId: r.reportId,
         dataStartTime: r.dataStartTime,
@@ -325,6 +336,7 @@ async function fetchSettlementReports(brandId, { since, until, limit = 5, parse 
         headers: parsed.headers,
         rows: parsed.rows,
         count: parsed.count,
+        ledgerPath,
       });
     } finally {
       fs.promises.unlink(file).catch(() => {});
