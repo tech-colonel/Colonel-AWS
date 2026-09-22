@@ -101,7 +101,7 @@ function bucketFor(amountType, amountDescription) {
   // liability, not a cost of selling in this period, so it must NOT land in
   // the fee columns. `other` is where Amazon's own export puts it too.
   // Recognised explicitly here so it stops reading as an unknown category.
-  if (has(type, 'debt', 'adjustment') || has(desc, 'debt adjustment')) return 'other';
+  if (has(type, 'debt', 'adjustment') || has(desc, 'debt adjustment') || has(desc, 'payable to amazon')) return 'other';
 
   // ── withheld taxes ──────────────────────────────────────────────────────
   if (has(type, 'itemtcs') || has(desc, 'tcs-')) {
@@ -126,8 +126,8 @@ function bucketFor(amountType, amountDescription) {
   }
 
   // ── fees ────────────────────────────────────────────────────────────────
-  if (has(type, 'itemfees', 'fee')) {
-    if (has(desc, 'fba')) return 'fba_fees';
+  if (has(type, 'itemfees', 'fbafees', 'fee')) {
+    if (has(desc, 'fba') || has(type, 'fbafees')) return 'fba_fees';
     if (has(desc, 'commission', 'closing fee', 'referral')) return 'selling_fees';
     return 'other_transaction_fees';
   }
@@ -220,7 +220,7 @@ function pivotSettlementRows(ledgerRows) {
 
     const bucket = bucketFor(row['amount-type'], row['amount-description']);
     g._buckets[bucket] += paise;
-    const deliberateOther = bucket === 'other' && (has(row['amount-type'], 'debt', 'adjustment') || has(row['amount-description'], 'debt adjustment'));
+    const deliberateOther = bucket === 'other' && (has(row['amount-type'], 'debt', 'adjustment') || has(row['amount-description'], 'debt adjustment', 'payable to amazon'));
 
     // `description` on the wide row should name the sale, not whichever
     // component happened to be seen first.

@@ -9,6 +9,7 @@ const fs = require('fs-extra');
 const amazonReports = require('../../../services/amazonReports');
 const amazonTokenStore = require('../../../services/amazonTokenStore');
 const { pivotSettlementRows, verifyBalance } = require('../../../services/processors/amazonSettlementPivot');
+const { buildSummaryAoA } = require('../../../services/processors/amazonSettlementSummary');
 
 const OUTPUT_DIR = path.join(__dirname, '../../../../outputs');
 
@@ -659,10 +660,6 @@ const fetchSettlementFromAmazon = async (req, res, next) => {
         const Model = getDynamicModel(brandDb, tableName, agent.columns);
         await Model.sync({ alter: true });
 
-        // Which settlements do we already hold? Re-importing would double-count.
-        const existing = await Model.findAll({ attributes: ['settlement_id'], group: ['settlement_id'], raw: true });
-        const already = new Set(existing.map((r) => String(r.settlement_id)).filter(Boolean));
-
         // Raw ledgers are retained per brand so re-mapping or auditing a
         // settlement never needs a second (rate-limited) trip to Amazon.
         const ledgerDir = path.join(OUTPUT_DIR, 'amazon-ledgers', brand.name.replace(/[^a-zA-Z0-9]/g, '_'));
@@ -680,11 +677,6 @@ const fetchSettlementFromAmazon = async (req, res, next) => {
             const result = pivotSettlementRows(report.rows);
             const settlementId = result.settlement && result.settlement.settlement_id;
 
-            if (settlementId && already.has(String(settlementId))) {
-                skipped.push({ settlement_id: settlementId, reason: 'already imported' });
-                continue;
-            }
-
             /* The pivot must account for every rupee in the ledger. If it does
                not, something in the file is shaped differently from what we
                understand, and storing it would put wrong numbers in the books. */
@@ -700,6 +692,28 @@ const fetchSettlementFromAmazon = async (req, res, next) => {
             }
 
             const filename = `settlement_amazon_${brand.name}_${settlementId || uuidv4()}.xlsx`;
+
+            /* The workbook is rebuilt for every settlement we pulled, including
+               ones already stored. It derives entirely from the ledger, so
+               rewriting it is idempotent — and it means a change to the summary
+               reaches existing settlements on the next sync instead of only new
+               ones. Only the database insert is conditional. */
+            const book = XLSX.utils.book_new();
+
+            /* Summary first, matching the reconciliation workbooks the team
+               already reads: the summary is what gets looked at, the line detail
+               is what gets checked when a figure is queried. Percentages and
+               totals are live formulas, not baked values, so a reader can click
+               a cell and see how it was derived. */
+            const { aoa, colWidths } = buildSummaryAoA(report.rows, result.settlement);
+            const summarySheet = XLSX.utils.aoa_to_sheet(aoa);
+            summarySheet['!cols'] = colWidths;
+            XLSX.utils.book_append_sheet(book, summarySheet, 'Summary');
+
+            const sheet = XLSX.utils.json_to_sheet(result.rows, { cellDates: true });
+            XLSX.utils.book_append_sheet(book, sheet, 'Settlement');
+            await fs.writeFile(path.join(OUTPUT_DIR, filename), XLSX.write(book, { type: 'buffer', bookType: 'xlsx' }));
+
 
             /* ── all-or-nothing, and duplicate-proof ──────────────────────────
                Two holes close here, both of which put wrong data in the books:
@@ -737,12 +751,6 @@ const fetchSettlementFromAmazon = async (req, res, next) => {
                 continue;
             }
 
-            /* Written only after the rows are committed, so a failed import
-               never leaves an orphaned workbook claiming data that isn't there. */
-            const sheet = XLSX.utils.json_to_sheet(result.rows, { cellDates: true });
-            const book = XLSX.utils.book_new();
-            XLSX.utils.book_append_sheet(book, sheet, 'Settlement');
-            await fs.writeFile(path.join(OUTPUT_DIR, filename), XLSX.write(book, { type: 'buffer', bookType: 'xlsx' }));
 
             imported.push({
                 settlement_id: settlementId,
