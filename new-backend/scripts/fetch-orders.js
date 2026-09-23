@@ -12,6 +12,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // 30-day maximum per request, so the span is cut into windows.
 const WINDOWS = [
+  ['2026-05-27', '2026-06-25'],
   ['2026-06-25', '2026-07-24'],
   ['2026-07-24', '2026-08-22'],
   ['2026-08-22', '2026-09-20'],

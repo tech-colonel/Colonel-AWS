@@ -158,3 +158,59 @@ def main(ledger_dir, invoice_dir, month, year):
 
 if __name__ == '__main__':
     sys.exit(main(*sys.argv[1:5]))
+
+
+# ── dating a fee the way the invoice dates it ───────────────────────────────── #
+
+def order_dates(orders_dir):
+    """amazon-order-id -> the day the order was placed."""
+    dates = {}
+    for path in glob.glob(f'{orders_dir}/*.tsv'):
+        with open(path, encoding='utf-8-sig', errors='replace') as fh:
+            for row in csv.DictReader(fh, delimiter='\t'):
+                oid = (row.get('amazon-order-id') or '').strip()
+                day = (row.get('purchase-date') or '').strip()[:10]
+                if oid and day:
+                    dates.setdefault(oid, day)
+    return dates
+
+
+def charged_by_order_month(ledger_dir, orders_dir):
+    """Every fee Amazon deducted, dated by the month its ORDER was placed.
+
+    The invoice bills a fee against the month of the order.  The payout posts
+    that same fee 8 to 20 days later, once the delivery and return window has
+    closed -- and the lag differs per order, so no single shift aligns them.
+    Dating each fee by its own order is what makes the two comparable.
+
+    A warehouse fee (storage) belongs to no order, so it keeps its posted date;
+    that is the basis the invoice uses for it too.
+    """
+    dates = order_dates(orders_dir)
+    charged = collections.defaultdict(Decimal)
+    undated = collections.defaultdict(Decimal)
+    settled_days = set()
+    paths, superseded = ledger_files(ledger_dir)
+    for path in paths:
+        with open(path, encoding='utf-8-sig', errors='replace') as fh:
+            for row in csv.DictReader(fh, delimiter='\t'):
+                m = DOTTED.match((row.get('posted-date') or '').strip())
+                if m:
+                    settled_days.add(f'{m.group(3)}-{m.group(2)}-{m.group(1)}')
+                kind = (row.get('amount-type') or '').strip()
+                desc = (row.get('amount-description') or '').strip()
+                if 'Fee' not in kind and kind != 'Amazon Fees':
+                    continue
+                label = label_for(kind, desc)
+                if label is None or IS_TAX.search(desc):
+                    continue
+                amount = -Decimal((row.get('amount') or '0').strip() or '0')
+                oid = (row.get('order-id') or '').strip()
+                posted = f'{m.group(3)}-{m.group(2)}' if m else None
+                if oid and oid in dates:
+                    charged[(dates[oid][:7], label)] += amount
+                elif not oid and posted:
+                    charged[(posted, label)] += amount          # warehouse fee
+                elif posted:
+                    undated[(posted, label)] += amount          # order we cannot date
+    return charged, undated, settled_days, superseded

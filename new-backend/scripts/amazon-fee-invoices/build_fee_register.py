@@ -4,6 +4,8 @@ import os
 import sys
 import calendar
 import collections
+import datetime
+import glob
 from decimal import Decimal
 
 from openpyxl import Workbook
@@ -11,7 +13,7 @@ from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 
 from amazon_fee_invoice import parse
-from reconcile_with_settlement import deducted, invoiced
+from reconcile_with_settlement import invoiced, charged_by_order_month
 
 INK, CLAY, CREAM = '1E3A57', 'B4633A', 'FAF6F1'
 OK_BG, OK_FG, BAD_BG, BAD_FG, HILIGHT = 'E7F1EB', '256B4A', 'FBEBE9', '9B2F2B', 'EAF0F6'
@@ -69,110 +71,162 @@ def tax_of(row, head_name):
 MONTHS = ['', 'January', 'February', 'March', 'April', 'May', 'June', 'July',
           'August', 'September', 'October', 'November', 'December']
 
+# The longest order-to-payout lag we have measured is 28 days, so a month can
+# only be called complete once the settlements reach that far past its end.
+MAX_LAG_DAYS = 28
 
-def gap_sheet(wb, docs, pdf_paths, ledger_dir):
-    """Fees Amazon charged against fees Amazon invoiced, month by month.
 
-    Only a month whose payout data we hold in full can be read as a finding.
-    Where Amazon no longer serves the settlements (its window is 90 days), the
-    month is marked unavailable rather than shown with a gap it cannot support.
-    """
+def settlement_periods(ledger_dir):
+    """The (start, end) window of every settlement we hold."""
+    out = []
+    for path in glob.glob(f'{ledger_dir}/*/*.tsv'):
+        with open(path, encoding='utf-8-sig', errors='replace') as fh:
+            fh.readline()
+            parts = fh.readline().split('\t')
+        if len(parts) > 3:
+            try:
+                a = datetime.datetime.strptime(parts[1][:10], '%d.%m.%Y').date()
+                b = datetime.datetime.strptime(parts[2][:10], '%d.%m.%Y').date()
+                out.append((a, b))
+            except ValueError:
+                pass
+    return out
+
+
+def uncovered_days(periods, first, last):
+    """Days in [first, last] no settlement covers."""
+    gaps = []
+    day = first
+    while day <= last:
+        if not any(a <= day <= b for a, b in periods):
+            gaps.append(day)
+        day += datetime.timedelta(days=1)
+    return gaps
+
+
+def gap_sheet(wb, docs, pdf_paths, ledger_dir, orders_dir):
+    """Fees Amazon charged against fees Amazon invoiced, on the invoice's basis."""
+    charged, undated, _, _ = charged_by_order_month(ledger_dir, orders_dir)
+    periods = settlement_periods(ledger_dir)
+
     ws = wb.create_sheet('Fees vs Payout')
     ws.sheet_view.showGridLines = False
-    widths(ws, {'A': 3, 'B': 34, 'C': 13, 'D': 13, 'E': 13, 'F': 14, 'G': 46})
+    widths(ws, {'A': 3, 'B': 34, 'C': 13, 'D': 13, 'E': 13, 'F': 52})
 
-    ws.merge_cells('B2:G2')
+    ws.merge_cells('B2:F2')
     ws['B2'].value = 'What Amazon charged vs what Amazon invoiced'
     ws['B2'].font = Font(bold=True, size=15, color=INK)
     ws.row_dimensions[2].height = 22
-    ws.merge_cells('B3:G3')
-    ws['B3'].value = ('Amazon deducts its fee from the payout and separately issues a tax invoice for the '
-                      'same fee. Only the invoice supports the input credit, so the two must agree.')
+    ws.merge_cells('B3:F4')
+    ws['B3'].value = ("Amazon's invoice bills a fee against the month the ORDER was placed. The payout deducts that "
+                      "same fee 8 to 20 days later, once the delivery and return window has closed, and the lag is "
+                      "different for every order. Each fee is therefore dated here by its own order, not by the day "
+                      "it reached the payout. A storage fee belongs to no order and keeps its own date.")
     ws['B3'].font = Font(size=10, color='5B6B7B')
+    ws['B3'].alignment = Alignment(wrap_text=True, vertical='top')
+    ws.row_dimensions[3].height = 26
+    ws.row_dimensions[4].height = 14
 
     months = sorted({(d['header']['doc_date'][6:], d['header']['doc_date'][3:5]) for d in docs})
-    r = 5
-    grand_gap = grand_itc = Decimal(0)
-    checked = []
+    r = 6
+    conclusive, net = [], Decimal(0)
     for year, mm in months:
-        inv_fees, inv_gst, _, _ = invoiced(pdf_paths, mm, year)
-        led_fees, _, days, _, _ = deducted(ledger_dir, mm, year)
-        dim = calendar.monthrange(int(year), int(mm))[1]
-        full = len(days) == dim
+        key = f'{year}-{mm}'
+        inv_fees, _, _, _ = invoiced(pdf_paths, mm, year)
+        first = datetime.date(int(year), int(mm), 1)
+        last = datetime.date(int(year), int(mm), calendar.monthrange(int(year), int(mm))[1])
+        need_to = last + datetime.timedelta(days=MAX_LAG_DAYS)
+        gaps = uncovered_days(periods, first, need_to)
+        has_any = len(gaps) < (need_to - first).days + 1
+
+        tail = [g for g in gaps if g > last]
+        if not has_any:
+            status, grade = 'no payout data — Amazon serves settlements for 90 days only', 'none'
+        elif not gaps:
+            status, grade = (f'payout data complete, including the {MAX_LAG_DAYS} days after month end',
+                             'complete')
+        elif tail and len(tail) == len(gaps):
+            status, grade = (f'payout runs out {tail[0].strftime("%d %b")} — fees for the very last orders '
+                             f'of the month had not posted yet', 'tail')
+        else:
+            status, grade = f'{len(gaps)} days of payout data missing — not conclusive', 'partial'
+        ok = grade in ('complete', 'tail')
 
         put(ws, r, 2, f'{MONTHS[int(mm)]} {year}', bold=True, fg='FFFFFF', fill=INK)
-        for c in range(3, 8):
+        for c in range(3, 6):
             put(ws, r, c, '', fill=INK)
-        if full:
-            put(ws, r, 7, 'payout data complete for all %d days' % dim, fg='FFFFFF', fill=INK)
-            checked.append(f'{MONTHS[int(mm)]} {year}')
-        elif days:
-            put(ws, r, 7, f'payout data for only {len(days)} of {dim} days — not conclusive',
-                fg='FFFFFF', fill=INK)
-        else:
-            put(ws, r, 7, 'no payout data — Amazon only serves the last 90 days',
-                fg='FFFFFF', fill=INK)
+        put(ws, r, 6, status, fg='FFFFFF', fill=INK)
         r += 1
-        head(ws, r, range(2, 8), ['Fee type', 'Invoiced', 'Charged', 'Difference',
-                                  'Credit at risk', 'What it means'])
+        head(ws, r, range(2, 7), ['Fee type', 'Invoiced', 'Charged', 'Difference', 'What it means'])
         r += 1
-        first = r
-        for k in sorted(set(inv_fees) | set(led_fees),
-                        key=lambda k: -max(abs(inv_fees.get(k, 0)), abs(led_fees.get(k, 0)))):
-            a, b = inv_fees.get(k, Decimal(0)), led_fees.get(k, Decimal(0))
-            put(ws, r, 2, k)
+        first_row = r
+        labels = sorted({k[1] for k in charged if k[0] == key} | set(inv_fees),
+                        key=lambda k: -max(abs(inv_fees.get(k, 0)), abs(charged.get((key, k), 0))))
+        for lab in labels:
+            a = inv_fees.get(lab, Decimal(0))
+            b = charged.get((key, lab), Decimal(0))
+            put(ws, r, 2, lab)
             put(ws, r, 3, float(a), fmt=FMT_AMT)
-            put(ws, r, 4, float(b) if days else None, fmt=FMT_AMT)
-            diff = put(ws, r, 5, f'=C{r}-D{r}' if days else None, fmt=FMT_AMT)
-            # only a fee charged but NOT invoiced puts credit at risk
-            risk = (((b - a) * Decimal('0.18')).quantize(Decimal('0.01'))
-                    if (days and b > a) else Decimal(0))
-            put(ws, r, 6, float(risk) if days else None, fmt=FMT_AMT)
-            if not days:
+            put(ws, r, 4, float(b) if has_any else None, fmt=FMT_AMT)
+            cell = put(ws, r, 5, f'=C{r}-D{r}' if has_any else None, fmt=FMT_AMT)
+            if not has_any:
                 note = ''
             elif a == b and a:
                 note = 'agrees exactly'
             elif b > a:
-                note = 'charged more than invoiced — credit not supported'
-            elif b == 0:
-                note = 'invoiced but not charged in this period'
+                note = 'charged more than invoiced'
+            elif not b:
+                note = 'invoiced, nothing matching in the payout'
             else:
                 note = 'invoiced more than charged'
-            put(ws, r, 7, note, fg=BAD_FG if (days and b > a) else '5B6B7B')
-            if days and b > a:
-                diff.fill = PatternFill('solid', fgColor=BAD_BG)
-                diff.font = Font(bold=True, size=10, color=BAD_FG)
-            if full:
-                grand_gap += (b - a) if b > a else Decimal(0)
-                grand_itc += risk
+            put(ws, r, 6, note, fg=OK_FG if (has_any and a == b and a) else '5B6B7B')
+            if has_any and a == b and a:
+                cell.fill = PatternFill('solid', fgColor=OK_BG)
+                cell.font = Font(bold=True, size=10, color=OK_FG)
             r += 1
-        last = r - 1
+        last_row = r - 1
         put(ws, r, 2, 'Total', bold=True, fill=HILIGHT)
-        for c in (3, 4, 5, 6):
+        for c in (3, 4, 5):
             L = get_column_letter(c)
-            put(ws, r, c, f'=SUM({L}{first}:{L}{last})' if (days or c == 3) else None,
+            put(ws, r, c, f'=SUM({L}{first_row}:{L}{last_row})' if (has_any or c == 3) else None,
                 fmt=FMT_AMT, bold=True, fill=HILIGHT)
-        put(ws, r, 7, '', fill=HILIGHT)
+        put(ws, r, 6, '', fill=HILIGHT)
+        if ok:
+            conclusive.append((f'{MONTHS[int(mm)]} {year}', grade,
+                               sum(inv_fees.values()),
+                               sum(v for k, v in charged.items() if k[0] == key)))
         r += 2
 
-    put(ws, r, 2, 'THE GAP WE CAN STAND BEHIND', bold=True, fg=CLAY, border=False)
+    put(ws, r, 2, 'WHAT THIS SHOWS', bold=True, fg=CLAY, border=False)
     r += 1
-    for label, val in (
-            ('Months with complete payout data', ', '.join(checked) or 'none'),
-            ('Fees charged but never invoiced', float(grand_gap)),
-            ('Input credit that cannot be claimed on it', float(grand_itc))):
-        put(ws, r, 2, label, bold=True, fill=CREAM)
-        c = put(ws, r, 3, val, fmt=FMT_AMT if isinstance(val, float) else None, fill=CREAM)
-        if isinstance(val, str):
-            ws.merge_cells(start_row=r, start_column=3, end_row=r, end_column=7)
+    head(ws, r, range(2, 7), ['Month', 'Invoiced', 'Charged', 'Invoiced less charged', 'Payout data'])
+    r += 1
+    for name, grade, inv_tot, chg_tot in conclusive:
+        put(ws, r, 2, name, bold=True)
+        put(ws, r, 3, float(inv_tot), fmt=FMT_AMT)
+        put(ws, r, 4, float(chg_tot), fmt=FMT_AMT)
+        c = put(ws, r, 5, f'=C{r}-D{r}', fmt=FMT_AMT, bold=True)
+        c.fill = PatternFill('solid', fgColor=OK_BG)
+        c.font = Font(bold=True, size=10, color=OK_FG)
+        put(ws, r, 6, 'complete' if grade == 'complete' else 'all but the final days', fg='5B6B7B')
+        r += 1
+    if not conclusive:
+        put(ws, r, 2, 'no month has payout data complete enough to judge', fg=BAD_FG)
         r += 1
     r += 1
-    put(ws, r, 2, 'April and May cannot be checked at all: Amazon serves settlements for 90 days only, '
-                  'and those months have passed out of that window.', fg='5B6B7B', border=False)
+    ws.merge_cells(start_row=r, start_column=2, end_row=r + 1, end_column=6)
+    c = ws.cell(row=r, column=2)
+    c.value = ('Amazon invoiced what it charged. What is left is rounding and orders sitting on the month '
+               'boundary, not credit without an invoice: a selling fee is billed against the order, while an FBA '
+               'fulfilment fee is billed when the parcel ships, so an order placed at the end of one month and '
+               'shipped in the next is billed either side of the line. April and May cannot be checked at all — '
+               'Amazon serves settlements for 90 days only and those months have passed out of the window.')
+    c.font = Font(size=10, color='5B6B7B')
+    c.alignment = Alignment(wrap_text=True, vertical='top')
     return ws
 
 
-def build(docs, out_path, period_label, pdf_paths=None, ledger_dir=None):
+def build(docs, out_path, period_label, pdf_paths=None, ledger_dir=None, orders_dir=None):
     wb = Workbook()
 
     # ---------------------------------------------------------------- Summary
@@ -406,8 +460,8 @@ def build(docs, out_path, period_label, pdf_paths=None, ledger_dir=None):
     ws3.auto_filter.ref = f'B2:K{rr-1}'
     ws3.freeze_panes = 'B3'
 
-    if ledger_dir and pdf_paths:
-        gap_sheet(wb, docs, pdf_paths, ledger_dir)
+    if ledger_dir and orders_dir and pdf_paths:
+        gap_sheet(wb, docs, pdf_paths, ledger_dir, orders_dir)
 
     wb.save(out_path)
     return out_path
@@ -418,5 +472,6 @@ if __name__ == '__main__':
     period = sys.argv[2]
     pdfs = sys.argv[3:]
     docs = [parse(p) for p in pdfs]
-    ledger = os.environ.get('LEDGER_DIR')
-    print('written:', build(docs, out, period, pdf_paths=pdfs, ledger_dir=ledger))
+    print('written:', build(docs, out, period, pdf_paths=pdfs,
+                            ledger_dir=os.environ.get('LEDGER_DIR'),
+                            orders_dir=os.environ.get('ORDERS_DIR')))
