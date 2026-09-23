@@ -1,0 +1,301 @@
+==============================================================================
+0. INPUTS
+==============================================================================
+MTR rows: B2C 6850  B2B 219  stock-transfer 44
+Settlement: 20 kept reports, 19753 ledger rows
+Revised-settlement dedupe (same settlement-id, newer report id wins):
+  dropped settlement-id 27311875782 report 853883020644 (settlement_ledger_853883020644.tsv)
+  kept    settlement-id 27311875782 report 856592020656 (settlement_ledger_856592020656.tsv)
+Sum of header total-amount (net deposits, deduped):     955,999.10
+
+Settlement period coverage (settlement-start -> settlement-end, dotted DD.MM.YYYY):
+  26321917782  2026-01-09 -> 2026-01-16  deposit 2026-01-18  total      61,048.53
+  26360714932  2026-01-16 -> 2026-01-23  deposit 2026-01-25  total      97,260.88
+  26405258872  2026-01-23 -> 2026-01-30  deposit 2026-02-01  total     156,047.65
+  27311866722  2026-06-19 -> 2026-06-26  deposit 2026-06-28  total     103,641.20
+  27311875782  2026-06-19 -> 2026-07-10  deposit 2026-07-12  total         423.65
+  27356934992  2026-06-26 -> 2026-07-03  deposit 2026-07-05  total     111,634.07
+  27401141052  2026-07-03 -> 2026-07-10  deposit 2026-07-12  total      41,603.72
+  27357109252  2026-07-10 -> 2026-08-07  deposit 2026-08-09  total         -73.77
+  27446374602  2026-07-10 -> 2026-07-17  deposit 2026-07-19  total      40,735.01
+  27493701502  2026-07-17 -> 2026-07-24  deposit 2026-07-26  total      57,528.90
+  27541522022  2026-07-24 -> 2026-07-31  deposit 2026-08-02  total           0.00
+  27585350722  2026-07-31 -> 2026-08-07  deposit 2026-08-09  total      68,527.94
+  27494181642  2026-08-07 -> 2026-08-21  deposit 2026-08-23  total         241.35
+  27628536942  2026-08-07 -> 2026-08-14  deposit 2026-08-16  total      53,118.86
+  27671673472  2026-08-14 -> 2026-08-21  deposit 2026-08-23  total      54,174.30
+  27671484952  2026-08-21 -> 2026-09-11  deposit 2026-09-13  total         -48.38
+  27720440482  2026-08-21 -> 2026-08-28  deposit 2026-08-30  total      33,132.45
+  27765610772  2026-08-28 -> 2026-09-04  deposit 2026-09-06  total      26,703.88
+  27809722702  2026-09-04 -> 2026-09-11  deposit 2026-09-13  total      21,971.89
+  27852258902  2026-09-11 -> 2026-09-18  deposit 2026-09-20  total      28,326.97
+
+MTR date span (shipment/order/invoice): 2026-01-20 -> 2026-09-01
+
+==============================================================================
+1. MTR BY MONTH (basis: Shipment Date, falling back to Order/Invoice Date)
+==============================================================================
+month    type         rows     InvoiceAmt   TaxExclGross      TotalTax      PrincExcl
+2026-01  Refund          1        -199.00        -168.64         -30.36        -168.64
+2026-02  Refund          1      -1,059.00        -897.46        -161.54        -897.46
+2026-03  Refund         14      -6,648.41      -5,634.16      -1,014.25      -5,634.16
+2026-04  Cancel        498           0.00           0.00           0.00           0.00
+2026-04  Refund         42     -15,986.00     -13,547.37      -2,438.63     -13,547.37
+2026-04  Shipment     2272     741,192.73     628,124.31     113,068.42     628,124.31
+2026-05  Cancel        291           0.00           0.00           0.00           0.00
+2026-05  EInvoiceCancel      2           0.00           0.00           0.00           0.00
+2026-05  Refund         34     -17,130.00     -14,516.95      -2,613.05     -14,516.95
+2026-05  Shipment     1322     516,573.01     437,772.18      78,800.83     437,772.18
+2026-06  Cancel        214           0.00           0.00           0.00           0.00
+2026-06  Refund         29     -14,415.16     -12,216.28      -2,198.88     -12,216.28
+2026-06  Shipment     1032     463,601.70     392,882.73      70,718.97     392,882.73
+2026-07  Cancel        120           0.00           0.00           0.00           0.00
+2026-07  Refund         18      -6,355.00      -5,385.57        -969.43      -5,385.57
+2026-07  Shipment      556     221,077.48     187,354.01      33,723.47     187,354.01
+2026-08  Cancel        113           0.00           0.00           0.00           0.00
+2026-08  Refund          8      -2,902.96      -2,460.14        -442.82      -2,460.14
+2026-08  Shipment      489     185,561.89     157,255.85      28,306.04     157,255.85
+2026-09  Shipment       13       5,153.31       4,367.22         786.09       4,367.22
+
+NOTE ON MTR SIGNS (verified on the data, not assumed):
+  Refund rows: 147; 147 have NEGATIVE Invoice Amount but 147 have POSITIVE 'Principal Amount'.
+  => MTR 'Principal Amount' is TAX-INCLUSIVE and UNSIGNED on refunds. 'Principal Amount Basis' is tax-exclusive and correctly signed.
+  Cancel rows: 1236, total Invoice Amount           0.00 (all-zero => carry no value).
+
+==============================================================================
+2. SETTLEMENT SALES COMPONENTS
+==============================================================================
+ItemPrice rows 5904  Promotion rows 16
+    2855      999,196.18  Order          ItemPrice  Principal
+    2855      179,856.36  Order          ItemPrice  Product Tax
+      85      -33,983.63  Refund         ItemPrice  Principal
+      85       -6,117.02  Refund         ItemPrice  Product Tax
+      12          406.80  Order          ItemPrice  Shipping
+       8         -271.20  Order          Promotion  Shipping discount
+      12           73.20  Order          ItemPrice  Shipping tax
+       8          -48.80  Order          Promotion  Shipping tax discount
+
+Non-sales settlement components (fees/taxes/adjustments; not compared to MTR):
+    7850     -159,110.99  ItemFees
+       4      -16,277.59  Debt Adjustment
+    3082       -4,826.20  ItemTCS
+      26       -1,450.89  Amazon Fees
+    2855       -1,018.70  ItemTDS
+       9         -260.25  FBA Inventory Storage Fee
+       3          -94.40  FBA Long-Term Storage Fee
+       3          -73.77  other-transaction
+       1            0.00  FBA Disposal Fee:
+
+==============================================================================
+3. JOIN ON ORDER ID
+==============================================================================
+Distinct MTR order ids        : 5660
+Distinct settlement order ids : 2763
+Matched on order id           : 1842
+MTR-only                      : 3818
+Settlement-only               : 921
+
+Overlap window used: 2026-06-19 .. 2026-08-31 (settlement coverage starts 19 Jun; MTR ends 31 Aug)
+MTR shipped orders inside overlap : 1252
+  ... of which found in settlement: 1252  (100.00%)
+  ... NOT in settlement            : 0
+MTR Tax-Exclusive Gross, overlap orders :     414,469.79
+  matched to settlement                 :     414,469.79 (100.00% by value)
+  unmatched                             :           0.00
+
+==============================================================================
+4. PER-MONTH: MTR vs SETTLEMENT, both dated by the MTR SHIPMENT DATE
+==============================================================================
+Basis: settlement rows for a matched order are attributed to the month of the MTR
+shipment date of that order, not to posted-date. Posting lags the sale, so a
+posted-date cut would split the same order across two months.
+
+ALL MTR shipped orders vs the settlement value of those that matched.
+
+month     MTRord  matched   join%  MTR TaxExcl(all)  MTR TaxExcl(mchd)   SET sale leg      diff
+2026-04     2247        2    0.1%     618,543.87         519.48           0.00         519.48
+2026-05     1298        4    0.3%     425,766.27       3,294.08           0.00       3,294.08
+2026-06     1000      789   78.9%     376,057.97     286,173.73     283,697.45       2,476.28
+2026-07      546      546  100.0%     181,157.42     186,542.99     186,542.99           0.00
+2026-08      486      486  100.0%     155,338.35     157,798.49     157,798.49           0.00
+2026-09       10       10  100.0%       3,066.95       3,066.95       3,066.95           0.00
+
+month      MTR Tax(mchd)  SET tax sale leg      diff    SET refund price  SET refund tax
+2026-04           93.52           0.00          93.52          -519.48         -93.52
+2026-05          592.92           0.00         592.92        -3,294.08        -592.92
+2026-06       51,511.51      51,065.79         445.72       -12,022.21      -2,163.95
+2026-07       33,577.49      33,577.49           0.00        -5,385.57        -969.43
+2026-08       28,403.71      28,403.71           0.00        -7,385.19      -1,329.30
+2026-09          552.05         552.05           0.00             0.00           0.00
+
+Same table against MTR 'Principal Amount' (tax-INCLUSIVE) to show why that field is the wrong pair:
+  MTR Principal Amount (incl tax), matched orders :     780,071.04
+  Settlement ItemPrice/Principal                  :     602,499.35
+  difference                                      :     177,571.69
+
+==============================================================================
+5. PER-ORDER AGREEMENT, CORRECT LIKE-FOR-LIKE PAIRING
+==============================================================================
+MTR 'Tax Exclusive Gross' is ALREADY net of shipping promotions (verified: 14 MTR rows
+carry a Shipping Amount Basis of 33.90 that is fully promo-reversed; Invoice Amount
+excludes it). The matching settlement figure therefore has to include the Promotion rows:
+  price side : MTR Tax Exclusive Gross  vs  ItemPrice/Principal + ItemPrice/Shipping + Promotion/'Shipping discount'
+  tax side   : MTR Total Tax Amount     vs  ItemPrice/Product Tax + ItemPrice/Shipping tax + Promotion/'Shipping tax discount'
+Legs are kept separate: MTR Shipment <-> settlement transaction-type 'Order';
+MTR Refund <-> settlement transaction-type 'Refund'.
+
+SALE LEG - MTR Shipment vs settlement 'Order':  price
+  orders compared : 1252
+  exact zero      : 1252
+  |diff| <= 0.05  : 0
+  |diff| >  0.05  : 0   total           0.00
+
+SALE LEG - MTR Shipment vs settlement 'Order':  tax
+  orders compared : 1252
+  exact zero      : 1252
+  |diff| <= 0.05  : 0
+  |diff| >  0.05  : 0   total           0.00
+
+REFUND LEG - MTR Refund vs settlement 'Refund':  price
+  orders compared : 40
+  exact zero      : 32
+  |diff| <= 0.05  : 0
+  |diff| >  0.05  : 8   total       4,925.05
+    order id                       MTR      SETTLE       diff
+    405-9978076-5602730           0.00    -1139.85    1139.85  MTR {'Shipment': 1} / SET {'Order': 6, 'Refund': 5}
+    404-4069807-6713119           0.00    -1130.10    1130.10  MTR {'Shipment': 1} / SET {'Order': 6, 'Refund': 5}
+    408-8515601-6117930           0.00     -897.46     897.46  MTR {'Shipment': 1, 'Cancel': 1} / SET {'Order': 8, 'Refund': 7}
+    407-0309172-9046722           0.00     -608.48     608.48  MTR {'Shipment': 1} / SET {'Order': 6, 'Refund': 5}
+    404-4184811-9533945           0.00     -380.51     380.51  MTR {'Shipment': 1} / SET {'Order': 6, 'Refund': 5}
+    171-6594334-7939543           0.00     -304.24     304.24  MTR {'Shipment': 1} / SET {'Order': 6, 'Refund': 5}
+    403-5418122-6638755           0.00     -253.39     253.39  MTR {'Cancel': 1, 'Shipment': 1} / SET {'Order': 6, 'Refund': 5}
+    404-7616085-9322736           0.00     -211.02     211.02  MTR {'Shipment': 1} / SET {'Order': 6, 'Refund': 5}
+
+REFUND LEG - MTR Refund vs settlement 'Refund':  tax
+  orders compared : 40
+  exact zero      : 32
+  |diff| <= 0.05  : 0
+  |diff| >  0.05  : 8   total         886.48
+
+COMBINED (sale + refund legs), overlap window, matched orders:
+  price : MTR     414,469.79   settlement     409,544.74   diff       4,925.05
+  tax   : MTR      74,604.21   settlement      73,717.73   diff         886.48
+
+==============================================================================
+6. ONE-SIDED ORDERS
+==============================================================================
+MTR orders absent from settlement:
+  group                                                       orders   TaxExclGross
+  Shipped before settlement coverage (<2026-06-19)              3767   1,139,215.49
+  Cancel-only (no shipment, zero value)                           51           0.00
+
+  Genuinely-missing detail (0 orders,           0.00 tax-exclusive):
+    by fulfilment channel: {}
+    largest 10:
+
+Settlement orders absent from MTR:
+  group                                                       orders  Set Principal
+  Posted in January 2026 (no MTR file for Jan)                   857     343,098.19
+  Posted Sept 2026 (beyond MTR window, Aug end)                   62      19,615.01
+  No sales value (fee/adjustment rows only)                        2           0.00
+
+  Settlement-only WITH sales value inside/near the MTR window: 0 orders, principal           0.00
+
+==============================================================================
+7. REFUNDS / CANCELLATIONS
+==============================================================================
+MTR Refund rows: 147 over 144 orders; TaxExclGross     -54,826.57  Tax      -9,868.96
+Settlement Refund ItemPrice: Principal     -33,983.63  Product Tax      -6,117.02 over 83 orders
+
+MTR refund orders with an MTR date inside 2026-06-19..2026-08-31: 32
+  also a settlement Refund row : 32
+  in settlement but NOT as Refund: 0
+  absent from settlement entirely: 0
+
+Settlement Refund orders (posted <= 2026-09-05): 78
+  with an MTR Refund row       : 58
+  in MTR but no MTR Refund row : 3
+  absent from MTR entirely     : 17
+  principal of settlement refunds with NO MTR credit note:      -7,785.17
+
+Cancellations: MTR 'Cancel' orders 1218 (zero value); settlement 'Cancellation' rows on 13 orders, amount      -1,450.89 (fee, not sales).
+  MTR Cancel orders that DO appear in settlement with sales value: 369
+
+==============================================================================
+8. STOCK TRANSFERS MUST NOT APPEAR AS SETTLEMENT SALES
+==============================================================================
+Stock-transfer rows 44 across 3 files; 59 distinct ids; Invoice Value     145,758.71  Taxable Value     125,776.04
+Transaction types: {'FC_REMOVAL': 36, 'FC_TRANSFER': 6, 'FC_REMOVAL-Cancel': 2}
+Stock-transfer ids found anywhere in the settlement ledgers: 0
+  => none. No stock transfer is booked as a settlement sale. Confirmed.
+Stock-transfer ids also present in MTR B2B/B2C order ids: 0
+Settlement order-ids NOT in Amazon customer-order format xxx-xxxxxxx-xxxxxxx: 4
+  ['20055116597-202601140913', '20055116597-202608120917', '20055116597-202609160911', 'xq5i9il701']
+Stock-transfer file breakdown (Invoice Value / Taxable Value):
+  FC_REMOVAL               36 rows  invoice     141,850.19  taxable     122,125.93
+  FC_REMOVAL-Cancel         2 rows  invoice           0.00  taxable           0.00
+  FC_TRANSFER               6 rows  invoice       3,908.52  taxable       3,650.11
+  (no stock-transfer file exists for July or August 2026)
+
+CONVERSE TEST - can every rupee of settlement sales be traced to a customer order?
+  settlement ItemPrice+Promotion total                :   1,139,111.89
+  ... on an order id that exists in MTR Apr-Aug       :     710,949.27
+  ... on rows with NO order id at all                 :           0.00
+
+==============================================================================
+9. SETTLEMENT BRIDGE: SALES -> DEPOSIT (deduped, all 20 reports)
+==============================================================================
+  ItemPrice (Principal+ProductTax+Shipping+ShippingTax)   1,139,431.89
+  Promotion                                                    -320.00
+  Amazon Fees                                                -1,450.89
+  Debt Adjustment                                           -16,277.59
+  FBA Disposal Fee:                                               0.00
+  FBA Inventory Storage Fee                                    -260.25
+  FBA Long-Term Storage Fee                                     -94.40
+  ItemFees                                                 -159,110.99
+  ItemTCS                                                    -4,826.20
+  ItemTDS                                                    -1,018.70
+  other-transaction                                             -73.77
+  SUM of all ledger rows                                    955,999.10
+  SUM of header total-amount                                955,999.10
+  difference                                                      0.00
+
+==============================================================================
+10. HEADLINE - the reconcilable window only (19 Jun 2026 .. 31 Aug 2026)
+==============================================================================
+SALE LEG
+  MTR shipped orders in window        : 1252
+  found in settlement                 : 1252  (100.00%)
+  MTR Tax Exclusive Gross             :     424,786.84
+  Settlement Order-leg price          :     424,786.84
+  MTR Total Tax Amount                :      76,461.28
+  Settlement Order-leg tax            :      76,461.28
+  orders differing by > 0.05          : 0 on price, 0 on tax
+
+REFUND LEG - cut by MTR CREDIT-NOTE date inside the window (the defensible cut)
+  MTR credit notes dated in window    : 31  value (incl tax)     -11,892.96
+  with a settlement Refund leg        : 31
+  without one                         : 0
+  MTR value     -11,892.96 vs settlement     -11,892.96 diff           0.00
+  settlement Refund legs with NO MTR credit note anywhere in Apr-Aug MTR:
+    posted 2026-01 (order absent from MTR)      17 orders       -6,345.00
+    posted 2026-09 (order in MTR)                8 orders       -5,811.53
+
+UNRECONCILABLE BY COVERAGE
+  MTR orders shipped before 19 Jun (no settlement file): 3767 orders,   1,139,215.49 tax-exclusive
+  Settlement orders posted in Jan 2026 (no MTR file): 857 orders,     343,098.19 principal
+  Settlement orders posted Sept 2026 (MTR ends Aug): 62 orders,      19,615.01 principal
+
+TRACE of the residual sale-leg 'diff' in section 4 (Apr 519.48 + May 3,294.08 + Jun 2,476.28):
+  10 matched orders have ONLY a settlement Refund leg - their sale posted
+  before 19 Jun and so sits in a settlement file we do not have. MTR sale value       6,289.84.
+    402-1232962-4538739    shipped 2026-05-12  MTR    897.46  settlement legs {'Refund': 7}
+    402-3708206-7322767    shipped 2026-06-04  MTR    897.46  settlement legs {'Refund': 7}
+    403-1937951-7812328    shipped 2026-05-19  MTR    897.46  settlement legs {'Refund': 7}
+    408-1073676-6930722    shipped 2026-06-01  MTR    897.46  settlement legs {'Refund': 7}
+    408-9558609-5800304    shipped 2026-05-28  MTR    897.46  settlement legs {'Refund': 7}
+    407-7730961-2373930    shipped 2026-05-18  MTR    601.70  settlement legs {'Refund': 5}
+    404-1871941-1470721    shipped 2026-06-03  MTR    380.51  settlement legs {'Refund': 5}
+    404-5845848-9003517    shipped 2026-04-23  MTR    337.28  settlement legs {'Refund': 6}
+    404-5492300-7513933    shipped 2026-06-02  MTR    300.85  settlement legs {'Refund': 5}
+    406-3177552-2265961    shipped 2026-04-20  MTR    182.20  settlement legs {'Refund': 5}
