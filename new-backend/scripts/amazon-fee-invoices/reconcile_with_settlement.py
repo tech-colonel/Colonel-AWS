@@ -28,18 +28,53 @@ from amazon_fee_invoice import parse
 DOTTED = re.compile(r'^(\d{2})\.(\d{2})\.(\d{4})')
 GST_SUFFIX = re.compile(r'\s*[CSI]GST\s*$', re.I)
 
+# Amazon names the same charge differently on the settlement and on the
+# invoice, and it does not even keep the name in the same column: a selling fee
+# is named in `amount-description`, while an FBA storage fee is named in
+# `amount-type` with "Base fee" or "Tax on fee - CGST" as its description.
+# Look in both. Anything neither field resolves is reported, never dropped.
 LABEL_MAP = {
-    'fixedclosingfee':        'Fixed Closing Fee',
-    'commission':             'Listing Fee',
-    'refundcommission':       'Refund Processing Fee',
-    'ordercancellationcharge': 'Order Cancellation Fee',
+    'fixedclosingfee':          'Fixed Closing Fee',
+    'commission':               'Listing Fee',
+    'refundcommission':         'Refund Processing Fee',
+    'ordercancellationcharge':  'Order Cancellation Fee',
+    'fbaweighthandlingfee':     'FBA Weight Handling Shipping Fee',
+    'fbapickpackfee':           'FBA Pick and Pack Fee',
+    'fbainventorystoragefee':   'Storage Fee',
+    'fbalongtermstoragefee':    'Long Term Storage Fee',
+    'removalfee':               'Removal Fee',
 }
+IS_TAX = re.compile(r'(?:C|S|I|UT)GST\b|tax on fee', re.I)
 
 
-def normkey(desc):
-    # Amazon writes the same label both ways -- "Order Cancellation Charge" on
-    # one row and "OrderCancellationChargeIGST" on the next.  Match on letters.
-    return re.sub(r'[^a-z]', '', GST_SUFFIX.sub('', desc).lower())
+def normkey(text):
+    # Amazon writes the same label several ways -- "Order Cancellation Charge",
+    # "OrderCancellationChargeIGST", "FBA Pick & Pack Fee".  Match on letters.
+    return re.sub(r'[^a-z]', '', GST_SUFFIX.sub('', text).lower())
+
+
+def label_for(kind, desc):
+    return LABEL_MAP.get(normkey(desc)) or LABEL_MAP.get(normkey(kind))
+
+
+def ledger_files(ledger_dir):
+    """One file per settlement, newest report wins.
+
+    Amazon re-issues a settlement under a NEW report id when it revises it --
+    same settlement-id, corrected figures (we have a pair differing only in
+    tax-on-fee, 5.49 against 10.54).  Reading both double-counts the period, so
+    keep the later report id and drop the superseded one.
+    """
+    newest = {}
+    for path in glob.glob(f'{ledger_dir}/*/*.tsv'):
+        report = (re.search(r'settlement_ledger_(\d+)\.tsv$', path) or [None, path]).group(1)
+        with open(path, encoding='utf-8-sig', errors='replace') as fh:
+            fh.readline()
+            sid = (fh.readline().split('\t') or [''])[0].strip() or path
+        prev = newest.get(sid)
+        if prev is None or int(report) > int(prev[0]):
+            newest[sid] = (report, path)
+    return [p for _, p in newest.values()], len(glob.glob(f'{ledger_dir}/*/*.tsv')) - len(newest)
 
 
 def deducted(ledger_dir, month, year):
@@ -48,7 +83,8 @@ def deducted(ledger_dir, month, year):
     gst = collections.defaultdict(Decimal)
     days = set()
     unmapped = collections.Counter()
-    for path in glob.glob(f'{ledger_dir}/*/*.tsv'):
+    paths, superseded = ledger_files(ledger_dir)
+    for path in paths:
         with open(path, encoding='utf-8-sig', errors='replace') as fh:
             for row in csv.DictReader(fh, delimiter='\t'):
                 m = DOTTED.match((row.get('posted-date') or '').strip())
@@ -59,37 +95,44 @@ def deducted(ledger_dir, month, year):
                 desc = (row.get('amount-description') or '').strip()
                 if 'Fee' not in kind and kind != 'Amazon Fees':
                     continue
-                amount = -Decimal((row.get('amount') or '0').strip() or '0')   # a deduction is a cost
-                label = LABEL_MAP.get(normkey(desc))
+                amount = -Decimal((row.get('amount') or '0').strip() or '0')  # a deduction is a cost
+                label = label_for(kind, desc)
                 if label is None:
                     unmapped[(kind, desc)] += amount
                     continue
-                (gst if re.search(r'[CSI]GST', desc) else fees)[label] += amount
-    return fees, gst, days, unmapped
+                (gst if IS_TAX.search(desc) else fees)[label] += amount
+    return fees, gst, days, unmapped, superseded
 
 
-def invoiced(pdf_paths):
+def invoiced(pdf_paths, month, year):
+    """Invoiced fee lines whose FEE date falls in the month -- the same basis
+    the settlement side uses, so a credit note raised this month against an
+    earlier invoice lands here, where the settlement also shows it."""
     fees = collections.defaultdict(Decimal)
     gst = collections.defaultdict(Decimal)
     docs = [parse(p) for p in pdf_paths]
     bad = [d['source_file'] for d in docs if not d['ok']]
     for d in docs:
         for row in d['detail']:
+            dd, mm, yy = row['fee_date'].split('/')
+            if (mm, yy) != (month, year):
+                continue
             fees[row['description']] += row['amount']
             gst[row['description']] += sum(t['amount'] for t in row['taxes'])
     return fees, gst, docs, bad
 
 
 def main(ledger_dir, invoice_dir, month, year):
-    inv_fees, inv_gst, docs, bad = invoiced(sorted(glob.glob(f'{invoice_dir}/*.pdf')))
+    inv_fees, inv_gst, docs, bad = invoiced(sorted(glob.glob(f'{invoice_dir}/*.pdf')), month, year)
     if bad:
         print('REJECTED (did not tie to their own printed totals):', bad)
         return 1
-    led_fees, led_gst, days, unmapped = deducted(ledger_dir, month, year)
+    led_fees, led_gst, days, unmapped, superseded = deducted(ledger_dir, month, year)
 
     missing = [d for d in range(1, 32) if d not in days]
     print(f'{month}/{year} — fees invoiced vs fees deducted')
     print(f'settlement ledgers held for {len(days)} days'
+          + (f'; {superseded} superseded report(s) ignored' if superseded else '')
           + (f'; no ledger for {missing}' if missing else '') + '\n')
 
     print(f"{'FEE TYPE':32}{'INVOICED':>11}{'DEDUCTED':>11}{'DIFF':>10}{'ITC':>10}")

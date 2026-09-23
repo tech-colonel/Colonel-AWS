@@ -39,6 +39,13 @@ NOISE = [
 HEADER_WORDS = {'Category', 'Description', 'Service', 'Rate', 'Amount', 'Number',
                 'Date', 'Original', 'Invoice', 'Tax', 'Fee', 'SI', 'No', 'of'}
 
+# A wrapped column header can leave a single word such as "Date" or "Amount" on
+# a line of its own -- too short for is_header_row to catch -- which then glues
+# itself to the front of a description.  No Amazon fee is named with any of
+# these.  "Fee" is deliberately absent: it is a real description fragment.
+NEVER_IN_DESC = {'category', 'description', 'service', 'rate', 'amount', 'number',
+                 'date', 'original', 'invoice', 'tax', 'si', 'no', 'of'}
+
 RE_AMOUNT   = re.compile(r'(-?)\s*INR\s+(-?)([\d,]+\.\d{2})')
 RE_DATE     = re.compile(r'\b(\d{2})/(\d{2})/(\d{4})\b')       # fee date, DD/MM/YYYY
 RE_ORIGDATE = re.compile(r'\b(\d{2})-(\d{2})-(\d{4})\b')       # original invoice date, MM-DD-YYYY
@@ -82,7 +89,8 @@ def scrub(s):
     s = re.sub(r'\d+', ' ', s)
     s = re.sub(r'[|:;%]+', ' ', s)
     s = re.sub(r'(?<![A-Za-z])-+|-+(?![A-Za-z])', ' ', s)
-    return ' '.join(s.split()).strip(' -.,')
+    toks = [t for t in s.split() if t.lower() not in NEVER_IN_DESC]
+    return ' '.join(toks).strip(' -.,')
 
 
 def text_lines(pdf_path):
@@ -164,7 +172,10 @@ def parse_summary(lines, negate=False):
             continue
         if 'Details of Fees to the above' in s:
             break
-        if ('Category of' in s and 'Description of' in s) or re.search(r'\bSI\s*No\b', s):
+        # The header itself wraps: "SI ... Category of ... Tax" on one line,
+        # "Description of Service  Amount" on the next, "No Number Date" on a
+        # third.  Any one of them opens the table.
+        if 'Category of' in s or 'Description of' in s or re.match(r'^SI\b', s):
             started = True
             continue
         if not started:
@@ -203,19 +214,32 @@ def parse_summary(lines, negate=False):
             pending = []
             continue
 
-        # an SI row whose amount wrapped onto its own line ("-INR" / "126.00")
-        if cur is not None and cur['amount'] is None and amt:
-            cur['amount'] = amt[-1]
-            continue
-        if cur is not None and cur['amount'] is None and re.fullmatch(r'-?[\d,]+\.\d{2}', s):
-            cur['amount'] = money('-' if s.startswith('-') else '', '', s.lstrip('-'))
+        # A summary row can wrap across three lines: the description starts on
+        # the line ABOVE the numbered row, finishes on the line BELOW it, and
+        # the figure is split from its "-INR" marker.  Carry all of it forward.
+        if cur is not None:
+            if cur['amount'] is None and amt:
+                cur['amount'] = amt[-1]
+                continue
+            trailing = re.search(r'(-?[\d,]+\.\d{2})\s*$', s)
+            if trailing and cur['amount'] is None and not RE_RATE.search(s):
+                cur['amount'] = money('-' if trailing.group(1).startswith('-') else '',
+                                      '', trailing.group(1).lstrip('-'))
+                s = s[:trailing.start()].strip()
+            # A tax row whose figure wrapped away still names its head; it is
+            # not part of the description above it.
+            if s and not any(w in s for w in TAX_WORDS) \
+                    and not is_header_row(s) and re.search(r'[A-Za-z]', s):
+                cur.setdefault('tail', []).append(s)
             continue
 
         if not amt and not is_header_row(s) and re.search(r'[A-Za-z]', s):
-            (pending if cur is None else cur.setdefault('tail', [])).append(s)
+            pending.append(s)
 
     for r in rows:
-        r.pop('tail', None)
+        tail = r.pop('tail', None)
+        if tail:
+            r['description'] = scrub(f"{r['description']} {' '.join(tail)}")
         # On a credit note the minus sign sits in the column header's row, not
         # beside the figure, so it is lost on extraction.  Every amount on a
         # credit note is negative by definition -- take that, not the glyph.

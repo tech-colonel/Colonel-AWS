@@ -131,6 +131,38 @@ def build(docs, out_path, period_label):
     total_row = r
     ws.auto_filter.ref = f'B{hrow}:I{last}'
 
+    # ----- by month
+    r += 2
+    put(ws, r, 2, 'BY MONTH', bold=True, fg=CLAY, border=False)
+    r += 1
+    head(ws, r, range(2, 7), ['Month', 'Documents', 'Taxable value', 'Input credit', 'Total'])
+    r += 1
+    permonth = collections.defaultdict(lambda: {'n': 0, 'tax': Decimal(0), 'gst': Decimal(0)})
+    for d in docs:
+        dt = d['header'].get('doc_date', '')          # DD/MM/YYYY
+        key = (dt[6:], dt[3:5])
+        permonth[key]['n'] += 1
+        permonth[key]['tax'] += d['calculated']['taxable']
+        permonth[key]['gst'] += d['calculated']['gst']
+    MONTHS = ['', 'January', 'February', 'March', 'April', 'May', 'June', 'July',
+              'August', 'September', 'October', 'November', 'December']
+    mfirst = r
+    for key in sorted(permonth):
+        a = permonth[key]
+        put(ws, r, 2, f'{MONTHS[int(key[1])]} {key[0]}')
+        put(ws, r, 3, a['n'], fmt=FMT_INT, align='right')
+        put(ws, r, 4, float(a['tax']), fmt=FMT_AMT)
+        put(ws, r, 5, float(a['gst']), fmt=FMT_AMT)
+        put(ws, r, 6, f'=D{r}+E{r}', fmt=FMT_AMT)
+        r += 1
+    mlast = r - 1
+    put(ws, r, 2, 'Total', bold=True, fill=HILIGHT)
+    for c in range(3, 7):
+        L = get_column_letter(c)
+        put(ws, r, c, f'=SUM({L}{mfirst}:{L}{mlast})',
+            fmt=FMT_INT if c == 3 else FMT_AMT, bold=True, fill=HILIGHT,
+            align='right' if c == 3 else None)
+
     # ----- ITC by registration
     r += 2
     put(ws, r, 2, 'INPUT CREDIT — BY GST REGISTRATION', bold=True, fg=CLAY, border=False)
@@ -197,7 +229,9 @@ def build(docs, out_path, period_label):
                                 'Place of supply', 'Our GSTIN', 'Taxable value',
                                 'CGST', 'SGST', 'IGST', 'Document total', 'Ties'])
     rr = 3
-    for d in docs:
+    for d in sorted(docs, key=lambda x: (x['header'].get('doc_date', '')[6:],
+                                         x['header'].get('doc_date', '')[3:5],
+                                         x['header'].get('doc_no', ''))):
         h = d['header']
         bh = d['calculated']['by_head']
         put(ws2, rr, 2, h.get('doc_no'))
