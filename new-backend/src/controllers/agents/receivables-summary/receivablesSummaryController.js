@@ -216,6 +216,9 @@ const getSummary = async (req, res, next) => {
     const b = buildReceivables(rows, req.query.asAt);
     res.json({
       empty: false,
+      /* The GST sales summary, in the shape the accountant's own working
+         already uses. Shown first, because it is the figure they check. */
+      gst: { blocks: b.gst.blocks.map(({ _raw, ...rest }) => rest), consolidated: b.gst.consolidated },
       orders: b.totals.orders,
       billed: b.totals.billed,
       collected: b.totals.collected,

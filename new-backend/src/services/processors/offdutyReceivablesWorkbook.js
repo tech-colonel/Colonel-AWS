@@ -22,6 +22,9 @@ const MUTED  = '6B6660';
 const HL_BG  = 'EAF0F6';  const HL_FG  = '1E3A57';
 
 const AMT = '#,##0.00;-#,##0.00';
+/* The accountant's own Sales Summary is cast in whole rupees. Matching it. */
+const RUP = '#,##0;-#,##0';
+const GST_HEAD_BG = 'FFF7CC';   // the pale yellow band their sheet already uses
 const PCT = '0.0%';
 const INT = '#,##0';
 
@@ -60,6 +63,18 @@ function styleCell(cell, kind, col) {
     case 'bad':     return { ...right, font: { bold: true, color: { rgb: BAD_FG } },
                              fill: { patternType: 'solid', fgColor: { rgb: BAD_BG } },
                              border: border(['top', 'bottom'], BAD_FG) };
+    /* The GST sales summary is laid out exactly as the accountant's own
+       "Sales Summary" tab: a pale yellow banded header, boxed, with bold
+       subtotals ruled above and below. Nothing invented. */
+    case 'gsthead': return { font: { bold: true, sz: 11 },
+                             fill: { patternType: 'solid', fgColor: { rgb: GST_HEAD_BG } },
+                             border: border(['top', 'bottom', 'left', 'right'], '000000'),
+                             alignment: { vertical: 'center', horizontal: 'center' } };
+    case 'gstrow':  return { ...right, border: border(['left', 'right'], '000000') };
+    case 'gsttot':  return { ...right, font: { bold: true },
+                             border: border(['top', 'bottom', 'left', 'right'], '000000') };
+    case 'gstname': return { font: { bold: true, sz: 12, color: { rgb: INK } },
+                             alignment: { vertical: 'center', horizontal: 'left' } };
     case 'sub':     return { ...right, font: { sz: 10, color: { rgb: MUTED } } };
     case 'note':    return { font: { italic: true, sz: 9, color: { rgb: MUTED } },
                              alignment: { vertical: 'center', horizontal: 'left', wrapText: true } };
@@ -99,7 +114,81 @@ function sheetFrom(grid, widths) {
 const money = (v, kind = 'text') => C(Number(v) || 0, kind, { fmt: AMT });
 const count = (v, kind = 'text') => C(Number(v) || 0, kind, { fmt: INT });
 
-/* ── Sheet 1: the summary ──────────────────────────────────────────────────── */
+/* ── Sheet 1: the GST sales summary, in the shape already in use ───────────── */
+
+const STATE_NAME = { HR: 'Haryana', KAR: 'Karnataka', MH: 'Maharashtra' };
+const SHORT_MONTH = (p) => {
+  if (!p) return '';
+  const [mon, yr] = p.split(' ');
+  return `${mon.slice(0, 3)}'${String(yr).slice(2)}`;
+};
+
+function salesSummarySheet(b, meta) {
+  const g = [];
+  const push = (...cells) => { g.push(cells); return g.length; };
+  const blank = () => g.push([]);
+  const heads = ['taxable_value', 'cgst', 'sgst', 'igst'];
+  const period = b.periods.length === 1 ? SHORT_MONTH(b.periods[0])
+               : `${SHORT_MONTH(b.periods[0])} to ${SHORT_MONTH(b.periods[b.periods.length - 1])}`;
+
+  const rowOf = (label, o, kind) =>
+    push(C(label, kind), ...heads.map((h) => C(Number(o[h]) || 0, kind, { fmt: RUP })));
+
+  const block = (blk, caption) => {
+    push(C(`Off Duty : Summary of Shopify Sales for the month of ${period}`, 'gstname'));
+    push(C(caption, 'gstname'));
+    push(C('Particulars', 'gsthead'), C('Taxable', 'gsthead'), C('CGST', 'gsthead'),
+         C('SGST', 'gsthead'), C('IGST', 'gsthead'));
+    const salesRow = rowOf('Shopify', blk.sales, 'gstrow');
+    const totalSales = push(C('Total Sales', 'gsttot'),
+      ...heads.map((h, i) => C(`=${colLetter(i + 1)}${salesRow}`, 'gsttot', { fmt: RUP })));
+    blank();
+    const rtoRow = rowOf('Shopify- Rto', blk.rto, 'gstrow');
+    const refRow = rowOf('Shopify- Refunded', blk.refund, 'gstrow');
+    const retRow = push(C('Total Return', 'gsttot'),
+      ...heads.map((h, i) => {
+        const L = colLetter(i + 1);
+        return C(`=${L}${rtoRow}+${L}${refRow}`, 'gsttot', { fmt: RUP });
+      }));
+    blank();
+    const netRow = push(C('Net Sales', 'gsttot'),
+      ...heads.map((h, i) => {
+        const L = colLetter(i + 1);
+        return C(`=${L}${totalSales}+${L}${retRow}`, 'gsttot', { fmt: RUP });
+      }));
+    blank(); blank();
+    return netRow;
+  };
+
+  const netRows = [];
+  for (const blk of b.gst.blocks) netRows.push(block(blk, STATE_NAME[blk.entity] || blk.entity));
+  if (b.gst.consolidated) {
+    const at = block(b.gst.consolidated, 'All registrations — consolidated');
+    /* The consolidation must equal the registrations added up. Stated as a live
+       formula so it re-evaluates if anything above is edited. */
+    push(C('Difference with the registrations above (to be Nil)', 'ok'),
+      ...heads.map((h, i) => {
+        const L = colLetter(i + 1);
+        return C(`=ROUND(${L}${at}-(${netRows.map((r) => `${L}${r}`).join('+')}),2)`, 'ok', { fmt: AMT });
+      }));
+  }
+  blank();
+  push(C('Prepared from the delivered, refund and RTO sheets of each registration\'s GST sales register. '
+       + 'Other sales channels appearing in those workbooks — Nykaa, Myntra, Slikk, B2B and the stores — '
+       + 'are not included. Figures agree with the Sales Summary of each workbook.', 'note'));
+
+  const ws = sheetFrom(g, [34, 16, 14, 14, 16]);
+  ws['!rows'] = g.map((row) => {
+    const k = row && row[0] ? row[0].kind : null;
+    if (k === 'gstname') return { hpt: 19 };
+    if (k === 'gsthead') return { hpt: 20 };
+    if (k === 'note') return { hpt: 42 };
+    return { hpt: 16 };
+  });
+  return ws;
+}
+
+/* ── Sheet 2: the receivables statement ────────────────────────────────────── */
 
 function summarySheet(b, meta) {
   const g = [];
@@ -328,7 +417,8 @@ function buildWorkbook(b, meta) {
   const wb = XLSXStyle.utils.book_new();
   const add = (name, ws) => XLSXStyle.utils.book_append_sheet(wb, ws, name.slice(0, 31));
 
-  add('Summary', summarySheet(b, meta));
+  add('Sales Summary', salesSummarySheet(b, meta));
+  add('Receivables', summarySheet(b, meta));
 
   add('Collection Channels', tableSheet([
     { key: 'label', label: 'Collection channel' },

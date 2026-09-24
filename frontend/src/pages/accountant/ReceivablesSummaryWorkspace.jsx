@@ -20,6 +20,53 @@ const money = (n) =>
   n == null ? '—' : `₹${Number(n).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 const int = (n) => (n == null ? '—' : Number(n).toLocaleString('en-IN'));
 
+const STATE_NAME = { HR: 'Haryana', KAR: 'Karnataka', MH: 'Maharashtra' };
+const HEADS = ['taxable_value', 'cgst', 'sgst', 'igst'];
+const rup = (n) => (n == null ? '—' : Number(n).toLocaleString('en-IN', { maximumFractionDigits: 0 }));
+
+/* The GST sales summary, laid out as the accountant's own working already has
+   it: sales, less returns, net — by registration, across the four heads. */
+const SalesSummaryBlock = ({ block, caption }) => (
+  <div className="mb-6">
+    <div className="mb-1 text-sm font-semibold text-slate-800">{caption}</div>
+    <table className="w-full border border-slate-300 text-sm">
+      <thead>
+        <tr style={{ background: '#FFF7CC' }}>
+          <th className="border border-slate-300 px-3 py-1.5 text-left font-semibold">Particulars</th>
+          {['Taxable', 'CGST', 'SGST', 'IGST'].map((h) => (
+            <th key={h} className="border border-slate-300 px-3 py-1.5 text-center font-semibold">{h}</th>
+          ))}
+        </tr>
+      </thead>
+      <tbody>
+        {[
+          ['Shopify', block.sales, false],
+          ['Total Sales', block.sales, true],
+          [null],
+          ['Shopify- Rto', block.rto, false],
+          ['Shopify- Refunded', block.refund, false],
+          ['Total Return', block.totalReturn, true],
+          [null],
+          ['Net Sales', block.net, true],
+        ].map(([label, o, bold], i) => (
+          label === null
+            ? <tr key={i}><td colSpan={5} className="h-2" /></tr>
+            : (
+              <tr key={i} className={bold ? 'font-semibold' : ''}>
+                <td className="border-x border-slate-300 px-3 py-1">{label}</td>
+                {HEADS.map((h) => (
+                  <td key={h} className="border-x border-slate-300 px-3 py-1 text-right tabular-nums">
+                    {rup(o[h])}
+                  </td>
+                ))}
+              </tr>
+            )
+        ))}
+      </tbody>
+    </table>
+  </div>
+);
+
 const Kpi = ({ label, value, sub, tone }) => (
   <div className="rounded-xl border border-slate-200 bg-white p-4">
     <div className="text-xs font-medium uppercase tracking-wide text-slate-500">{label}</div>
@@ -201,6 +248,31 @@ const ReceivablesSummaryWorkspace = ({ agent }) => {
 
       {!loading && summary && (
         <>
+          {summary.gst && (
+            <Card>
+              <CardHeader>
+                <CardTitle>
+                  Off Duty : Summary of Shopify Sales for {summary.periods.join(', ')}
+                </CardTitle>
+                <CardDescription>
+                  Cast from the delivered, refund and RTO sheets of each registration's GST sales
+                  register. Other sales channels in those workbooks — Nykaa, Myntra, Slikk, B2B and the
+                  stores — are not included. Agrees with the Sales Summary of each workbook.
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                {summary.gst.blocks.map((blk) => (
+                  <SalesSummaryBlock key={blk.entity} block={blk}
+                                     caption={STATE_NAME[blk.entity] || blk.entity} />
+                ))}
+                {summary.gst.consolidated && (
+                  <SalesSummaryBlock block={summary.gst.consolidated}
+                                     caption="All registrations — consolidated" />
+                )}
+              </CardContent>
+            </Card>
+          )}
+
           <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
             <Kpi label={`Trade receivables as on ${summary.asAt}`} value={money(summary.position.receivable)}
                  tone="text-amber-700" sub="delivered within the period, realised later or not at all" />

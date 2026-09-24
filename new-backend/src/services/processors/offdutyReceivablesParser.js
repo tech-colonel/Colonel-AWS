@@ -195,7 +195,15 @@ function readDelivered(rows, h, entity, tab) {
     const od = asDate(pick(row, h.index, 'order date'));
     out.push({
       source_kind: 'DELIVERED', source_tab: tab,
-      entity: ENTITY_FROM_SELLER(pick(row, h.index, 'gstn seller')) || entity,
+      /* The registration is the WORKBOOK's, not the row's. Each workbook is one
+         registration's GSTR-1 working and its own Sales Summary is cast on that
+         basis; reading the row-level "GSTN Seller" instead moved a handful of
+         lines between registrations and put every state out by a few rupees
+         against the accountant's own figures. The seller value is kept
+         separately for reference. */
+      entity,
+      gstn_seller: text(pick(row, h.index, 'gstn seller')),
+      seller_entity: ENTITY_FROM_SELLER(pick(row, h.index, 'gstn seller')),
       order_id: id,
       order_date: iso(od),
       period: period(od) || period(asDate(pick(row, h.index, 'sales month'))),

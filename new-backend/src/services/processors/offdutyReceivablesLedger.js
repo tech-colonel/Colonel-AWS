@@ -134,6 +134,69 @@ function placeOrder(l, asAt) {
                  + 'date. No amount recoverable.' };
 }
 
+/* ── the GST sales summary ─────────────────────────────────────────────────
+   The shape the accountant already reads: sales, less returns, net — by
+   registration, split across taxable / CGST / SGST / IGST. Built from the RAW
+   line-item rows, not from the per-order ledger, because the taxable value and
+   the tax heads are stated per line; aggregating the deduplicated order ledger
+   would not agree with the workbook's own Sales Summary.
+
+   Returns one block per registration plus a consolidated block. */
+function gstSummary(allRows) {
+  const HEADS = ['taxable_value', 'cgst', 'sgst', 'igst'];
+  const zero = () => ({ taxable_value: 0, cgst: 0, sgst: 0, igst: 0, lines: 0 });
+  const bucket = {};
+
+  /* ROUND ONCE, AT THE END. add() rounds to the paisa on every step, which is
+     right for rupee amounts but wrong here: a taxable value like
+     1358.0357142857142 carries a sub-paisa fraction, and rounding the running
+     total over 12,608 lines drifts by Rs 12 against the accountant's own Sales
+     Summary. These heads therefore accumulate at full precision. */
+  const acc = (o, r) => { o.lines += 1; for (const h of HEADS) o[h] += Number(r[h]) || 0; };
+
+  for (const r of allRows) {
+    if (r.source_kind === 'PAYMENT') continue;          // the payment file carries no tax heads
+    const e = r.entity || 'Unallocated';
+    bucket[e] = bucket[e] || { DELIVERED: zero(), RTO: zero(), REFUND: zero() };
+    const b = bucket[e][r.source_kind];
+    if (!b) continue;
+    acc(b, r);
+  }
+
+  /* RTO and refund rows are held positive in the source workbooks; on a sales
+     summary they reduce sales, so they are shown negative here. */
+  const neg = (o) => HEADS.reduce((a, h) => ({ ...a, [h]: -o[h] }), { lines: o.lines });
+  const sum = (...os) => HEADS.reduce((a, h) => ({ ...a, [h]: os.reduce((t, o) => t + o[h], 0) }),
+                                      { lines: os.reduce((t, o) => t + (o.lines || 0), 0) });
+  const round = (o) => HEADS.reduce((a, h) => ({ ...a, [h]: r2(o[h]) }), { lines: o.lines });
+
+  const blocks = Object.keys(bucket).sort().map((entity) => {
+    const sales = bucket[entity].DELIVERED;
+    const rto = neg(bucket[entity].RTO);
+    const ref = neg(bucket[entity].REFUND);
+    return {
+      entity,
+      sales: round(sales), rto: round(rto), refund: round(ref),
+      totalReturn: round(sum(rto, ref)),
+      net: round(sum(sales, rto, ref)),
+      _raw: { sales, rto, ref },
+    };
+  });
+
+  /* The consolidation adds the FULL-PRECISION figures, then rounds — never the
+     already-rounded per-registration ones. */
+  const consolidated = blocks.length > 1 ? {
+    entity: 'All registrations',
+    sales: round(sum(...blocks.map((b) => b._raw.sales))),
+    rto: round(sum(...blocks.map((b) => b._raw.rto))),
+    refund: round(sum(...blocks.map((b) => b._raw.ref))),
+    totalReturn: round(sum(...blocks.map((b) => sum(b._raw.rto, b._raw.ref)))),
+    net: round(sum(...blocks.map((b) => sum(b._raw.sales, b._raw.rto, b._raw.ref)))),
+  } : null;
+
+  return { blocks, consolidated, HEADS };
+}
+
 /**
  * Build everything the workbook needs from the flat parsed rows.
  * `asAt` is the cut-off (YYYY-MM-DD). Left out, it is the last day of the
@@ -434,9 +497,10 @@ function buildReceivables(allRows, asAtIn) {
       + 'not examined.'),
   ].filter((x) => x.orders > 0);
 
-  return { ledger, byGroup, GROUP_ORDER, GROUP_LABEL, byCollector, byEntity, receivableSplit,
+  return { gst: gstSummary(allRows),
+           ledger, byGroup, GROUP_ORDER, GROUP_LABEL, byCollector, byEntity, receivableSplit,
            exceptions, totals, checks, periods, collectorKeys, COLLECTOR_LABEL, bucketOf,
            byPosition, POSITION, POSITION_ORDER, positionTotals, asAt, limits };
 }
 
-module.exports = { buildReceivables, moneyGroup, placeOrder, GROUP_LABEL, GROUP_ORDER, POSITION };
+module.exports = { buildReceivables, gstSummary, moneyGroup, placeOrder, GROUP_LABEL, GROUP_ORDER, POSITION };
