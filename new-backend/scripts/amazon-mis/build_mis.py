@@ -64,21 +64,26 @@ def section(ws, r, label, ncols):
 
 
 def build(mtr_dir, invoice_dir, ledger_dir, out_path):
-    sales, units, skus, transfers, mtr_failures = D.sales(mtr_dir)
+    sales, units, skus, transfers, mtr_failures, sku_desc, sku_value = D.sales(mtr_dir)
     fees, fee_gst, rejected = D.fees(invoice_dir)
     setts = D.settlements(ledger_dir)
 
     months = sorted(sales)
+    total_units = sum(units.values()) or Decimal('1')
+    default_cpu = (sum(sales[m]['net'] for m in months) * COGS_RATE / total_units
+                   ).quantize(Decimal('0.01'))
     first_col, last_col = 3, 3 + len(months) - 1
     ytd_col = last_col + 1
     rem_col = ytd_col + 2
     NC = rem_col
 
     wb = Workbook()
-
-    # ══════════════════════════════════════════════════════════ MIS
     ws = wb.active
     ws.title = 'MIS'
+    # built first so the MIS can point its COGS line straight at it
+    cogs_ref = build_cogs(wb, months, skus, units, sku_desc, sku_value, default_cpu)
+
+    # ══════════════════════════════════════════════════════════ MIS
     ws.sheet_view.showGridLines = False
     ws.column_dimensions['A'].width = 2.5
     ws.column_dimensions['B'].width = 42
@@ -165,14 +170,19 @@ def build(mtr_dir, invoice_dir, ledger_dir, out_path):
     r += 1
     r = section(ws, r, 'COST OF GOODS SOLD', ytd_col)
     cogs = line('Cost of goods sold',
-                formula=lambda c, m: f'={get_column_letter(c)}{net}*{float(COGS_RATE)}',
+                formula=lambda c, m: ("='{}'!{}{}".format(
+                    cogs_ref['sheet'],
+                    cogs_ref['month_cols'][months.index(m)],
+                    cogs_ref['total_row'])),
                 indent=True,
-                remark='ASSUMPTION — 32% of net sales, the rate used in the existing MIS. '
-                       'Not actual cost. Give us landed cost per SKU and this becomes real: '
-                       'every MTR line already carries SKU and quantity.')
+                remark='Units actually sold x cost per unit, from the COGS sheet. Cost attaches to a unit, not '
+                       'to a rupee of sales — so this moves with volume and mix, which a flat percentage cannot. '
+                       f'Each SKU is seeded at {float(default_cpu):,.2f}/unit until real landed costs are entered.')
     line('COGS %', formula=lambda c, m: f'=IF({get_column_letter(c)}{net}=0,"",'
                                         f'{get_column_letter(c)}{cogs}/{get_column_letter(c)}{net})',
-         pct=True, band=True, remark='Fixed by the assumption above until real costs are supplied.',
+         pct=True, band=True,
+         remark='Now varies with average selling price and mix, because cost follows units. Enter real costs '
+                'on the COGS sheet and this becomes the true figure.',
          ytd=f'={get_column_letter(ytd_col)}{cogs}/{get_column_letter(ytd_col)}{net}')
     gm = line('Gross margin',
               formula=lambda c, m: f'={get_column_letter(c)}{net}-{get_column_letter(c)}{cogs}',
@@ -519,6 +529,113 @@ def build_basis(wb, months, sales, fees, setts, transfers, mtr_failures, rejecte
         put(ws, r, 4, why, wrap=True, size=9)
         ws.row_dimensions[r].height = 30
         r += 1
+
+
+
+
+def build_cogs(wb, months, skus, units, sku_desc, sku_value, default_cpu):
+    """One row per SKU, with the cost per unit as the single input.
+
+    Cost attaches to a UNIT, not to a rupee of revenue. Holding COGS at a fixed
+    share of sales makes gross margin a constant by construction and hides the
+    only thing it should reveal -- what happens when the average selling price
+    or the product mix moves. Here COGS follows units, so it moves with the mix
+    on its own.
+
+    Every cost is seeded with one blended rate so the workbook is usable today.
+    Replace a cell with the real landed cost and every dependent figure follows,
+    with no rebuild.
+    """
+    n = len(months)
+    ws = wb.create_sheet('COGS')
+    ws.sheet_view.showGridLines = False
+    ws.column_dimensions['A'].width = 2.5
+    ws.column_dimensions['B'].width = 24
+    ws.column_dimensions['C'].width = 46
+    ws.column_dimensions['D'].width = 15
+    u0 = 5
+    for i in range(n):
+        ws.column_dimensions[get_column_letter(u0 + i)].width = 9
+    ws.column_dimensions[get_column_letter(u0 + n)].width = 11
+    c0 = u0 + n + 1
+    for i in range(n):
+        ws.column_dimensions[get_column_letter(c0 + i)].width = 13
+    ws.column_dimensions[get_column_letter(c0 + n)].width = 15
+    last_col = c0 + n
+
+    _title(ws, 'Cost of goods sold, by SKU',
+           'The only column to fill in is Cost per unit. Everything else is units actually sold, read from the '
+           'tax reports. Each cost is seeded with one blended rate so the workbook works today — replace a cell '
+           'with the real landed cost and the MIS follows immediately.', last_col)
+
+    r = 5
+    put(ws, r, 2, 'SKU', bold=True, fg='FFFFFF', fill=INK)
+    put(ws, r, 3, 'Description', bold=True, fg='FFFFFF', fill=INK)
+    put(ws, r, 4, 'Cost per unit', bold=True, fg='FFFFFF', fill=CLAY, align='center')
+    ws.merge_cells(start_row=r - 1, start_column=u0, end_row=r - 1, end_column=u0 + n)
+    for i, m in enumerate(months):
+        put(ws, r, u0 + i, MONTH_NAME[m[5:]], bold=True, fg='FFFFFF', fill=INK, align='center')
+        put(ws, r, c0 + i, MONTH_NAME[m[5:]], bold=True, fg='FFFFFF', fill=INK, align='center')
+    put(ws, r, u0 + n, 'Units', bold=True, fg='FFFFFF', fill=INK, align='center')
+    put(ws, r, c0 + n, 'Total COGS', bold=True, fg='FFFFFF', fill=INK, align='center')
+    ws.row_dimensions[r].height = 22
+    ws.freeze_panes = ws.cell(row=r + 1, column=u0)
+    r += 1
+
+    order = sorted(skus_all(skus), key=lambda s: -sku_value.get(s, ZERO_D))
+    first = r
+    for sku in order:
+        put(ws, r, 2, sku)
+        put(ws, r, 3, (sku_desc.get(sku) or '')[:90], size=9, fg=MUTED)
+        inp = put(ws, r, 4, float(default_cpu), fmt=AMT2, bold=True, align='center')
+        inp.fill = PatternFill('solid', fgColor=CREAM)
+        inp.font = Font(bold=True, size=10, color=CLAY)
+        for i, m in enumerate(months):
+            put(ws, r, u0 + i, float(skus[m].get(sku, 0) or 0), fmt=INT, align='center')
+            U = get_column_letter(u0 + i)
+            put(ws, r, c0 + i, f'={U}{r}*$D${r}', fmt=AMT2)
+        UL, UR = get_column_letter(u0), get_column_letter(u0 + n - 1)
+        put(ws, r, u0 + n, f'=SUM({UL}{r}:{UR}{r})', fmt=INT, align='center', bold=True)
+        CL, CR = get_column_letter(c0), get_column_letter(c0 + n - 1)
+        put(ws, r, c0 + n, f'=SUM({CL}{r}:{CR}{r})', fmt=AMT2, bold=True)
+        r += 1
+    last = r - 1
+
+    put(ws, r, 2, 'Total', bold=True, fill=HILIGHT)
+    put(ws, r, 3, f'{len(order)} SKUs', fill=HILIGHT, fg=MUTED, italic=True)
+    put(ws, r, 4, '', fill=HILIGHT)
+    for c in list(range(u0, u0 + n + 1)) + list(range(c0, c0 + n + 1)):
+        L = get_column_letter(c)
+        put(ws, r, c, f'=SUM({L}{first}:{L}{last})',
+            fmt=INT if c <= u0 + n else AMT2, bold=True, fill=HILIGHT,
+            align='center' if c <= u0 + n else None)
+    total_row = r
+
+    r += 2
+    put(ws, r, 2, 'Seeded cost per unit', bold=True, border=False)
+    put(ws, r, 4, float(default_cpu), fmt=AMT2, bold=True, align='center', fg=CLAY)
+    r += 1
+    put(ws, r, 2, f'This is the rate implied by costing the whole period at 32% of net sales, the assumption the '
+                  f'existing MIS uses, spread over the {int(sum(units.values())):,} units actually sold. It is a '
+                  f'placeholder, not a measurement — but it is the right SHAPE, because it moves with volume and '
+                  f'mix instead of tracking revenue and telling you nothing.',
+        italic=True, fg=MUTED, size=9, border=False, wrap=True)
+    ws.merge_cells(start_row=r, start_column=2, end_row=r + 1, end_column=last_col)
+    ws.row_dimensions[r].height = 26
+
+    return {'sheet': 'COGS', 'total_row': total_row,
+            'month_cols': [get_column_letter(c0 + i) for i in range(len(months))],
+            'total_col': get_column_letter(c0 + len(months))}
+
+
+ZERO_D = __import__('decimal').Decimal('0')
+
+
+def skus_all(skus):
+    out = set()
+    for m in skus:
+        out |= set(skus[m])
+    return out
 
 
 if __name__ == '__main__':

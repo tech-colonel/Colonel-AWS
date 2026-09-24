@@ -45,6 +45,8 @@ def sales(mtr_dir):
     out = collections.defaultdict(lambda: collections.defaultdict(Decimal))
     units = collections.defaultdict(Decimal)
     skus = collections.defaultdict(lambda: collections.defaultdict(Decimal))
+    sku_desc = {}
+    sku_value = collections.defaultdict(Decimal)
     transfers = []
     failures = []
     for d in docs:
@@ -68,11 +70,14 @@ def sales(mtr_dir):
             units[m] += r['quantity_signed']
             if r['sku']:
                 skus[m][r['sku']] += r['quantity_signed']
+                sku_value[r['sku']] += v
+                if r.get('item_description') and r['sku'] not in sku_desc:
+                    sku_desc[r['sku']] = r['item_description']
     for m in out:
         out[m]['net'] = out[m]['B2B_net'] + out[m]['B2C_net']
         out[m]['gross'] = out[m]['B2B_gross'] + out[m]['B2C_gross']
         out[m]['returns'] = out[m]['B2B_return'] + out[m]['B2C_return']
-    return out, units, skus, transfers, failures
+    return out, units, skus, transfers, failures, sku_desc, sku_value
 
 
 def fees(invoice_dir):
