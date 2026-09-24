@@ -43,7 +43,7 @@ def colsum(ws, col, rows):
     return t
 
 SCHED = ['Trade Receivables', 'Realisation Unascertained', 'Goods In Transit', 'Channel Not Identified',
-         'Flagged In Payment Reco', 'Part Realisation', 'Records Differ', 'Not In Sales Register',
+         'Flagged In Payment Reco', 'Part Realisation', 'Workbooks Differ', 'Not In GSTR-1',
          'Bank Date Not Recorded', 'Two Registrations']
 # column positions on a worklist sheet
 COL = {'billed': 9, 'realised': 10, 'recoverable': 11}
@@ -53,11 +53,15 @@ print('=' * 100); print('AUDIT PART 2'); print('=' * 100)
 # ── every schedule: does its own total row equal the sum of its rows? ─────────
 print('\n4. EACH SCHEDULE — its stated total against the sum of its own rows')
 for name in SCHED:
+    if name not in wb.sheetnames:
+        res.append((False, f'  schedule "{name}" is missing from the workbook', 0, 1)); continue
     ws = wb[name]
     rows = data_rows(ws)
     tot_row = None
     for r in range(1, ws.max_row + 1):
         if str(ws.cell(r, 1).value).strip() == 'Total': tot_row = r
+    if name not in wb.sheetnames:
+        res.append((False, f'  schedule "{name}" is missing from the workbook', 0, 1)); continue
     if tot_row:
         for label, c in COL.items():
             stated = val(ws, tot_row, c)
@@ -77,22 +81,25 @@ def findrow(text):
 NOTE_TO_SCHED = {
     'Realisation date not recorded': ('Realisation Unascertained', None),
     'Collection channel not identified — delivered and unrealised': ('Channel Not Identified', None),
-    'Sales register and payment reconciliation differ': ('Records Differ', None),
-    'Delivered and realised, but not in any GST sales register': ('Not In Sales Register', None),
+    'GSTR-1 workbook and payment reconciliation differ': ('Workbooks Differ', None),
+    'Delivered and realised, but not in any GSTR-1 workbook': ('Not In GSTR-1', None),
     'Billed from two GST registrations': ('Two Registrations', None),
 }
 for note, (sched, _) in NOTE_TO_SCHED.items():
     r = findrow(note)
-    if r is None: continue
+    # a caption that no longer exists must FAIL, not be skipped — an audit that
+    # quietly stops checking when a label is renamed is worse than no audit
+    if r is None:
+        res.append((False, f'  note caption not found in the workbook: "{note[:56]}"', 0, 1)); continue
     n_workbook = val(ws, r, 2)
     n_sched = len(data_rows(wb[sched]))
     check(f'  note "{note[:44]}" order count = {sched}', n_workbook, n_sched, 0)
 
 # ── the same population reported twice under different amounts ───────────────
 print('\n6. CONSISTENCY — is any population given two different amounts?')
-rC = findrow('Add: orders in the payment reconciliation appearing in no sales register')
+rC = findrow('Add: orders in the payment reconciliation appearing in no GSTR-1 workbook')
 c_orders, c_amount = val(ws, rC, 2), val(ws, rC, 3)
-rN = findrow('Delivered and realised, but not in any GST sales register')
+rN = findrow('Delivered and realised, but not in any GSTR-1 workbook')
 n_orders, n_amount = val(ws, rN, 2), val(ws, rN, 3)
 print(f'   "in no sales register"  table C: {c_orders:.0f} orders  {c_amount:,.2f}')
 print(f'                           note  F: {n_orders:.0f} orders  {n_amount:,.2f}')
@@ -123,7 +130,9 @@ for r in range(1, cc.max_row + 1):
     if isinstance(label, str) and label.strip() in ('Cashfree', 'Bill Desk', 'Bill Desk — exchange',
                                                     'Razorpay — exchange', 'Shiprocket — cash on delivery'):
         d = findrow(label.strip())
-        if d: check(f'  {label.strip()} collections agree', val(cc, r, 3), val(ws, d, 3))
+        if d is None:
+            res.append((False, f'  channel "{label.strip()}" missing from table D', 0, 1)); continue
+        check(f'  {label.strip()} collections agree', val(cc, r, 3), val(ws, d, 3))
 
 # ── order ledger integrity ───────────────────────────────────────────────────
 print('\n9. ORDER LEDGER')

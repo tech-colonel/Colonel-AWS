@@ -455,13 +455,13 @@ function buildReceivables(allRows, asAtIn) {
 
   const MONTHS = ['', 'January', 'February', 'March', 'April', 'May', 'June', 'July',
                   'August', 'September', 'October', 'November', 'December'];
-  /* ── the bridge from the GST sales registers to the payment reconciliation ──
+  /* ── the bridge from the GSTR-1 workbooks to the payment reconciliation ──
      The two documents count different things, so they are reconciled order by
      order rather than compared as totals. Three causes, and nothing left over:
        · orders taxed as delivered that the payment file gives another status
-       · orders only PART delivered — the register taxes the delivered lines,
+       · orders only PART delivered — the GSTR-1 workbook taxes the delivered lines,
          the payment file carries the whole order value
-       · orders in the payment file that no sales register contains
+       · orders in the payment file that no GSTR-1 workbook contains
      Every figure below is measured, none is a balancing item. */
   /* Full precision, rounded once at the end. A delivered line's order total is
      taxable + tax and carries a sub-paisa fraction, so rounding on every one of
@@ -538,14 +538,14 @@ function buildReceivables(allRows, asAtIn) {
       + 'whom recovery is due could not be identified from the records produced.',
         'Invoice value'),
     lim('statusConflict', exceptions.statusConflict, (l) => l.billed,
-        'Sales register and payment reconciliation differ',
-        'Taxed as delivered in the GST sales register, but shown under a different status in the payment '
+        'GSTR-1 workbook and payment reconciliation differ',
+        'Taxed as delivered in the GSTR-1 workbook, but shown under a different status in the payment '
       + 'reconciliation. One of the two records is incorrect and the GST liability depends on which. '
       + 'Reported as is; no adjustment has been made.',
         'Invoice value'),
     lim('taxedNowhere', exceptions.taxedNowhere, (l) => l.billed,
-        'Delivered and realised, but not in any GST sales register',
-        'Shown as delivered in the payment reconciliation but not appearing in any GST sales register '
+        'Delivered and realised, but not in any GSTR-1 workbook',
+        'Shown as delivered in the payment reconciliation but not appearing in any GSTR-1 workbook '
       + 'produced; they may have been realised without being reported in GSTR-1. Stated at invoice '
       + `value, the same figure as in table C; realisation against them is Rs `
       + `${exceptions.taxedNowhere.reduce((a, l) => add(a, l.collected), 0)

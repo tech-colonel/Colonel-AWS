@@ -193,7 +193,7 @@ function salesSummarySheet(b, meta) {
       }));
   }
   blank();
-  push(C('Prepared from the delivered, refund and RTO sheets of each registration\'s GST sales register. '
+  push(C('Prepared from the delivered, refund and RTO sheets of each registration\'s GSTR-1 workbook. '
        + 'Other sales channels appearing in those workbooks — Nykaa, Myntra, Slikk, B2B and the stores — '
        + 'are not included. Figures agree with the Sales Summary of each workbook.', 'note'));
 
@@ -242,6 +242,23 @@ function summarySheet(b, meta) {
   push(C('As on', 'meta'), C(pretty(b.asAt), 'meta'));
   push(C('Records examined', 'meta'), C(meta.sourceLine, 'meta'));
   blank();
+  /* Every term used below, defined once. The reconciliation turns on the
+     difference between three documents, and calling any of them by a name the
+     reader has to guess at makes the whole statement unreadable. */
+  band('THE THREE RECORDS THIS STATEMENT COMPARES', CLR.notes, 3);
+  head(['Term used below', 'The file it means', 'What it tells you'], CLR.notes);
+  push(C('GSTR-1 workbook', 'gstrow'),
+       C('Off Duty- GSTR1 <month>_HR / _KAR / _MH — the delivered, refund and RTO sheets', 'gstrow'),
+       C('what was TAXED, i.e. the record the GST return is filed from', 'gstrow'));
+  push(C('Payment reconciliation', 'gstrow'),
+       C("<month>_Payment-Reco — the 'Final' sheet", 'gstrow'),
+       C('what was COLLECTED, and through which channel', 'gstrow'));
+  push(C('Shopify export', 'gstrow'),
+       C('<month>.xlsx — the order export', 'gstrow'),
+       C('every order the website took. Not read by this statement: the payment '
+       + 'reconciliation already carries one row per Shopify order and agrees with it to the rupee.',
+         'gstrow'));
+  blank();
 
   /* ── A. net sales ───────────────────────────────────────────────────── */
   const gc = b.gst.consolidated || b.gst.blocks[0];
@@ -284,22 +301,43 @@ function summarySheet(b, meta) {
   blank();
 
   /* ── C. the bridge ──────────────────────────────────────────────────── */
-  band('C.  RECONCILIATION OF DELIVERED SALES WITH THE PAYMENT RECONCILIATION', CLR.recon, 3);
-  head(['Particulars', 'No. of orders', 'Amount (₹)'], CLR.recon);
-  const c1 = row('Delivered — per the GST sales registers', [br.salesDelivered.orders, br.salesDelivered.amount]);
-  const c2 = row('Less: taxed as delivered, shown under another status in the payment reconciliation',
-    [br.salesOnly.orders, -br.salesOnly.amount]);
-  const c3 = row('Common orders — per the GST sales registers', [br.commonPerSales.orders, `=C${c1}+C${c2}`], 'gsttot');
-  const c4 = row('Add: orders only part delivered — the register taxes the delivered lines, the payment '
-               + 'reconciliation carries the whole order', [br.partDelivered.orders, br.partDelivered.amount]);
-  const c5 = row('Common orders — per the payment reconciliation', [br.commonPerPayment.orders, `=C${c3}+C${c4}`], 'gsttot');
-  const c6 = row('Add: orders in the payment reconciliation appearing in no sales register',
-    [br.payOnly.orders, br.payOnly.amount]);
-  const c7 = row('Delivered — per the payment reconciliation', [br.payDelivered.orders, br.payDelivered.amount],
-    'gsttot', CLR.recon);
+  band('C.  RECONCILIATION OF THE GSTR-1 WORKBOOKS WITH THE PAYMENT RECONCILIATION', CLR.recon, 4);
+  /* State the gap FIRST, then explain it. Previously this table opened with the
+     workbook figure and closed with the payment figure, and a reader landing on
+     the two totals had no way to see that the second is the first plus three
+     measured adjustments — they read as two different answers to one question. */
+  head(['Particulars', 'No. of orders', 'Amount (₹)', 'Remarks'], CLR.recon);
+  const c1 = push(C('Delivered — per the GSTR-1 workbooks', 'gstrow'),
+    C(br.salesDelivered.orders, 'gstrow', { fmt: INT }), C(br.salesDelivered.amount, 'gstrow', { fmt: RUP }),
+    C('The total of table B above — what was taxed.', 'sub'));
+  const c2 = push(C('Delivered — per the payment reconciliation', 'gstrow'),
+    C(br.payDelivered.orders, 'gstrow', { fmt: INT }), C(br.payDelivered.amount, 'gstrow', { fmt: RUP }),
+    C('What the payment reconciliation treats as delivered.', 'sub'));
+  const cGap = push(C('DIFFERENCE TO BE EXPLAINED', 'gsttot', { bg: CLR.recon }),
+    C(`=B${c2}-B${c1}`, 'gsttot', { fmt: INT, bg: CLR.recon }),
+    C(`=C${c2}-C${c1}`, 'gsttot', { fmt: RUP, bg: CLR.recon }),
+    C('Explained in full below; nothing is left as a balancing figure.', 'sub'));
+  blank();
+  head(['Explained by', 'No. of orders', 'Amount (₹)', 'Remarks'], CLR.recon);
+  const x1 = push(C('Less: taxed as delivered, shown under another status in the payment reconciliation', 'gstrow'),
+    C(-br.salesOnly.orders, 'gstrow', { fmt: INT }), C(-br.salesOnly.amount, 'gstrow', { fmt: RUP }),
+    C('Returns, RTOs and the like in the payment reconciliation, still taxed as sales.', 'sub'));
+  const x2 = push(C('Add: orders only part delivered', 'gstrow'),
+    C(0, 'gstrow', { fmt: INT }), C(br.partDelivered.amount, 'gstrow', { fmt: RUP }),
+    C(`${br.partDelivered.orders.toLocaleString('en-IN')} orders. In BOTH records, so the count does not `
+    + 'change — only the value does. The GSTR-1 workbook taxes the lines delivered; the payment '
+    + `reconciliation carries the whole order. In all ${br.partHigherInPayment.toLocaleString('en-IN')} `
+    + 'the payment figure is the higher, never the other way.', 'sub'));
+  const x3 = push(C('Add: orders in the payment reconciliation appearing in no GSTR-1 workbook', 'gstrow'),
+    C(br.payOnly.orders, 'gstrow', { fmt: INT }), C(br.payOnly.amount, 'gstrow', { fmt: RUP }),
+    C('Delivered and realised, but never taxed — see the schedule "Not In GSTR-1".', 'sub'));
+  const xT = push(C('Total explained', 'gsttot', { bg: CLR.recon }),
+    C(`=B${x1}+B${x2}+B${x3}`, 'gsttot', { fmt: INT, bg: CLR.recon }),
+    C(`=C${x1}+C${x2}+C${x3}`, 'gsttot', { fmt: RUP, bg: CLR.recon }), C('', 'gsttot', { bg: CLR.recon }));
   const okC = Math.abs(br.difference) < 0.005;
-  push(C('Difference (to be Nil)', okC ? 'ok' : 'bad'), C('', okC ? 'ok' : 'bad'),
-    C(`=ROUND(C${c5}+C${c6}-C${c7},2)`, okC ? 'ok' : 'bad', { fmt: AMT }));
+  push(C('Difference (to be Nil)', okC ? 'ok' : 'bad'),
+    C(`=B${xT}-B${cGap}`, okC ? 'ok' : 'bad', { fmt: INT }),
+    C(`=ROUND(C${xT}-C${cGap},2)`, okC ? 'ok' : 'bad', { fmt: AMT }), C('', okC ? 'ok' : 'bad'));
   blank();
 
   /* ── D. collections ─────────────────────────────────────────────────── */
@@ -543,10 +581,10 @@ function buildWorkbook(b, meta) {
     ['Part Realisation', b.exceptions.shortPaid,
       'Realisation received through a named collection channel, but short of the invoice value. '
       + 'Recoverable from that channel.'],
-    ['Records Differ', b.exceptions.statusConflict,
-      'Taxed as delivered in the GST sales register but shown under another status in the payment '
+    ['Workbooks Differ', b.exceptions.statusConflict,
+      'Taxed as delivered in the GSTR-1 workbook but shown under another status in the payment '
       + 'reconciliation. One of the two records is incorrect and the GST liability depends on which.'],
-    ['Not In Sales Register', b.exceptions.taxedNowhere,
+    ['Not In GSTR-1', b.exceptions.taxedNowhere,
       'Shown as delivered and realised in the payment reconciliation but not appearing in any GST sales '
       + 'register produced. May have been realised without being reported in GSTR-1.'],
     ['Bank Date Not Recorded', b.exceptions.noDeposit,
@@ -606,8 +644,8 @@ function buildWorkbook(b, meta) {
   ck('Every order is classified under one head only', b.checks.positionSplit);
   basis.push([]);
   B(C('Matters reported without adjustment', 'section'), C('', 'section'), C('', 'section'), C('', 'section'), C('', 'section'));
-  B(C('The GST sales registers and the payment reconciliation differ in respect of certain orders. Those '
-    + 'differences are reported in the schedules "Records Differ" and "Not In Sales Register" together '
+  B(C('The GSTR-1 workbooks and the payment reconciliation differ in respect of certain orders. Those '
+    + 'differences are reported in the schedules "Workbooks Differ" and "Not In GSTR-1" together '
     + 'with the order numbers. No adjustment has been made and no amount has been netted off.', 'note'));
   const bws = sheetFrom(basis, [48, 24, 13, 13, 44]);
   bws['!rows'] = basis.map((r) => ({ hpt: r && r[0] && r[0].kind === 'note' ? 34 : 16 }));

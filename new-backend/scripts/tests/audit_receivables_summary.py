@@ -172,21 +172,29 @@ sales_only = [k for k in sales_deliv if k not in pay_ids]
 pay_only = [k for k in pay_ids if k not in sales_deliv]
 part = [k for k in common if abs(sales_deliv[k] - pay_by[k]) > 0.5]
 
-rC = findrow('Delivered — per the GST sales registers')
-check('  C delivered per sales registers — orders', cell('Receivables', f'B{rC}'), len(sales_deliv), 0)
-check('  C delivered per sales registers — amount', cell('Receivables', f'C{rC}'), sum(sales_deliv.values()))
-check('  C shown otherwise — orders', cell('Receivables', f'B{rC+1}'), len(sales_only), 0)
-check('  C shown otherwise — amount', cell('Receivables', f'C{rC+1}'), -sum(sales_deliv[k] for k in sales_only))
-check('  C common per registers', cell('Receivables', f'C{rC+2}'), sum(sales_deliv[k] for k in common))
-check('  C part delivered — orders', cell('Receivables', f'B{rC+3}'), len(part), 0)
-check('  C part delivered — amount', cell('Receivables', f'C{rC+3}'),
+rC = findrow('Delivered — per the GSTR-1 workbooks')
+check('  C delivered per GSTR-1 workbooks — orders', cell('Receivables', f'B{rC}'), len(sales_deliv), 0)
+check('  C delivered per GSTR-1 workbooks — amount', cell('Receivables', f'C{rC}'), sum(sales_deliv.values()))
+check('  C delivered per payment reco — orders', cell('Receivables', f'B{rC+1}'), len(pay_deliv), 0)
+check('  C delivered per payment reco — amount', cell('Receivables', f'C{rC+1}'), pay_deliv['billed'].sum())
+check('  C difference to be explained — orders', cell('Receivables', f'B{rC+2}'),
+      len(pay_deliv) - len(sales_deliv), 0)
+check('  C difference to be explained — amount', cell('Receivables', f'C{rC+2}'),
+      pay_deliv['billed'].sum() - sum(sales_deliv.values()))
+rX = findrow('Less: taxed as delivered')
+check('  C explained: another status — orders', cell('Receivables', f'B{rX}'), -len(sales_only), 0)
+check('  C explained: another status — amount', cell('Receivables', f'C{rX}'),
+      -sum(sales_deliv[k] for k in sales_only))
+check('  C explained: part delivered — amount', cell('Receivables', f'C{rX+1}'),
       sum(pay_by[k] for k in common) - sum(sales_deliv[k] for k in common))
-check('  C common per payment reco', cell('Receivables', f'C{rC+4}'), sum(pay_by[k] for k in common))
-check('  C in payment reco only — orders', cell('Receivables', f'B{rC+5}'), len(pay_only), 0)
-check('  C in payment reco only — amount', cell('Receivables', f'C{rC+5}'), sum(pay_by[k] for k in pay_only))
-check('  C delivered per payment reco — orders', cell('Receivables', f'B{rC+6}'), len(pay_deliv), 0)
-check('  C delivered per payment reco — amount', cell('Receivables', f'C{rC+6}'), pay_deliv['billed'].sum())
-check('  C DIFFERENCE (check row = 0)', cell('Receivables', f'C{rC+7}'), 0)
+check('  C explained: part delivered adds no orders', cell('Receivables', f'B{rX+1}'), 0, 0)
+check('  C explained: in no GSTR-1 workbook — orders', cell('Receivables', f'B{rX+2}'), len(pay_only), 0)
+check('  C explained: in no GSTR-1 workbook — amount', cell('Receivables', f'C{rX+2}'),
+      sum(pay_by[k] for k in pay_only))
+check('  C total explained — amount', cell('Receivables', f'C{rX+3}'),
+      pay_deliv['billed'].sum() - sum(sales_deliv.values()))
+check('  C DIFFERENCE (check row = 0)', cell('Receivables', f'C{rX+4}'), 0)
+check('  C DIFFERENCE order count (check row = 0)', cell('Receivables', f'B{rX+4}'), 0, 0)
 
 # D
 rD = findrow('Less: collections received')
