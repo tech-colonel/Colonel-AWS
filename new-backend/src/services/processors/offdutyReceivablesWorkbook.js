@@ -21,9 +21,13 @@ const BAD_BG = 'FBEBE9';  const BAD_FG = '9B2F2B';
 const MUTED  = '6B6660';
 const HL_BG  = 'EAF0F6';  const HL_FG  = '1E3A57';
 
-const AMT = '#,##0.00;-#,##0.00';
+/* No explicit negative section. Writing one ("#,##0;-#,##0") puts a literal
+   minus in front of a value that is already negative in some viewers, and every
+   deduction came out as "--1,862,777". Left to itself the format signs a
+   negative once. */
+const AMT = '#,##0.00';
 /* The accountant's own Sales Summary is cast in whole rupees. Matching it. */
-const RUP = '#,##0;-#,##0';
+const RUP = '#,##0';
 const GST_HEAD_BG = 'FFF7CC';   // the pale yellow band their sheet already uses
 /* One colour per table, so a reader can tell at a glance which statement they
    are looking at. All pale, all printable, all distinguishable in greyscale by
@@ -243,6 +247,7 @@ function summarySheet(b, meta) {
   const gc = b.gst.consolidated || b.gst.blocks[0];
   band('A.  NET SALES — ALL REGISTRATIONS CONSOLIDATED', CLR.sales, 6);
   head(['Particulars', 'Taxable', 'CGST', 'SGST', 'IGST', 'Invoice value'], CLR.sales);
+  // invoice value = taxable + the three tax heads; it is what the customer was billed
   const four = (o) => [o.taxable_value, o.cgst, o.sgst, o.igst];
   const rA1 = row('Shopify — delivered', [...four(gc.sales), inv(gc.sales)]);
   const rA2 = row('Less: RTO', [...four(gc.rto), inv(gc.rto)]);
@@ -254,20 +259,28 @@ function summarySheet(b, meta) {
   blank();
 
   /* ── B. returns and RTO by registration ─────────────────────────────── */
-  band('B.  RETURNS AND RTO — BY REGISTRATION', CLR.returns, 6);
-  head(['Registration', 'Delivered', 'RTO', 'Sales returns', 'Total returns', 'Returns as % of delivered'],
-       CLR.returns);
+  band('B.  RETURNS AND RTO — BY REGISTRATION  (invoice value)', CLR.returns, 7);
+  head(['Registration', 'Delivered', 'Less: RTO', 'Less: Sales returns', 'Total returns',
+        'Net sales', 'Returns as % of delivered'], CLR.returns);
   const bFirst = g.length + 1;
   for (const blk of b.gst.blocks) {
     const r = row(STATE_NAME[blk.entity] || blk.entity,
-      [inv(blk.sales), inv(blk.rto), inv(blk.refund), inv(blk.totalReturn), null]);
-    g[r - 1][5] = C(`=IFERROR(-E${r}/B${r},0)`, 'gstrow', { fmt: PCT });
+      [inv(blk.sales), inv(blk.rto), inv(blk.refund), `=C${g.length + 1}+D${g.length + 1}`,
+       `=B${g.length + 1}+E${g.length + 1}`, null]);
+    /* the two computed columns refer to their own row, so they are written after
+       the row exists rather than guessed at */
+    g[r - 1][4] = C(`=C${r}+D${r}`, 'gstrow', { fmt: RUP });
+    g[r - 1][5] = C(`=B${r}+E${r}`, 'gstrow', { fmt: RUP });
+    g[r - 1][6] = C(`=IFERROR(-E${r}/B${r},0)`, 'gstrow', { fmt: PCT });
   }
   const bLast = g.length;
-  const rB = push(C('Total', 'gsttot', { bg: CLR.returns }),
-    ...[1, 2, 3, 4].map((i) => C(`=SUM(${colLetter(i)}${bFirst}:${colLetter(i)}${bLast})`, 'gsttot',
+  const bTot = bLast + 1;
+  push(C('Total', 'gsttot', { bg: CLR.returns }),
+    ...[1, 2, 3, 4, 5].map((i) => C(`=SUM(${colLetter(i)}${bFirst}:${colLetter(i)}${bLast})`, 'gsttot',
       { fmt: RUP, bg: CLR.returns })),
-    C(`=IFERROR(-E${bLast + 1}/B${bLast + 1},0)`, 'gsttot', { fmt: PCT, bg: CLR.returns }));
+    C(`=IFERROR(-E${bTot}/B${bTot},0)`, 'gsttot', { fmt: PCT, bg: CLR.returns }));
+  push(C('Net sales above agree with A (to be Nil)', 'ok'), C('', 'ok'), C('', 'ok'), C('', 'ok'), C('', 'ok'),
+    C(`=ROUND(F${bTot}-F${rA4},2)`, 'ok', { fmt: AMT }), C('', 'ok'));
   blank();
 
   /* ── C. the bridge ──────────────────────────────────────────────────── */
@@ -360,7 +373,7 @@ function summarySheet(b, meta) {
        C('A recovery schedule, NOT trade receivables as on the reporting date — most collections had '
        + 'been received by the date of preparation, though not by the reporting date.', 'sub'));
 
-  const ws = sheetFrom(g, [64, 15, 18, 18, 18, 22]);
+  const ws = sheetFrom(g, [64, 16, 16, 18, 16, 16, 20]);
   ws['!rows'] = g.map((r) => {
     const k = r && r[0] ? r[0].kind : null;
     if (k === 'title') return { hpt: 26 };
