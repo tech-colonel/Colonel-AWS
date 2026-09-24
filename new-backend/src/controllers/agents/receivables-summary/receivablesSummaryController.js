@@ -219,6 +219,9 @@ const getSummary = async (req, res, next) => {
       /* The GST sales summary, in the shape the accountant's own working
          already uses. Shown first, because it is the figure they check. */
       gst: { blocks: b.gst.blocks.map(({ _raw, ...rest }) => rest), consolidated: b.gst.consolidated },
+      /* The order-by-order bridge from the sales registers to the payment
+         reconciliation. Every figure measured; none is a balancing item. */
+      bridge: b.bridge,
       orders: b.totals.orders,
       billed: b.totals.billed,
       collected: b.totals.collected,

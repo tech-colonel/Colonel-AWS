@@ -67,6 +67,41 @@ const SalesSummaryBlock = ({ block, caption }) => (
   </div>
 );
 
+/* One colour per table, matching the workbook, so the same statement looks the
+   same on screen and in the file. */
+const CLR = { sales: '#FFF7CC', returns: '#FCE4D6', recon: '#DDEBF7', cash: '#E2EFDA',
+              due: '#FFE1E1', notes: '#EDEDED' };
+
+const Tbl = ({ caption, colour, cols, rows }) => (
+  <div className="mb-6">
+    <div className="border border-slate-400 px-3 py-1.5 text-sm font-semibold text-slate-800"
+         style={{ background: colour }}>{caption}</div>
+    <table className="w-full border-x border-b border-slate-400 text-sm">
+      <thead>
+        <tr style={{ background: colour }}>
+          {cols.map((c, i) => (
+            <th key={c} className={`border border-slate-300 px-3 py-1.5 font-semibold ${i ? 'text-right' : 'text-left'}`}>{c}</th>
+          ))}
+        </tr>
+      </thead>
+      <tbody>
+        {rows.map(([label, ...vals], i) => {
+          const bold = typeof label === 'object';
+          const text = bold ? label.t : label;
+          return (
+            <tr key={i} className={bold ? 'font-semibold' : ''} style={bold ? { background: colour } : {}}>
+              <td className="border-x border-slate-300 px-3 py-1">{text}</td>
+              {vals.map((v, j) => (
+                <td key={j} className="border-x border-slate-300 px-3 py-1 text-right tabular-nums">{v}</td>
+              ))}
+            </tr>
+          );
+        })}
+      </tbody>
+    </table>
+  </div>
+);
+
 const Kpi = ({ label, value, sub, tone }) => (
   <div className="rounded-xl border border-slate-200 bg-white p-4">
     <div className="text-xs font-medium uppercase tracking-wide text-slate-500">{label}</div>
@@ -269,6 +304,47 @@ const ReceivablesSummaryWorkspace = ({ agent }) => {
                   <SalesSummaryBlock block={summary.gst.consolidated}
                                      caption="All registrations — consolidated" />
                 )}
+              </CardContent>
+            </Card>
+          )}
+
+          {summary.bridge && (
+            <Card>
+              <CardHeader>
+                <CardTitle>Reconciliation of sales with collections</CardTitle>
+                <CardDescription>
+                  The two records count different things, so they are reconciled order by order rather
+                  than compared as totals. Every figure below is measured; none is a balancing item.
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <Tbl caption="C.  Reconciliation of delivered sales with the payment reconciliation"
+                     colour={CLR.recon} cols={['Particulars', 'No. of orders', 'Amount (₹)']}
+                     rows={[
+                       ['Delivered — per the GST sales registers',
+                        int(summary.bridge.salesDelivered.orders), rup(summary.bridge.salesDelivered.amount)],
+                       ['Less: taxed as delivered, shown under another status in the payment reconciliation',
+                        int(summary.bridge.salesOnly.orders), rup(-summary.bridge.salesOnly.amount)],
+                       [{ t: 'Common orders — per the GST sales registers' },
+                        int(summary.bridge.commonPerSales.orders), rup(summary.bridge.commonPerSales.amount)],
+                       ['Add: orders only part delivered — the register taxes the delivered lines, the payment reconciliation carries the whole order',
+                        int(summary.bridge.partDelivered.orders), rup(summary.bridge.partDelivered.amount)],
+                       [{ t: 'Common orders — per the payment reconciliation' },
+                        int(summary.bridge.commonPerPayment.orders), rup(summary.bridge.commonPerPayment.amount)],
+                       ['Add: orders in the payment reconciliation appearing in no sales register',
+                        int(summary.bridge.payOnly.orders), rup(summary.bridge.payOnly.amount)],
+                       [{ t: 'Delivered — per the payment reconciliation' },
+                        int(summary.bridge.payDelivered.orders), rup(summary.bridge.payDelivered.amount)],
+                       [{ t: 'Difference (to be Nil)' }, '', rup(summary.bridge.difference)],
+                     ]} />
+                <Tbl caption="D.  Collections against delivered sales" colour={CLR.cash}
+                     cols={['Particulars', 'No. of orders', 'Amount (₹)']}
+                     rows={[
+                       ['Delivered — per the payment reconciliation',
+                        int(summary.bridge.payDelivered.orders), rup(summary.bridge.payDelivered.amount)],
+                       ['Less: collections received', '', rup(-summary.bridge.collections)],
+                       [{ t: 'Unsettled' }, '', rup(summary.bridge.unsettled)],
+                     ]} />
               </CardContent>
             </Card>
           )}

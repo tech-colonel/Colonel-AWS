@@ -448,6 +448,49 @@ function buildReceivables(allRows, asAtIn) {
 
   const MONTHS = ['', 'January', 'February', 'March', 'April', 'May', 'June', 'July',
                   'August', 'September', 'October', 'November', 'December'];
+  /* ── the bridge from the GST sales registers to the payment reconciliation ──
+     The two documents count different things, so they are reconciled order by
+     order rather than compared as totals. Three causes, and nothing left over:
+       · orders taxed as delivered that the payment file gives another status
+       · orders only PART delivered — the register taxes the delivered lines,
+         the payment file carries the whole order value
+       · orders in the payment file that no sales register contains
+     Every figure below is measured, none is a balancing item. */
+  const salesDelivered = new Map();
+  for (const r of allRows) {
+    if (r.source_kind !== 'DELIVERED' || !r.order_id) continue;
+    salesDelivered.set(r.order_id, add(salesDelivered.get(r.order_id), r.order_total));
+  }
+  const payDelivered = ledger.filter((l) => l.in_payment_file && l.group === 'DELIVERED');
+  const payDelivIds = new Set(payDelivered.map((l) => l.order_id));
+
+  const common = [...salesDelivered.keys()].filter((k) => payDelivIds.has(k));
+  const salesOnly = [...salesDelivered.keys()].filter((k) => !payDelivIds.has(k));
+  const payOnly = payDelivered.filter((l) => !salesDelivered.has(l.order_id));
+  const payById = new Map(payDelivered.map((l) => [l.order_id, l]));
+
+  const sumBy = (keys, f) => keys.reduce((a, k) => add(a, f(k)), 0);
+  const commonSales = sumBy(common, (k) => salesDelivered.get(k));
+  const commonPay   = sumBy(common, (k) => payById.get(k).billed);
+  const partDelivered = common.filter((k) => Math.abs(salesDelivered.get(k) - payById.get(k).billed) > 0.5);
+
+  const bridge = {
+    salesDelivered:      { orders: salesDelivered.size, amount: sumBy([...salesDelivered.keys()], (k) => salesDelivered.get(k)) },
+    salesOnly:           { orders: salesOnly.length, amount: sumBy(salesOnly, (k) => salesDelivered.get(k)) },
+    commonPerSales:      { orders: common.length, amount: commonSales },
+    partDelivered:       { orders: partDelivered.length, amount: r2(commonPay - commonSales) },
+    commonPerPayment:    { orders: common.length, amount: commonPay },
+    payOnly:             { orders: payOnly.length, amount: payOnly.reduce((a, l) => add(a, l.billed), 0) },
+    payDelivered:        { orders: payDelivered.length, amount: payDelivered.reduce((a, l) => add(a, l.billed), 0) },
+    collections:         payDelivered.reduce((a, l) => add(a, l.collected), 0),
+    /* the direction of the part-delivery difference, which is what shows it is
+       part delivery and not valuation noise */
+    partHigherInPayment: partDelivered.filter((k) => payById.get(k).billed > salesDelivered.get(k)).length,
+  };
+  bridge.difference = r2(bridge.salesDelivered.amount - bridge.salesOnly.amount + bridge.partDelivered.amount
+                         + bridge.payOnly.amount - bridge.payDelivered.amount);
+  bridge.unsettled = r2(bridge.payDelivered.amount - bridge.collections);
+
   const periods = [...new Set(ledger.map((l) => l.period).filter(Boolean))].sort()
     .map((p) => { const [y, m] = p.split('-'); return `${MONTHS[Number(m)]} ${y}`; });
 
@@ -497,7 +540,7 @@ function buildReceivables(allRows, asAtIn) {
       + 'not examined.'),
   ].filter((x) => x.orders > 0);
 
-  return { gst: gstSummary(allRows),
+  return { gst: gstSummary(allRows), bridge,
            ledger, byGroup, GROUP_ORDER, GROUP_LABEL, byCollector, byEntity, receivableSplit,
            exceptions, totals, checks, periods, collectorKeys, COLLECTOR_LABEL, bucketOf,
            byPosition, POSITION, POSITION_ORDER, positionTotals, asAt, limits };
