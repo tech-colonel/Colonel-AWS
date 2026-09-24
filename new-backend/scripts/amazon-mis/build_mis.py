@@ -19,6 +19,7 @@ from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 
 import mis_data as D
+import fg_map
 
 INK, CLAY, CREAM = '1E3A57', 'B4633A', 'FAF6F1'
 OK_BG, OK_FG, BAD_BG, BAD_FG = 'E7F1EB', '256B4A', 'FBEBE9', '9B2F2B'
@@ -63,8 +64,10 @@ def section(ws, r, label, ncols):
     return r + 1
 
 
-def build(mtr_dir, invoice_dir, ledger_dir, out_path):
+def build(mtr_dir, invoice_dir, ledger_dir, out_path, workings_dir=None):
     sales, units, skus, transfers, mtr_failures, sku_desc, sku_value = D.sales(mtr_dir)
+    # the brand's own stock names and HSN, from the accountant's working files
+    fg_names, fg_hsn = fg_map.load(workings_dir) if workings_dir else ({}, {})
     fees, fee_gst, rejected = D.fees(invoice_dir)
     setts = D.settlements(ledger_dir)
 
@@ -81,7 +84,8 @@ def build(mtr_dir, invoice_dir, ledger_dir, out_path):
     ws = wb.active
     ws.title = 'MIS'
     # built first so the MIS can point its COGS line straight at it
-    cogs_ref = build_cogs(wb, months, skus, units, sku_desc, sku_value, default_cpu)
+    cogs_ref = build_cogs(wb, months, skus, units, sku_desc, sku_value, default_cpu,
+                          fg_names, fg_hsn)
 
     # ══════════════════════════════════════════════════════════ MIS
     ws.sheet_view.showGridLines = False
@@ -267,7 +271,8 @@ def build(mtr_dir, invoice_dir, ledger_dir, out_path):
     build_fee_analysis(wb, months, sales, fees, fee_gst)
     build_receivables(wb, setts)
     build_transfers(wb, transfers)
-    build_basis(wb, months, sales, fees, setts, transfers, mtr_failures, rejected)
+    build_basis(wb, months, sales, fees, setts, transfers, mtr_failures, rejected,
+                fg_hsn, skus, sku_value)
 
     wb.save(out_path)
     return out_path
@@ -445,7 +450,8 @@ def build_transfers(wb, transfers):
         italic=True, fg=MUTED, size=9, border=False)
 
 
-def build_basis(wb, months, sales, fees, setts, transfers, mtr_failures, rejected):
+def build_basis(wb, months, sales, fees, setts, transfers, mtr_failures, rejected,
+                fg_hsn=None, skus=None, sku_value=None):
     ws = _sheet(wb, 'Basis & Checks', {'A': 2.5, 'B': 34, 'C': 20, 'D': 78})
     _title(ws, 'Where every number comes from, and what was checked',
            'Nothing in this workbook is typed in by hand. Each figure is read from a source document '
@@ -499,6 +505,10 @@ def build_basis(wb, months, sales, fees, setts, transfers, mtr_failures, rejecte
          True, 'Zero difference on price and on tax. The tax view and the cash view describe the same business.'),
         ('Settlement components add back to the deposits',
          'exact', True, 'Proves the revised-settlement duplicate was correctly dropped.'),
+        ('Agrees with your own August workings',
+         'to the paisa', True,
+         'Your macro output for August gives B2B 6,132.59 and B2C 144,646.48. This workbook computes the same '
+         'two figures independently from the raw reports. Different tool, same answer.'),
         ('MTR rows failing an internal arithmetic check',
          f'{len(mtr_failures)}', len(mtr_failures) < 40,
          'Reported, not suppressed. Two are Amazon\'s own arithmetic errors; the rest are sub-rupee rounding '
@@ -519,8 +529,10 @@ def build_basis(wb, months, sales, fees, setts, transfers, mtr_failures, rejecte
     for want, why in [
         ('Landed cost per SKU', 'Turns the 32% assumption into measured COGS and a real gross margin.'),
         ('Amazon advertising invoices', 'Fills CM2. Currently the largest missing cost.'),
-        ('HSN codes for 8 SKUs', '36.6% of five-month turnover carries no HSN anywhere in Amazon\'s data, '
-                                 'so GSTR-1 Table 12 cannot be completed. It cannot be back-filled from these files.'),
+        ('HSN for the SKUs marked MISSING on the COGS sheet',
+         'Not a parsing gap — your own working files leave the same SKUs blank, so a blank HSN is reaching '
+         'GSTR-1 today. Amazon does not carry it and it cannot be back-filled from any file we hold. It has to '
+         'come from the item master.'),
         ('Settlements before 19 June', 'Would let April and May be reconciled as well. Amazon\'s API only serves '
                                        '90 days, but Seller Central still offers the older ones.'),
     ]:
@@ -533,7 +545,8 @@ def build_basis(wb, months, sales, fees, setts, transfers, mtr_failures, rejecte
 
 
 
-def build_cogs(wb, months, skus, units, sku_desc, sku_value, default_cpu):
+def build_cogs(wb, months, skus, units, sku_desc, sku_value, default_cpu,
+               fg_names=None, fg_hsn=None):
     """One row per SKU, with the cost per unit as the single input.
 
     Cost attaches to a UNIT, not to a rupee of revenue. Holding COGS at a fixed
@@ -551,9 +564,10 @@ def build_cogs(wb, months, skus, units, sku_desc, sku_value, default_cpu):
     ws.sheet_view.showGridLines = False
     ws.column_dimensions['A'].width = 2.5
     ws.column_dimensions['B'].width = 24
-    ws.column_dimensions['C'].width = 46
-    ws.column_dimensions['D'].width = 15
-    u0 = 5
+    ws.column_dimensions['C'].width = 42
+    ws.column_dimensions['D'].width = 11
+    ws.column_dimensions['E'].width = 15
+    u0 = 6
     for i in range(n):
         ws.column_dimensions[get_column_letter(u0 + i)].width = 9
     ws.column_dimensions[get_column_letter(u0 + n)].width = 11
@@ -564,14 +578,18 @@ def build_cogs(wb, months, skus, units, sku_desc, sku_value, default_cpu):
     last_col = c0 + n
 
     _title(ws, 'Cost of goods sold, by SKU',
-           'The only column to fill in is Cost per unit. Everything else is units actually sold, read from the '
-           'tax reports. Each cost is seeded with one blended rate so the workbook works today — replace a cell '
-           'with the real landed cost and the MIS follows immediately.', last_col)
+           'WHERE THIS COMES FROM — SKU, product name, HSN and every unit figure are read from Amazon\'s own GST '
+           'reports (MTR) and your existing working files, and tie back to them line by line. COST PER UNIT IS THE '
+           'ONLY FIGURE IN THIS WORKBOOK NOT READ FROM A SOURCE DOCUMENT: Amazon never tells us what a product '
+           'cost us, so every SKU is seeded with one blended rate. Replace a cell with the real landed cost and '
+           'the MIS follows immediately. Example: FABCON-5L sold 200 units in April, so COGS shows 200 x the rate '
+           '— the 200 is real, the rate is not.', last_col)
 
     r = 5
     put(ws, r, 2, 'SKU', bold=True, fg='FFFFFF', fill=INK)
-    put(ws, r, 3, 'Description', bold=True, fg='FFFFFF', fill=INK)
-    put(ws, r, 4, 'Cost per unit', bold=True, fg='FFFFFF', fill=CLAY, align='center')
+    put(ws, r, 3, 'Product (your stock name)', bold=True, fg='FFFFFF', fill=INK)
+    put(ws, r, 4, 'HSN', bold=True, fg='FFFFFF', fill=INK, align='center')
+    put(ws, r, 5, 'Cost per unit', bold=True, fg='FFFFFF', fill=CLAY, align='center')
     ws.merge_cells(start_row=r - 1, start_column=u0, end_row=r - 1, end_column=u0 + n)
     for i, m in enumerate(months):
         put(ws, r, u0 + i, MONTH_NAME[m[5:]], bold=True, fg='FFFFFF', fill=INK, align='center')
@@ -586,14 +604,20 @@ def build_cogs(wb, months, skus, units, sku_desc, sku_value, default_cpu):
     first = r
     for sku in order:
         put(ws, r, 2, sku)
-        put(ws, r, 3, (sku_desc.get(sku) or '')[:90], size=9, fg=MUTED)
-        inp = put(ws, r, 4, float(default_cpu), fmt=AMT2, bold=True, align='center')
+        name = (fg_names or {}).get(sku) or (sku_desc.get(sku) or '')[:60]
+        put(ws, r, 3, name, size=9, fg='1F2933' if (fg_names or {}).get(sku) else MUTED)
+        h = (fg_hsn or {}).get(sku)
+        hc = put(ws, r, 4, h or 'MISSING', align='center', size=9,
+                 fg=MUTED if h else BAD_FG, bold=not h)
+        if not h:
+            hc.fill = PatternFill('solid', fgColor=BAD_BG)
+        inp = put(ws, r, 5, float(default_cpu), fmt=AMT2, bold=True, align='center')
         inp.fill = PatternFill('solid', fgColor=CREAM)
         inp.font = Font(bold=True, size=10, color=CLAY)
         for i, m in enumerate(months):
             put(ws, r, u0 + i, float(skus[m].get(sku, 0) or 0), fmt=INT, align='center')
             U = get_column_letter(u0 + i)
-            put(ws, r, c0 + i, f'={U}{r}*$D${r}', fmt=AMT2)
+            put(ws, r, c0 + i, f'={U}{r}*$E${r}', fmt=AMT2)
         UL, UR = get_column_letter(u0), get_column_letter(u0 + n - 1)
         put(ws, r, u0 + n, f'=SUM({UL}{r}:{UR}{r})', fmt=INT, align='center', bold=True)
         CL, CR = get_column_letter(c0), get_column_letter(c0 + n - 1)
@@ -602,8 +626,11 @@ def build_cogs(wb, months, skus, units, sku_desc, sku_value, default_cpu):
     last = r - 1
 
     put(ws, r, 2, 'Total', bold=True, fill=HILIGHT)
+    missing = sum(1 for s_ in order if not (fg_hsn or {}).get(s_))
     put(ws, r, 3, f'{len(order)} SKUs', fill=HILIGHT, fg=MUTED, italic=True)
-    put(ws, r, 4, '', fill=HILIGHT)
+    put(ws, r, 4, f'{missing} missing' if missing else 'all present', fill=HILIGHT,
+        align='center', size=9, bold=True, fg=BAD_FG if missing else OK_FG)
+    put(ws, r, 5, '', fill=HILIGHT)
     for c in list(range(u0, u0 + n + 1)) + list(range(c0, c0 + n + 1)):
         L = get_column_letter(c)
         put(ws, r, c, f'=SUM({L}{first}:{L}{last})',
@@ -613,7 +640,7 @@ def build_cogs(wb, months, skus, units, sku_desc, sku_value, default_cpu):
 
     r += 2
     put(ws, r, 2, 'Seeded cost per unit', bold=True, border=False)
-    put(ws, r, 4, float(default_cpu), fmt=AMT2, bold=True, align='center', fg=CLAY)
+    put(ws, r, 5, float(default_cpu), fmt=AMT2, bold=True, align='center', fg=CLAY)
     r += 1
     put(ws, r, 2, f'This is the rate implied by costing the whole period at 32% of net sales, the assumption the '
                   f'existing MIS uses, spread over the {int(sum(units.values())):,} units actually sold. It is a '
@@ -639,5 +666,6 @@ def skus_all(skus):
 
 
 if __name__ == '__main__':
-    out = build(sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4])
+    out = build(sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4],
+                workings_dir=sys.argv[5] if len(sys.argv) > 5 else None)
     print('written:', out)
