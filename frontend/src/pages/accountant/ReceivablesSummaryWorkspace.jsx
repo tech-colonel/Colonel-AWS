@@ -1,98 +1,115 @@
 /* Receivables Summary — the workspace.
-   Built alongside the Amazon settlement workspace, never on top of it: the
-   Amazon agent keeps its own page and its own routes, untouched. */
-import React, { useState, useEffect, useCallback } from 'react';
+   This file belongs to this agent alone; nothing else imports it, so the
+   Amazon settlement agent and every other workspace are untouched by anything
+   in here. The API calls are the ones the agent already exposes.
+
+   The page is laid out like the workbook it produces — same lettered tables,
+   same colours — so a figure on screen and a figure in the file look alike as
+   well as read alike. */
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { useParams } from 'react-router-dom';
 import {
   Upload, FileText, Download, Trash2, Loader2, CheckCircle2, AlertTriangle,
-  FileSpreadsheet, ListChecks, X,
+  FileSpreadsheet, X, ChevronRight, Scale, Banknote, Truck, ClipboardList, Inbox,
 } from 'lucide-react';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../../components/ui/card';
 import { Button } from '../../components/ui/button';
 import { Input } from '../../components/ui/input';
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../../components/ui/table';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../../components/ui/modal';
 import api from '../../lib/api';
 import { toast } from 'sonner';
 import { format } from 'date-fns';
 
-const money = (n) =>
-  n == null ? '—' : `₹${Number(n).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-const int = (n) => (n == null ? '—' : Number(n).toLocaleString('en-IN'));
-
+/* The workbook's palette, so the two match. */
+const CLR = { sales: '#FFF7CC', returns: '#FCE4D6', recon: '#DDEBF7', cash: '#E2EFDA',
+              due: '#FFE1E1', notes: '#EDEDED' };
 const STATE_NAME = { HR: 'Haryana', KAR: 'Karnataka', MH: 'Maharashtra' };
 const HEADS = ['taxable_value', 'cgst', 'sgst', 'igst'];
-const rup = (n) => (n == null ? '—' : Number(n).toLocaleString('en-IN', { maximumFractionDigits: 0 }));
 
-/* The GST sales summary, laid out as the accountant's own working already has
-   it: sales, less returns, net — by registration, across the four heads. */
-const SalesSummaryBlock = ({ block, caption }) => (
-  <div className="mb-6">
-    <div className="mb-1 text-sm font-semibold text-slate-800">{caption}</div>
-    <table className="w-full border border-slate-300 text-sm">
-      <thead>
-        <tr style={{ background: '#FFF7CC' }}>
-          <th className="border border-slate-300 px-3 py-1.5 text-left font-semibold">Particulars</th>
-          {['Taxable', 'CGST', 'SGST', 'IGST'].map((h) => (
-            <th key={h} className="border border-slate-300 px-3 py-1.5 text-center font-semibold">{h}</th>
-          ))}
-        </tr>
-      </thead>
-      <tbody>
-        {[
-          ['Shopify', block.sales, false],
-          ['Total Sales', block.sales, true],
-          [null],
-          ['Shopify- Rto', block.rto, false],
-          ['Shopify- Refunded', block.refund, false],
-          ['Total Return', block.totalReturn, true],
-          [null],
-          ['Net Sales', block.net, true],
-        ].map(([label, o, bold], i) => (
-          label === null
-            ? <tr key={i}><td colSpan={5} className="h-2" /></tr>
-            : (
-              <tr key={i} className={bold ? 'font-semibold' : ''}>
-                <td className="border-x border-slate-300 px-3 py-1">{label}</td>
-                {HEADS.map((h) => (
-                  <td key={h} className="border-x border-slate-300 px-3 py-1 text-right tabular-nums">
-                    {rup(o[h])}
-                  </td>
-                ))}
-              </tr>
-            )
-        ))}
-      </tbody>
-    </table>
+const rup = (n) => (n == null || n === '' ? '' : Number(n).toLocaleString('en-IN', { maximumFractionDigits: 0 }));
+const money = (n) => (n == null ? '—' : `₹${Number(n).toLocaleString('en-IN', { maximumFractionDigits: 0 })}`);
+const int = (n) => (n == null ? '—' : Number(n).toLocaleString('en-IN'));
+const inv = (o) => HEADS.reduce((a, h) => a + (Number(o[h]) || 0), 0);
+
+/* ── small pieces ─────────────────────────────────────────────────────────── */
+
+const Card = ({ children, className = '', ...rest }) => (
+  <div className={`rounded-2xl ${className}`}
+       style={{ background: 'var(--surface)', border: '1px solid var(--card-border)',
+                boxShadow: 'var(--card-shadow)' }} {...rest}>
+    {children}
   </div>
 );
 
-/* One colour per table, matching the workbook, so the same statement looks the
-   same on screen and in the file. */
-const CLR = { sales: '#FFF7CC', returns: '#FCE4D6', recon: '#DDEBF7', cash: '#E2EFDA',
-              due: '#FFE1E1', notes: '#EDEDED' };
+const Stat = ({ icon: Icon, label, value, sub, accent, big }) => (
+  <div className="rounded-2xl p-5" style={{
+    background: 'var(--surface)', border: `1px solid ${accent ? `${accent}55` : 'var(--card-border)'}`,
+    boxShadow: 'var(--card-shadow)' }}>
+    <div className="flex items-center gap-2">
+      {Icon && <span className="flex h-7 w-7 items-center justify-center rounded-lg"
+                     style={{ background: accent ? `${accent}18` : '#F1F5F9' }}>
+        <Icon className="h-4 w-4" style={{ color: accent || '#64748B' }} />
+      </span>}
+      <span className="text-xs font-medium uppercase tracking-wide" style={{ color: 'var(--text-muted)' }}>
+        {label}
+      </span>
+    </div>
+    <div className={`mt-2 font-semibold tabular-nums ${big ? 'text-3xl' : 'text-2xl'}`}
+         style={{ color: accent || 'var(--text-heading)' }}>{value}</div>
+    {sub && <div className="mt-1 text-xs leading-snug" style={{ color: 'var(--text-muted)' }}>{sub}</div>}
+  </div>
+);
 
-const Tbl = ({ caption, colour, cols, rows }) => (
-  <div className="mb-6">
-    <div className="border border-slate-400 px-3 py-1.5 text-sm font-semibold text-slate-800"
-         style={{ background: colour }}>{caption}</div>
-    <table className="w-full border-x border-b border-slate-400 text-sm">
+/* A check is the point of the sheet, so it shows the number either way. */
+const CheckPill = ({ label, value }) => {
+  const ok = Math.abs(Number(value) || 0) < 0.005;
+  return (
+    <div className={`flex items-start gap-2 rounded-xl border px-3 py-2 text-xs leading-snug ${
+      ok ? 'border-emerald-200 bg-emerald-50 text-emerald-800' : 'border-rose-200 bg-rose-50 text-rose-800'}`}>
+      {ok ? <CheckCircle2 className="mt-px h-3.5 w-3.5 shrink-0" />
+          : <AlertTriangle className="mt-px h-3.5 w-3.5 shrink-0" />}
+      <span>{label}<span className="ml-1.5 font-mono font-semibold">{Number(value || 0).toFixed(2)}</span></span>
+    </div>
+  );
+};
+
+/* The lettered tables. `rows` is [label, orders, amount, remark, kind]. */
+const Tbl = ({ caption, colour, cols, rows, dense }) => (
+  <div className="mb-7 overflow-hidden rounded-xl border" style={{ borderColor: '#CBD5E1' }}>
+    {caption && (
+      <div className="px-3 py-2 text-sm font-semibold" style={{ background: colour, color: '#1E3A57' }}>
+        {caption}
+      </div>
+    )}
+    <table className="w-full text-sm">
       <thead>
         <tr style={{ background: colour }}>
           {cols.map((c, i) => (
-            <th key={c} className={`border border-slate-300 px-3 py-1.5 font-semibold ${i ? 'text-right' : 'text-left'}`}>{c}</th>
+            <th key={c}
+                className={`border-t px-3 py-1.5 font-semibold ${i === 0 ? 'text-left' : i === cols.length - 1 && !dense ? 'text-left' : 'text-right'}`}
+                style={{ borderColor: '#CBD5E1', color: '#1E3A57' }}>{c}</th>
           ))}
         </tr>
       </thead>
       <tbody>
-        {rows.map(([label, ...vals], i) => {
-          const bold = typeof label === 'object';
-          const text = bold ? label.t : label;
+        {rows.map(([label, ...rest], i) => {
+          const kind = rest[rest.length - 1];
+          const cells = rest.slice(0, cols.length - 1);
+          const strong = kind === 'total';
+          const good = kind === 'ok';
           return (
-            <tr key={i} className={bold ? 'font-semibold' : ''} style={bold ? { background: colour } : {}}>
-              <td className="border-x border-slate-300 px-3 py-1">{text}</td>
-              {vals.map((v, j) => (
-                <td key={j} className="border-x border-slate-300 px-3 py-1 text-right tabular-nums">{v}</td>
+            <tr key={i}
+                className={strong ? 'font-semibold' : ''}
+                style={{ background: strong ? colour : good ? '#ECFDF5' : undefined,
+                         color: good ? '#166534' : undefined }}>
+              <td className="border-t px-3 py-1.5 align-top" style={{ borderColor: '#E2E8F0' }}>{label}</td>
+              {cells.map((v, j) => (
+                <td key={j}
+                    className={`border-t px-3 py-1.5 align-top ${j === cells.length - 1 && !dense ? 'text-left text-xs' : 'text-right tabular-nums'}`}
+                    style={{ borderColor: '#E2E8F0',
+                             color: j === cells.length - 1 && !dense ? 'var(--text-muted)' : undefined,
+                             maxWidth: j === cells.length - 1 && !dense ? 460 : undefined }}>
+                  {v}
+                </td>
               ))}
             </tr>
           );
@@ -102,26 +119,15 @@ const Tbl = ({ caption, colour, cols, rows }) => (
   </div>
 );
 
-const Kpi = ({ label, value, sub, tone }) => (
-  <div className="rounded-xl border border-slate-200 bg-white p-4">
-    <div className="text-xs font-medium uppercase tracking-wide text-slate-500">{label}</div>
-    <div className={`mt-1 text-2xl font-semibold ${tone || 'text-slate-900'}`}>{value}</div>
-    {sub && <div className="mt-1 text-xs text-slate-500">{sub}</div>}
-  </div>
-);
+const TABS = [
+  { key: 'position', label: 'The position' },
+  { key: 'sales', label: 'Sales' },
+  { key: 'recon', label: 'Reconciliation' },
+  { key: 'notes', label: 'Notes' },
+  { key: 'records', label: 'Records' },
+];
 
-/* A check is the whole point of the sheet, so it is shown as a check — pass or
-   fail with the number — never as a silent success. */
-const Check = ({ label, value }) => {
-  const ok = Math.abs(Number(value) || 0) < 0.005;
-  return (
-    <div className={`flex items-start gap-2 rounded-lg border px-3 py-2 text-sm ${
-      ok ? 'border-emerald-200 bg-emerald-50 text-emerald-800' : 'border-rose-200 bg-rose-50 text-rose-800'}`}>
-      {ok ? <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0" /> : <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />}
-      <span>{label}<span className="ml-2 font-mono font-semibold">{Number(value || 0).toFixed(2)}</span></span>
-    </div>
-  );
-};
+/* ── the page ─────────────────────────────────────────────────────────────── */
 
 const ReceivablesSummaryWorkspace = ({ agent }) => {
   const { brandId, agentId } = useParams();
@@ -134,9 +140,10 @@ const ReceivablesSummaryWorkspace = ({ agent }) => {
   const [building, setBuilding] = useState(false);
   const [picked, setPicked] = useState([]);
   const [uploadReport, setUploadReport] = useState(null);
-  const [worklist, setWorklist] = useState(null);
-  const [worklistRows, setWorklistRows] = useState([]);
-  const [worklistLoading, setWorklistLoading] = useState(false);
+  const [tab, setTab] = useState('position');
+  const [sched, setSched] = useState(null);
+  const [schedRows, setSchedRows] = useState([]);
+  const [schedLoading, setSchedLoading] = useState(false);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -160,7 +167,7 @@ const ReceivablesSummaryWorkspace = ({ agent }) => {
       const res = await api.post(`${base}/upload`, fd, { headers: { 'Content-Type': 'multipart/form-data' } });
       setUploadReport(res.data);
       setPicked([]);
-      toast.success(`${int(res.data.stored)} rows read from ${res.data.files.length} file(s)`);
+      toast.success(`${int(res.data.stored)} lines read from ${res.data.files.length} record(s)`);
       refresh();
     } catch (e) {
       toast.error(e.response?.data?.error || 'Upload failed');
@@ -179,77 +186,349 @@ const ReceivablesSummaryWorkspace = ({ agent }) => {
       a.remove(); window.URL.revokeObjectURL(url);
       toast.success(`${res.data.sheets.length} sheets built`);
     } catch (e) {
-      toast.error(e.response?.data?.error || 'Could not build the workbook');
+      toast.error(e.response?.data?.error || 'Could not build the statement');
     } finally { setBuilding(false); }
   };
 
-  const openWorklist = async (key, label) => {
-    setWorklist({ key, label }); setWorklistLoading(true); setWorklistRows([]);
+  const openSched = async (key, label) => {
+    setSched({ key, label }); setSchedLoading(true); setSchedRows([]);
     try {
       const res = await api.get(`${base}/ledger`, { params: { worklist: key, limit: 500 } });
-      setWorklistRows(res.data.rows || []);
-    } catch (e) {
-      toast.error('Could not load that worklist');
-    } finally { setWorklistLoading(false); }
+      setSchedRows(res.data.rows || []);
+    } catch (e) { toast.error('Could not load that schedule'); }
+    finally { setSchedLoading(false); }
   };
 
   const handleDelete = async (filename) => {
     try {
       await api.delete(`${base}/files/${encodeURIComponent(filename)}`);
-      toast.success('Removed');
-      refresh();
-    } catch (e) { toast.error('Could not remove that file'); }
+      toast.success('Removed'); refresh();
+    } catch (e) { toast.error('Could not remove that record'); }
   };
+
+  const s = summary;
+  const br = s?.bridge;
+  const P = useMemo(() => {
+    const m = {};
+    (s?.byPosition || []).forEach((p) => { m[p.key] = p; });
+    return m;
+  }, [s]);
+
+  /* ── upload panel, used empty and on the Records tab ──────────────────── */
+  const uploadPanel = (
+    <Card className="p-5">
+      <div className="mb-1 flex items-center gap-2 text-base font-semibold" style={{ color: 'var(--text-heading)' }}>
+        <Upload className="h-4 w-4" /> Records to be produced
+      </div>
+      <p className="mb-4 text-sm leading-relaxed" style={{ color: 'var(--text-muted)' }}>
+        The GSTR-1 workbook of each registration and the payment reconciliation for the month. Only the
+        delivered, refund and RTO sheets are read; every other sheet pertains to a different sales channel
+        and is excluded. Upload them together — each is identified from its contents.
+      </p>
+      <Input type="file" multiple accept=".xlsx,.xls"
+             onChange={(e) => setPicked(Array.from(e.target.files || []))} />
+      {picked.length > 0 && (
+        <ul className="mt-3 space-y-1 text-sm" style={{ color: 'var(--text-muted)' }}>
+          {picked.map((f) => (
+            <li key={f.name} className="flex items-center gap-2">
+              <FileSpreadsheet className="h-4 w-4 shrink-0 text-slate-400" />
+              <span className="truncate">{f.name}</span>
+              <span className="shrink-0 text-xs text-slate-400">{(f.size / 1024 / 1024).toFixed(1)} MB</span>
+            </li>
+          ))}
+        </ul>
+      )}
+      <Button onClick={handleUpload} disabled={uploading || !picked.length} className="mt-4 w-full">
+        {uploading ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" /> Reading…</>
+                   : <><Upload className="mr-2 h-4 w-4" /> Read {picked.length || ''} record(s)</>}
+      </Button>
+    </Card>
+  );
 
   return (
     <div className="space-y-6" data-testid="receivables-summary-workspace">
-      {/* ── upload ─────────────────────────────────────────────────────── */}
-      <Card>
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2"><Upload className="h-5 w-5" /> Records to be produced</CardTitle>
-          <CardDescription>
-            Upload the GST sales register of each registration and the payment reconciliation for the month.
-            Only the delivered, refund and RTO sheets are read; every other sheet pertains to a different
-            sales channel and is excluded. All of them may be uploaded together — each is identified from
-            its contents.
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-3">
-          <Input type="file" multiple accept=".xlsx,.xls"
-                 onChange={(e) => setPicked(Array.from(e.target.files || []))} />
-          {picked.length > 0 && (
-            <ul className="space-y-1 text-sm text-slate-600">
-              {picked.map((f) => (
-                <li key={f.name} className="flex items-center gap-2">
-                  <FileSpreadsheet className="h-4 w-4 text-slate-400" />
-                  {f.name}<span className="text-slate-400">({(f.size / 1024 / 1024).toFixed(1)} MB)</span>
-                </li>
-              ))}
-            </ul>
-          )}
-          <Button onClick={handleUpload} disabled={uploading || !picked.length} className="w-full">
-            {uploading ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" /> Reading…</>
-                       : <><Upload className="mr-2 h-4 w-4" /> Read {picked.length || ''} file(s)</>}
-          </Button>
-        </CardContent>
-      </Card>
+      {loading && <div className="flex justify-center py-16"><Loader2 className="h-6 w-6 animate-spin text-slate-400" /></div>}
 
-      {/* what was actually read — shown, not assumed */}
-      {uploadReport && (
-        <Card>
-          <CardHeader className="flex flex-row items-start justify-between">
+      {/* ── empty ─────────────────────────────────────────────────────── */}
+      {!loading && !s && (
+        <div className="grid gap-6 lg:grid-cols-5">
+          <div className="lg:col-span-3">{uploadPanel}</div>
+          <Card className="lg:col-span-2 p-6">
+            <Inbox className="mb-3 h-8 w-8 text-slate-300" />
+            <div className="text-base font-semibold" style={{ color: 'var(--text-heading)' }}>
+              Nothing read yet
+            </div>
+            <p className="mt-2 text-sm leading-relaxed" style={{ color: 'var(--text-muted)' }}>
+              Once the records are in, this page shows what was sold, what was taxed, what was collected
+              and what is still owed — each figure traceable to the file it came from, and every total
+              checked against its own parts.
+            </p>
+          </Card>
+        </div>
+      )}
+
+      {!loading && s && (
+        <>
+          {/* ── header ──────────────────────────────────────────────── */}
+          <div className="flex flex-wrap items-end justify-between gap-4">
             <div>
-              <CardTitle>Records read</CardTitle>
-              <CardDescription>Each sheet, the row at which its header was found, and the number of lines read.</CardDescription>
+              <div className="text-xs font-medium uppercase tracking-wide" style={{ color: 'var(--text-muted)' }}>
+                Off Duty · Statement of trade receivables
+              </div>
+              <div className="mt-0.5 text-xl font-semibold" style={{ color: 'var(--text-heading)' }}>
+                As on {s.asAt}
+                <span className="ml-3 text-sm font-normal" style={{ color: 'var(--text-muted)' }}>
+                  {s.periods.join(', ')} · {int(s.orders)} orders · {s.entities.filter((e) => !e.includes('+')).join(', ')}
+                </span>
+              </div>
+            </div>
+            <Button onClick={handleBuild} disabled={building} className="bg-slate-800 hover:bg-slate-900">
+              {building ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" /> Building…</>
+                        : <><Download className="mr-2 h-4 w-4" /> Download the statement</>}
+            </Button>
+          </div>
+
+          {/* ── the numbers that matter ─────────────────────────────── */}
+          <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+            <Stat icon={Scale} label={`Trade receivables`} value={money(s.position.receivable)}
+                  accent="#B45309" big
+                  sub={`Delivered by ${s.asAt}, realised later or not at all. Up to ${money(s.position.receivableUpperBound)} if the undated receipts fell after the date.`} />
+            <Stat icon={Truck} label="Goods in transit" value={money(s.position.inTransit)}
+                  sub="Dispatched within the period, delivered thereafter. Not a trade receivable on a delivery basis." />
+            <Stat icon={Banknote} label="Total recoverable" value={money(s.position.totalOwed)}
+                  sub="Trade receivables plus goods in transit." />
+            <Stat icon={ClipboardList} label="Unrealised as on date" value={money(s.stillShortToday)}
+                  sub="A recovery list, not a month-end figure — most collections had arrived by the date of preparation, though not by the reporting date." />
+          </div>
+
+          {/* ── checks ──────────────────────────────────────────────── */}
+          <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+            <CheckPill label="Collection channels rebuild the remittance" value={s.checks.collectors} />
+            <CheckPill label="Status split rebuilds gross orders" value={s.checks.statusSplit} />
+            <CheckPill label="Channel split rebuilds trade receivables" value={s.checks.receivableSplit} />
+            <CheckPill label="Every order under one head only" value={s.checks.positionSplit} />
+          </div>
+
+          {/* ── tabs ────────────────────────────────────────────────── */}
+          <div className="flex gap-1 border-b" style={{ borderColor: 'var(--card-border)' }}>
+            {TABS.map((t) => (
+              <button key={t.key} onClick={() => setTab(t.key)}
+                      className={`-mb-px border-b-2 px-4 py-2 text-sm font-medium transition ${
+                        tab === t.key ? 'border-slate-800 text-slate-900' : 'border-transparent text-slate-500 hover:text-slate-800'}`}>
+                {t.label}
+              </button>
+            ))}
+          </div>
+
+          {/* ── the position ────────────────────────────────────────── */}
+          {tab === 'position' && (
+            <Card className="p-5">
+              <Tbl caption={`E.  Amounts unsettled as on ${s.asAt}`} colour={CLR.due}
+                   cols={['Particulars', 'No. of orders', 'Amount (₹)', 'Remarks']}
+                   rows={[
+                     ['Delivered on or before the reporting date, realised subsequently',
+                      int(P.RECEIVABLE_LATE?.orders), rup(P.RECEIVABLE_LATE?.amount),
+                      'The goods were with the customer and the money was not. Recovered since.'],
+                     ['Delivered on or before the reporting date, not realised',
+                      int(P.RECEIVABLE_UNPAID?.orders), rup(P.RECEIVABLE_UNPAID?.amount),
+                      'No realisation received against these at all.'],
+                     ['Trade receivables (sundry debtors)', int(s.position.receivable != null
+                        ? (P.RECEIVABLE_LATE?.orders || 0) + (P.RECEIVABLE_UNPAID?.orders || 0) : null),
+                      rup(s.position.receivable), 'Recoverable from customers on the reporting date.', 'total'],
+                     ['Realised, but date of receipt not recorded',
+                      int(P.RECEIVABLE_UNDATED?.orders), rup(P.RECEIVABLE_UNDATED?.amount),
+                      'The money came but no date is recorded, so it cannot be placed either side of the date.'],
+                     ['Maximum, if the above are treated as unrealised', '',
+                      rup(s.position.receivableUpperBound), 'The figure above is the minimum.', 'total'],
+                     ['Goods in transit — dispatched within the period, delivered thereafter',
+                      int(P.IN_TRANSIT?.orders), rup(P.IN_TRANSIT?.amount),
+                      'Include only where revenue is recognised on dispatch.'],
+                     ['Total amount recoverable', '', rup(s.position.totalOwed),
+                      'Trade receivables plus goods in transit.', 'total'],
+                   ]} />
+              <Tbl caption="Trade receivables — collection channel wise" colour={CLR.due}
+                   cols={['Collection channel', 'No. of orders', 'Amount recoverable (₹)']} dense
+                   rows={[...(s.receivableSplit || []).map((r) => [r.label, int(r.orders), rup(r.receivable)]),
+                          ['Total', int((s.receivableSplit || []).reduce((a, r) => a + r.orders, 0)),
+                           rup(s.position.receivable), 'total']]} />
+              <div className="text-sm font-semibold" style={{ color: 'var(--text-heading)' }}>Schedules</div>
+              <p className="mb-3 mt-1 text-xs" style={{ color: 'var(--text-muted)' }}>
+                Each is a tab in the workbook with the order numbers. Click to see them here.
+              </p>
+              <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                {(s.worklists || []).map((w) => (
+                  <button key={w.key} onClick={() => openSched(w.key, w.label)}
+                          className="group flex items-center justify-between rounded-xl border px-3 py-2.5 text-left transition hover:border-slate-400 hover:bg-slate-50"
+                          style={{ borderColor: 'var(--card-border)' }}>
+                    <span className="text-sm" style={{ color: 'var(--text-heading)' }}>{w.label}</span>
+                    <span className="flex items-center gap-1 text-sm font-semibold tabular-nums"
+                          style={{ color: 'var(--text-muted)' }}>
+                      {int(w.rows)}
+                      <ChevronRight className="h-3.5 w-3.5 opacity-0 transition group-hover:opacity-100" />
+                    </span>
+                  </button>
+                ))}
+              </div>
+            </Card>
+          )}
+
+          {/* ── sales ───────────────────────────────────────────────── */}
+          {tab === 'sales' && s.gst && (
+            <Card className="p-5">
+              <p className="mb-4 text-sm leading-relaxed" style={{ color: 'var(--text-muted)' }}>
+                Cast from the delivered, refund and RTO sheets of each registration's GSTR-1 workbook.
+                Other channels in those workbooks — Nykaa, Myntra, Slikk, B2B and the stores — are not
+                included. Agrees with the Sales Summary of each workbook.
+              </p>
+              {[...s.gst.blocks, ...(s.gst.consolidated ? [s.gst.consolidated] : [])].map((blk) => (
+                <Tbl key={blk.entity}
+                     caption={`Off Duty : Summary of Shopify Sales — ${STATE_NAME[blk.entity] || blk.entity}`}
+                     colour={CLR.sales} dense
+                     cols={['Particulars', 'Taxable', 'CGST', 'SGST', 'IGST', 'Invoice value']}
+                     rows={[
+                       ['Shopify', ...HEADS.map((h) => rup(blk.sales[h])), rup(inv(blk.sales))],
+                       ['Shopify- Rto', ...HEADS.map((h) => rup(blk.rto[h])), rup(inv(blk.rto))],
+                       ['Shopify- Refunded', ...HEADS.map((h) => rup(blk.refund[h])), rup(inv(blk.refund))],
+                       ['Net Sales', ...HEADS.map((h) => rup(blk.net[h])), rup(inv(blk.net)), 'total'],
+                     ]} />
+              ))}
+            </Card>
+          )}
+
+          {/* ── reconciliation ──────────────────────────────────────── */}
+          {tab === 'recon' && br && (
+            <Card className="p-5">
+              <Tbl caption="C.  What Shopify delivered, against what the GSTR-1 workbooks taxed"
+                   colour={CLR.recon} cols={['Particulars', 'No. of orders', 'Amount (₹)', 'Remarks']}
+                   rows={[
+                     ['Delivered — per Shopify', int(br.payDelivered.orders), rup(br.payDelivered.amount),
+                      'Every Shopify order marked delivered, whether taxed or not.'],
+                     ['Delivered — per the GSTR-1 workbooks', int(br.salesDelivered.orders),
+                      rup(br.salesDelivered.amount), 'The part of the above that reached a GSTR-1 workbook.'],
+                     ['Difference to be explained', int(br.payDelivered.orders - br.salesDelivered.orders),
+                      rup(br.payDelivered.amount - br.salesDelivered.amount),
+                      'Both lines are the SAME Shopify orders. The difference is not sales from anywhere else.',
+                      'total'],
+                   ]} />
+              <Tbl caption="Explained by" colour={CLR.recon}
+                   cols={['Particulars', 'No. of orders', 'Amount (₹)', 'Remarks']}
+                   rows={[
+                     ['Orders Shopify does not call delivered, but the workbooks taxed as delivered',
+                      int(-br.salesOnly.orders), rup(-br.salesOnly.amount),
+                      'Returns and RTOs in Shopify, still taxed as sales.'],
+                     ['Orders only part delivered', '0', rup(br.partDelivered.amount),
+                      `${int(br.partDelivered.orders)} orders, in both records — so the count does not change, only the value. The workbook taxes the lines delivered; Shopify carries the whole order.`],
+                     ['Orders in Shopify appearing in no GSTR-1 workbook', int(br.payOnly.orders),
+                      rup(br.payOnly.amount),
+                      'Delivered and realised, but their order numbers appear on no sheet of any workbook.'],
+                     ['Total explained', int(br.payDelivered.orders - br.salesDelivered.orders),
+                      rup(br.payDelivered.amount - br.salesDelivered.amount), '', 'total'],
+                     ['Difference (to be Nil)', '0', rup(br.difference), '', 'ok'],
+                   ]} />
+              <Tbl caption="D.  Collections against delivered sales" colour={CLR.cash}
+                   cols={['Particulars', 'No. of orders', 'Amount (₹)', 'Remarks']}
+                   rows={[
+                     ['Delivered — per Shopify', int(br.payDelivered.orders), rup(br.payDelivered.amount),
+                      'As above.'],
+                     ['Less: collections received', '', rup(-br.collections),
+                      'Money received through all five collection channels.'],
+                     ['Unsettled', int((s.worklists || []).find((w) => w.key === 'unsettled')?.rows),
+                      rup(br.unsettled),
+                      'Every one of these is on the "Unsettled Orders" schedule with the reason it is short.',
+                      'total'],
+                   ]} />
+            </Card>
+          )}
+
+          {/* ── notes ───────────────────────────────────────────────── */}
+          {tab === 'notes' && (
+            <Card className="p-5">
+              <p className="mb-4 text-sm leading-relaxed" style={{ color: 'var(--text-muted)' }}>
+                Each matter below is a separate schedule in the workbook, giving the order numbers.
+                No amount has been adjusted, netted off or excluded.
+              </p>
+              <Tbl caption="F.  Notes and qualifications" colour={CLR.notes}
+                   cols={['Particulars', 'No. of orders', 'Amount (₹)', 'Amount is / remarks']}
+                   rows={(s.limits || []).map((l) => [
+                     l.label, int(l.orders), rup(l.amount),
+                     <span key={l.key}>
+                       {l.basis && <span className="mr-1 rounded bg-slate-100 px-1.5 py-0.5 text-[11px] font-medium text-slate-600">{l.basis}</span>}
+                       {l.why}
+                     </span>,
+                   ])} />
+            </Card>
+          )}
+
+          {/* ── records ─────────────────────────────────────────────── */}
+          {tab === 'records' && (
+            <div className="grid gap-6 lg:grid-cols-5">
+              <div className="lg:col-span-2">{uploadPanel}</div>
+              <Card className="lg:col-span-3 p-5">
+                <div className="mb-1 text-base font-semibold" style={{ color: 'var(--text-heading)' }}>
+                  Records on hand
+                </div>
+                <p className="mb-4 text-sm" style={{ color: 'var(--text-muted)' }}>
+                  Removing a record withdraws its lines from every figure above.
+                </p>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="text-left text-xs uppercase tracking-wide" style={{ color: 'var(--text-muted)' }}>
+                        <th className="pb-2">Record</th><th className="pb-2">Read as</th>
+                        <th className="pb-2">Registration</th><th className="pb-2">Period</th>
+                        <th className="pb-2 text-right">Lines</th><th className="pb-2">Uploaded</th><th />
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {files.map((f) => (
+                        <tr key={f.filename} className="border-t" style={{ borderColor: 'var(--card-border)' }}>
+                          <td className="max-w-[220px] truncate py-2 text-xs" style={{ color: 'var(--text-muted)' }}>{f.filename}</td>
+                          <td className="py-2">{f.kinds.join(', ')}</td>
+                          <td className="py-2">{f.entities.join(', ') || '—'}</td>
+                          <td className="py-2">{f.periods.join(', ') || '—'}</td>
+                          <td className="py-2 text-right tabular-nums">{int(f.rows)}</td>
+                          <td className="py-2 text-xs" style={{ color: 'var(--text-muted)' }}>
+                            {f.uploadedAt ? format(new Date(f.uploadedAt), 'dd MMM yyyy HH:mm') : '—'}
+                          </td>
+                          <td className="py-2 text-right">
+                            <Button size="sm" variant="ghost" onClick={() => handleDelete(f.filename)}>
+                              <Trash2 className="h-4 w-4 text-rose-600" />
+                            </Button>
+                          </td>
+                        </tr>
+                      ))}
+                      {!files.length && (
+                        <tr><td colSpan={7} className="py-6 text-center" style={{ color: 'var(--text-muted)' }}>
+                          No records held.
+                        </td></tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </Card>
+            </div>
+          )}
+        </>
+      )}
+
+      {/* ── what was read, after an upload ──────────────────────────── */}
+      {uploadReport && (
+        <Card className="p-5">
+          <div className="mb-3 flex items-start justify-between">
+            <div>
+              <div className="text-base font-semibold" style={{ color: 'var(--text-heading)' }}>Records read</div>
+              <p className="text-sm" style={{ color: 'var(--text-muted)' }}>
+                Each sheet, the row its header was found on, and the number of lines read.
+              </p>
             </div>
             <Button size="sm" variant="ghost" onClick={() => setUploadReport(null)}><X className="h-4 w-4" /></Button>
-          </CardHeader>
-          <CardContent className="space-y-4">
+          </div>
+          <div className="space-y-3">
             {uploadReport.files.map((f) => (
-              <div key={f.file} className="rounded-lg border border-slate-200 p-3">
-                <div className="mb-2 flex items-center gap-2 text-sm font-medium text-slate-800">
-                  <FileSpreadsheet className="h-4 w-4 text-slate-400" />
-                  {f.file}
+              <div key={f.file} className="rounded-xl border p-3" style={{ borderColor: 'var(--card-border)' }}>
+                <div className="mb-1.5 flex flex-wrap items-center gap-2 text-sm font-medium"
+                     style={{ color: 'var(--text-heading)' }}>
+                  <FileSpreadsheet className="h-4 w-4 text-slate-400" />{f.file}
                   {f.entity && <span className="rounded bg-slate-100 px-2 py-0.5 text-xs">{f.entity}</span>}
                   {f.kind && <span className="rounded bg-slate-100 px-2 py-0.5 text-xs">{f.kind}</span>}
                 </div>
@@ -257,17 +536,17 @@ const ReceivablesSummaryWorkspace = ({ agent }) => {
                   <table className="w-full text-sm">
                     <tbody>
                       {(f.tabs || []).map((t) => (
-                        <tr key={t.tab} className="border-t border-slate-100">
-                          <td className="py-1 text-slate-700">{t.tab}</td>
-                          <td className="py-1 text-slate-500">{t.kind}</td>
-                          <td className="py-1 text-slate-500">header at row {t.headerRow}</td>
-                          <td className="py-1 text-right font-medium text-slate-800">{int(t.rows)} rows</td>
+                        <tr key={t.tab} className="border-t" style={{ borderColor: '#F1F5F9' }}>
+                          <td className="py-1">{t.tab}</td>
+                          <td className="py-1 text-xs" style={{ color: 'var(--text-muted)' }}>{t.kind}</td>
+                          <td className="py-1 text-xs" style={{ color: 'var(--text-muted)' }}>header at row {t.headerRow}</td>
+                          <td className="py-1 text-right font-medium tabular-nums">{int(t.rows)}</td>
                         </tr>
                       ))}
-                      {(f.skipped || []).map((s) => (
-                        <tr key={s.tab} className="border-t border-slate-100 text-slate-400">
-                          <td className="py-1">{s.tab}</td>
-                          <td className="py-1" colSpan={3}>skipped — {s.why}</td>
+                      {(f.skipped || []).map((sk) => (
+                        <tr key={sk.tab} className="border-t text-xs" style={{ borderColor: '#F1F5F9', color: '#94A3B8' }}>
+                          <td className="py-1">{sk.tab}</td>
+                          <td className="py-1" colSpan={3}>skipped — {sk.why}</td>
                         </tr>
                       ))}
                     </tbody>
@@ -275,315 +554,50 @@ const ReceivablesSummaryWorkspace = ({ agent }) => {
                 )}
               </div>
             ))}
-          </CardContent>
+          </div>
         </Card>
       )}
 
-      {loading && <div className="flex justify-center py-10"><Loader2 className="h-6 w-6 animate-spin text-slate-400" /></div>}
-
-      {!loading && summary && (
-        <>
-          {summary.gst && (
-            <Card>
-              <CardHeader>
-                <CardTitle>
-                  Off Duty : Summary of Shopify Sales for {summary.periods.join(', ')}
-                </CardTitle>
-                <CardDescription>
-                  Cast from the delivered, refund and RTO sheets of each registration's GST sales
-                  register. Other sales channels in those workbooks — Nykaa, Myntra, Slikk, B2B and the
-                  stores — are not included. Agrees with the Sales Summary of each workbook.
-                </CardDescription>
-              </CardHeader>
-              <CardContent>
-                {summary.gst.blocks.map((blk) => (
-                  <SalesSummaryBlock key={blk.entity} block={blk}
-                                     caption={STATE_NAME[blk.entity] || blk.entity} />
-                ))}
-                {summary.gst.consolidated && (
-                  <SalesSummaryBlock block={summary.gst.consolidated}
-                                     caption="All registrations — consolidated" />
-                )}
-              </CardContent>
-            </Card>
-          )}
-
-          {summary.bridge && (
-            <Card>
-              <CardHeader>
-                <CardTitle>Reconciliation of sales with collections</CardTitle>
-                <CardDescription>
-                  The two records count different things, so they are reconciled order by order rather
-                  than compared as totals. Every figure below is measured; none is a balancing item.
-                </CardDescription>
-              </CardHeader>
-              <CardContent>
-                <Tbl caption="C.  Reconciliation of delivered sales with the payment reconciliation"
-                     colour={CLR.recon} cols={['Particulars', 'No. of orders', 'Amount (₹)']}
-                     rows={[
-                       ['Delivered — per the GST sales registers',
-                        int(summary.bridge.salesDelivered.orders), rup(summary.bridge.salesDelivered.amount)],
-                       ['Less: taxed as delivered, shown under another status in the payment reconciliation',
-                        int(summary.bridge.salesOnly.orders), rup(-summary.bridge.salesOnly.amount)],
-                       [{ t: 'Common orders — per the GST sales registers' },
-                        int(summary.bridge.commonPerSales.orders), rup(summary.bridge.commonPerSales.amount)],
-                       ['Add: orders only part delivered — the register taxes the delivered lines, the payment reconciliation carries the whole order',
-                        int(summary.bridge.partDelivered.orders), rup(summary.bridge.partDelivered.amount)],
-                       [{ t: 'Common orders — per the payment reconciliation' },
-                        int(summary.bridge.commonPerPayment.orders), rup(summary.bridge.commonPerPayment.amount)],
-                       ['Add: orders in the payment reconciliation appearing in no sales register',
-                        int(summary.bridge.payOnly.orders), rup(summary.bridge.payOnly.amount)],
-                       [{ t: 'Delivered — per the payment reconciliation' },
-                        int(summary.bridge.payDelivered.orders), rup(summary.bridge.payDelivered.amount)],
-                       [{ t: 'Difference (to be Nil)' }, '', rup(summary.bridge.difference)],
-                     ]} />
-                <Tbl caption="D.  Collections against delivered sales" colour={CLR.cash}
-                     cols={['Particulars', 'No. of orders', 'Amount (₹)']}
-                     rows={[
-                       ['Delivered — per the payment reconciliation',
-                        int(summary.bridge.payDelivered.orders), rup(summary.bridge.payDelivered.amount)],
-                       ['Less: collections received', '', rup(-summary.bridge.collections)],
-                       [{ t: 'Unsettled' }, '', rup(summary.bridge.unsettled)],
-                     ]} />
-              </CardContent>
-            </Card>
-          )}
-
-          <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
-            <Kpi label={`Trade receivables as on ${summary.asAt}`} value={money(summary.position.receivable)}
-                 tone="text-amber-700" sub="delivered within the period, realised later or not at all" />
-            <Kpi label="Maximum trade receivables" value={money(summary.position.receivableUpperBound)}
-                 sub={`includes ${money(summary.position.uncertain)} whose period of realisation is unascertained`} />
-            <Kpi label="Goods in transit" value={money(summary.position.inTransit)}
-                 sub="dispatched within the period, delivered thereafter" />
-            <Kpi label="Total amount recoverable" value={money(summary.position.totalOwed)}
-                 sub="trade receivables plus goods in transit" />
-          </div>
-
-          {/* The number people reach for by mistake, named as what it is. */}
-          <div className="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700">
-            <span className="font-medium">Unrealised as on date: {money(summary.stillShortToday)}</span>
-            {' '}— amounts remaining unrealised on the date of this statement, after the recovery already
-            effected. This is a recovery schedule and not the figure of trade receivables as on the
-            reporting date: most collections had been received by the date of preparation, though not by
-            the reporting date. Stating it as trade receivables would understate the position.
-          </div>
-
-          <Card>
-            <CardHeader>
-              <CardTitle>Verification</CardTitle>
-              <CardDescription>
-                No stated total is accepted on its own. Each of the following aggregates a figure from its
-                constituents, and the difference must be Nil.
-              </CardDescription>
-            </CardHeader>
-            <CardContent className="grid gap-2 md:grid-cols-2">
-              <Check label="Collection-channel columns aggregate to the remittance stated" value={summary.checks.collectors} />
-              <Check label="Status-wise break-up aggregates to gross orders" value={summary.checks.statusSplit} />
-              <Check label="Channel-wise break-up aggregates to trade receivables" value={summary.checks.receivableSplit} />
-              <Check label="Every order classified under one head only" value={summary.checks.positionSplit} />
-            </CardContent>
-          </Card>
-
-          <div className="grid gap-6 lg:grid-cols-2">
-            <Card>
-              <CardHeader>
-                <CardTitle>Statement of trade receivables as on {summary.asAt}</CardTitle>
-                <CardDescription>
-                  Trade receivables are stated as at a date. Every order is classified under one head only.
-                </CardDescription>
-              </CardHeader>
-              <CardContent>
-                <Table>
-                  <TableHeader><TableRow>
-                    <TableHead>Particulars</TableHead><TableHead className="text-right">No. of orders</TableHead>
-                    <TableHead className="text-right">Amount</TableHead>
-                  </TableRow></TableHeader>
-                  <TableBody>
-                    {summary.byPosition.map((p) => (
-                      <TableRow key={p.key}>
-                        <TableCell className="font-medium">{p.label}</TableCell>
-                        <TableCell className="text-right">{int(p.orders)}</TableCell>
-                        <TableCell className="text-right">{money(p.amount)}</TableCell>
-                      </TableRow>
-                    ))}
-                  </TableBody>
-                </Table>
-              </CardContent>
-            </Card>
-
-            <Card>
-              <CardHeader>
-                <CardTitle>Trade receivables — collection channel wise</CardTitle>
-                <CardDescription>The party from whom recovery is due, and the amount.</CardDescription>
-              </CardHeader>
-              <CardContent>
-                <Table>
-                  <TableHeader><TableRow>
-                    <TableHead>Collection channel</TableHead><TableHead className="text-right">No. of orders</TableHead>
-                    <TableHead className="text-right">Amount recoverable</TableHead>
-                  </TableRow></TableHeader>
-                  <TableBody>
-                    {summary.receivableSplit.map((r) => (
-                      <TableRow key={r.key}>
-                        <TableCell className="font-medium">{r.label}</TableCell>
-                        <TableCell className="text-right">{int(r.orders)}</TableCell>
-                        <TableCell className={`text-right ${r.receivable > 0 ? 'font-semibold text-amber-700' : ''}`}>
-                          {money(r.receivable)}
-                        </TableCell>
-                      </TableRow>
-                    ))}
-                  </TableBody>
-                </Table>
-              </CardContent>
-            </Card>
-          </div>
-
-          <Card>
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                <AlertTriangle className="h-5 w-5 text-amber-600" /> Notes and qualifications
-              </CardTitle>
-              <CardDescription>
-                Each of the matters below is annexed as a separate schedule in the workbook, giving the
-                order numbers. No amount has been adjusted, netted off or excluded.
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
-              <Table>
-                <TableHeader><TableRow>
-                  <TableHead>Particulars</TableHead><TableHead className="text-right">No. of orders</TableHead>
-                  <TableHead className="text-right">Amount</TableHead><TableHead>Remarks</TableHead>
-                </TableRow></TableHeader>
-                <TableBody>
-                  {summary.limits.map((l) => (
-                    <TableRow key={l.key}>
-                      <TableCell className="font-medium align-top">{l.label}</TableCell>
-                      <TableCell className="text-right align-top">{int(l.orders)}</TableCell>
-                      <TableCell className="text-right align-top">{money(l.amount)}</TableCell>
-                      <TableCell className="max-w-xl text-xs text-slate-500">{l.why}</TableCell>
-                    </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
-            </CardContent>
-          </Card>
-
-          <Card>
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2"><ListChecks className="h-5 w-5" /> Schedules</CardTitle>
-              <CardDescription>Click any schedule to see the orders comprising it.</CardDescription>
-            </CardHeader>
-            <CardContent className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-              {summary.worklists.map((w) => (
-                <button key={w.key} onClick={() => openWorklist(w.key, w.label)}
-                        className="rounded-lg border border-slate-200 p-3 text-left transition hover:border-slate-400 hover:bg-slate-50">
-                  <div className="text-sm font-medium text-slate-800">{w.label}</div>
-                  <div className="mt-1 text-xl font-semibold text-slate-900">{int(w.rows)}</div>
-                  <div className="text-xs text-slate-500">orders</div>
-                </button>
-              ))}
-            </CardContent>
-          </Card>
-
-          <Card>
-            <CardHeader>
-              <CardTitle>Generate the statement</CardTitle>
-              <CardDescription>
-                The statement, the order ledger, a schedule for each matter reported, and a basis of
-                preparation naming the record behind every figure. Percentages and totals are live formulas.
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
-              <Button onClick={handleBuild} disabled={building} className="w-full bg-slate-700 hover:bg-slate-800">
-                {building ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" /> Building…</>
-                          : <><Download className="mr-2 h-4 w-4" /> Build &amp; download</>}
-              </Button>
-            </CardContent>
-          </Card>
-        </>
-      )}
-
-      {!loading && !summary && !uploadReport && (
-        <Card><CardContent className="py-10 text-center text-slate-600">
-          <FileText className="mx-auto mb-3 h-10 w-10 text-slate-300" />
-          No records produced yet. Upload the GST sales registers and the payment reconciliation to begin.
-        </CardContent></Card>
-      )}
-
-      {/* ── files held ─────────────────────────────────────────────────── */}
-      {files.length > 0 && (
-        <Card>
-          <CardHeader>
-            <CardTitle>Records on hand</CardTitle>
-            <CardDescription>Removing a record withdraws its lines from every figure above.</CardDescription>
-          </CardHeader>
-          <CardContent>
-            <Table>
-              <TableHeader><TableRow>
-                <TableHead>Record</TableHead><TableHead>Read as</TableHead><TableHead>Registration</TableHead>
-                <TableHead>Period</TableHead><TableHead className="text-right">Lines</TableHead>
-                <TableHead>Uploaded</TableHead><TableHead />
-              </TableRow></TableHeader>
-              <TableBody>
-                {files.map((f) => (
-                  <TableRow key={f.filename}>
-                    <TableCell className="max-w-[240px] truncate text-sm text-slate-600">{f.filename}</TableCell>
-                    <TableCell className="text-sm">{f.kinds.join(', ')}</TableCell>
-                    <TableCell className="text-sm">{f.entities.join(', ') || '—'}</TableCell>
-                    <TableCell className="text-sm">{f.periods.join(', ') || '—'}</TableCell>
-                    <TableCell className="text-right text-sm">{int(f.rows)}</TableCell>
-                    <TableCell className="text-sm text-slate-500">
-                      {f.uploadedAt ? format(new Date(f.uploadedAt), 'dd MMM yyyy HH:mm') : '—'}
-                    </TableCell>
-                    <TableCell className="text-right">
-                      <Button size="sm" variant="destructive" onClick={() => handleDelete(f.filename)}>
-                        <Trash2 className="h-4 w-4" />
-                      </Button>
-                    </TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          </CardContent>
-        </Card>
-      )}
-
-      {/* ── worklist modal ─────────────────────────────────────────────── */}
-      <Dialog open={!!worklist} onOpenChange={(o) => !o && setWorklist(null)}>
-        <DialogContent className="max-w-6xl">
-          <DialogHeader><DialogTitle>{worklist?.label}</DialogTitle></DialogHeader>
-          {worklistLoading ? (
-            <div className="flex justify-center py-10"><Loader2 className="h-6 w-6 animate-spin text-slate-400" /></div>
+      {/* ── schedule ────────────────────────────────────────────────── */}
+      <Dialog open={!!sched} onOpenChange={(o) => !o && setSched(null)}>
+        <DialogContent className="max-w-7xl">
+          <DialogHeader><DialogTitle>{sched?.label}</DialogTitle></DialogHeader>
+          {schedLoading ? (
+            <div className="flex justify-center py-12"><Loader2 className="h-6 w-6 animate-spin text-slate-400" /></div>
           ) : (
-            <div className="max-h-[65vh] overflow-auto">
-              <Table>
-                <TableHeader><TableRow>
-                  <TableHead>Order no.</TableHead><TableHead>Registration</TableHead><TableHead>Order date</TableHead>
-                  <TableHead>Order status</TableHead><TableHead>Collection channel</TableHead><TableHead>Place of supply</TableHead>
-                  <TableHead className="text-right">Invoice value</TableHead><TableHead className="text-right">Realised</TableHead>
-                  <TableHead className="text-right">Recoverable</TableHead>
-                  <TableHead className="min-w-[320px]">Basis</TableHead>
-                </TableRow></TableHeader>
-                <TableBody>
-                  {worklistRows.map((r) => (
-                    <TableRow key={r.order_id}>
-                      <TableCell className="font-mono text-sm">{r.order_id}</TableCell>
-                      <TableCell className="text-sm">{r.entity || '—'}</TableCell>
-                      <TableCell className="text-sm">{r.order_date || '—'}</TableCell>
-                      <TableCell className="text-sm">{r.status || '—'}</TableCell>
-                      <TableCell className="text-sm">{r.collector || '—'}</TableCell>
-                      <TableCell className="text-sm">{r.shipping_state || '—'}</TableCell>
-                      <TableCell className="text-right text-sm">{money(r.billed)}</TableCell>
-                      <TableCell className="text-right text-sm">{money(r.collected)}</TableCell>
-                      <TableCell className="text-right text-sm font-medium">{money(r.owed)}</TableCell>
-                      <TableCell className="text-xs text-slate-600">{r.remark}</TableCell>
-                    </TableRow>
+            <div className="max-h-[68vh] overflow-auto">
+              <table className="w-full text-sm">
+                <thead className="sticky top-0" style={{ background: 'var(--surface)' }}>
+                  <tr className="text-left text-xs uppercase tracking-wide" style={{ color: 'var(--text-muted)' }}>
+                    <th className="pb-2">Order no.</th><th className="pb-2">Registration</th>
+                    <th className="pb-2">Delivered</th><th className="pb-2">Realised on</th>
+                    <th className="pb-2">Channel</th>
+                    <th className="pb-2 text-right">Invoice value</th>
+                    <th className="pb-2 text-right">Realised</th>
+                    <th className="pb-2 text-right">Recoverable</th>
+                    <th className="pb-2">Basis</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {schedRows.map((r) => (
+                    <tr key={r.order_id} className="border-t align-top" style={{ borderColor: 'var(--card-border)' }}>
+                      <td className="py-1.5 font-mono text-xs">{r.order_id}</td>
+                      <td className="py-1.5 text-xs">{r.entity || '—'}</td>
+                      <td className="py-1.5 text-xs">{r.delivered_date || '—'}</td>
+                      <td className="py-1.5 text-xs">{r.payment_date || '—'}</td>
+                      <td className="py-1.5 text-xs">{r.collector || '—'}</td>
+                      <td className="py-1.5 text-right tabular-nums">{rup(r.billed)}</td>
+                      <td className="py-1.5 text-right tabular-nums">{rup(r.collected)}</td>
+                      <td className="py-1.5 text-right font-medium tabular-nums">{rup(r.owed)}</td>
+                      <td className="max-w-[420px] py-1.5 text-xs" style={{ color: 'var(--text-muted)' }}>
+                        {r.unsettled_reason || r.remark}
+                      </td>
+                    </tr>
                   ))}
-                </TableBody>
-              </Table>
-              {worklistRows.length >= 500 && (
-                <p className="py-3 text-center text-xs text-slate-500">
+                </tbody>
+              </table>
+              {schedRows.length >= 500 && (
+                <p className="py-3 text-center text-xs" style={{ color: 'var(--text-muted)' }}>
                   First 500 shown — the workbook carries the complete schedule.
                 </p>
               )}
