@@ -305,6 +305,27 @@ function buildReceivables(allRows, asAtIn) {
     l.uncertain = l.position === 'RECEIVABLE_UNDATED' ? l.collected
                 : l.position === 'UNDATED_DELIVERY' ? l.billed : 0;
     l.in_transit_value = l.position === 'IN_TRANSIT' ? l.billed : 0;
+
+    /* Why this order is short, in the words an accountant would use. Written
+       per order so the schedule can be worked without going back to the file. */
+    const ch = l.collector ? String(l.collector).trim() : '';
+    const short = r2(l.billed - l.collected);
+    l.unsettled_reason =
+      l.group !== 'DELIVERED' ? ''
+      : short <= 0.5 && short >= -0.5 ? ''
+      : short < 0
+        ? `Realisation of Rs ${Math.abs(short).toLocaleString('en-IN')} in excess of the invoice value `
+          + `received${ch ? ` through ${ch}` : ''}. To be examined.`
+      : l.collected === 0
+        ? (ch
+            ? `Delivered and billed Rs ${l.billed.toLocaleString('en-IN')}. No realisation received `
+              + `through ${ch}. Outstanding in full.`
+            : `Delivered and billed Rs ${l.billed.toLocaleString('en-IN')}. No realisation received, and `
+              + 'no collection channel or UTR on record, so the party from whom recovery is due is not '
+              + 'identifiable from the records produced.')
+        : `Delivered and billed Rs ${l.billed.toLocaleString('en-IN')}. Part realisation of `
+          + `Rs ${l.collected.toLocaleString('en-IN')} received${ch ? ` through ${ch}` : ''}; `
+          + `short by Rs ${short.toLocaleString('en-IN')}.`;
   }
 
   const byPosition = {};
@@ -423,6 +444,9 @@ function buildReceivables(allRows, asAtIn) {
                                       && l.earned_taxable > 0 && l.group !== 'DELIVERED'),
     taxedNowhere:   ledger.filter((l) => l.in_payment_file && !l.in_sales_file && l.group === 'DELIVERED'),
     noDeposit:      ledger.filter((l) => l.collected !== 0 && isBlank(l.deposit_date)),
+    /* Every delivered order where the money received differs from the amount
+       billed — the population behind the "Unsettled" line of table D. */
+    unsettled:      ledger.filter((l) => l.group === 'DELIVERED' && Math.abs(l.still_short) >= 0.01),
   };
 
   const sum = (arr, f) => arr.reduce((a, x) => add(a, x[f]), 0);
@@ -431,7 +455,9 @@ function buildReceivables(allRows, asAtIn) {
     billed: sum(ledger, 'billed'),
     collected: sum(ledger, 'collected'),
     collectorsTotal: sum(ledger, 'collectors_total'),
-    stillShortToday: sum(ledger, 'still_short'),
+    /* the total of the Unsettled Orders schedule, so the figure on the face
+       of table D and the schedule behind it are the same arithmetic */
+    stillShortToday: sum(exceptions.unsettled, 'still_short'),
     earnedTaxable: sum(ledger, 'earned_taxable'),
     earnedTax: sum(ledger, 'earned_tax'),
     refunded: sum(ledger, 'refunded'),

@@ -95,7 +95,8 @@ function styleCell(cell, kind, col) {
                              alignment: { vertical: 'center', horizontal: 'left' } };
     case 'gstname': return { font: { bold: true, sz: 12, color: { rgb: INK } },
                              alignment: { vertical: 'center', horizontal: 'left' } };
-    case 'sub':     return { ...right, font: { sz: 10, color: { rgb: MUTED } } };
+    case 'sub':     return { font: { sz: 10, color: { rgb: MUTED } },
+                             alignment: { vertical: 'top', horizontal: 'left', wrapText: true } };
     case 'note':    return { font: { italic: true, sz: 9, color: { rgb: MUTED } },
                              alignment: { vertical: 'center', horizontal: 'left', wrapText: true } };
     default:        return { ...right, border: border(['bottom']) };
@@ -192,6 +193,29 @@ function salesSummarySheet(b, meta) {
         return C(`=ROUND(${L}${at}-(${netRows.map((r) => `${L}${r}`).join('+')}),2)`, 'ok', { fmt: AMT });
       }));
   }
+  /* Returns and RTO by registration, cast here rather than on the Receivables
+     sheet: this is a statement about SALES, and keeping it here lets the
+     Receivables sheet carry one wide remarks column instead of six narrow
+     numeric ones. */
+  blank();
+  const invOf = (o) => (Number(o.taxable_value) || 0) + (Number(o.cgst) || 0)
+                     + (Number(o.sgst) || 0) + (Number(o.igst) || 0);
+  push(C('RETURNS AND RTO — BY REGISTRATION  (invoice value)', 'gstband', { bg: CLR.returns }),
+       ...Array.from({ length: 5 }, () => C('', 'gstband', { bg: CLR.returns })));
+  push(...['Registration', 'Delivered', 'Less: RTO', 'Less: Sales returns', 'Total returns', 'Net sales']
+    .map((h) => C(h, 'gsthead', { bg: CLR.returns })));
+  const bF = g.length + 1;
+  for (const blk of b.gst.blocks) {
+    const r = push(C(STATE_NAME[blk.entity] || blk.entity, 'gstrow'),
+      C(invOf(blk.sales), 'gstrow', { fmt: RUP }), C(invOf(blk.rto), 'gstrow', { fmt: RUP }),
+      C(invOf(blk.refund), 'gstrow', { fmt: RUP }), C('', 'gstrow'), C('', 'gstrow'));
+    g[r - 1][4] = C(`=C${r}+D${r}`, 'gstrow', { fmt: RUP });
+    g[r - 1][5] = C(`=B${r}+E${r}`, 'gstrow', { fmt: RUP });
+  }
+  const bL = g.length;
+  push(C('Total', 'gsttot', { bg: CLR.returns }),
+    ...[1, 2, 3, 4, 5].map((i) => C(`=SUM(${colLetter(i)}${bF}:${colLetter(i)}${bL})`, 'gsttot',
+      { fmt: RUP, bg: CLR.returns })));
   blank();
   push(C('Prepared from the delivered, refund and RTO sheets of each registration\'s GSTR-1 workbook. '
        + 'Other sales channels appearing in those workbooks — Nykaa, Myntra, Slikk, B2B and the stores — '
@@ -222,216 +246,180 @@ function summarySheet(b, meta) {
   };
   const P = b.byPosition;
   const br = b.bridge;
-  const inv = (o) => r2v(o.taxable_value) + r2v(o.cgst) + r2v(o.sgst) + r2v(o.igst);
-  const r2v = (n) => Number(n) || 0;
+  const inv = (o) => (Number(o.taxable_value) || 0) + (Number(o.cgst) || 0)
+                   + (Number(o.sgst) || 0) + (Number(o.igst) || 0);
 
-  /* One table: a caption band in the table's colour, a header row in the same
-     colour, then rows. Everything boxed, as the accountant's own sheet is. */
-  const band = (caption, colour, width) =>
-    push(...Array.from({ length: width }, (_, i) => C(i === 0 ? caption : '', 'gstband', { bg: colour })));
+  const band = (caption, colour) =>
+    push(...Array.from({ length: 4 }, (_, i) => C(i === 0 ? caption : '', 'gstband', { bg: colour })));
   const head = (labels, colour) => push(...labels.map((l) => C(l, 'gsthead', { bg: colour })));
-  const row = (label, vals, kind = 'gstrow', colour) =>
-    push(C(label, kind, colour ? { bg: colour } : {}),
-         ...vals.map((v) => (typeof v === 'string' && v.startsWith('=')
-           ? C(v, kind, { fmt: RUP, ...(colour ? { bg: colour } : {}) })
-           : v === null ? C('', kind, colour ? { bg: colour } : {})
-           : C(Number(v) || 0, kind, { fmt: RUP, ...(colour ? { bg: colour } : {}) }))));
+  /* Particulars | orders | amount | remark. Four columns throughout, so the
+     remark column can be wide enough to read. */
+  const line = (label, orders, amount, remark, kind = 'gstrow', colour) => {
+    const ex = colour ? { bg: colour } : {};
+    return push(C(label, kind, ex),
+      orders === null ? C('', kind, ex)
+        : typeof orders === 'string' ? C(orders, kind, { fmt: INT, ...ex })
+        : C(orders, kind, { fmt: INT, ...ex }),
+      amount === null ? C('', kind, ex)
+        : typeof amount === 'string' ? C(amount, kind, { fmt: RUP, ...ex })
+        : C(amount, kind, { fmt: RUP, ...ex }),
+      C(remark || '', 'sub'));
+  };
 
   push(C('Off Duty : Reconciliation of Sales with Collections', 'title'));
   push(C('For', 'meta'), C(b.periods.join(', ') || '—', 'meta'));
   push(C('As on', 'meta'), C(pretty(b.asAt), 'meta'));
   push(C('Records examined', 'meta'), C(meta.sourceLine, 'meta'));
   blank();
-  /* Every term used below, defined once. The reconciliation turns on the
-     difference between three documents, and calling any of them by a name the
-     reader has to guess at makes the whole statement unreadable. */
-  band('THE THREE RECORDS THIS STATEMENT COMPARES', CLR.notes, 3);
-  head(['Term used below', 'The file it means', 'What it tells you'], CLR.notes);
-  push(C('GSTR-1 workbook', 'gstrow'),
-       C('Off Duty- GSTR1 <month>_HR / _KAR / _MH — the delivered, refund and RTO sheets', 'gstrow'),
-       C('what was TAXED, i.e. the record the GST return is filed from', 'gstrow'));
-  push(C('Payment reconciliation', 'gstrow'),
-       C("<month>_Payment-Reco — the 'Final' sheet", 'gstrow'),
-       C('what was COLLECTED, and through which channel', 'gstrow'));
-  push(C('Shopify export', 'gstrow'),
-       C('<month>.xlsx — the order export', 'gstrow'),
-       C('every order the website took. Not read by this statement: the payment '
-       + 'reconciliation already carries one row per Shopify order and agrees with it to the rupee.',
-         'gstrow'));
-  blank();
 
-  /* ── A. net sales ───────────────────────────────────────────────────── */
-  const gc = b.gst.consolidated || b.gst.blocks[0];
-  band('A.  NET SALES — ALL REGISTRATIONS CONSOLIDATED', CLR.sales, 6);
-  head(['Particulars', 'Taxable', 'CGST', 'SGST', 'IGST', 'Invoice value'], CLR.sales);
-  // invoice value = taxable + the three tax heads; it is what the customer was billed
-  const four = (o) => [o.taxable_value, o.cgst, o.sgst, o.igst];
-  const rA1 = row('Shopify — delivered', [...four(gc.sales), inv(gc.sales)]);
-  const rA2 = row('Less: RTO', [...four(gc.rto), inv(gc.rto)]);
-  const rA3 = row('Less: Sales returns / refunds', [...four(gc.refund), inv(gc.refund)]);
-  const rA4 = row('Net Sales', [1, 2, 3, 4, 5].map((i) => {
-    const L = colLetter(i);
-    return `=${L}${rA1}+${L}${rA2}+${L}${rA3}`;
-  }), 'gsttot', CLR.sales);
+  band('THE TWO RECORDS THIS STATEMENT COMPARES', CLR.notes);
+  head(['Term used below', 'Orders', 'Amount (₹)', 'The file it means, and what it tells you'], CLR.notes);
+  push(C('Shopify', 'gstrow'), C(b.bridge.payDelivered.orders + 0, 'gstrow', { fmt: INT }),
+       C(b.totals.billed, 'gstrow', { fmt: RUP }),
+       C('The Shopify export <month>.xlsx together with the payment reconciliation <month>_Payment-Reco, '
+       + 'which carries one row per Shopify order and agrees with the export to the rupee. What was SOLD '
+       + 'and what was COLLECTED.', 'sub'));
+  push(C('GSTR-1 workbooks', 'gstrow'), C(br.salesDelivered.orders, 'gstrow', { fmt: INT }),
+       C(br.salesDelivered.amount, 'gstrow', { fmt: RUP }),
+       C('Off Duty- GSTR1 <month>_HR / _KAR / _MH — the delivered, refund and RTO sheets. What was '
+       + 'TAXED. A part of Shopify, never more than it.', 'sub'));
   blank();
-
-  /* ── B. returns and RTO by registration ─────────────────────────────── */
-  band('B.  RETURNS AND RTO — BY REGISTRATION  (invoice value)', CLR.returns, 7);
-  head(['Registration', 'Delivered', 'Less: RTO', 'Less: Sales returns', 'Total returns',
-        'Net sales', 'Returns as % of delivered'], CLR.returns);
-  const bFirst = g.length + 1;
-  for (const blk of b.gst.blocks) {
-    const r = row(STATE_NAME[blk.entity] || blk.entity,
-      [inv(blk.sales), inv(blk.rto), inv(blk.refund), `=C${g.length + 1}+D${g.length + 1}`,
-       `=B${g.length + 1}+E${g.length + 1}`, null]);
-    /* the two computed columns refer to their own row, so they are written after
-       the row exists rather than guessed at */
-    g[r - 1][4] = C(`=C${r}+D${r}`, 'gstrow', { fmt: RUP });
-    g[r - 1][5] = C(`=B${r}+E${r}`, 'gstrow', { fmt: RUP });
-    g[r - 1][6] = C(`=IFERROR(-E${r}/B${r},0)`, 'gstrow', { fmt: PCT });
-  }
-  const bLast = g.length;
-  const bTot = bLast + 1;
-  push(C('Total', 'gsttot', { bg: CLR.returns }),
-    ...[1, 2, 3, 4, 5].map((i) => C(`=SUM(${colLetter(i)}${bFirst}:${colLetter(i)}${bLast})`, 'gsttot',
-      { fmt: RUP, bg: CLR.returns })),
-    C(`=IFERROR(-E${bTot}/B${bTot},0)`, 'gsttot', { fmt: PCT, bg: CLR.returns }));
-  push(C('Net sales above agree with A (to be Nil)', 'ok'), C('', 'ok'), C('', 'ok'), C('', 'ok'), C('', 'ok'),
-    C(`=ROUND(F${bTot}-F${rA4},2)`, 'ok', { fmt: AMT }), C('', 'ok'));
+  push(C(`Net sales for the period were Rs ${inv(b.gst.consolidated || b.gst.blocks[0].net)
+           .toLocaleString('en-IN', { maximumFractionDigits: 0 })} — see the Sales Summary sheet, which `
+       + 'carries sales, RTO and returns for each registration.', 'note'));
   blank();
 
   /* ── C. the bridge ──────────────────────────────────────────────────── */
-  band('C.  RECONCILIATION OF THE GSTR-1 WORKBOOKS WITH THE PAYMENT RECONCILIATION', CLR.recon, 4);
-  /* State the gap FIRST, then explain it. Previously this table opened with the
-     workbook figure and closed with the payment figure, and a reader landing on
-     the two totals had no way to see that the second is the first plus three
-     measured adjustments — they read as two different answers to one question. */
+  band('C.  WHAT SHOPIFY DELIVERED, AGAINST WHAT THE GSTR-1 WORKBOOKS TAXED', CLR.recon);
   head(['Particulars', 'No. of orders', 'Amount (₹)', 'Remarks'], CLR.recon);
-  const c1 = push(C('Delivered — per the GSTR-1 workbooks', 'gstrow'),
-    C(br.salesDelivered.orders, 'gstrow', { fmt: INT }), C(br.salesDelivered.amount, 'gstrow', { fmt: RUP }),
-    C('The total of table B above. These are Shopify orders that reached a GSTR-1 workbook.', 'sub'));
-  const c2 = push(C('Delivered — per the payment reconciliation', 'gstrow'),
-    C(br.payDelivered.orders, 'gstrow', { fmt: INT }), C(br.payDelivered.amount, 'gstrow', { fmt: RUP }),
-    C('The payment reconciliation IS Shopify — it carries one row per Shopify order and its order '
-    + 'total agrees with the Shopify export to the rupee. So this line is every Shopify order marked '
-    + 'delivered, taxed or not.', 'sub'));
-  const cGap = push(C('DIFFERENCE TO BE EXPLAINED', 'gsttot', { bg: CLR.recon }),
-    C(`=B${c2}-B${c1}`, 'gsttot', { fmt: INT, bg: CLR.recon }),
-    C(`=C${c2}-C${c1}`, 'gsttot', { fmt: RUP, bg: CLR.recon }),
-    C('Both lines are the SAME April Shopify orders. The difference is not sales from anywhere else — '
-    + 'it is Shopify orders that the GSTR-1 workbooks taxed differently, or did not tax at all. '
-    + 'Discharged in full below; nothing is left as a balancing figure.', 'sub'));
+  const c1 = line('Delivered — per Shopify', br.payDelivered.orders, br.payDelivered.amount,
+    'Every Shopify order marked delivered, whether taxed or not.');
+  const c2 = line('Delivered — per the GSTR-1 workbooks', br.salesDelivered.orders, br.salesDelivered.amount,
+    'The part of the above that reached a GSTR-1 workbook. Also the total of table B on the Sales '
+    + 'Summary sheet.');
+  const cGap = line('DIFFERENCE TO BE EXPLAINED', `=B${c1}-B${c2}`, `=C${c1}-C${c2}`,
+    'Both lines are the SAME Shopify orders. The difference is not sales from anywhere else — it is '
+    + 'Shopify orders the GSTR-1 workbooks taxed differently, or did not tax at all.',
+    'gsttot', CLR.recon);
   blank();
   head(['Explained by', 'No. of orders', 'Amount (₹)', 'Remarks'], CLR.recon);
-  const x1 = push(C('Less: taxed as delivered, shown under another status in the payment reconciliation', 'gstrow'),
-    C(-br.salesOnly.orders, 'gstrow', { fmt: INT }), C(-br.salesOnly.amount, 'gstrow', { fmt: RUP }),
-    C('Returns, RTOs and the like in the payment reconciliation, still taxed as sales.', 'sub'));
-  const x2 = push(C('Add: orders only part delivered', 'gstrow'),
-    C(0, 'gstrow', { fmt: INT }), C(br.partDelivered.amount, 'gstrow', { fmt: RUP }),
-    C(`${br.partDelivered.orders.toLocaleString('en-IN')} orders. In BOTH records, so the count does not `
-    + 'change — only the value does. A customer ordered two or three items, some were delivered and the '
-    + 'rest were not; the GSTR-1 workbook taxes only the lines delivered, while the payment '
-    + 'reconciliation carries the whole Shopify order. Checked against the Shopify export: in every one '
-    + `of the ${br.partDelivered.orders.toLocaleString('en-IN')} the payment figure equals the Shopify `
-    + 'order total and the GSTR-1 figure is lower — never once the other way.', 'sub'));
-  const x3 = push(C('Add: orders in the payment reconciliation appearing in no GSTR-1 workbook', 'gstrow'),
-    C(br.payOnly.orders, 'gstrow', { fmt: INT }), C(br.payOnly.amount, 'gstrow', { fmt: RUP }),
-    C('In the Shopify export and in the payment reconciliation, but their order numbers appear on NO '
-    + 'sheet of any GSTR-1 workbook. Delivered and realised, apparently never taxed — see the schedule '
-    + '"Not In GSTR-1".', 'sub'));
-  const xT = push(C('Total explained', 'gsttot', { bg: CLR.recon }),
-    C(`=B${x1}+B${x2}+B${x3}`, 'gsttot', { fmt: INT, bg: CLR.recon }),
-    C(`=C${x1}+C${x2}+C${x3}`, 'gsttot', { fmt: RUP, bg: CLR.recon }), C('', 'gsttot', { bg: CLR.recon }));
+  const x1 = line('Orders Shopify does NOT call delivered, but the GSTR-1 workbooks taxed as delivered',
+    -br.salesOnly.orders, -br.salesOnly.amount,
+    'Returns and RTOs in Shopify, still taxed as sales. Listed on the schedule "Workbooks Differ".');
+  const x2 = line('Orders only part delivered', 0, br.partDelivered.amount,
+    `${br.partDelivered.orders.toLocaleString('en-IN')} orders, in BOTH records — so the count does not `
+    + 'change, only the value. A customer ordered two or three items and some were not delivered; the '
+    + 'GSTR-1 workbook taxes the lines delivered while Shopify carries the whole order. Checked against '
+    + `the Shopify export: in all ${br.partDelivered.orders.toLocaleString('en-IN')} the Shopify figure `
+    + 'is the higher, never once the other way.');
+  const x3 = line('Orders in Shopify appearing in no GSTR-1 workbook', br.payOnly.orders, br.payOnly.amount,
+    'Delivered and realised, but their order numbers appear on NO sheet of any GSTR-1 workbook, so they '
+    + 'may never have been reported in GSTR-1. Listed on the schedule "Not In GSTR-1".');
+  const xT = line('Total explained', `=B${x1}+B${x2}+B${x3}`, `=C${x1}+C${x2}+C${x3}`, '',
+    'gsttot', CLR.recon);
   const okC = Math.abs(br.difference) < 0.005;
-  push(C('Difference (to be Nil)', okC ? 'ok' : 'bad'),
-    C(`=B${xT}-B${cGap}`, okC ? 'ok' : 'bad', { fmt: INT }),
-    C(`=ROUND(C${xT}-C${cGap},2)`, okC ? 'ok' : 'bad', { fmt: AMT }), C('', okC ? 'ok' : 'bad'));
-  push(C('Neither figure above comes from a different source of sales. Every April Shopify order — all '
-       + `${b.totals.orders.toLocaleString('en-IN')} of them, Rs 5,85,05,718 — sits in the payment `
-       + 'reconciliation, which agrees with the Shopify export to the rupee. The GSTR-1 workbooks hold '
-       + 'the part of that which was taxed. The three lines above are the whole of the difference.',
-       'note'));
+  line('Difference (to be Nil)', `=B${xT}-B${cGap}`, `=ROUND(C${xT}-C${cGap},2)`, '',
+    okC ? 'ok' : 'bad');
   blank();
 
   /* ── D. collections ─────────────────────────────────────────────────── */
-  band('D.  COLLECTIONS AGAINST DELIVERED SALES', CLR.cash, 3);
-  head(['Particulars', 'No. of orders', 'Amount (₹)'], CLR.cash);
-  const d1 = row('Delivered — per the payment reconciliation', [br.payDelivered.orders, br.payDelivered.amount]);
-  const d2 = row('Less: collections received', [null, -br.collections]);
-  const d3 = row('Unsettled', [null, `=C${d1}+C${d2}`], 'gsttot', CLR.cash);
+  band('D.  COLLECTIONS AGAINST DELIVERED SALES', CLR.cash);
+  head(['Particulars', 'No. of orders', 'Amount (₹)', 'Remarks'], CLR.cash);
+  const d1 = line('Delivered — per Shopify', br.payDelivered.orders, br.payDelivered.amount,
+    'As in table C above.');
+  const d2 = line('Less: collections received', null, -br.collections,
+    'Money received against those orders, through all five collection channels.');
+  const d3 = line('Unsettled', b.exceptions.unsettled.length, `=C${d1}+C${d2}`,
+    `Every one of these ${b.exceptions.unsettled.length.toLocaleString('en-IN')} orders is listed on the `
+    + 'schedule "Unsettled Orders", each with the reason it is short.', 'gsttot', CLR.cash);
   blank();
-  head(['Collection channel', 'Orders routed', 'Collections received (₹)'], CLR.cash);
+  head(['Collection channel', 'Orders routed', 'Collections received (₹)', 'Remarks'], CLR.cash);
   const dFirst = g.length + 1;
-  for (const c of b.byCollector) row(c.label, [c.orders, c.collected]);
+  for (const c of b.byCollector)
+    line(c.label, c.orders, c.collected, '');
   const dLast = g.length;
-  const dTot = row('Total collections — all periods produced',
-    [null, `=SUM(C${dFirst}:C${dLast})`], 'gsttot', CLR.cash);
-  const dStated = row('As per the payment reconciliation', [null, b.totals.collected]);
+  const dTot = line('Total collections — all periods produced', null,
+    `=SUM(C${dFirst}:C${dLast})`, '', 'gsttot', CLR.cash);
+  const dStated = line('As per the payment reconciliation', null, b.totals.collected,
+    'The figure the payment reconciliation itself states.');
   const ok2 = b.checks.collectors === 0;
-  push(C('Difference (to be Nil)', ok2 ? 'ok' : 'bad'), C('', ok2 ? 'ok' : 'bad'),
-    C(`=ROUND(C${dTot}-C${dStated},2)`, ok2 ? 'ok' : 'bad', { fmt: AMT }));
+  line('Difference (to be Nil)', null, `=ROUND(C${dTot}-C${dStated},2)`, '', ok2 ? 'ok' : 'bad');
   blank();
 
-  /* ── E. what is unsettled, as at the date ───────────────────────────── */
-  band(`E.  AMOUNTS UNSETTLED AS ON ${pretty(b.asAt).toUpperCase()}`, CLR.due, 3);
-  head(['Particulars', 'No. of orders', 'Amount (₹)'], CLR.due);
-  const e1 = row('Delivered on or before the reporting date, realised subsequently',
-    [P.RECEIVABLE_LATE.orders, P.RECEIVABLE_LATE.amount]);
-  const e2 = row('Delivered on or before the reporting date, not realised',
-    [P.RECEIVABLE_UNPAID.orders, P.RECEIVABLE_UNPAID.amount]);
-  const e3 = row('Trade receivables (sundry debtors)', [`=B${e1}+B${e2}`, `=C${e1}+C${e2}`], 'gsttot', CLR.due);
-  const e4 = row('Realised, but date of receipt not recorded',
-    [P.RECEIVABLE_UNDATED.orders, P.RECEIVABLE_UNDATED.amount]);
-  const e5 = row('Maximum trade receivables, if the above are treated as unrealised',
-    [null, `=C${e3}+C${e4}`], 'gsttot');
-  const e6 = row('Goods in transit — dispatched within the period, delivered thereafter',
-    [P.IN_TRANSIT.orders, P.IN_TRANSIT.amount]);
-  row('Total amount recoverable', [null, `=C${e3}+C${e6}`], 'gsttot', CLR.due);
+  /* ── E. the position at the date ────────────────────────────────────── */
+  band(`E.  AMOUNTS UNSETTLED AS ON ${pretty(b.asAt).toUpperCase()}`, CLR.due);
+  head(['Particulars', 'No. of orders', 'Amount (₹)', 'Remarks'], CLR.due);
+  const e1 = line('Delivered on or before the reporting date, realised subsequently',
+    P.RECEIVABLE_LATE.orders, P.RECEIVABLE_LATE.amount,
+    'The goods were with the customer on that date and the money was not. Recovered since. '
+    + 'Listed on the schedule "Trade Receivables".');
+  const e2 = line('Delivered on or before the reporting date, not realised',
+    P.RECEIVABLE_UNPAID.orders, P.RECEIVABLE_UNPAID.amount,
+    'No realisation received against these at all. Also on "Trade Receivables".');
+  const e3 = line('Trade receivables (sundry debtors)', `=B${e1}+B${e2}`, `=C${e1}+C${e2}`,
+    'What was recoverable from customers on the reporting date.', 'gsttot', CLR.due);
+  const e4 = line('Realised, but date of receipt not recorded',
+    P.RECEIVABLE_UNDATED.orders, P.RECEIVABLE_UNDATED.amount,
+    'The money came but the payment reconciliation records no date for it, so it cannot be placed on '
+    + 'either side of the reporting date. Listed on "Realisation Unascertained".');
+  const e5 = line('Maximum trade receivables, if the above are treated as unrealised',
+    null, `=C${e3}+C${e4}`,
+    'The figure above is the minimum; this is the maximum.', 'gsttot');
+  const e6 = line('Goods in transit — dispatched within the period, delivered thereafter',
+    P.IN_TRANSIT.orders, P.IN_TRANSIT.amount,
+    'Not a trade receivable where revenue is recognised on delivery, but money the business is owed. '
+    + 'Listed on "Goods In Transit".');
+  line('Total amount recoverable', null, `=C${e3}+C${e6}`,
+    'Trade receivables plus goods in transit.', 'gsttot', CLR.due);
   blank();
-  head(['Trade receivables — collection channel wise', 'No. of orders', 'Amount recoverable (₹)'], CLR.due);
+  head(['Trade receivables — collection channel wise', 'No. of orders', 'Amount recoverable (₹)', 'Remarks'],
+       CLR.due);
   const fFirst = g.length + 1;
-  for (const r of b.receivableSplit) row(r.label, [r.orders, r.receivable]);
+  for (const r of b.receivableSplit) line(r.label, r.orders, r.receivable, '');
   const fLast = g.length;
-  const fTot = row('Total', [`=SUM(B${fFirst}:B${fLast})`, `=SUM(C${fFirst}:C${fLast})`], 'gsttot', CLR.due);
+  const fTot = line('Total', `=SUM(B${fFirst}:B${fLast})`, `=SUM(C${fFirst}:C${fLast})`, '',
+    'gsttot', CLR.due);
   const okS = b.checks.receivableSplit === 0;
-  push(C('Difference with trade receivables above (to be Nil)', okS ? 'ok' : 'bad'), C('', okS ? 'ok' : 'bad'),
-    C(`=ROUND(C${fTot}-C${e3},2)`, okS ? 'ok' : 'bad', { fmt: AMT }));
+  line('Difference with trade receivables above (to be Nil)', null, `=ROUND(C${fTot}-C${e3},2)`, '',
+    okS ? 'ok' : 'bad');
   blank();
 
-  /* ── F. notes ───────────────────────────────────────────────────────── */
-  band('F.  NOTES AND QUALIFICATIONS', CLR.notes, 5);
-  head(['Particulars', 'No. of orders', 'Amount (₹)', 'Amount is', 'Remarks'], CLR.notes);
+  /* ── F / G. notes ───────────────────────────────────────────────────── */
+  band('F.  NOTES AND QUALIFICATIONS', CLR.notes);
+  head(['Particulars', 'No. of orders', 'Amount (₹)', 'Remarks  (the amount is stated on the basis shown first)'],
+       CLR.notes);
   for (const l of b.limits)
-    push(C(l.label, 'gstrow'), C(l.orders, 'gstrow', { fmt: INT }),
-         C(l.amount, 'gstrow', { fmt: RUP }), C(l.basis || '', 'gstrow'), C(l.why, 'sub'));
+    line(l.label, l.orders, l.amount, `${l.basis ? `[${l.basis}]  ` : ''}${l.why}`);
   blank();
-  band('G.  AMOUNTS UNREALISED AS ON DATE — FOR RECOVERY', CLR.notes, 5);
-  head(['Particulars', 'No. of orders', 'Amount (₹)', 'Amount is', 'Remarks'], CLR.notes);
+  band('G.  AMOUNTS UNREALISED AS ON DATE — FOR RECOVERY', CLR.notes);
+  head(['Particulars', 'No. of orders', 'Amount (₹)', 'Remarks'], CLR.notes);
   const WL = [
     ['Collection channel not identified', b.exceptions.noCollector,
-     'Delivered, unrealised, and no gateway or UTR on record'],
+     'Delivered, unrealised, and no gateway or UTR on record. Schedule "Channel Not Identified".'],
     ['Flagged in the payment reconciliation', b.exceptions.redFlag,
-     'Marked RED FLAG by the accountant in the payment reconciliation'],
+     'Marked RED FLAG by the accountant. Schedule "Flagged In Payment Reco".'],
     ['Part realisation received', b.exceptions.shortPaid,
-     'Realisation received through a named channel, but short of the invoice value'],
+     'Money came through a named channel but short of the invoice value. Schedule "Part Realisation".'],
   ];
   for (const [label, rows, why] of WL)
-    push(C(label, 'gstrow'), C(rows.length, 'gstrow', { fmt: INT }),
-         C(Number(rows.reduce((a, x) => a + Math.abs(x.gap), 0).toFixed(2)), 'gstrow', { fmt: RUP }),
-         C('Shortfall', 'gstrow'), C(why, 'sub'));
-  push(C('Total unrealised as on date', 'gsttot', { bg: CLR.notes }), C('', 'gsttot', { bg: CLR.notes }),
-       C(b.totals.stillShortToday, 'gsttot', { fmt: RUP, bg: CLR.notes }), C('', 'gsttot', { bg: CLR.notes }),
-       C('A recovery schedule, NOT trade receivables as on the reporting date — most collections had '
-       + 'been received by the date of preparation, though not by the reporting date.', 'sub'));
+    line(label, rows.length, Number(rows.reduce((a, x) => a + Math.abs(x.gap), 0).toFixed(2)), why);
+  line('Total unrealised as on date', b.exceptions.unsettled.length, b.totals.stillShortToday,
+    'Ties to the Unsettled line of table D, and to the schedule "Unsettled Orders", which gives the '
+    + 'reason for every one of them. This is a recovery schedule and NOT trade receivables as on the '
+    + 'reporting date — most collections had been received by the date of preparation, though not by '
+    + 'the reporting date.', 'gsttot', CLR.notes);
 
-  const ws = sheetFrom(g, [64, 16, 18, 20, 16, 16, 20]);
+  const WIDTH = 92;   // characters that fit the remarks column
+  const ws = sheetFrom(g, [56, 14, 18, WIDTH]);
   ws['!rows'] = g.map((r) => {
     const k = r && r[0] ? r[0].kind : null;
     if (k === 'title') return { hpt: 26 };
     if (k === 'gstband' || k === 'gsthead') return { hpt: 21 };
-    if ((r && r[4] && r[4].kind === 'sub') || (r && r[3] && r[3].kind === 'sub')) return { hpt: 30 };
-    if (r && r[0] && String(r[0].v || '').length > 70) return { hpt: 28 };
-    return { hpt: 16 };
+    if (k === 'note') return { hpt: 30 };
+    const rem = r && r[3] && typeof r[3].v === 'string' ? r[3].v : '';
+    const lab = r && r[0] && typeof r[0].v === 'string' ? r[0].v : '';
+    const lines = Math.max(Math.ceil(rem.length / WIDTH), Math.ceil(lab.length / 56), 1);
+    return { hpt: 4 + lines * 14 };
   });
   return ws;
 }
@@ -513,6 +501,23 @@ const WORKLIST_COLS = [
      should have to be taken on trust. */
   { key: 'remark', label: 'Basis' },
 ];
+/* The unsettled schedule leads with the reason, because that is what the
+   person working it needs first. */
+const UNSETTLED_COLS = [
+  { key: 'order_id', label: 'Order no.' },
+  { key: 'entity', label: 'GST registration' },
+  { key: 'order_date', label: 'Order date' },
+  { key: 'delivered_date', label: 'Date of delivery' },
+  { key: 'collector', label: 'Collection channel' },
+  { key: 'shipping_state', label: 'Place of supply' },
+  { key: 'billed', label: 'Invoice value', money: true },
+  { key: 'collected', label: 'Amount realised', money: true },
+  { key: 'still_short', label: 'Amount short', money: true },
+  { key: 'utr_id', label: 'UTR' },
+  { key: 'remarks', label: 'Remark per payment reco' },
+  { key: 'unsettled_reason', label: 'Why it is unsettled' },
+];
+const UNSETTLED_W = [12, 15, 12, 15, 20, 15, 14, 15, 14, 20, 20, 96];
 const WL_W = [12, 8, 12, 16, 18, 13, 13, 13, 13, 13, 15, 20, 18, 74];
 
 function buildWorkbook(b, meta) {
@@ -571,6 +576,16 @@ function buildWorkbook(b, meta) {
       total: false,
     }));
   }
+
+  /* The schedule behind the "Unsettled" line of table D. */
+  add('Unsettled Orders', tableSheet(UNSETTLED_COLS,
+    [...b.exceptions.unsettled].sort((x, y) => Math.abs(y.still_short) - Math.abs(x.still_short)),
+    UNSETTLED_W, {
+      title: 'Unsettled orders — delivered, but the money received differs from the amount billed',
+      note: 'Every order behind the "Unsettled" line of table D, largest first. The last column gives '
+          + 'the reason for each one in words. The total below agrees with table D and with the '
+          + '"Total unrealised as on date" line of table G.',
+    }));
 
   const pos = (k) => b.ledger.filter((l) => l.position === k);
   const WL = [

@@ -104,7 +104,9 @@ blocks = {}
 for r in range(1, ws.max_row + 1):
     v = ws.cell(r, 1).value
     if v in ('Haryana', 'Karnataka', 'Maharashtra', 'All registrations — consolidated'):
-        blocks[v] = r
+        # the state names appear TWICE on this sheet now — once as a per-state
+        # block caption and again as a row of table B. The block is the first.
+        blocks.setdefault(v, r)
 NAME = {'HR': 'Haryana', 'KAR': 'Karnataka', 'MH': 'Maharashtra'}
 for st in STATES:
     base = blocks[NAME[st]]          # caption row; header is +1, Shopify +2
@@ -134,27 +136,29 @@ def findrow(text, col=1):
             return r
     raise SystemExit(f'row not found: {text}')
 
-# A
-rA = findrow('Shopify — delivered')
-for j, head in enumerate(HEADS):
-    col = chr(ord('B') + j)
-    check(f'  A Shopify {head}', cell('Receivables', f'{col}{rA}'), sum(src[s]['sales'][j] for s in STATES))
-    check(f'  A RTO {head}', cell('Receivables', f'{col}{rA+1}'), -sum(src[s]['rto'][j] for s in STATES))
-    check(f'  A Refunds {head}', cell('Receivables', f'{col}{rA+2}'), -sum(src[s]['ref'][j] for s in STATES))
-    check(f'  A Net Sales {head}', cell('Receivables', f'{col}{rA+3}'),
-          sum(src[s]['sales'][j] - src[s]['rto'][j] - src[s]['ref'][j] for s in STATES))
-check('  A invoice value = taxable + 3 heads', cell('Receivables', f'F{rA}'),
-      sum(sum(src[s]['sales']) for s in STATES))
+# A / B now live on the Sales Summary sheet
+ssw = wb['Sales Summary']
+def ss_find(text, col=1):
+    for r in range(1, ssw.max_row + 1):
+        v = ssw.cell(r, col).value
+        if isinstance(v, str) and v.strip().startswith(text): return r
+    raise SystemExit(f'Sales Summary row not found: {text}')
+def ss_cell(coord):
+    v = ssw[coord].value
+    if isinstance(v, str) and v.startswith('='): return Calc(ssw).eval(v[1:])
+    return float(v) if isinstance(v, (int, float)) else v
 
-# B
+rB = ss_find('RETURNS AND RTO — BY REGISTRATION')
 for st in STATES:
-    r = findrow(NAME[st])
-    check(f'  B {NAME[st]} delivered (invoice value)', cell('Receivables', f'B{r}'), sum(src[st]['sales']))
-    check(f'  B {NAME[st]} RTO', cell('Receivables', f'C{r}'), -sum(src[st]['rto']))
-    check(f'  B {NAME[st]} sales returns', cell('Receivables', f'D{r}'), -sum(src[st]['ref']))
-    check(f'  B {NAME[st]} net sales', cell('Receivables', f'F{r}'),
+    # the row INSIDE table B, i.e. at or after the table B caption
+    rr = None
+    for k in range(rB, ssw.max_row + 1):
+        if str(ssw.cell(k, 1).value).strip() == NAME[st]: rr = k; break
+    check(f'  B {NAME[st]} delivered (invoice value)', ss_cell(f'B{rr}'), sum(src[st]['sales']))
+    check(f'  B {NAME[st]} RTO', ss_cell(f'C{rr}'), -sum(src[st]['rto']))
+    check(f'  B {NAME[st]} sales returns', ss_cell(f'D{rr}'), -sum(src[st]['ref']))
+    check(f'  B {NAME[st]} net sales', ss_cell(f'F{rr}'),
           sum(src[st]['sales']) - sum(src[st]['rto']) - sum(src[st]['ref']))
-check('  B net agrees with A (check row = 0)', cell('Receivables', f'F{findrow("Net sales above agree")}'), 0)
 
 # C — the bridge, recomputed independently
 sales_deliv = {}
@@ -172,16 +176,16 @@ sales_only = [k for k in sales_deliv if k not in pay_ids]
 pay_only = [k for k in pay_ids if k not in sales_deliv]
 part = [k for k in common if abs(sales_deliv[k] - pay_by[k]) > 0.5]
 
-rC = findrow('Delivered — per the GSTR-1 workbooks')
-check('  C delivered per GSTR-1 workbooks — orders', cell('Receivables', f'B{rC}'), len(sales_deliv), 0)
-check('  C delivered per GSTR-1 workbooks — amount', cell('Receivables', f'C{rC}'), sum(sales_deliv.values()))
-check('  C delivered per payment reco — orders', cell('Receivables', f'B{rC+1}'), len(pay_deliv), 0)
-check('  C delivered per payment reco — amount', cell('Receivables', f'C{rC+1}'), pay_deliv['billed'].sum())
+rC = findrow('Delivered — per Shopify')
+check('  C delivered per Shopify — orders', cell('Receivables', f'B{rC}'), len(pay_deliv), 0)
+check('  C delivered per Shopify — amount', cell('Receivables', f'C{rC}'), pay_deliv['billed'].sum())
+check('  C delivered per GSTR-1 workbooks — orders', cell('Receivables', f'B{rC+1}'), len(sales_deliv), 0)
+check('  C delivered per GSTR-1 workbooks — amount', cell('Receivables', f'C{rC+1}'), sum(sales_deliv.values()))
 check('  C difference to be explained — orders', cell('Receivables', f'B{rC+2}'),
       len(pay_deliv) - len(sales_deliv), 0)
 check('  C difference to be explained — amount', cell('Receivables', f'C{rC+2}'),
       pay_deliv['billed'].sum() - sum(sales_deliv.values()))
-rX = findrow('Less: taxed as delivered')
+rX = findrow('Orders Shopify does NOT call delivered')
 check('  C explained: another status — orders', cell('Receivables', f'B{rX}'), -len(sales_only), 0)
 check('  C explained: another status — amount', cell('Receivables', f'C{rX}'),
       -sum(sales_deliv[k] for k in sales_only))
@@ -200,6 +204,10 @@ check('  C DIFFERENCE order count (check row = 0)', cell('Receivables', f'B{rX+4
 rD = findrow('Less: collections received')
 check('  D collections received', cell('Receivables', f'C{rD}'), -pay_deliv['rem'].sum())
 check('  D unsettled', cell('Receivables', f'C{rD+1}'), pay_deliv['billed'].sum() - pay_deliv['rem'].sum())
+check('  D unsettled order count = the Unsettled Orders schedule', cell('Receivables', f'B{rD+1}'),
+      sum(1 for r in range(1, wb['Unsettled Orders'].max_row + 1)
+          if isinstance(wb['Unsettled Orders'].cell(r, 1).value, (int, float, str))
+          and str(wb['Unsettled Orders'].cell(r, 1).value).isdigit()), 0)
 for i, c in enumerate(COLL):
     r = findrow(['Cashfree', 'Bill Desk', 'Bill Desk — exchange', 'Razorpay — exchange',
                  'Shiprocket — cash on delivery'][i])

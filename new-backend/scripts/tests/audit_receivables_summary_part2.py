@@ -42,11 +42,13 @@ def colsum(ws, col, rows):
         if isinstance(v, (int, float)): t += v
     return t
 
-SCHED = ['Trade Receivables', 'Realisation Unascertained', 'Goods In Transit', 'Channel Not Identified',
+SCHED = ['Unsettled Orders', 'Trade Receivables', 'Realisation Unascertained', 'Goods In Transit', 'Channel Not Identified',
          'Flagged In Payment Reco', 'Part Realisation', 'Workbooks Differ', 'Not In GSTR-1',
          'Bank Date Not Recorded', 'Two Registrations']
 # column positions on a worklist sheet
 COL = {'billed': 9, 'realised': 10, 'recoverable': 11}
+# the Unsettled schedule has its own column order
+UNSETTLED_COL = {'billed': 7, 'realised': 8, 'short': 9}
 
 print('=' * 100); print('AUDIT PART 2'); print('=' * 100)
 
@@ -62,8 +64,9 @@ for name in SCHED:
         if str(ws.cell(r, 1).value).strip() == 'Total': tot_row = r
     if name not in wb.sheetnames:
         res.append((False, f'  schedule "{name}" is missing from the workbook', 0, 1)); continue
+    cols = UNSETTLED_COL if name == 'Unsettled Orders' else COL
     if tot_row:
-        for label, c in COL.items():
+        for label, c in cols.items():
             stated = val(ws, tot_row, c)
             if stated is None: continue
             check(f'  {name}: {label} total = sum of rows', stated, colsum(ws, c, rows))
@@ -78,6 +81,12 @@ def findrow(text):
         v = ws.cell(r, 1).value
         if isinstance(v, str) and v.strip().startswith(text): return r
     return None
+
+def require(text):
+    r = findrow(text)
+    if r is None:
+        res.append((False, f'  caption not found on the Receivables sheet: "{text[:56]}"', 0, 1))
+    return r
 NOTE_TO_SCHED = {
     'Realisation date not recorded': ('Realisation Unascertained', None),
     'Collection channel not identified — delivered and unrealised': ('Channel Not Identified', None),
@@ -98,9 +107,9 @@ for note, (sched, _) in NOTE_TO_SCHED.items():
 # ── the same population reported twice under different amounts ───────────────
 print('\n6. CONSISTENCY — is any population given two different amounts?')
 rC = findrow('Add: orders in the payment reconciliation appearing in no GSTR-1 workbook')
-c_orders, c_amount = val(ws, rC, 2), val(ws, rC, 3)
-rN = findrow('Delivered and realised, but not in any GSTR-1 workbook')
-n_orders, n_amount = val(ws, rN, 2), val(ws, rN, 3)
+c_orders, c_amount = (val(ws, rC, 2), val(ws, rC, 3)) if rC else (0, 0)
+rN = require('Delivered and realised, but not in any GSTR-1 workbook')
+n_orders, n_amount = (val(ws, rN, 2), val(ws, rN, 3)) if rN else (0, 0)
 print(f'   "in no sales register"  table C: {c_orders:.0f} orders  {c_amount:,.2f}')
 print(f'                           note  F: {n_orders:.0f} orders  {n_amount:,.2f}')
 same_pop = abs(c_orders - n_orders) < 0.5
@@ -114,8 +123,8 @@ ss = wb['Sales Summary']
 ss_net = {}
 for r in range(1, ss.max_row + 1):
     v = ss.cell(r, 1).value
-    if v in ('Haryana', 'Karnataka', 'Maharashtra'):
-        ss_net[v] = val(ss, r + 2, 2)      # Shopify taxable
+    if v in ('Haryana', 'Karnataka', 'Maharashtra') and v not in ss_net:
+        ss_net[v] = val(ss, r + 2, 2)      # Shopify taxable, from the FIRST block
 NAME = {'HR': 'Haryana', 'KAR': 'Karnataka', 'MH': 'Maharashtra'}
 for r in range(1, rw.max_row + 1):
     e = rw.cell(r, 1).value
@@ -149,7 +158,7 @@ print('   classifications:', ', '.join(f'{k}={v}' for k, v in sorted(cls.items()
 res.append((None not in cls, '  every ledger row carries a classification', 0 if None not in cls else 1, 0))
 # ledger recoverable column must equal the trade receivable
 led_rec = colsum(ol, 14, rows) if ol.cell(5, 14).value else None
-rE = findrow('Trade receivables (sundry debtors)')
+rE = require('Trade receivables (sundry debtors)')
 print(f'   trade receivables per table E: {val(ws, rE, 3):,.2f}')
 
 print('\n10. LABEL COLLISIONS — the same caption used for two different figures')
