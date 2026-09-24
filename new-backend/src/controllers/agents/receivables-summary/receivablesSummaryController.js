@@ -234,18 +234,20 @@ const getSummary = async (req, res, next) => {
         .map((g) => ({ key: g, label: b.GROUP_LABEL[g], ...b.byGroup[g] })),
       receivableSplit: b.receivableSplit,
       worklists: [
-        { key: 'receivable', label: 'Receivable at the cut-off',
+        /* Same captions as the schedules in the workbook, so a figure on screen
+           and a figure in the file are never called two different things. */
+        { key: 'receivable', label: 'Trade receivables',
           rows: b.ledger.filter((l) => l.owed > 0 || l.position === 'RECEIVABLE_UNPAID').length },
-        { key: 'uncertain', label: 'Uncertain — cannot be placed',
+        { key: 'uncertain', label: 'Realisation unascertained',
           rows: b.ledger.filter((l) => l.uncertain > 0).length },
-        { key: 'inTransit', label: 'In transit at the cut-off',
+        { key: 'inTransit', label: 'Goods in transit',
           rows: b.ledger.filter((l) => l.position === 'IN_TRANSIT').length },
-        { key: 'noCollector', label: 'No collector', rows: b.exceptions.noCollector.length },
-        { key: 'redFlag', label: 'Red flag', rows: b.exceptions.redFlag.length },
-        { key: 'shortPaid', label: 'Short paid', rows: b.exceptions.shortPaid.length },
-        { key: 'statusConflict', label: 'Status conflict', rows: b.exceptions.statusConflict.length },
-        { key: 'taxedNowhere', label: 'Delivered, taxed nowhere', rows: b.exceptions.taxedNowhere.length },
-        { key: 'noDeposit', label: 'No deposit date', rows: b.exceptions.noDeposit.length },
+        { key: 'noCollector', label: 'Channel not identified', rows: b.exceptions.noCollector.length },
+        { key: 'redFlag', label: 'Flagged in payment reco', rows: b.exceptions.redFlag.length },
+        { key: 'shortPaid', label: 'Part realisation', rows: b.exceptions.shortPaid.length },
+        { key: 'statusConflict', label: 'Records differ', rows: b.exceptions.statusConflict.length },
+        { key: 'taxedNowhere', label: 'Not in sales register', rows: b.exceptions.taxedNowhere.length },
+        { key: 'noDeposit', label: 'Bank date not recorded', rows: b.exceptions.noDeposit.length },
       ],
     });
   } catch (error) { next(error); }
@@ -281,7 +283,7 @@ const generateWorkbook = async (req, res, next) => {
     });
 
     await ensureDir();
-    const filename = `Receivables Summary - ${brand.name} - as at ${b.asAt}.xlsx`;
+    const filename = `Statement of Trade Receivables - ${brand.name} - as on ${b.asAt}.xlsx`;
     XLSXStyle.writeFile(wb, path.join(OUTPUT_DIR, filename), WRITE_OPTS);
 
     res.json({

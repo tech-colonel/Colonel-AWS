@@ -40,12 +40,12 @@ function moneyGroup(status, remarks) {
 
 const GROUP_LABEL = {
   DELIVERED: 'Delivered',
-  RETURNED:  'Returned to customer',
-  RTO:       'RTO — came back',
-  CANCELLED: 'Cancelled',
+  RETURNED:  'Sales return',
+  RTO:       'Returned to origin (RTO)',
+  CANCELLED: 'Cancelled before dispatch',
   LOST:      'Lost in transit',
-  IN_FLIGHT: 'Still in transit',
-  NO_STATUS: 'No status recorded',
+  IN_FLIGHT: 'In transit',
+  NO_STATUS: 'Status not recorded',
   OTHER:     'Other',
 };
 const GROUP_ORDER = ['DELIVERED', 'RETURNED', 'IN_FLIGHT', 'RTO', 'CANCELLED', 'LOST', 'NO_STATUS', 'OTHER'];
@@ -79,13 +79,13 @@ const TAXY = ['order_total', 'taxable_value', 'tax_amount', 'cgst', 'sgst', 'igs
    Each order lands in exactly one position, and carries a remark saying in
    plain words why, so nothing in this file has to be taken on trust. */
 const POSITION = {
-  PAID_IN_PERIOD:     'Delivered and paid within the period',
-  RECEIVABLE_LATE:    'Delivered by the cut-off, money arrived after it',
-  RECEIVABLE_UNPAID:  'Delivered by the cut-off, no money received at all',
-  RECEIVABLE_UNDATED: 'Delivered by the cut-off and paid, but the file records no payment date',
-  UNDATED_DELIVERY:   'Marked delivered, but the file records no delivery date',
-  IN_TRANSIT:         'Dispatched but not delivered by the cut-off',
-  NOT_DUE:            'Nothing is owed — returned, cancelled or lost',
+  PAID_IN_PERIOD:     'Realised within the period',
+  RECEIVABLE_LATE:    'Recoverable — realised after the reporting date',
+  RECEIVABLE_UNPAID:  'Recoverable — not realised',
+  RECEIVABLE_UNDATED: 'Realised, date of receipt not recorded',
+  UNDATED_DELIVERY:   'Delivered, date of delivery not recorded',
+  IN_TRANSIT:         'Goods in transit',
+  NOT_DUE:            'Not recoverable',
 };
 const POSITION_ORDER = ['RECEIVABLE_LATE', 'RECEIVABLE_UNPAID', 'RECEIVABLE_UNDATED',
                         'UNDATED_DELIVERY', 'IN_TRANSIT', 'PAID_IN_PERIOD', 'NOT_DUE'];
@@ -99,35 +99,39 @@ function placeOrder(l, asAt) {
 
   if (l.group !== 'DELIVERED') {
     return { position: 'NOT_DUE',
-             remark: `${GROUP_LABEL[l.group]} — no money is due on this order.` };
+             remark: `${GROUP_LABEL[l.group]}. No amount recoverable from the customer.` };
   }
   if (!delivered) {
     return { position: 'UNDATED_DELIVERY',
-             remark: 'The payment file marks this delivered but records no delivery date, so it cannot '
-                   + 'be placed on either side of the cut-off. Counted as uncertain, never as collected.' };
+             remark: 'Shown as delivered in the payment reconciliation, but no date of delivery is on '
+                   + `record. Could not be classified against the reporting date ${asAt}. Treated as `
+                   + 'unascertained; not taken as realised.' };
   }
   if (delivered > asAt) {
     return { position: 'IN_TRANSIT',
-             remark: `Delivered ${delivered}, after the ${asAt} cut-off. The goods had left but had not `
-                   + 'arrived, so this is not a trade receivable on a delivery basis.' };
+             remark: `Dispatched within the period. Delivery completed ${delivered}, i.e. after the `
+                   + `reporting date ${asAt}. Goods in transit — not a trade receivable where revenue is `
+                   + 'recognised on delivery.' };
   }
   if (l.collected === 0) {
     return { position: 'RECEIVABLE_UNPAID',
-             remark: `Delivered ${delivered} and nothing has been received`
-                   + `${l.collector ? ` via ${l.collector}` : ', with no collector named'}. Owed.` };
+             remark: `Delivered ${delivered}. No realisation received till date`
+                   + `${l.collector ? ` through ${l.collector}` : '; collection channel not identified'}. `
+                   + 'Outstanding and recoverable.' };
   }
   if (!paid) {
     return { position: 'RECEIVABLE_UNDATED',
-             remark: `Delivered ${delivered} and the money came, but the file gives no payment date, so `
-                   + 'it cannot be told whether it landed before or after the cut-off. Shown as uncertain.' };
+             remark: `Delivered ${delivered}. Realisation received, but the payment reconciliation records `
+                   + 'no date of receipt, hence the period of realisation could not be ascertained.' };
   }
   if (paid > asAt) {
     return { position: 'RECEIVABLE_LATE',
-             remark: `Delivered ${delivered}, money received ${paid} — after the ${asAt} cut-off. `
-                   + 'Owed to you on that date.' };
+             remark: `Delivered ${delivered}. Realisation received ${paid}, i.e. after the reporting date `
+                   + `${asAt}. Recoverable as on that date; subsequently realised.` };
   }
   return { position: 'PAID_IN_PERIOD',
-           remark: `Delivered ${delivered}, money received ${paid}. Settled within the period.` };
+           remark: `Delivered ${delivered}. Realisation received ${paid}, on or before the reporting `
+                 + 'date. No amount recoverable.' };
 }
 
 /**
@@ -274,8 +278,8 @@ function buildReceivables(allRows, asAtIn) {
      its own row rather than vanishing — which is what makes the split tie. */
   const collectorKeys = ['cashfree', 'billdesk', 'billdesk_exchange', 'razorpay_exchange', 'shiprocket'];
   const COLLECTOR_LABEL = {
-    cashfree: 'Cashfree', billdesk: 'Bill Desk', billdesk_exchange: 'Bill Desk (exchange)',
-    razorpay_exchange: 'Razorpay (exchange)', shiprocket: 'Shiprocket — COD',
+    cashfree: 'Cashfree', billdesk: 'Bill Desk', billdesk_exchange: 'Bill Desk — exchange',
+    razorpay_exchange: 'Razorpay — exchange', shiprocket: 'Shiprocket — cash on delivery',
   };
   const MATCH = [
     ['billdesk_exchange', /bill\s*desk.*exchange/i],
@@ -316,8 +320,8 @@ function buildReceivables(allRows, asAtIn) {
   };
   const receivableSplit = [
     ...collectorKeys.map((k) => bucketRow(k, COLLECTOR_LABEL[k])),
-    bucketRow('other', 'Collector named but not one of the five'),
-    bucketRow('none', 'No collector named'),
+    bucketRow('other', 'Channel not among the five above'),
+    bucketRow('none', 'Collection channel not identified'),
   ].filter((r) => r.orders > 0);
 
   const entities = [...new Set(ledger.map((l) => l.entity).filter(Boolean))].sort();
@@ -379,7 +383,10 @@ function buildReceivables(allRows, asAtIn) {
     positionSplit: r2(POSITION_ORDER.reduce((a, k) => add(a, byPosition[k].orders), 0) - ledger.length),
   };
 
-  const periods = [...new Set(ledger.map((l) => l.period).filter(Boolean))].sort();
+  const MONTHS = ['', 'January', 'February', 'March', 'April', 'May', 'June', 'July',
+                  'August', 'September', 'October', 'November', 'December'];
+  const periods = [...new Set(ledger.map((l) => l.period).filter(Boolean))].sort()
+    .map((p) => { const [y, m] = p.split('-'); return `${MONTHS[Number(m)]} ${y}`; });
 
   /* Every known limit of this data, with its size, so a reader meets it on the
      face of the report rather than discovering it later. */
@@ -389,37 +396,42 @@ function buildReceivables(allRows, asAtIn) {
   });
   const limits = [
     lim('undatedPayment', ledger.filter((l) => l.position === 'RECEIVABLE_UNDATED'), (l) => l.collected,
-        'Paid, but no payment date',
-        'Delivered before the cut-off and the money came, but the file records no date for it. These '
-      + 'could sit on either side of the cut-off, so the receivable above is a floor, not a ceiling.'),
+        'Realisation date not recorded',
+        'Delivered on or before the reporting date and realisation received, but the payment '
+      + 'reconciliation records no date of receipt. The period of realisation could not be ascertained, '
+      + 'hence trade receivables above are stated at the minimum.'),
     lim('undatedDelivery', ledger.filter((l) => l.position === 'UNDATED_DELIVERY'), (l) => l.billed,
-        'Marked delivered, no delivery date',
-        'The payment file calls these delivered but gives no delivery date, so they cannot be placed '
-      + 'against the cut-off at all.'),
+        'Date of delivery not recorded',
+        'Shown as delivered in the payment reconciliation without a date of delivery, hence these could '
+      + 'not be classified against the reporting date.'),
     lim('noDeposit', exceptions.noDeposit, (l) => l.collected,
-        'No bank deposit date',
-        '"Date of Deposit in bank" is blank on every row of the payment file. Money can be traced to a '
-      + 'collector but not to the bank, so nothing here can be aged against the statement.'),
+        'Bank credit date not recorded',
+        'The column "Date of Deposit in bank" is blank throughout the payment reconciliation. '
+      + 'Collections are traceable to the collection channel but not to the bank account, hence ageing '
+      + 'against the bank statement could not be carried out.'),
     lim('noCollector', exceptions.noCollector, (l) => l.billed,
-        'No collector named',
-        'Delivered, nothing received, and no gateway or UTR on the row. Nothing in the file says who '
-      + 'should have paid.'),
+        'Collection channel not identified',
+        'Delivered, no realisation received, and no payment gateway or UTR on record. The party from '
+      + 'whom recovery is due could not be identified from the records produced.'),
     lim('statusConflict', exceptions.statusConflict, (l) => l.billed,
-        'Sales file and payment file disagree',
-        'The state workbook taxed these as delivered; the payment file gives them another status. One '
-      + 'of the two is wrong, and the GST position depends on which. Reported, never netted away.'),
+        'Sales register and payment reconciliation differ',
+        'Taxed as delivered in the GST sales register, but shown under a different status in the payment '
+      + 'reconciliation. One of the two records is incorrect and the GST liability depends on which. '
+      + 'Reported as is; no adjustment has been made.'),
     lim('taxedNowhere', exceptions.taxedNowhere, (l) => l.collected,
-        'Collected but in no state workbook',
-        'The payment file shows these delivered and paid, but they appear in none of the GST sales '
-      + 'workbooks, so they may have been collected without reaching GSTR-1.'),
+        'Realised but not in the GST sales register',
+        'Shown as delivered and realised in the payment reconciliation, but not appearing in any of the '
+      + 'GST sales registers produced. These may have been realised without being reported in GSTR-1.'),
     lim('splitShipment', ledger.filter((l) => l.split_shipment), (l) => l.billed,
-        'Shipped from two registrations',
-        'One order whose lines went out from two warehouses. Counted once at order level here; summing '
-      + 'the per-GSTIN sheet instead would double count these.'),
+        'Billed from two GST registrations',
+        'A single order whose line items were dispatched from two warehouses and billed under two GST '
+      + 'registrations. Taken once at order level; aggregating the registration-wise schedule instead '
+      + 'would result in double counting.'),
     lim('outOfWindow', ledger.filter((l) => !l.in_payment_file), (l) => l.billed,
-        'No payment row in the uploaded months',
-        'These reach back before the earliest payment file uploaded — mostly RTOs of an earlier month. '
-      + 'Nothing is owed on them, but their collection sits in a month not loaded here.'),
+        'Realisation falls outside the periods produced',
+        'Pertaining to a period earlier than the earliest payment reconciliation produced — largely RTOs '
+      + 'of a preceding month. No amount is recoverable on these, but their realisation lies in a period '
+      + 'not examined.'),
   ].filter((x) => x.orders > 0);
 
   return { ledger, byGroup, GROUP_ORDER, GROUP_LABEL, byCollector, byEntity, receivableSplit,

@@ -124,11 +124,12 @@ const ReceivablesSummaryWorkspace = ({ agent }) => {
       {/* ── upload ─────────────────────────────────────────────────────── */}
       <Card>
         <CardHeader>
-          <CardTitle className="flex items-center gap-2"><Upload className="h-5 w-5" /> Source files</CardTitle>
+          <CardTitle className="flex items-center gap-2"><Upload className="h-5 w-5" /> Records to be produced</CardTitle>
           <CardDescription>
-            Upload the sales workbook for each GST registration and the payment reconciliation for the month.
-            Only the delivered, refund and RTO tabs are read — every other tab belongs to a different sales
-            channel and is left alone. You can drop them all in at once; each file is recognised by its contents.
+            Upload the GST sales register of each registration and the payment reconciliation for the month.
+            Only the delivered, refund and RTO sheets are read; every other sheet pertains to a different
+            sales channel and is excluded. All of them may be uploaded together — each is identified from
+            its contents.
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-3">
@@ -156,8 +157,8 @@ const ReceivablesSummaryWorkspace = ({ agent }) => {
         <Card>
           <CardHeader className="flex flex-row items-start justify-between">
             <div>
-              <CardTitle>What was read</CardTitle>
-              <CardDescription>Every tab, the row its header was found on, and how many rows came out.</CardDescription>
+              <CardTitle>Records read</CardTitle>
+              <CardDescription>Each sheet, the row at which its header was found, and the number of lines read.</CardDescription>
             </div>
             <Button size="sm" variant="ghost" onClick={() => setUploadReport(null)}><X className="h-4 w-4" /></Button>
           </CardHeader>
@@ -201,52 +202,53 @@ const ReceivablesSummaryWorkspace = ({ agent }) => {
       {!loading && summary && (
         <>
           <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
-            <Kpi label={`Trade receivable at ${summary.asAt}`} value={money(summary.position.receivable)}
-                 tone="text-amber-700" sub="delivered by the cut-off, money after it or never" />
-            <Kpi label="Upper bound" value={money(summary.position.receivableUpperBound)}
-                 sub={`${money(summary.position.uncertain)} cannot be placed either side of the cut-off`} />
-            <Kpi label="In transit at the cut-off" value={money(summary.position.inTransit)}
-                 sub="dispatched, not yet delivered — not a trade receivable" />
-            <Kpi label="Total owed to the business" value={money(summary.position.totalOwed)}
-                 sub="receivable + in transit" />
+            <Kpi label={`Trade receivables as on ${summary.asAt}`} value={money(summary.position.receivable)}
+                 tone="text-amber-700" sub="delivered within the period, realised later or not at all" />
+            <Kpi label="Maximum trade receivables" value={money(summary.position.receivableUpperBound)}
+                 sub={`includes ${money(summary.position.uncertain)} whose period of realisation is unascertained`} />
+            <Kpi label="Goods in transit" value={money(summary.position.inTransit)}
+                 sub="dispatched within the period, delivered thereafter" />
+            <Kpi label="Total amount recoverable" value={money(summary.position.totalOwed)}
+                 sub="trade receivables plus goods in transit" />
           </div>
 
           {/* The number people reach for by mistake, named as what it is. */}
           <div className="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700">
-            <span className="font-medium">Still short today: {money(summary.stillShortToday)}</span>
-            {' '}— what remains unpaid now, after the chasing already done. That is a collection list,
-            not a month-end figure: by the time this file was made almost everything had come in, just
-            not all of it before the cut-off. Reporting it as the receivable understates the position.
+            <span className="font-medium">Unrealised as on date: {money(summary.stillShortToday)}</span>
+            {' '}— amounts remaining unrealised on the date of this statement, after the recovery already
+            effected. This is a recovery schedule and not the figure of trade receivables as on the
+            reporting date: most collections had been received by the date of preparation, though not by
+            the reporting date. Stating it as trade receivables would understate the position.
           </div>
 
           <Card>
             <CardHeader>
-              <CardTitle>Checks</CardTitle>
+              <CardTitle>Verification</CardTitle>
               <CardDescription>
-                The sheet never trusts a stated total on its own. Each of these rebuilds a figure from its
-                parts and must come to zero.
+                No stated total is accepted on its own. Each of the following aggregates a figure from its
+                constituents, and the difference must be Nil.
               </CardDescription>
             </CardHeader>
             <CardContent className="grid gap-2 md:grid-cols-2">
-              <Check label="Collector columns rebuild the remittance" value={summary.checks.collectors} />
-              <Check label="Status split rebuilds the gross" value={summary.checks.statusSplit} />
-              <Check label="Collector split rebuilds the trade receivable" value={summary.checks.receivableSplit} />
-              <Check label="Every order sits in exactly one position" value={summary.checks.positionSplit} />
+              <Check label="Collection-channel columns aggregate to the remittance stated" value={summary.checks.collectors} />
+              <Check label="Status-wise break-up aggregates to gross orders" value={summary.checks.statusSplit} />
+              <Check label="Channel-wise break-up aggregates to trade receivables" value={summary.checks.receivableSplit} />
+              <Check label="Every order classified under one head only" value={summary.checks.positionSplit} />
             </CardContent>
           </Card>
 
           <div className="grid gap-6 lg:grid-cols-2">
             <Card>
               <CardHeader>
-                <CardTitle>The position at {summary.asAt}</CardTitle>
+                <CardTitle>Statement of trade receivables as on {summary.asAt}</CardTitle>
                 <CardDescription>
-                  A receivable is a position at a date. Every order sits in exactly one line below.
+                  Trade receivables are stated as at a date. Every order is classified under one head only.
                 </CardDescription>
               </CardHeader>
               <CardContent>
                 <Table>
                   <TableHeader><TableRow>
-                    <TableHead>Position</TableHead><TableHead className="text-right">Orders</TableHead>
+                    <TableHead>Particulars</TableHead><TableHead className="text-right">No. of orders</TableHead>
                     <TableHead className="text-right">Amount</TableHead>
                   </TableRow></TableHeader>
                   <TableBody>
@@ -264,14 +266,14 @@ const ReceivablesSummaryWorkspace = ({ agent }) => {
 
             <Card>
               <CardHeader>
-                <CardTitle>Where the receivable sits</CardTitle>
-                <CardDescription>Who to chase, and for how much.</CardDescription>
+                <CardTitle>Trade receivables — collection channel wise</CardTitle>
+                <CardDescription>The party from whom recovery is due, and the amount.</CardDescription>
               </CardHeader>
               <CardContent>
                 <Table>
                   <TableHeader><TableRow>
-                    <TableHead>Collector</TableHead><TableHead className="text-right">Delivered orders</TableHead>
-                    <TableHead className="text-right">Still owed</TableHead>
+                    <TableHead>Collection channel</TableHead><TableHead className="text-right">No. of orders</TableHead>
+                    <TableHead className="text-right">Amount recoverable</TableHead>
                   </TableRow></TableHeader>
                   <TableBody>
                     {summary.receivableSplit.map((r) => (
@@ -292,18 +294,18 @@ const ReceivablesSummaryWorkspace = ({ agent }) => {
           <Card>
             <CardHeader>
               <CardTitle className="flex items-center gap-2">
-                <AlertTriangle className="h-5 w-5 text-amber-600" /> Known limits of this data
+                <AlertTriangle className="h-5 w-5 text-amber-600" /> Notes and qualifications
               </CardTitle>
               <CardDescription>
-                Everything these files cannot tell you, with its size. Each one is a tab in the workbook
-                with the order ids on it. None of them has been netted away to make a total look clean.
+                Each of the matters below is annexed as a separate schedule in the workbook, giving the
+                order numbers. No amount has been adjusted, netted off or excluded.
               </CardDescription>
             </CardHeader>
             <CardContent>
               <Table>
                 <TableHeader><TableRow>
-                  <TableHead>Limit</TableHead><TableHead className="text-right">Orders</TableHead>
-                  <TableHead className="text-right">Amount</TableHead><TableHead>What it means</TableHead>
+                  <TableHead>Particulars</TableHead><TableHead className="text-right">No. of orders</TableHead>
+                  <TableHead className="text-right">Amount</TableHead><TableHead>Remarks</TableHead>
                 </TableRow></TableHeader>
                 <TableBody>
                   {summary.limits.map((l) => (
@@ -321,8 +323,8 @@ const ReceivablesSummaryWorkspace = ({ agent }) => {
 
           <Card>
             <CardHeader>
-              <CardTitle className="flex items-center gap-2"><ListChecks className="h-5 w-5" /> Worklists</CardTitle>
-              <CardDescription>Each one is a list someone can act on. Click to see the orders.</CardDescription>
+              <CardTitle className="flex items-center gap-2"><ListChecks className="h-5 w-5" /> Schedules</CardTitle>
+              <CardDescription>Click any schedule to see the orders comprising it.</CardDescription>
             </CardHeader>
             <CardContent className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
               {summary.worklists.map((w) => (
@@ -338,10 +340,10 @@ const ReceivablesSummaryWorkspace = ({ agent }) => {
 
           <Card>
             <CardHeader>
-              <CardTitle>Build the workbook</CardTitle>
+              <CardTitle>Generate the statement</CardTitle>
               <CardDescription>
-                The summary, the per-order ledger, a tab per worklist, and a Basis &amp; Checks sheet naming
-                the file behind every figure. Percentages and totals are live formulas.
+                The statement, the order ledger, a schedule for each matter reported, and a basis of
+                preparation naming the record behind every figure. Percentages and totals are live formulas.
               </CardDescription>
             </CardHeader>
             <CardContent>
@@ -357,7 +359,7 @@ const ReceivablesSummaryWorkspace = ({ agent }) => {
       {!loading && !summary && !uploadReport && (
         <Card><CardContent className="py-10 text-center text-slate-600">
           <FileText className="mx-auto mb-3 h-10 w-10 text-slate-300" />
-          Nothing read yet. Upload the sales workbooks and the payment reconciliation to begin.
+          No records produced yet. Upload the GST sales registers and the payment reconciliation to begin.
         </CardContent></Card>
       )}
 
@@ -365,14 +367,14 @@ const ReceivablesSummaryWorkspace = ({ agent }) => {
       {files.length > 0 && (
         <Card>
           <CardHeader>
-            <CardTitle>Files held</CardTitle>
-            <CardDescription>Remove a file to take its rows out of every figure above.</CardDescription>
+            <CardTitle>Records on hand</CardTitle>
+            <CardDescription>Removing a record withdraws its lines from every figure above.</CardDescription>
           </CardHeader>
           <CardContent>
             <Table>
               <TableHeader><TableRow>
-                <TableHead>File</TableHead><TableHead>Read as</TableHead><TableHead>GSTIN</TableHead>
-                <TableHead>Period</TableHead><TableHead className="text-right">Rows</TableHead>
+                <TableHead>Record</TableHead><TableHead>Read as</TableHead><TableHead>Registration</TableHead>
+                <TableHead>Period</TableHead><TableHead className="text-right">Lines</TableHead>
                 <TableHead>Uploaded</TableHead><TableHead />
               </TableRow></TableHeader>
               <TableBody>
@@ -409,11 +411,11 @@ const ReceivablesSummaryWorkspace = ({ agent }) => {
             <div className="max-h-[65vh] overflow-auto">
               <Table>
                 <TableHeader><TableRow>
-                  <TableHead>Order ID</TableHead><TableHead>GSTIN</TableHead><TableHead>Order date</TableHead>
-                  <TableHead>Status</TableHead><TableHead>Collector</TableHead><TableHead>State</TableHead>
-                  <TableHead className="text-right">Billed</TableHead><TableHead className="text-right">Collected</TableHead>
-                  <TableHead className="text-right">Owed</TableHead>
-                  <TableHead className="min-w-[320px]">Why it sits here</TableHead>
+                  <TableHead>Order no.</TableHead><TableHead>Registration</TableHead><TableHead>Order date</TableHead>
+                  <TableHead>Order status</TableHead><TableHead>Collection channel</TableHead><TableHead>Place of supply</TableHead>
+                  <TableHead className="text-right">Invoice value</TableHead><TableHead className="text-right">Realised</TableHead>
+                  <TableHead className="text-right">Recoverable</TableHead>
+                  <TableHead className="min-w-[320px]">Basis</TableHead>
                 </TableRow></TableHeader>
                 <TableBody>
                   {worklistRows.map((r) => (
@@ -434,7 +436,7 @@ const ReceivablesSummaryWorkspace = ({ agent }) => {
               </Table>
               {worklistRows.length >= 500 && (
                 <p className="py-3 text-center text-xs text-slate-500">
-                  First 500 shown — the workbook carries the full list.
+                  First 500 shown — the workbook carries the complete schedule.
                 </p>
               )}
             </div>
