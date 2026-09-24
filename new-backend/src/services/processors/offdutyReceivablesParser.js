@@ -126,20 +126,41 @@ const orderId = (v) => {
   return i > 0 ? String(i) : null;
 };
 
+/* Excel writes an empty date cell as serial 0, which decodes to 1899-12-30, and
+   some exports round-trip that through epoch as 1970-01-01. Both mean BLANK.
+   7,571 rows of the April payment file carry one, and treating them as real
+   dates would put a third of the book in the wrong period. */
+const REAL_DATE_FLOOR = 2000;
+
 const asDate = (v) => {
-  if (v instanceof Date && !Number.isNaN(v.getTime())) return v;
+  if (v instanceof Date && !Number.isNaN(v.getTime())) {
+    return v.getFullYear() < REAL_DATE_FLOOR ? null : v;
+  }
   if (typeof v === 'number') {
     const d = XLSX.SSF ? XLSX.SSF.parse_date_code(v) : null;
-    if (d) return new Date(Date.UTC(d.y, d.m - 1, d.d, d.H || 0, d.M || 0, Math.floor(d.S || 0)));
+    if (d && d.y >= REAL_DATE_FLOOR) {
+      return new Date(d.y, d.m - 1, d.d, d.H || 0, d.M || 0, Math.floor(d.S || 0));
+    }
+    return null;
   }
   const s = text(v);
   if (!s || s === '-') return null;
   const d = new Date(s.replace(/(\d)(st|nd|rd|th)\b/gi, '$1'));
-  return Number.isNaN(d.getTime()) ? null : d;
+  if (Number.isNaN(d.getTime())) return null;
+  return d.getFullYear() < REAL_DATE_FLOOR ? null : d;
 };
 
-const iso = (d) => (d ? d.toISOString().slice(0, 10) : null);
-const period = (d) => (d ? d.toISOString().slice(0, 7) : null);
+/* DATES ARE READ AS SERIALS, NOT AS Date OBJECTS — see parseReceivablesFile,
+   which deliberately does NOT pass cellDates. Asked for a Date, SheetJS converts
+   the serial through UTC and lands ten seconds short: a payment stored as
+   1 May 2025 came back as 2025-04-30T18:29:50Z, which is 23:59:50 on the 30th in
+   IST. That moved 148 payments out of May into April and understated the April
+   receivable by 2.6 lakh. SSF.parse_date_code reads the calendar fields straight
+   off the serial with no timezone in the path at all.
+   These formatters therefore work in local fields, matching how asDate builds. */
+const pad2 = (n) => String(n).padStart(2, '0');
+const iso = (d) => (d ? `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}` : null);
+const period = (d) => (d ? `${d.getFullYear()}-${pad2(d.getMonth() + 1)}` : null);
 
 /* Which GST registration does this workbook belong to? The filename carries it
    ("...April 25_KAR.xlsx"); the rows carry it too, so the filename is only a
@@ -321,7 +342,7 @@ function readPayment(rows, h, tab) {
  * user having to trust a single number.
  */
 function parseReceivablesFile(buffer, filename) {
-  const wb = XLSX.read(buffer, { type: 'buffer', cellDates: true });
+  const wb = XLSX.read(buffer, { type: 'buffer' });   // NOT cellDates — see iso() above
   const entity = entityOf(filename);
   const rows = [];
   const tabs = [];

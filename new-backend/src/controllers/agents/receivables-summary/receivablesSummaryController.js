@@ -23,7 +23,7 @@ const { getBrandConnection } = require('../../../config/database');
 const { getDynamicModel } = require('../../../models/brand');
 const { parseReceivablesFile } = require('../../../services/processors/offdutyReceivablesParser');
 const { buildReceivables } = require('../../../services/processors/offdutyReceivablesLedger');
-const { buildWorkbook } = require('../../../services/processors/offdutyReceivablesWorkbook');
+const { buildWorkbook, WRITE_OPTS } = require('../../../services/processors/offdutyReceivablesWorkbook');
 
 const OUTPUT_DIR = path.join(__dirname, '../../../../outputs');
 const ensureDir = () => fs.ensureDir(OUTPUT_DIR);
@@ -213,13 +213,19 @@ const getSummary = async (req, res, next) => {
     const rows = await ctx.Model.findAll({ raw: true });
     if (!rows.length) return res.json({ empty: true });
 
-    const b = buildReceivables(rows);
+    const b = buildReceivables(rows, req.query.asAt);
     res.json({
       empty: false,
       orders: b.totals.orders,
       billed: b.totals.billed,
       collected: b.totals.collected,
-      receivable: b.totals.receivable,
+      /* The position at the cut-off — what an accountant books. Kept apart from
+         stillShortToday, which is the collection list. */
+      asAt: b.asAt,
+      position: b.positionTotals,
+      byPosition: b.POSITION_ORDER.map((k) => b.byPosition[k]).filter((p) => p.orders),
+      limits: b.limits,
+      stillShortToday: b.totals.stillShortToday,
       periods: b.periods,
       entities: b.byEntity.map((e) => e.entity),
       splitShipments: b.totals.splitShipments,
@@ -228,6 +234,12 @@ const getSummary = async (req, res, next) => {
         .map((g) => ({ key: g, label: b.GROUP_LABEL[g], ...b.byGroup[g] })),
       receivableSplit: b.receivableSplit,
       worklists: [
+        { key: 'receivable', label: 'Receivable at the cut-off',
+          rows: b.ledger.filter((l) => l.owed > 0 || l.position === 'RECEIVABLE_UNPAID').length },
+        { key: 'uncertain', label: 'Uncertain — cannot be placed',
+          rows: b.ledger.filter((l) => l.uncertain > 0).length },
+        { key: 'inTransit', label: 'In transit at the cut-off',
+          rows: b.ledger.filter((l) => l.position === 'IN_TRANSIT').length },
         { key: 'noCollector', label: 'No collector', rows: b.exceptions.noCollector.length },
         { key: 'redFlag', label: 'Red flag', rows: b.exceptions.redFlag.length },
         { key: 'shortPaid', label: 'Short paid', rows: b.exceptions.shortPaid.length },
@@ -248,7 +260,7 @@ const generateWorkbook = async (req, res, next) => {
     const rows = await Model.findAll({ raw: true });
     if (!rows.length) return res.status(400).json({ error: 'Nothing uploaded yet' });
 
-    const b = buildReceivables(rows);
+    const b = buildReceivables(rows, req.body && req.body.asAt);
 
     /* Rebuild the "what was read" table from what is actually stored, so the
        Basis sheet describes the data in hand rather than the last upload. */
@@ -269,13 +281,16 @@ const generateWorkbook = async (req, res, next) => {
     });
 
     await ensureDir();
-    const filename = `Receivables Summary - ${brand.name} - ${b.periods.join(' to ') || 'all'}.xlsx`;
-    XLSXStyle.writeFile(wb, path.join(OUTPUT_DIR, filename));
+    const filename = `Receivables Summary - ${brand.name} - as at ${b.asAt}.xlsx`;
+    XLSXStyle.writeFile(wb, path.join(OUTPUT_DIR, filename), WRITE_OPTS);
 
     res.json({
       success: true, filename,
+      asAt: b.asAt,
+      position: b.positionTotals,
       totals: b.totals, checks: b.checks,
       receivableSplit: b.receivableSplit,
+      limits: b.limits,
       sheets: wb.SheetNames,
     });
   } catch (error) { console.error('Receivables workbook error:', error); next(error); }
@@ -297,9 +312,18 @@ const getLedger = async (req, res, next) => {
     const rows = await ctx.Model.findAll({ raw: true });
     if (!rows.length) return res.json({ rows: [], total: 0 });
 
-    const b = buildReceivables(rows);
+    const b = buildReceivables(rows, req.query.asAt);
     const { worklist, limit = 200, offset = 0 } = req.query;
-    const source = worklist && b.exceptions[worklist] ? b.exceptions[worklist] : b.ledger;
+    /* The position lists are not in `exceptions` — they are the ledger sliced by
+       where each order fell at the cut-off. */
+    const POSITION_LISTS = {
+      receivable: (l) => l.position === 'RECEIVABLE_LATE' || l.position === 'RECEIVABLE_UNPAID',
+      uncertain:  (l) => l.uncertain > 0,
+      inTransit:  (l) => l.position === 'IN_TRANSIT',
+    };
+    const source = POSITION_LISTS[worklist] ? b.ledger.filter(POSITION_LISTS[worklist])
+                 : (worklist && b.exceptions[worklist]) ? b.exceptions[worklist]
+                 : b.ledger;
     res.json({
       total: source.length,
       rows: source.slice(Number(offset), Number(offset) + Number(limit)),

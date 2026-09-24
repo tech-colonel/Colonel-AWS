@@ -82,7 +82,11 @@ function sheetFrom(grid, widths) {
         : typeof cell.v === 'number'
           ? { t: 'n', v: cell.v }
           : { t: 's', v: cell.v == null ? '' : String(cell.v) };
-      out.s = styleCell(cell, cell.kind, c);
+      /* A styled cell costs an `s` attribute on every one of them, and the
+         Ledger alone is 37k rows x 17 columns. Body cells of the big tables are
+         written as 'plain' — number format kept, styling dropped — which takes
+         the workbook from 39 MB to something that opens without a wait. */
+      if (cell.kind !== 'plain') out.s = styleCell(cell, cell.kind, c);
       if (cell.fmt) out.z = cell.fmt;
       ws[addr] = out;
     });
@@ -99,113 +103,138 @@ const count = (v, kind = 'text') => C(Number(v) || 0, kind, { fmt: INT });
 
 function summarySheet(b, meta) {
   const g = [];
-  const push = (...cells) => { g.push(cells); return g.length; };   // returns 1-based row
+  const push = (...cells) => { g.push(cells); return g.length; };
   const blank = () => g.push([]);
+  const pretty = (d) => {
+    if (!d) return '—';
+    const [y, m, dd] = d.split('-');
+    return `${dd} ${['', 'January', 'February', 'March', 'April', 'May', 'June', 'July',
+                     'August', 'September', 'October', 'November', 'December'][Number(m)]} ${y}`;
+  };
+  const P = b.byPosition;
 
   push(C('Off Duty — Receivables Summary', 'title'));
+  push(C('Position as at', 'meta'), C(pretty(b.asAt), 'meta'));
   push(C('Source', 'meta'), C(meta.sourceLine, 'meta'));
   push(C('Period covered', 'meta'), C(b.periods.join(', ') || '—', 'meta'));
   push(C('GST registrations', 'meta'), C(meta.entities.join(', ') || '—', 'meta'));
   push(C('Orders in ledger', 'meta'), C(b.totals.orders.toLocaleString('en-IN'), 'meta'));
   blank();
 
-  push(C('Particulars', 'header'), C('Orders', 'header'), C('Amount (₹)', 'header'), C('% of Gross', 'header'));
+  /* ── the position ──────────────────────────────────────────────────────
+     A receivable is a position at a date. Leading with anything else — such
+     as "delivered and still short" — answers a different question. */
+  push(C(`THE POSITION AT ${pretty(b.asAt).toUpperCase()}`, 'section'), C('', 'section'), C('', 'section'), C('', 'section'));
+  push(C('Particulars', 'header'), C('Orders', 'header'), C('Amount (₹)', 'header'), C('Why it sits here', 'header'));
 
-  const grossRow = push(C('Gross Orders — every order in the files', 'hilight'),
-                        count(b.totals.orders, 'hilight'), money(b.totals.billed, 'hilight'), C('', 'hilight'));
-  const gref = `$C$${grossRow}`;
+  const line = (label, pos, why, kind) => push(
+    C(label, kind), count(P[pos].orders, kind), money(P[pos].amount, kind), C(why, 'sub'));
 
-  const groupRows = [];
-  for (const key of b.GROUP_ORDER) {
-    const x = b.byGroup[key];
-    if (!x.orders) continue;
-    const r = push(C(`   ${b.GROUP_LABEL[key]}`), count(x.orders), money(x.billed),
-                   C(`=IFERROR(C${g.length + 1}/${gref},0)`, 'text', { fmt: PCT }));
-    groupRows.push(r);
-  }
-  // the % formula above referenced the row before it existed; rewrite correctly
-  groupRows.forEach((r) => { g[r - 1][3] = C(`=IFERROR(C${r}/${gref},0)`, 'text', { fmt: PCT }); });
-
-  const first = groupRows[0], last = groupRows[groupRows.length - 1];
-  const totRow = push(C('Total of the split', 'total'),
-                      C(`=SUM(B${first}:B${last})`, 'total', { fmt: INT }),
-                      C(`=SUM(C${first}:C${last})`, 'total', { fmt: AMT }), C('', 'total'));
-  const chk1 = push(C('Difference (must be 0)', b.checks.statusSplit === 0 ? 'ok' : 'bad'),
-                    C('', b.checks.statusSplit === 0 ? 'ok' : 'bad'),
-                    C(`=ROUND(C${totRow}-${gref},2)`, b.checks.statusSplit === 0 ? 'ok' : 'bad', { fmt: AMT }),
-                    C('', b.checks.statusSplit === 0 ? 'ok' : 'bad'));
-  g[chk1 - 1][0].v = b.checks.statusSplit === 0 ? 'Difference (must be 0)  ✓' : 'Difference (must be 0)  ✗';
+  const lateRow = line('Delivered by the cut-off, money arrived after it', 'RECEIVABLE_LATE',
+    'The goods were with the customer on that date and the cash was not. Owed.');
+  const unpaidRow = line('Delivered by the cut-off, no money at all', 'RECEIVABLE_UNPAID',
+    'Delivered and nothing has ever been received against it.');
+  const recRow = push(C('TRADE RECEIVABLE', 'hilight'),
+    C(`=B${lateRow}+B${unpaidRow}`, 'hilight', { fmt: INT }),
+    C(`=ROUND(C${lateRow}+C${unpaidRow},2)`, 'hilight', { fmt: AMT }),
+    C('What was owed to you on that date.', 'sub'));
   blank();
 
-  push(C('WHAT IS ACTUALLY OWED', 'section'), C('', 'section'), C('', 'section'), C('', 'section'));
-  push(C('Only a delivered order can be owed — an RTO came back, a cancellation never shipped, '
-       + 'and a refund was given back on purpose.', 'note'));
-  const d = b.byGroup.DELIVERED;
-  const dbRow = push(C('Delivered — billed to the customer'), count(d.orders), money(d.billed), C(''));
-  const dcRow = push(C('Less: already remitted to you'), C(''), money(-d.collected), C(''));
-  const recRow = push(C('RECEIVABLE', 'hilight'), C('', 'hilight'),
-                      C(`=ROUND(C${dbRow}+C${dcRow},2)`, 'hilight', { fmt: AMT }),
-                      C(`=IFERROR(C${dbRow + 2}/C${dbRow},0)`, 'hilight', { fmt: PCT }));
+  const uncRow = line('Uncertain — paid, but the file gives no payment date', 'RECEIVABLE_UNDATED',
+    'Could have landed on either side of the cut-off. The file does not say.');
+  const undRow = P.UNDATED_DELIVERY.orders
+    ? line('Uncertain — marked delivered, no delivery date', 'UNDATED_DELIVERY',
+        'Cannot be placed against the cut-off at all.')
+    : null;
+  const upperRow = push(C('Upper bound if every uncertain order fell after the cut-off', 'total'),
+    C('', 'total'),
+    C(`=ROUND(C${recRow}+C${uncRow}${undRow ? `+C${undRow}` : ''},2)`, 'total', { fmt: AMT }),
+    C('The receivable above is a floor, not a ceiling.', 'sub'));
   blank();
 
-  push(C('HOW THE MONEY ARRIVED', 'section'), C('', 'section'), C('', 'section'), C('', 'section'));
-  const colFirst = g.length + 1;
-  for (const c of b.byCollector) {
-    push(C(`   ${c.label}`), count(c.orders), money(c.collected),
-         C(`=IFERROR(C${g.length + 1}/$C$${g.length + b.byCollector.length + 2 - (g.length + 1 - colFirst)},0)`, 'text'));
-  }
-  const colLast = g.length;
-  // rewrite the ratios now that the total row's position is known
-  const colTotRow = colLast + 1;
-  for (let r = colFirst; r <= colLast; r++) g[r - 1][3] = C(`=IFERROR(C${r}/$C$${colTotRow},0)`, 'text', { fmt: PCT });
-  push(C('Total collected', 'total'), C(''), C(`=SUM(C${colFirst}:C${colLast})`, 'total', { fmt: AMT }), C('', 'total'));
+  const transitRow = line('Dispatched, not delivered by the cut-off', 'IN_TRANSIT',
+    'Goods had left but had not arrived — not a trade receivable on a delivery basis.');
+  const owedRow = push(C('TOTAL OWED TO THE BUSINESS', 'hilight'), C('', 'hilight'),
+    C(`=ROUND(C${recRow}+C${transitRow},2)`, 'hilight', { fmt: AMT }),
+    C('Include the transit line only if revenue is recognised on dispatch.', 'sub'));
+  blank();
+
+  push(C('For completeness — the rest of the book', 'section'), C('', 'section'), C('', 'section'), C('', 'section'));
+  const paidRow = line('Delivered and settled within the period', 'PAID_IN_PERIOD',
+    'Money in, on or before the cut-off. Nothing to chase.');
+  const notDueRow = line('Nothing owed — returned, cancelled, RTO or lost', 'NOT_DUE',
+    'An RTO came back, a cancellation never shipped, a refund was given back on purpose.');
+  const allRows = [lateRow, unpaidRow, uncRow, undRow, transitRow, paidRow, notDueRow].filter(Boolean);
+  const totRow = push(C('Every order, once', 'total'),
+    C(`=${allRows.map((r) => `B${r}`).join('+')}`, 'total', { fmt: INT }), C('', 'total'),
+    C('Each order sits in exactly one line above.', 'sub'));
+  const okPos = b.checks.positionSplit === 0;
+  push(C(`Difference from the ledger count (must be 0)  ${okPos ? '✓' : '✗'}`, okPos ? 'ok' : 'bad'),
+    C(`=B${totRow}-${b.totals.orders}`, okPos ? 'ok' : 'bad', { fmt: INT }),
+    C('', okPos ? 'ok' : 'bad'), C('', okPos ? 'ok' : 'bad'));
+  blank();
+
+  /* ── who owes it ───────────────────────────────────────────────────── */
+  push(C('WHO OWES THE RECEIVABLE', 'section'), C('', 'section'), C('', 'section'), C('', 'section'));
+  push(C('Collector', 'header'), C('Orders', 'header'), C('Owed (₹)', 'header'), C('% of receivable', 'header'));
+  const rFirst = g.length + 1;
+  for (const r of b.receivableSplit) push(C(`   ${r.label}`), count(r.orders), money(r.receivable), C(''));
+  const rLast = g.length;
+  const rTot = rLast + 1;
+  for (let r = rFirst; r <= rLast; r++) g[r - 1][3] = C(`=IFERROR(C${r}/$C$${rTot},0)`, 'text', { fmt: PCT });
+  push(C('Total of the split', 'total'), C(`=SUM(B${rFirst}:B${rLast})`, 'total', { fmt: INT }),
+    C(`=SUM(C${rFirst}:C${rLast})`, 'total', { fmt: AMT }), C('', 'total'));
+  const okSplit = b.checks.receivableSplit === 0;
+  push(C(`Difference from the TRADE RECEIVABLE above (must be 0)  ${okSplit ? '✓' : '✗'}`, okSplit ? 'ok' : 'bad'),
+    C('', okSplit ? 'ok' : 'bad'), C(`=ROUND(C${rTot}-C${recRow},2)`, okSplit ? 'ok' : 'bad', { fmt: AMT }),
+    C('', okSplit ? 'ok' : 'bad'));
+  blank();
+
+  /* ── how the money arrived ─────────────────────────────────────────── */
+  push(C('HOW THE MONEY ARRIVED, ACROSS EVERYTHING LOADED', 'section'), C('', 'section'), C('', 'section'), C('', 'section'));
+  const cFirst = g.length + 1;
+  for (const c of b.byCollector) push(C(`   ${c.label}`), count(c.orders), money(c.collected), C(''));
+  const cLast = g.length;
+  const cTot = cLast + 1;
+  for (let r = cFirst; r <= cLast; r++) g[r - 1][3] = C(`=IFERROR(C${r}/$C$${cTot},0)`, 'text', { fmt: PCT });
+  push(C('Total collected', 'total'), C(''), C(`=SUM(C${cFirst}:C${cLast})`, 'total', { fmt: AMT }), C('', 'total'));
   const statedRow = push(C('Payment file states'), C(''), money(b.totals.collected), C(''));
   const ok2 = b.checks.collectors === 0;
-  const chk2 = push(C(`Difference (must be 0)  ${ok2 ? '✓' : '✗'}`, ok2 ? 'ok' : 'bad'),
-                    C('', ok2 ? 'ok' : 'bad'),
-                    C(`=ROUND(C${colTotRow}-C${statedRow},2)`, ok2 ? 'ok' : 'bad', { fmt: AMT }),
-                    C('', ok2 ? 'ok' : 'bad'));
+  push(C(`Difference (must be 0)  ${ok2 ? '✓' : '✗'}`, ok2 ? 'ok' : 'bad'), C('', ok2 ? 'ok' : 'bad'),
+    C(`=ROUND(C${cTot}-C${statedRow},2)`, ok2 ? 'ok' : 'bad', { fmt: AMT }), C('', ok2 ? 'ok' : 'bad'));
   blank();
 
-  push(C('WHERE THE RECEIVABLE SITS', 'section'), C('', 'section'), C('', 'section'), C('', 'section'));
-  push(C('Collector', 'header'), C('Delivered orders', 'header'), C('Still owed (₹)', 'header'), C('% of receivable', 'header'));
-  const recFirst = g.length + 1;
-  for (const r of b.receivableSplit) push(C(`   ${r.label}`), count(r.orders), money(r.receivable), C(''));
-  const recLast = g.length;
-  const recTot = recLast + 1;
-  for (let r = recFirst; r <= recLast; r++) g[r - 1][3] = C(`=IFERROR(C${r}/$C$${recTot},0)`, 'text', { fmt: PCT });
-  push(C('Total of the split', 'total'), C(`=SUM(B${recFirst}:B${recLast})`, 'total', { fmt: INT }),
-       C(`=SUM(C${recFirst}:C${recLast})`, 'total', { fmt: AMT }), C('', 'total'));
-  const ok3 = b.checks.receivableSplit === 0;
-  push(C(`Difference from the RECEIVABLE above (must be 0)  ${ok3 ? '✓' : '✗'}`, ok3 ? 'ok' : 'bad'),
-       C('', ok3 ? 'ok' : 'bad'),
-       C(`=ROUND(C${recTot}-C${recRow},2)`, ok3 ? 'ok' : 'bad', { fmt: AMT }),
-       C('', ok3 ? 'ok' : 'bad'));
+  /* ── everything this data cannot tell you ──────────────────────────── */
+  push(C('KNOWN LIMITS OF THIS DATA', 'section'), C('', 'section'), C('', 'section'), C('', 'section'));
+  push(C('Every one of these is a tab in this file, with the order ids. None of them has been netted '
+       + 'away to make a total look clean.', 'note'));
+  push(C('Limit', 'header'), C('Orders', 'header'), C('Amount (₹)', 'header'), C('What it means', 'header'));
+  for (const l of b.limits) push(C(`   ${l.label}`), count(l.orders), money(l.amount), C(l.why, 'sub'));
   blank();
 
-  push(C('WORKLISTS — each is a tab in this file', 'section'), C('', 'section'), C('', 'section'), C('', 'section'));
-  push(C('Worklist', 'header'), C('Orders', 'header'), C('Amount (₹)', 'header'), C('What it means', 'header'));
+  /* ── the chase list, named as what it is ───────────────────────────── */
+  push(C('SEPARATELY — THE COLLECTION WORKLIST', 'section'), C('', 'section'), C('', 'section'), C('', 'section'));
+  push(C('Still short today', 'total'), count(b.exceptions.noCollector.length + b.exceptions.shortPaid.length, 'total'),
+    money(b.totals.stillShortToday, 'total'),
+    C('What is STILL unpaid now, after all the chasing already done. This is a collection list, not a '
+    + 'month-end figure — reporting it as the receivable understates the position, because by the time '
+    + 'this file was made almost everything had come in, just not all of it before the cut-off.', 'sub'));
   const WL = [
     ['No collector', b.exceptions.noCollector, 'Delivered, no gateway, no UTR — nothing says who should have paid'],
     ['Red flag', b.exceptions.redFlag, 'Already marked by the accountant in the payment file'],
     ['Short paid', b.exceptions.shortPaid, 'A collector is named and money came, but less than was billed'],
-    ['Status conflict', b.exceptions.statusConflict, 'Sales file says delivered, payment file says otherwise'],
-    ['Delivered, taxed nowhere', b.exceptions.taxedNowhere, 'Money collected, but the order is in no state workbook'],
   ];
   for (const [label, rows, why] of WL)
     push(C(`   ${label}`), count(rows.length),
-         money(Number(rows.reduce((a, x) => a + Math.abs(x.gap), 0).toFixed(2))), C(why, 'sub'));
-  blank();
-  push(C(`Ageing is not shown because "Date of Deposit in bank" is empty on every row of the payment file `
-       + `(${b.exceptions.noDeposit.length.toLocaleString('en-IN')} collected orders carry no deposit date). `
-       + `Fill that column, or supply the bank statement, and the ageing buckets appear here.`, 'note'));
+      money(Number(rows.reduce((a, x) => a + Math.abs(x.gap), 0).toFixed(2))), C(why, 'sub'));
 
-  const ws = sheetFrom(g, [46, 14, 18, 34]);
+  const ws = sheetFrom(g, [52, 12, 18, 62]);
   ws['!rows'] = g.map((row) => {
     const k = row && row[0] ? row[0].kind : null;
     if (k === 'title') return { hpt: 26 };
     if (k === 'section' || k === 'header') return { hpt: 20 };
-    if (k === 'note') return { hpt: 30 };
+    if (k === 'note') return { hpt: 28 };
+    if (row && row[3] && row[3].kind === 'sub' && String(row[3].v || '').length > 90) return { hpt: 30 };
     return { hpt: 16 };
   });
   return ws;
@@ -219,12 +248,13 @@ function tableSheet(columns, rows, widths, opts = {}) {
   if (opts.note) { g.push([C(opts.note, 'note')]); g.push([]); }
   const headRow = g.length + 1;
   g.push(columns.map((c) => C(c.label, 'header')));
+  const kind = rows.length > 500 ? 'plain' : 'text';
   for (const r of rows) {
     g.push(columns.map((c) => {
       const v = r[c.key];
-      if (c.money) return money(v);
-      if (c.int) return count(v);
-      return C(v == null ? '' : String(v));
+      if (c.money) return C(Number(v) || 0, kind, { fmt: AMT });
+      if (c.int) return C(Number(v) || 0, kind, { fmt: INT });
+      return C(v == null ? '' : String(v), kind);
     }));
   }
   if (rows.length && opts.total !== false) {
@@ -259,8 +289,14 @@ const LEDGER_COLS = [
   { key: 'collected', label: 'Collected', money: true },
   { key: 'receivable', label: 'Receivable', money: true },
   { key: 'utr_id', label: 'UTR' },
+  { key: 'delivered_date', label: 'Delivered on' },
   { key: 'payment_date', label: 'Paid on' },
-  { key: 'remarks', label: 'Remarks' },
+  { key: 'remarks', label: 'File remark' },
+  /* The Ledger carries the POSITION but not the sentence explaining it: the
+     sentence names dates, so it is near-unique per row, and 37k copies of it
+     made this one tab 33 MB of a 42 MB file. The sentence is on every worklist
+     tab, which is where anyone actually reads it. */
+  { key: 'position', label: 'Position' },
 ];
 
 const WORKLIST_COLS = [
@@ -270,13 +306,18 @@ const WORKLIST_COLS = [
   { key: 'status', label: 'Status' },
   { key: 'collector', label: 'Collector' },
   { key: 'shipping_state', label: 'Ship state' },
+  { key: 'delivered_date', label: 'Delivered on' },
+  { key: 'payment_date', label: 'Paid on' },
   { key: 'billed', label: 'Billed', money: true },
   { key: 'collected', label: 'Collected', money: true },
-  { key: 'gap', label: 'Gap', money: true },
+  { key: 'owed', label: 'Owed at cut-off', money: true },
   { key: 'utr_id', label: 'UTR' },
-  { key: 'remarks', label: 'Remarks' },
+  { key: 'remarks', label: 'File remark' },
+  /* Every row says in plain words why it is on this tab. Nothing in this file
+     should have to be taken on trust. */
+  { key: 'remark', label: 'Why it sits here' },
 ];
-const WL_W = [12, 8, 12, 16, 18, 13, 13, 13, 13, 22, 20];
+const WL_W = [12, 8, 12, 16, 18, 13, 13, 13, 13, 13, 15, 20, 18, 74];
 
 function buildWorkbook(b, meta) {
   const wb = XLSXStyle.utils.book_new();
@@ -315,10 +356,21 @@ function buildWorkbook(b, meta) {
         + `${b.totals.splitShipments.toLocaleString('en-IN')} orders behave this way.`,
   }));
 
+  const pos = (k) => b.ledger.filter((l) => l.position === k);
   const WL = [
+    ['Receivable', [...pos('RECEIVABLE_LATE'), ...pos('RECEIVABLE_UNPAID')],
+      'The orders that make up the trade receivable at the cut-off. Each row says which of the two '
+      + 'reasons put it here — money that arrived after the cut-off, or money that never arrived.'],
+    ['Uncertain', [...pos('RECEIVABLE_UNDATED'), ...pos('UNDATED_DELIVERY')],
+      'Delivered before the cut-off, but the file records no payment date (or no delivery date), so '
+      + 'these cannot be placed on either side of it. They are the gap between the receivable and its '
+      + 'upper bound — counted as neither collected nor owed.'],
+    ['In Transit', pos('IN_TRANSIT'),
+      'Dispatched on or before the cut-off, delivered after it. Not a trade receivable on a delivery '
+      + 'basis, but money the business is owed. Include them only if revenue is recognised on dispatch.'],
     ['No Collector', b.exceptions.noCollector,
-      'Delivered, nothing received, and no gateway or UTR anywhere on the row. Nothing in the file says who '
-      + 'should have paid. This is the list to work first.'],
+      'Delivered, nothing received, and no gateway or UTR anywhere on the row. Nothing in the file says '
+      + 'who should have paid. This is the list to work first.'],
     ['Red Flag', b.exceptions.redFlag,
       'Rows the accountant already marked RED FLAG in the payment file. A subset of No Collector.'],
     ['Short Paid', b.exceptions.shortPaid,
@@ -327,20 +379,36 @@ function buildWorkbook(b, meta) {
       'The state workbook taxed this order as delivered; the payment file gives it another status. '
       + 'One of the two is wrong, and the GST position depends on which.'],
     ['Taxed Nowhere', b.exceptions.taxedNowhere,
-      'The payment file shows these delivered and paid, but they appear in no state workbook — so they may '
-      + 'have been collected without being reported in GSTR-1.'],
+      'The payment file shows these delivered and paid, but they appear in no state workbook — so they '
+      + 'may have been collected without being reported in GSTR-1.'],
     ['No Deposit Date', b.exceptions.noDeposit,
-      'Money was collected but "Date of Deposit in bank" is blank, so these cannot be aged. '
-      + 'This is why the Summary shows no ageing buckets.'],
+      'Money was collected but "Date of Deposit in bank" is blank, so these cannot be aged against the '
+      + 'bank statement. This is why the Summary shows no ageing buckets.'],
+    ['Split Shipment', b.ledger.filter((l) => l.split_shipment),
+      'One order whose lines shipped from two GST registrations. Counted once at order level; summing '
+      + 'the By GSTIN sheet instead would double count these.'],
   ];
-  for (const [name, rows, note] of WL)
-    add(name, tableSheet(WORKLIST_COLS, rows.slice(0, 20000), WL_W, { title: name, note }));
+  for (const [name, rows, note] of WL) {
+    if (!rows.length) continue;
+    /* "No deposit date" is a statement about the payment file, not a list anyone
+       works — it is nearly every collected order. The count belongs on the
+       Summary; only a sample belongs here. */
+    const cap = name === 'No Deposit Date' ? 200 : 20000;
+    const shown = rows.slice(0, cap);
+    const extra = rows.length > cap
+      ? `${note}  —  ${rows.length.toLocaleString('en-IN')} orders in total; the first `
+        + `${cap.toLocaleString('en-IN')} are shown here, and all of them are on the Ledger tab.`
+      : note;
+    add(name, tableSheet(WORKLIST_COLS, shown, WL_W, { title: name, note: extra, total: shown.length <= 500 }));
+  }
 
   add('Ledger', tableSheet(LEDGER_COLS, b.ledger,
-    [12, 10, 12, 18, 14, 18, 12, 13, 13, 12, 13, 13, 13, 13, 22, 12, 18], {
+    [12, 10, 12, 18, 14, 18, 12, 13, 13, 12, 13, 13, 13, 13, 20, 15, 15, 18, 22], {
       title: 'Per-order ledger — every order, every source',
       note: 'One row per order id. An order sold in one month and returned in the next appears once here, '
-          + 'carrying both dates, which is why no month has to be netted against another.',
+          + 'carrying both dates, which is why no month has to be netted against another. The Position '
+          + 'column says where each order fell at the cut-off; the tab named after that position spells '
+          + 'out why, order by order.',
     }));
 
   /* Basis & Checks — where each figure came from, in the accountant's terms. */
@@ -366,7 +434,8 @@ function buildWorkbook(b, meta) {
                                C('', val === 0 ? 'ok' : 'bad'), C('', val === 0 ? 'ok' : 'bad'));
   ck('The five collector columns rebuild the remittance the file states', b.checks.collectors);
   ck('The status split rebuilds the gross the file states', b.checks.statusSplit);
-  ck('The collector split rebuilds the receivable', b.checks.receivableSplit);
+  ck('The collector split rebuilds the trade receivable', b.checks.receivableSplit);
+  ck('Every order sits in exactly one position', b.checks.positionSplit);
   basis.push([]);
   B(C('Stated, not forced', 'section'), C('', 'section'), C('', 'section'), C('', 'section'), C('', 'section'));
   B(C('The sales workbooks and the payment file disagree about some orders. That difference is REPORTED on '
@@ -379,4 +448,9 @@ function buildWorkbook(b, meta) {
   return wb;
 }
 
-module.exports = { buildWorkbook };
+/* Write options. bookSST puts repeated text in the shared-string table instead
+   of inline in every cell — on a ledger of 37k rows where the same statuses,
+   collectors and states repeat thousands of times, that is most of the file. */
+const WRITE_OPTS = { bookType: 'xlsx', bookSST: true, compression: true };
+
+module.exports = { buildWorkbook, WRITE_OPTS };

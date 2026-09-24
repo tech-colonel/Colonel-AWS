@@ -201,12 +201,22 @@ const ReceivablesSummaryWorkspace = ({ agent }) => {
       {!loading && summary && (
         <>
           <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
-            <Kpi label="Orders" value={int(summary.orders)}
-                 sub={`${summary.periods.join(', ')} · ${summary.entities.filter((e) => !e.includes('+')).join(', ')}`} />
-            <Kpi label="Billed" value={money(summary.billed)} sub="every order in the files" />
-            <Kpi label="Collected" value={money(summary.collected)} sub="remitted to you" />
-            <Kpi label="Receivable" value={money(summary.receivable)} tone="text-amber-700"
-                 sub="delivered orders only" />
+            <Kpi label={`Trade receivable at ${summary.asAt}`} value={money(summary.position.receivable)}
+                 tone="text-amber-700" sub="delivered by the cut-off, money after it or never" />
+            <Kpi label="Upper bound" value={money(summary.position.receivableUpperBound)}
+                 sub={`${money(summary.position.uncertain)} cannot be placed either side of the cut-off`} />
+            <Kpi label="In transit at the cut-off" value={money(summary.position.inTransit)}
+                 sub="dispatched, not yet delivered — not a trade receivable" />
+            <Kpi label="Total owed to the business" value={money(summary.position.totalOwed)}
+                 sub="receivable + in transit" />
+          </div>
+
+          {/* The number people reach for by mistake, named as what it is. */}
+          <div className="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700">
+            <span className="font-medium">Still short today: {money(summary.stillShortToday)}</span>
+            {' '}— what remains unpaid now, after the chasing already done. That is a collection list,
+            not a month-end figure: by the time this file was made almost everything had come in, just
+            not all of it before the cut-off. Reporting it as the receivable understates the position.
           </div>
 
           <Card>
@@ -217,35 +227,34 @@ const ReceivablesSummaryWorkspace = ({ agent }) => {
                 parts and must come to zero.
               </CardDescription>
             </CardHeader>
-            <CardContent className="grid gap-2 md:grid-cols-3">
+            <CardContent className="grid gap-2 md:grid-cols-2">
               <Check label="Collector columns rebuild the remittance" value={summary.checks.collectors} />
               <Check label="Status split rebuilds the gross" value={summary.checks.statusSplit} />
-              <Check label="Collector split rebuilds the receivable" value={summary.checks.receivableSplit} />
+              <Check label="Collector split rebuilds the trade receivable" value={summary.checks.receivableSplit} />
+              <Check label="Every order sits in exactly one position" value={summary.checks.positionSplit} />
             </CardContent>
           </Card>
 
           <div className="grid gap-6 lg:grid-cols-2">
             <Card>
               <CardHeader>
-                <CardTitle>Where the money went</CardTitle>
+                <CardTitle>The position at {summary.asAt}</CardTitle>
                 <CardDescription>
-                  Only a delivered order can be owed — an RTO came back, a cancellation never shipped,
-                  and a refund was given back on purpose.
+                  A receivable is a position at a date. Every order sits in exactly one line below.
                 </CardDescription>
               </CardHeader>
               <CardContent>
                 <Table>
                   <TableHeader><TableRow>
-                    <TableHead>Status</TableHead><TableHead className="text-right">Orders</TableHead>
-                    <TableHead className="text-right">Billed</TableHead><TableHead className="text-right">Collected</TableHead>
+                    <TableHead>Position</TableHead><TableHead className="text-right">Orders</TableHead>
+                    <TableHead className="text-right">Amount</TableHead>
                   </TableRow></TableHeader>
                   <TableBody>
-                    {summary.groups.map((g) => (
-                      <TableRow key={g.key}>
-                        <TableCell className="font-medium">{g.label}</TableCell>
-                        <TableCell className="text-right">{int(g.orders)}</TableCell>
-                        <TableCell className="text-right">{money(g.billed)}</TableCell>
-                        <TableCell className="text-right">{money(g.collected)}</TableCell>
+                    {summary.byPosition.map((p) => (
+                      <TableRow key={p.key}>
+                        <TableCell className="font-medium">{p.label}</TableCell>
+                        <TableCell className="text-right">{int(p.orders)}</TableCell>
+                        <TableCell className="text-right">{money(p.amount)}</TableCell>
                       </TableRow>
                     ))}
                   </TableBody>
@@ -279,6 +288,36 @@ const ReceivablesSummaryWorkspace = ({ agent }) => {
               </CardContent>
             </Card>
           </div>
+
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <AlertTriangle className="h-5 w-5 text-amber-600" /> Known limits of this data
+              </CardTitle>
+              <CardDescription>
+                Everything these files cannot tell you, with its size. Each one is a tab in the workbook
+                with the order ids on it. None of them has been netted away to make a total look clean.
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              <Table>
+                <TableHeader><TableRow>
+                  <TableHead>Limit</TableHead><TableHead className="text-right">Orders</TableHead>
+                  <TableHead className="text-right">Amount</TableHead><TableHead>What it means</TableHead>
+                </TableRow></TableHeader>
+                <TableBody>
+                  {summary.limits.map((l) => (
+                    <TableRow key={l.key}>
+                      <TableCell className="font-medium align-top">{l.label}</TableCell>
+                      <TableCell className="text-right align-top">{int(l.orders)}</TableCell>
+                      <TableCell className="text-right align-top">{money(l.amount)}</TableCell>
+                      <TableCell className="max-w-xl text-xs text-slate-500">{l.why}</TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </CardContent>
+          </Card>
 
           <Card>
             <CardHeader>
@@ -373,7 +412,8 @@ const ReceivablesSummaryWorkspace = ({ agent }) => {
                   <TableHead>Order ID</TableHead><TableHead>GSTIN</TableHead><TableHead>Order date</TableHead>
                   <TableHead>Status</TableHead><TableHead>Collector</TableHead><TableHead>State</TableHead>
                   <TableHead className="text-right">Billed</TableHead><TableHead className="text-right">Collected</TableHead>
-                  <TableHead className="text-right">Gap</TableHead><TableHead>UTR</TableHead>
+                  <TableHead className="text-right">Owed</TableHead>
+                  <TableHead className="min-w-[320px]">Why it sits here</TableHead>
                 </TableRow></TableHeader>
                 <TableBody>
                   {worklistRows.map((r) => (
@@ -386,8 +426,8 @@ const ReceivablesSummaryWorkspace = ({ agent }) => {
                       <TableCell className="text-sm">{r.shipping_state || '—'}</TableCell>
                       <TableCell className="text-right text-sm">{money(r.billed)}</TableCell>
                       <TableCell className="text-right text-sm">{money(r.collected)}</TableCell>
-                      <TableCell className="text-right text-sm font-medium">{money(r.gap)}</TableCell>
-                      <TableCell className="max-w-[160px] truncate text-sm text-slate-500">{r.utr_id || '—'}</TableCell>
+                      <TableCell className="text-right text-sm font-medium">{money(r.owed)}</TableCell>
+                      <TableCell className="text-xs text-slate-600">{r.remark}</TableCell>
                     </TableRow>
                   ))}
                 </TableBody>

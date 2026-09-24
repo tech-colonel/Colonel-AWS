@@ -71,10 +71,71 @@ function foldByOrder(rows, kind, fields) {
 
 const TAXY = ['order_total', 'taxable_value', 'tax_amount', 'cgst', 'sgst', 'igst', 'qty'];
 
+/* ── the position at a date ────────────────────────────────────────────────
+   A receivable is a position AT A DATE, not a running balance. An order
+   delivered on 28 April whose money arrived on 12 May was owed to you at
+   30 April, and saying otherwise understates the book — in April 2025 by 5x.
+
+   Each order lands in exactly one position, and carries a remark saying in
+   plain words why, so nothing in this file has to be taken on trust. */
+const POSITION = {
+  PAID_IN_PERIOD:     'Delivered and paid within the period',
+  RECEIVABLE_LATE:    'Delivered by the cut-off, money arrived after it',
+  RECEIVABLE_UNPAID:  'Delivered by the cut-off, no money received at all',
+  RECEIVABLE_UNDATED: 'Delivered by the cut-off and paid, but the file records no payment date',
+  UNDATED_DELIVERY:   'Marked delivered, but the file records no delivery date',
+  IN_TRANSIT:         'Dispatched but not delivered by the cut-off',
+  NOT_DUE:            'Nothing is owed — returned, cancelled or lost',
+};
+const POSITION_ORDER = ['RECEIVABLE_LATE', 'RECEIVABLE_UNPAID', 'RECEIVABLE_UNDATED',
+                        'UNDATED_DELIVERY', 'IN_TRANSIT', 'PAID_IN_PERIOD', 'NOT_DUE'];
+/* The three that are certainly owed at the cut-off, and the one that might be. */
+const RECEIVABLE_POSITIONS = ['RECEIVABLE_LATE', 'RECEIVABLE_UNPAID'];
+const UNCERTAIN_POSITIONS  = ['RECEIVABLE_UNDATED', 'UNDATED_DELIVERY'];
+
+function placeOrder(l, asAt) {
+  const delivered = l.delivered_date || null;
+  const paid = l.payment_date || null;
+
+  if (l.group !== 'DELIVERED') {
+    return { position: 'NOT_DUE',
+             remark: `${GROUP_LABEL[l.group]} — no money is due on this order.` };
+  }
+  if (!delivered) {
+    return { position: 'UNDATED_DELIVERY',
+             remark: 'The payment file marks this delivered but records no delivery date, so it cannot '
+                   + 'be placed on either side of the cut-off. Counted as uncertain, never as collected.' };
+  }
+  if (delivered > asAt) {
+    return { position: 'IN_TRANSIT',
+             remark: `Delivered ${delivered}, after the ${asAt} cut-off. The goods had left but had not `
+                   + 'arrived, so this is not a trade receivable on a delivery basis.' };
+  }
+  if (l.collected === 0) {
+    return { position: 'RECEIVABLE_UNPAID',
+             remark: `Delivered ${delivered} and nothing has been received`
+                   + `${l.collector ? ` via ${l.collector}` : ', with no collector named'}. Owed.` };
+  }
+  if (!paid) {
+    return { position: 'RECEIVABLE_UNDATED',
+             remark: `Delivered ${delivered} and the money came, but the file gives no payment date, so `
+                   + 'it cannot be told whether it landed before or after the cut-off. Shown as uncertain.' };
+  }
+  if (paid > asAt) {
+    return { position: 'RECEIVABLE_LATE',
+             remark: `Delivered ${delivered}, money received ${paid} — after the ${asAt} cut-off. `
+                   + 'Owed to you on that date.' };
+  }
+  return { position: 'PAID_IN_PERIOD',
+           remark: `Delivered ${delivered}, money received ${paid}. Settled within the period.` };
+}
+
 /**
  * Build everything the workbook needs from the flat parsed rows.
+ * `asAt` is the cut-off (YYYY-MM-DD). Left out, it is the last day of the
+ * latest month present in the data.
  */
-function buildReceivables(allRows) {
+function buildReceivables(allRows, asAtIn) {
   const payments = allRows.filter((r) => r.source_kind === 'PAYMENT');
   const delivered = foldByOrder(allRows, 'DELIVERED', TAXY);
   const refunds   = foldByOrder(allRows, 'REFUND', ['refunded_amount', 'taxable_value', 'tax_amount', 'cgst', 'sgst', 'igst', 'qty']);
@@ -129,12 +190,19 @@ function buildReceivables(allRows) {
       shiprocket: p ? r2(p.shiprocket) : 0,
 
       utr_id: p ? p.utr_id : null,
+      /* The two dates the position turns on. Both come only from the payment
+         file — the sales workbooks carry no delivery date. */
+      delivered_date: p ? p.delivered_date : null,
       payment_date: p ? p.payment_date : null,
       deposit_date: p ? p.deposit_date : null,
 
-      /* The receivable. Only a DELIVERED order can be owed: an RTO came back, a
-         cancellation never shipped, a refund was given back on purpose. */
-      receivable: group === 'DELIVERED' ? r2(billed - collected) : 0,
+      /* NOT the receivable — this is what is STILL short today, after all the
+         chasing already done. The receivable is a position at a date and is set
+         below by placeOrder(). Keeping the two under different names is
+         deliberate: reporting this one as the receivable understated April by
+         5x, because by the time the file was made nearly everything had been
+         collected — just not all of it before month end. */
+      still_short: group === 'DELIVERED' ? r2(billed - collected) : 0,
       gap: r2(billed - collected),
 
       in_sales_file: !!(d || t || f),
@@ -143,6 +211,49 @@ function buildReceivables(allRows) {
   }
 
   ledger.sort((a, b) => Number(b.order_id) - Number(a.order_id));
+
+  /* The cut-off. Default: the end of the latest month the orders cover, which is
+     the month-end an accountant would be closing. */
+  const lastPeriod = [...new Set(ledger.map((l) => l.period).filter(Boolean))].sort().pop();
+  const monthEnd = (p) => {
+    if (!p) return new Date().toISOString().slice(0, 10);
+    const [y, m] = p.split('-').map(Number);
+    return new Date(Date.UTC(y, m, 0)).toISOString().slice(0, 10);
+  };
+  const asAt = asAtIn || monthEnd(lastPeriod);
+
+  for (const l of ledger) {
+    Object.assign(l, placeOrder(l, asAt));
+    /* What this order contributes to each line of the position statement. One
+       order contributes to exactly one, so the lines always add back. */
+    l.owed      = l.position === 'RECEIVABLE_LATE' ? l.collected
+                : l.position === 'RECEIVABLE_UNPAID' ? l.billed : 0;
+    l.uncertain = l.position === 'RECEIVABLE_UNDATED' ? l.collected
+                : l.position === 'UNDATED_DELIVERY' ? l.billed : 0;
+    l.in_transit_value = l.position === 'IN_TRANSIT' ? l.billed : 0;
+  }
+
+  const byPosition = {};
+  for (const k of POSITION_ORDER) byPosition[k] = { key: k, label: POSITION[k], orders: 0, billed: 0, collected: 0, amount: 0 };
+  for (const l of ledger) {
+    const p = byPosition[l.position];
+    p.orders += 1;
+    p.billed = add(p.billed, l.billed);
+    p.collected = add(p.collected, l.collected);
+    /* What this position contributes to the position statement: money owed for
+       the unpaid ones, money that came late for the late ones. */
+    p.amount = add(p.amount, l.owed || l.uncertain || l.in_transit_value
+                             || (l.position === 'PAID_IN_PERIOD' ? l.collected : l.billed));
+  }
+
+  const positionTotals = {
+    asAt,
+    receivable: RECEIVABLE_POSITIONS.reduce((a, k) => add(a, byPosition[k].amount), 0),
+    uncertain:  UNCERTAIN_POSITIONS.reduce((a, k) => add(a, byPosition[k].amount), 0),
+    inTransit:  byPosition.IN_TRANSIT.amount,
+  };
+  positionTotals.receivableUpperBound = add(positionTotals.receivable, positionTotals.uncertain);
+  positionTotals.totalOwed = add(positionTotals.receivable, positionTotals.inTransit);
 
   /* ── roll-ups ──────────────────────────────────────────────────────────── */
 
@@ -194,11 +305,14 @@ function buildReceivables(allRows) {
     };
   });
 
-  /* The receivable, split so that the parts add back to the whole. */
-  const deliveredRows = ledger.filter((l) => l.group === 'DELIVERED');
+
+  /* The receivable, split so that the parts add back to the whole. Built from
+     the POSITION, not from "delivered and short", so it agrees with the figure
+     on the face of the summary. */
+  const owedRows = ledger.filter((l) => l.position === 'RECEIVABLE_LATE' || l.position === 'RECEIVABLE_UNPAID');
   const bucketRow = (key, label) => {
-    const rows = deliveredRows.filter((l) => bucketOf(l) === key);
-    return { key, label, orders: rows.length, receivable: rows.reduce((a, l) => add(a, l.receivable), 0) };
+    const rows = owedRows.filter((l) => bucketOf(l) === key);
+    return { key, label, orders: rows.length, receivable: rows.reduce((a, l) => add(a, l.owed), 0) };
   };
   const receivableSplit = [
     ...collectorKeys.map((k) => bucketRow(k, COLLECTOR_LABEL[k])),
@@ -230,7 +344,7 @@ function buildReceivables(allRows) {
   const exceptions = {
     noCollector: ledger.filter((l) => l.group === 'DELIVERED' && l.collected === 0 && isBlank(l.collector)),
     redFlag:     ledger.filter((l) => String(l.remarks || '').toUpperCase() === 'RED FLAG'),
-    shortPaid:   ledger.filter((l) => l.group === 'DELIVERED' && l.receivable > 0.5 && !isBlank(l.collector)),
+    shortPaid:   ledger.filter((l) => l.group === 'DELIVERED' && l.still_short > 0.5 && !isBlank(l.collector)),
     statusConflict: ledger.filter((l) => l.in_sales_file && l.in_payment_file
                                       && l.earned_taxable > 0 && l.group !== 'DELIVERED'),
     taxedNowhere:   ledger.filter((l) => l.in_payment_file && !l.in_sales_file && l.group === 'DELIVERED'),
@@ -243,7 +357,7 @@ function buildReceivables(allRows) {
     billed: sum(ledger, 'billed'),
     collected: sum(ledger, 'collected'),
     collectorsTotal: sum(ledger, 'collectors_total'),
-    receivable: sum(ledger, 'receivable'),
+    stillShortToday: sum(ledger, 'still_short'),
     earnedTaxable: sum(ledger, 'earned_taxable'),
     earnedTax: sum(ledger, 'earned_tax'),
     refunded: sum(ledger, 'refunded'),
@@ -258,13 +372,59 @@ function buildReceivables(allRows) {
     statusSplit: r2(GROUP_ORDER.reduce((a, g) => add(a, byGroup[g].billed), 0) - totals.billed),
     /* 3. the receivable split must rebuild the receivable. Without this a
           collector bucket can quietly go missing and the total still looks right. */
-    receivableSplit: r2(receivableSplit.reduce((a, x) => add(a, x.receivable), 0) - totals.receivable),
+    receivableSplit: r2(receivableSplit.reduce((a, x) => add(a, x.receivable), 0)
+                        - positionTotals.receivable),
+    /* 4. every order sits in exactly one position, so the positions must rebuild
+          the gross too. This is what stops a date bug from hiding an order. */
+    positionSplit: r2(POSITION_ORDER.reduce((a, k) => add(a, byPosition[k].orders), 0) - ledger.length),
   };
 
   const periods = [...new Set(ledger.map((l) => l.period).filter(Boolean))].sort();
 
+  /* Every known limit of this data, with its size, so a reader meets it on the
+     face of the report rather than discovering it later. */
+  const lim = (key, rows, amountOf, label, why) => ({
+    key, label, why, orders: rows.length,
+    amount: rows.reduce((a, x) => add(a, amountOf(x)), 0),
+  });
+  const limits = [
+    lim('undatedPayment', ledger.filter((l) => l.position === 'RECEIVABLE_UNDATED'), (l) => l.collected,
+        'Paid, but no payment date',
+        'Delivered before the cut-off and the money came, but the file records no date for it. These '
+      + 'could sit on either side of the cut-off, so the receivable above is a floor, not a ceiling.'),
+    lim('undatedDelivery', ledger.filter((l) => l.position === 'UNDATED_DELIVERY'), (l) => l.billed,
+        'Marked delivered, no delivery date',
+        'The payment file calls these delivered but gives no delivery date, so they cannot be placed '
+      + 'against the cut-off at all.'),
+    lim('noDeposit', exceptions.noDeposit, (l) => l.collected,
+        'No bank deposit date',
+        '"Date of Deposit in bank" is blank on every row of the payment file. Money can be traced to a '
+      + 'collector but not to the bank, so nothing here can be aged against the statement.'),
+    lim('noCollector', exceptions.noCollector, (l) => l.billed,
+        'No collector named',
+        'Delivered, nothing received, and no gateway or UTR on the row. Nothing in the file says who '
+      + 'should have paid.'),
+    lim('statusConflict', exceptions.statusConflict, (l) => l.billed,
+        'Sales file and payment file disagree',
+        'The state workbook taxed these as delivered; the payment file gives them another status. One '
+      + 'of the two is wrong, and the GST position depends on which. Reported, never netted away.'),
+    lim('taxedNowhere', exceptions.taxedNowhere, (l) => l.collected,
+        'Collected but in no state workbook',
+        'The payment file shows these delivered and paid, but they appear in none of the GST sales '
+      + 'workbooks, so they may have been collected without reaching GSTR-1.'),
+    lim('splitShipment', ledger.filter((l) => l.split_shipment), (l) => l.billed,
+        'Shipped from two registrations',
+        'One order whose lines went out from two warehouses. Counted once at order level here; summing '
+      + 'the per-GSTIN sheet instead would double count these.'),
+    lim('outOfWindow', ledger.filter((l) => !l.in_payment_file), (l) => l.billed,
+        'No payment row in the uploaded months',
+        'These reach back before the earliest payment file uploaded — mostly RTOs of an earlier month. '
+      + 'Nothing is owed on them, but their collection sits in a month not loaded here.'),
+  ].filter((x) => x.orders > 0);
+
   return { ledger, byGroup, GROUP_ORDER, GROUP_LABEL, byCollector, byEntity, receivableSplit,
-           exceptions, totals, checks, periods, collectorKeys, COLLECTOR_LABEL, bucketOf };
+           exceptions, totals, checks, periods, collectorKeys, COLLECTOR_LABEL, bucketOf,
+           byPosition, POSITION, POSITION_ORDER, positionTotals, asAt, limits };
 }
 
-module.exports = { buildReceivables, moneyGroup, GROUP_LABEL, GROUP_ORDER };
+module.exports = { buildReceivables, moneyGroup, placeOrder, GROUP_LABEL, GROUP_ORDER, POSITION };
