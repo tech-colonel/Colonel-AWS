@@ -226,7 +226,14 @@ function buildReceivables(allRows, asAtIn) {
     const group = moneyGroup(p ? p.order_status : (t ? 'RTO DELIVERED' : (d ? d.order_status : null)),
                              p ? p.remarks : null);
 
-    const billed    = p ? r2(p.order_total) : r2(d ? d.order_total : (t ? t.order_total : 0));
+    /* An order known only from a refund row still has a value — the amount
+       refunded. Falling through to 0 made a note read "2,382 orders,
+       Rs 20,81,155" when half of those orders were carrying nothing. */
+    const billed    = p ? r2(p.order_total)
+                    : d ? r2(d.order_total)
+                    : t ? r2(t.order_total)
+                    : f ? r2(f.refunded_amount)
+                    : 0;
     const collected = p ? r2(p.remitted_amount) : 0;
 
     ledger.push({
@@ -384,7 +391,7 @@ function buildReceivables(allRows, asAtIn) {
   const receivableSplit = [
     ...collectorKeys.map((k) => bucketRow(k, COLLECTOR_LABEL[k])),
     bucketRow('other', 'Channel not among the five above'),
-    bucketRow('none', 'Collection channel not identified'),
+    bucketRow('none', 'No channel identified — within trade receivables'),
   ].filter((r) => r.orders > 0);
 
   const entities = [...new Set(ledger.map((l) => l.entity).filter(Boolean))].sort();
@@ -456,10 +463,14 @@ function buildReceivables(allRows, asAtIn) {
          the payment file carries the whole order value
        · orders in the payment file that no sales register contains
      Every figure below is measured, none is a balancing item. */
+  /* Full precision, rounded once at the end. A delivered line's order total is
+     taxable + tax and carries a sub-paisa fraction, so rounding on every one of
+     29,349 additions drifts — the same fault that put the sales summary Rs 12
+     out against the accountant's own figures. */
   const salesDelivered = new Map();
   for (const r of allRows) {
     if (r.source_kind !== 'DELIVERED' || !r.order_id) continue;
-    salesDelivered.set(r.order_id, add(salesDelivered.get(r.order_id), r.order_total));
+    salesDelivered.set(r.order_id, (salesDelivered.get(r.order_id) || 0) + (Number(r.order_total) || 0));
   }
   const payDelivered = ledger.filter((l) => l.in_payment_file && l.group === 'DELIVERED');
   const payDelivIds = new Set(payDelivered.map((l) => l.order_id));
@@ -469,7 +480,7 @@ function buildReceivables(allRows, asAtIn) {
   const payOnly = payDelivered.filter((l) => !salesDelivered.has(l.order_id));
   const payById = new Map(payDelivered.map((l) => [l.order_id, l]));
 
-  const sumBy = (keys, f) => keys.reduce((a, k) => add(a, f(k)), 0);
+  const sumBy = (keys, f) => r2(keys.reduce((a, k) => a + f(k), 0));
   const commonSales = sumBy(common, (k) => salesDelivered.get(k));
   const commonPay   = sumBy(common, (k) => payById.get(k).billed);
   const partDelivered = common.filter((k) => Math.abs(salesDelivered.get(k) - payById.get(k).billed) > 0.5);
@@ -480,9 +491,9 @@ function buildReceivables(allRows, asAtIn) {
     commonPerSales:      { orders: common.length, amount: commonSales },
     partDelivered:       { orders: partDelivered.length, amount: r2(commonPay - commonSales) },
     commonPerPayment:    { orders: common.length, amount: commonPay },
-    payOnly:             { orders: payOnly.length, amount: payOnly.reduce((a, l) => add(a, l.billed), 0) },
-    payDelivered:        { orders: payDelivered.length, amount: payDelivered.reduce((a, l) => add(a, l.billed), 0) },
-    collections:         payDelivered.reduce((a, l) => add(a, l.collected), 0),
+    payOnly:             { orders: payOnly.length, amount: r2(payOnly.reduce((a, l) => a + l.billed, 0)) },
+    payDelivered:        { orders: payDelivered.length, amount: r2(payDelivered.reduce((a, l) => a + l.billed, 0)) },
+    collections:         r2(payDelivered.reduce((a, l) => a + l.collected, 0)),
     /* the direction of the part-delivery difference, which is what shows it is
        part delivery and not valuation noise */
     partHigherInPayment: partDelivered.filter((k) => payById.get(k).billed > salesDelivered.get(k)).length,
@@ -496,48 +507,62 @@ function buildReceivables(allRows, asAtIn) {
 
   /* Every known limit of this data, with its size, so a reader meets it on the
      face of the report rather than discovering it later. */
-  const lim = (key, rows, amountOf, label, why) => ({
-    key, label, why, orders: rows.length,
-    amount: rows.reduce((a, x) => add(a, amountOf(x)), 0),
+  /* Each note states what its amount IS. Some are invoice value and some are
+     cash received; putting both under a bare "Amount" column invited the reader
+     to add them up or to read a collections figure as an exposure. */
+  const lim = (key, rows, amountOf, label, why, basis) => ({
+    key, label, why, basis, orders: rows.length,
+    amount: r2(rows.reduce((a, x) => a + amountOf(x), 0)),
   });
   const limits = [
     lim('undatedPayment', ledger.filter((l) => l.position === 'RECEIVABLE_UNDATED'), (l) => l.collected,
         'Realisation date not recorded',
         'Delivered on or before the reporting date and realisation received, but the payment '
       + 'reconciliation records no date of receipt. The period of realisation could not be ascertained, '
-      + 'hence trade receivables above are stated at the minimum.'),
+      + 'hence trade receivables above are stated at the minimum.',
+        'Realisation received'),
     lim('undatedDelivery', ledger.filter((l) => l.position === 'UNDATED_DELIVERY'), (l) => l.billed,
         'Date of delivery not recorded',
         'Shown as delivered in the payment reconciliation without a date of delivery, hence these could '
-      + 'not be classified against the reporting date.'),
+      + 'not be classified against the reporting date.',
+        'Invoice value'),
     lim('noDeposit', exceptions.noDeposit, (l) => l.collected,
         'Bank credit date not recorded',
         'The column "Date of Deposit in bank" is blank throughout the payment reconciliation. '
       + 'Collections are traceable to the collection channel but not to the bank account, hence ageing '
-      + 'against the bank statement could not be carried out.'),
+      + 'against the bank statement could not be carried out.',
+        'Collections received'),
     lim('noCollector', exceptions.noCollector, (l) => l.billed,
-        'Collection channel not identified',
+        'Collection channel not identified — delivered and unrealised, any date',
         'Delivered, no realisation received, and no payment gateway or UTR on record. The party from '
-      + 'whom recovery is due could not be identified from the records produced.'),
+      + 'whom recovery is due could not be identified from the records produced.',
+        'Invoice value'),
     lim('statusConflict', exceptions.statusConflict, (l) => l.billed,
         'Sales register and payment reconciliation differ',
         'Taxed as delivered in the GST sales register, but shown under a different status in the payment '
       + 'reconciliation. One of the two records is incorrect and the GST liability depends on which. '
-      + 'Reported as is; no adjustment has been made.'),
-    lim('taxedNowhere', exceptions.taxedNowhere, (l) => l.collected,
-        'Realised but not in the GST sales register',
-        'Shown as delivered and realised in the payment reconciliation, but not appearing in any of the '
-      + 'GST sales registers produced. These may have been realised without being reported in GSTR-1.'),
+      + 'Reported as is; no adjustment has been made.',
+        'Invoice value'),
+    lim('taxedNowhere', exceptions.taxedNowhere, (l) => l.billed,
+        'Delivered and realised, but not in any GST sales register',
+        'Shown as delivered in the payment reconciliation but not appearing in any GST sales register '
+      + 'produced; they may have been realised without being reported in GSTR-1. Stated at invoice '
+      + `value, the same figure as in table C; realisation against them is Rs `
+      + `${exceptions.taxedNowhere.reduce((a, l) => add(a, l.collected), 0)
+            .toLocaleString('en-IN', { maximumFractionDigits: 0 })}.`,
+        'Invoice value'),
     lim('splitShipment', ledger.filter((l) => l.split_shipment), (l) => l.billed,
         'Billed from two GST registrations',
         'A single order whose line items were dispatched from two warehouses and billed under two GST '
       + 'registrations. Taken once at order level; aggregating the registration-wise schedule instead '
-      + 'would result in double counting.'),
+      + 'would result in double counting.',
+        'Invoice value'),
     lim('outOfWindow', ledger.filter((l) => !l.in_payment_file), (l) => l.billed,
         'Realisation falls outside the periods produced',
         'Pertaining to a period earlier than the earliest payment reconciliation produced — largely RTOs '
       + 'of a preceding month. No amount is recoverable on these, but their realisation lies in a period '
-      + 'not examined.'),
+      + 'not examined.',
+        'Invoice value'),
   ].filter((x) => x.orders > 0);
 
   return { gst: gstSummary(allRows), bridge,

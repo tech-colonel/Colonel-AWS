@@ -309,7 +309,7 @@ function summarySheet(b, meta) {
   const d2 = row('Less: collections received', [null, -br.collections]);
   const d3 = row('Unsettled', [null, `=C${d1}+C${d2}`], 'gsttot', CLR.cash);
   blank();
-  head(['Collection channel', 'Orders routed', 'Collections (₹)'], CLR.cash);
+  head(['Collection channel', 'Orders routed', 'Collections received (₹)'], CLR.cash);
   const dFirst = g.length + 1;
   for (const c of b.byCollector) row(c.label, [c.orders, c.collected]);
   const dLast = g.length;
@@ -337,7 +337,7 @@ function summarySheet(b, meta) {
     [P.IN_TRANSIT.orders, P.IN_TRANSIT.amount]);
   row('Total amount recoverable', [null, `=C${e3}+C${e6}`], 'gsttot', CLR.due);
   blank();
-  head(['Trade receivables — collection channel wise', 'No. of orders', 'Amount (₹)'], CLR.due);
+  head(['Trade receivables — collection channel wise', 'No. of orders', 'Amount recoverable (₹)'], CLR.due);
   const fFirst = g.length + 1;
   for (const r of b.receivableSplit) row(r.label, [r.orders, r.receivable]);
   const fLast = g.length;
@@ -348,14 +348,14 @@ function summarySheet(b, meta) {
   blank();
 
   /* ── F. notes ───────────────────────────────────────────────────────── */
-  band('F.  NOTES AND QUALIFICATIONS', CLR.notes, 4);
-  head(['Particulars', 'No. of orders', 'Amount (₹)', 'Remarks'], CLR.notes);
+  band('F.  NOTES AND QUALIFICATIONS', CLR.notes, 5);
+  head(['Particulars', 'No. of orders', 'Amount (₹)', 'Amount is', 'Remarks'], CLR.notes);
   for (const l of b.limits)
     push(C(l.label, 'gstrow'), C(l.orders, 'gstrow', { fmt: INT }),
-         C(l.amount, 'gstrow', { fmt: RUP }), C(l.why, 'sub'));
+         C(l.amount, 'gstrow', { fmt: RUP }), C(l.basis || '', 'gstrow'), C(l.why, 'sub'));
   blank();
-  band('G.  AMOUNTS UNREALISED AS ON DATE — FOR RECOVERY', CLR.notes, 4);
-  head(['Particulars', 'No. of orders', 'Amount (₹)', 'Remarks'], CLR.notes);
+  band('G.  AMOUNTS UNREALISED AS ON DATE — FOR RECOVERY', CLR.notes, 5);
+  head(['Particulars', 'No. of orders', 'Amount (₹)', 'Amount is', 'Remarks'], CLR.notes);
   const WL = [
     ['Collection channel not identified', b.exceptions.noCollector,
      'Delivered, unrealised, and no gateway or UTR on record'],
@@ -367,18 +367,18 @@ function summarySheet(b, meta) {
   for (const [label, rows, why] of WL)
     push(C(label, 'gstrow'), C(rows.length, 'gstrow', { fmt: INT }),
          C(Number(rows.reduce((a, x) => a + Math.abs(x.gap), 0).toFixed(2)), 'gstrow', { fmt: RUP }),
-         C(why, 'sub'));
+         C('Shortfall', 'gstrow'), C(why, 'sub'));
   push(C('Total unrealised as on date', 'gsttot', { bg: CLR.notes }), C('', 'gsttot', { bg: CLR.notes }),
-       C(b.totals.stillShortToday, 'gsttot', { fmt: RUP, bg: CLR.notes }),
+       C(b.totals.stillShortToday, 'gsttot', { fmt: RUP, bg: CLR.notes }), C('', 'gsttot', { bg: CLR.notes }),
        C('A recovery schedule, NOT trade receivables as on the reporting date — most collections had '
        + 'been received by the date of preparation, though not by the reporting date.', 'sub'));
 
-  const ws = sheetFrom(g, [64, 16, 16, 18, 16, 16, 20]);
+  const ws = sheetFrom(g, [64, 16, 18, 20, 16, 16, 20]);
   ws['!rows'] = g.map((r) => {
     const k = r && r[0] ? r[0].kind : null;
     if (k === 'title') return { hpt: 26 };
     if (k === 'gstband' || k === 'gsthead') return { hpt: 21 };
-    if (r && r[3] && r[3].kind === 'sub') return { hpt: 30 };
+    if ((r && r[4] && r[4].kind === 'sub') || (r && r[3] && r[3].kind === 'sub')) return { hpt: 30 };
     if (r && r[0] && String(r[0].v || '').length > 70) return { hpt: 28 };
     return { hpt: 16 };
   });
@@ -486,23 +486,40 @@ function buildWorkbook(b, meta) {
         + 'amount can be recoverable.',
   }));
 
-  add('Registration Wise', tableSheet([
-    { key: 'entity', label: 'GST registration' },
-    { key: 'orders', label: 'No. of orders', int: true },
-    { key: 'earned_taxable', label: 'Taxable value (₹)', money: true },
-    { key: 'earned_tax', label: 'Tax (₹)', money: true },
-    { key: 'refunded', label: 'Sales returns (₹)', money: true },
-    { key: 'rto_value', label: 'RTO (₹)', money: true },
-    { key: 'billed', label: 'Delivered — invoice value (₹)', money: true },
-    { key: 'collected', label: 'Collections (₹)', money: true },
-    { key: 'receivable', label: 'Receivable (₹)', money: true },
-  ], b.byEntity, [20, 12, 18, 16, 16, 16, 20, 18, 18], {
-    title: 'Registration-wise summary',
-    note: 'A caption such as "HR+KAR" denotes a single order whose line items were dispatched from two '
-        + 'warehouses and billed under two registrations. Such orders are taken once only, so that no '
-        + `amount is counted twice — ${b.totals.splitShipments.toLocaleString('en-IN')} orders are of `
-        + 'this nature.',
-  }));
+  {
+    /* Built from the SAME figures as the Sales Summary. It was previously cast
+       from the deduplicated order ledger, where an order billed under two
+       registrations carries a combined caption and so fell out of both state
+       rows — the sheet then disagreed with the Sales Summary by lakhs for every
+       state, which is exactly the kind of thing that makes a file untrustworthy. */
+    const invOf = (o) => (Number(o.taxable_value) || 0) + (Number(o.cgst) || 0)
+                       + (Number(o.sgst) || 0) + (Number(o.igst) || 0);
+    const rows = [...b.gst.blocks, ...(b.gst.consolidated ? [b.gst.consolidated] : [])].map((blk) => ({
+      entity: STATE_NAME[blk.entity] || blk.entity,
+      taxable: blk.sales.taxable_value, cgst: blk.sales.cgst, sgst: blk.sales.sgst, igst: blk.sales.igst,
+      delivered: invOf(blk.sales), rto: invOf(blk.rto), refund: invOf(blk.refund),
+      net: invOf(blk.net),
+    }));
+    add('Registration Wise', tableSheet([
+      { key: 'entity', label: 'GST registration' },
+      { key: 'taxable', label: 'Taxable value (₹)', money: true },
+      { key: 'cgst', label: 'CGST (₹)', money: true },
+      { key: 'sgst', label: 'SGST (₹)', money: true },
+      { key: 'igst', label: 'IGST (₹)', money: true },
+      { key: 'delivered', label: 'Delivered — invoice value (₹)', money: true },
+      { key: 'rto', label: 'Less: RTO (₹)', money: true },
+      { key: 'refund', label: 'Less: sales returns (₹)', money: true },
+      { key: 'net', label: 'Net sales (₹)', money: true },
+    ], rows, [26, 18, 14, 14, 16, 22, 16, 20, 18], {
+      title: 'Registration-wise summary',
+      note: 'The same figures as the Sales Summary, restated in one table. The last line is the '
+          + 'consolidation, which is why this sheet carries no total row — adding the registrations '
+          + 'and the consolidation together would count everything twice. An order billed under two '
+          + `registrations (${b.totals.splitShipments.toLocaleString('en-IN')} of them) appears in each `
+          + 'register for the lines dispatched from it, which is how the registers themselves are cast.',
+      total: false,
+    }));
+  }
 
   const pos = (k) => b.ledger.filter((l) => l.position === k);
   const WL = [
