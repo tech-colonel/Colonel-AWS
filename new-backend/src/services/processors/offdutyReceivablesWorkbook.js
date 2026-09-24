@@ -309,14 +309,18 @@ function summarySheet(b, meta) {
   head(['Particulars', 'No. of orders', 'Amount (₹)', 'Remarks'], CLR.recon);
   const c1 = push(C('Delivered — per the GSTR-1 workbooks', 'gstrow'),
     C(br.salesDelivered.orders, 'gstrow', { fmt: INT }), C(br.salesDelivered.amount, 'gstrow', { fmt: RUP }),
-    C('The total of table B above — what was taxed.', 'sub'));
+    C('The total of table B above. These are Shopify orders that reached a GSTR-1 workbook.', 'sub'));
   const c2 = push(C('Delivered — per the payment reconciliation', 'gstrow'),
     C(br.payDelivered.orders, 'gstrow', { fmt: INT }), C(br.payDelivered.amount, 'gstrow', { fmt: RUP }),
-    C('What the payment reconciliation treats as delivered.', 'sub'));
+    C('The payment reconciliation IS Shopify — it carries one row per Shopify order and its order '
+    + 'total agrees with the Shopify export to the rupee. So this line is every Shopify order marked '
+    + 'delivered, taxed or not.', 'sub'));
   const cGap = push(C('DIFFERENCE TO BE EXPLAINED', 'gsttot', { bg: CLR.recon }),
     C(`=B${c2}-B${c1}`, 'gsttot', { fmt: INT, bg: CLR.recon }),
     C(`=C${c2}-C${c1}`, 'gsttot', { fmt: RUP, bg: CLR.recon }),
-    C('Explained in full below; nothing is left as a balancing figure.', 'sub'));
+    C('Both lines are the SAME April Shopify orders. The difference is not sales from anywhere else — '
+    + 'it is Shopify orders that the GSTR-1 workbooks taxed differently, or did not tax at all. '
+    + 'Discharged in full below; nothing is left as a balancing figure.', 'sub'));
   blank();
   head(['Explained by', 'No. of orders', 'Amount (₹)', 'Remarks'], CLR.recon);
   const x1 = push(C('Less: taxed as delivered, shown under another status in the payment reconciliation', 'gstrow'),
@@ -325,12 +329,16 @@ function summarySheet(b, meta) {
   const x2 = push(C('Add: orders only part delivered', 'gstrow'),
     C(0, 'gstrow', { fmt: INT }), C(br.partDelivered.amount, 'gstrow', { fmt: RUP }),
     C(`${br.partDelivered.orders.toLocaleString('en-IN')} orders. In BOTH records, so the count does not `
-    + 'change — only the value does. The GSTR-1 workbook taxes the lines delivered; the payment '
-    + `reconciliation carries the whole order. In all ${br.partHigherInPayment.toLocaleString('en-IN')} `
-    + 'the payment figure is the higher, never the other way.', 'sub'));
+    + 'change — only the value does. A customer ordered two or three items, some were delivered and the '
+    + 'rest were not; the GSTR-1 workbook taxes only the lines delivered, while the payment '
+    + 'reconciliation carries the whole Shopify order. Checked against the Shopify export: in every one '
+    + `of the ${br.partDelivered.orders.toLocaleString('en-IN')} the payment figure equals the Shopify `
+    + 'order total and the GSTR-1 figure is lower — never once the other way.', 'sub'));
   const x3 = push(C('Add: orders in the payment reconciliation appearing in no GSTR-1 workbook', 'gstrow'),
     C(br.payOnly.orders, 'gstrow', { fmt: INT }), C(br.payOnly.amount, 'gstrow', { fmt: RUP }),
-    C('Delivered and realised, but never taxed — see the schedule "Not In GSTR-1".', 'sub'));
+    C('In the Shopify export and in the payment reconciliation, but their order numbers appear on NO '
+    + 'sheet of any GSTR-1 workbook. Delivered and realised, apparently never taxed — see the schedule '
+    + '"Not In GSTR-1".', 'sub'));
   const xT = push(C('Total explained', 'gsttot', { bg: CLR.recon }),
     C(`=B${x1}+B${x2}+B${x3}`, 'gsttot', { fmt: INT, bg: CLR.recon }),
     C(`=C${x1}+C${x2}+C${x3}`, 'gsttot', { fmt: RUP, bg: CLR.recon }), C('', 'gsttot', { bg: CLR.recon }));
@@ -338,6 +346,11 @@ function summarySheet(b, meta) {
   push(C('Difference (to be Nil)', okC ? 'ok' : 'bad'),
     C(`=B${xT}-B${cGap}`, okC ? 'ok' : 'bad', { fmt: INT }),
     C(`=ROUND(C${xT}-C${cGap},2)`, okC ? 'ok' : 'bad', { fmt: AMT }), C('', okC ? 'ok' : 'bad'));
+  push(C('Neither figure above comes from a different source of sales. Every April Shopify order — all '
+       + `${b.totals.orders.toLocaleString('en-IN')} of them, Rs 5,85,05,718 — sits in the payment `
+       + 'reconciliation, which agrees with the Shopify export to the rupee. The GSTR-1 workbooks hold '
+       + 'the part of that which was taxed. The three lines above are the whole of the difference.',
+       'note'));
   blank();
 
   /* ── D. collections ─────────────────────────────────────────────────── */
