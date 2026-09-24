@@ -103,6 +103,11 @@ const RECO_AGENT_META = {
     color: '#0F766E', bg: '#F0FDFA', border: '#99F6E4', accuracy: null,
     fields: ['Internal Ledger', 'Counterparty Statement'],
   },
+  'Receivables Summary': {
+    displayName: 'Receivables Summary', icon: '\ud83d\udcb0', category: 'Receivables',
+    color: '#B45309', bg: '#FFF7ED', border: '#FED7AA', accuracy: null,
+    fields: ['Sales workbook per GSTIN (delivered / refund / RTO tabs)', 'Payment reconciliation'],
+  },
   // Fake demo cards (no backend) — matched by their synthetic agent `name`.
   'Amazon Receivables': {
     displayName: 'Amazon Receivables', icon: '📦', category: 'Receivables',

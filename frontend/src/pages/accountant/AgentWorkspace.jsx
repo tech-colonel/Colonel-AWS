@@ -21,6 +21,7 @@ import * as XLSX from 'xlsx';
 import InvoiceAgentWorkspace from './InvoiceAgentWorkspace';
 import OrderCycleShopifyWorkspace from './OrderCycleShopifyWorkspace';
 import SettlementAmazonWorkspace from './SettlementAmazonWorkspace';
+import ReceivablesSummaryWorkspace from './ReceivablesSummaryWorkspace';
 import TotalSalesAnalyzerModal from './TotalSalesAnalyzerModal';
 import NykaaWorkspace from './NykaaWorkspace';
 import MeeshoWorkspace from './MeeshoWorkspace';
@@ -665,6 +666,9 @@ const AgentWorkspace = () => {
     agent?.name?.toLowerCase().includes('order-cycle') ||
     agent?.name?.toLowerCase().includes('order cycle');
   const isSettlement = agent?.name?.toLowerCase().includes('settlement');
+  /* Matched on the full phrase, not on 'receivable' — 'Receivable Cycle' and
+     'Zepto Receivables' are different agents and must keep their own pages. */
+  const isReceivablesSummary = agent?.name?.toLowerCase().includes('receivables summary');
   const isTotalSalesAnalyzer = agent?.name?.toLowerCase().includes('total-sales');
   const isNykaa = agent?.name?.toLowerCase().includes('nykaa');
   const isMeesho = agent?.name?.toLowerCase().includes('meesho');
@@ -845,6 +849,33 @@ const AgentWorkspace = () => {
             </Button>
           </div>
           <PepperfryWorkspace agent={agent} />
+        </div>
+      ) : isReceivablesSummary ? (
+        <div className="p-6" data-testid="receivables-summary-page">
+          <div className="mb-8 flex justify-between items-start">
+            <div>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => navigate(`/brands/${brandId}/agents`)}
+                className="mb-4"
+                data-testid="back-button"
+              >
+                ← Back to Agents
+              </Button>
+              <h1 className="text-3xl font-bold text-slate-900 tracking-tight">{agent?.name}</h1>
+              <p className="text-slate-600 mt-1">{agent?.description}</p>
+            </div>
+            <Button
+              onClick={() => setShowWorkflowModal(true)}
+              variant="outline"
+              className="border-indigo-200 text-indigo-700 hover:bg-indigo-50"
+            >
+              <GitBranch className="mr-2 h-4 w-4" />
+              Workflows
+            </Button>
+          </div>
+          <ReceivablesSummaryWorkspace agent={agent} />
         </div>
       ) : isSettlement ? (
         <div className="p-6" data-testid="settlement-amazon-workspace">
