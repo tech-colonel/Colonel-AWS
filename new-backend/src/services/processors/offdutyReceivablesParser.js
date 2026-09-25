@@ -55,7 +55,7 @@ const REQUIRED = {
   DELIVERED: [['order id'], ['order total']],
   RTO:       [['order id'], ['order total']],
   REFUND:    [['order_number', 'order number'], ['refunded_amount', 'refunded amount']],
-  PAYMENT:   [['order id'], ['remited amount', 'remitted amount']],
+  PAYMENT:   [['order id'], ['remited amount', 'remitted amount']],   // both spellings seen
 };
 
 /* Find the header by content: the first row within the first 15 that carries
@@ -75,6 +75,20 @@ function findHeader(rows, kind) {
   }
   return null;
 }
+
+/* Read a value by a REGEX over the header names. The payment file's COD column
+   is named for its month — "Shiprockt_APR__" — so an exact match works for one
+   month and silently returns zero for every other, which would make every COD
+   order look unpaid. Anything whose header varies by month must be matched by
+   pattern, never by spelling. */
+const pickRe = (row, h, re) => {
+  for (const [name, i] of Object.entries(h.index)) {
+    if (!re.test(name)) continue;
+    const v = row[i];
+    if (v !== undefined && v !== null && v !== '') return v;
+  }
+  return null;
+};
 
 /* Read a value by any of several header spellings. */
 const pick = (row, index, ...names) => {
@@ -304,11 +318,13 @@ function readPayment(rows, h, tab) {
 
     /* Five collectors. Rebuilding the remittance from these is the first of the
        two checks — the sheet never trusts the stated total on its own. */
-    const cashfree  = num(pick(row, h.index, 'cashfree')) || 0;
-    const billdesk  = num(pick(row, h.index, 'bill desk')) || 0;
-    const bdExch    = num(pick(row, h.index, 'bill desk with exchange')) || 0;
-    const rzpExch   = num(pick(row, h.index, 'razorpay with exchange')) || 0;
-    const shiprocket = num(pick(row, h.index, 'shiprockt_apr__', 'shiprocket', 'shiprockt')) || 0;
+    const cashfree  = num(pickRe(row, h, /^cashfree$/)) || 0;
+    const billdesk  = num(pickRe(row, h, /^bill\s*desk$/)) || 0;
+    const bdExch    = num(pickRe(row, h, /^bill\s*desk.*exchange/)) || 0;
+    const rzpExch   = num(pickRe(row, h, /^razorpay.*exchange/)) || 0;
+    /* Shiprockt_APR__, Shiprockt_MAY__, Shiprocket_JUN, and the correct
+       spelling Shiprocket — month-suffixed AND inconsistently spelled. */
+    const shiprocket = num(pickRe(row, h, /^shiproc/)) || 0;
 
     out.push({
       source_kind: 'PAYMENT', source_tab: tab, entity: null,
