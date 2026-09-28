@@ -56,6 +56,9 @@ const REQUIRED = {
   RTO:       [['order id'], ['order total']],
   REFUND:    [['order_number', 'order number'], ['refunded_amount', 'refunded amount']],
   PAYMENT:   [['order id'], ['remited amount', 'remitted amount']],   // both spellings seen
+  /* the second format: All_Data, keyed on columns the subsets also carry — so
+     the TAB NAME decides which one is read, see parseReceivablesFile */
+  PAYMENT2:  [['order number'], ['selling price'], ['final status']],
 };
 
 /* Find the header by content: the first row within the first 15 that carries
@@ -395,6 +398,89 @@ function readPayment(rows, h, tab) {
   return out;
 }
 
+/* ── the payment reconciliation, SECOND format ─────────────────────────────
+   From July 2025 the payment file changed shape entirely. Instead of one
+   "Final" sheet with a Remitted Amount per order, it carries "All_Data" (every
+   line item) plus "Prepaid", "COD" and "Unfulfilled", which are SUBSETS of it,
+   and a "Summary" pivot. Reading the subsets as well would count the same money
+   two or three times, so only All_Data is read.
+
+   There is no remittance amount in this format. Collection is stated as a
+   STATUS per order — Prepaid Status (Success / Simpl / Failed / Not Found /
+   Refunded / Partially Refunded) and COD Status (Received / Not Received) — so
+   "collected" is the invoice value of the orders those columns mark as settled.
+
+   Verified against the file's own Summary tab: August delivered 37,549 orders
+   and Rs 6,20,79,896, to the rupee. And against the GSTR-1 workbooks for the
+   same month, 0.1% apart, which is what says Selling Price is the invoice
+   value — the same basis as the old format's Order Total. */
+
+const WAREHOUSE_ENTITY = (v) => {
+  const n = norm(v);
+  if (!n) return null;
+  if (/har|hr\b/.test(n)) return 'HR';
+  if (/bangalore|bengaluru|\bka\b|kar/.test(n)) return 'KAR';
+  if (/vasai|\bmh\b|mah/.test(n)) return 'MH';
+  return null;
+};
+
+/* Which prepaid/COD statuses mean the money came in. "Refunded" and "Partially
+   Refunded" ARE collected — the customer paid and was refunded; that is a
+   return, not a sum still owed, and it is reported on the returns side. */
+const PREPAID_SETTLED = /^(success|simpl|refunded|partially\s*refunded)$/;
+const COD_SETTLED = /^received$/;
+
+function readPaymentV2(rows, h, tab) {
+  const out = [];
+  for (let r = h.at + 1; r < rows.length; r++) {
+    const row = rows[r] || [];
+    const id = orderId(pick(row, h.index, 'order number'));
+    if (!id) continue;
+    const od = asDate(pick(row, h.index, 'order date'));
+    const value = num(pick(row, h.index, 'selling price')) || 0;
+    const prepaid = norm(pick(row, h.index, 'prepaid status'));
+    const cod = norm(pick(row, h.index, 'cod status'));
+    const settled = PREPAID_SETTLED.test(prepaid) || COD_SETTLED.test(cod);
+    const method = text(pick(row, h.index, 'payment method'));
+
+    out.push({
+      source_kind: 'PAYMENT', source_tab: tab,
+      entity: WAREHOUSE_ENTITY(pick(row, h.index, 'warehouse name')),
+      order_id: id,
+      order_date: iso(od),
+      period: period(od),
+      order_total: value,
+      financial_status: text(pick(row, h.index, 'financial status')),
+      /* Final Status is the settled one — Delivered / RTO / Cancelled / Lost /
+         Pending. Refined Shipping Status collapses it to three, and its
+         "Pending" is what tells us an order never arrived. */
+      order_status: text(pick(row, h.index, 'final status'))
+                 || text(pick(row, h.index, 'order status')),
+      gst_status: text(pick(row, h.index, 'refined shipping status')),
+      collector: method,
+      sku: text(pick(row, h.index, 'product sku')),
+      qty: num(pick(row, h.index, 'product quantity')),
+      /* one bucket, named by the partner — the five fixed columns of the old
+         format do not exist here */
+      cashfree: /cashfree/.test(norm(method)) && settled ? value : 0,
+      billdesk: /billdesk/.test(norm(method)) && settled ? value : 0,
+      billdesk_exchange: 0,
+      razorpay_exchange: /razorpay|simpl/.test(norm(method)) && settled ? value : 0,
+      shiprocket: /cash on delivery|\bcod\b/.test(norm(method)) && settled ? value : 0,
+      collectors_total: settled ? value : 0,
+      remitted_amount: settled ? value : 0,
+      difference: settled ? 0 : value,
+      remarks: settled ? null : `${prepaid || cod || 'no status'}`,
+      delivered_date: iso(asDate(pick(row, h.index, 'order delivered date'))),
+      rto_date: iso(asDate(pick(row, h.index, 'rto delivered date', 'rto initiated date'))),
+      payment_date: null,      // this format records none
+      deposit_date: null,
+      discount_amount: num(pick(row, h.index, 'discount amount')),
+    });
+  }
+  return out;
+}
+
 /* ── entry point ───────────────────────────────────────────────────────────── */
 
 /**
@@ -422,6 +508,25 @@ function parseReceivablesFile(buffer, filename) {
     if (!grid.length) { skipped.push({ tab: name, why: 'empty' }); continue; }
     /* blankrows:true is deliberate — it keeps grid index == Excel row - 1, so the
        header row we report is the row an accountant will actually find. */
+
+    /* The second payment format: Prepaid, COD and Unfulfilled are SUBSETS of
+       All_Data and carry the same columns, so the tab name — not the columns —
+       has to decide. Reading all four would count the same money three times. */
+    if (/^all[_\s]*data$/i.test(String(name).trim())) {
+      const h2 = findHeader(grid, 'PAYMENT2');
+      if (h2) {
+        const got = readPaymentV2(grid, h2, name);
+        rows.push(...got);
+        tabs.push({ tab: name, kind: 'PAYMENT', headerRow: excelRow(h2.at), rows: got.length });
+        continue;
+      }
+    }
+    if (/^(prepaid|cod|unfulfilled|summary|sheet\d*)$/i.test(String(name).trim())
+        && findHeader(grid, 'PAYMENT2')) {
+      skipped.push({ tab: name, why: 'a subset of All_Data — reading it too would count the same '
+                                   + 'money twice' });
+      continue;
+    }
 
     /* A payment file is recognised by its columns, not its name — the sheet is
        just called "Final", which says nothing. */

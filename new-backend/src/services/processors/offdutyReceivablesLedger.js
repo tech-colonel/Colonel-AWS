@@ -33,7 +33,11 @@ function moneyGroup(status, remarks) {
   if (s === 'LOST' || r === 'LOST ORDER') return 'LOST';
   if (s.startsWith('RETURN')) return 'RETURNED';
   if (s === 'DELIVERED') return 'DELIVERED';
-  if (s === 'NEW ORDER' || s.includes('TRANSIT') || s.includes('UNDELIVERED') || s.includes('HUB')) return 'IN_FLIGHT';
+  /* "Pending" is the second format's word for an order that never arrived —
+     Refined Shipping Status collapses everything to Delivered / Cancelled-RTO-
+     Lost / Pending, and Pending is goods still out. */
+  if (s === 'NEW ORDER' || s === 'PENDING' || s === 'MANIFESTED'
+      || s.includes('TRANSIT') || s.includes('UNDELIVERED') || s.includes('HUB')) return 'IN_FLIGHT';
   if (!s || s === '0') return 'NO_STATUS';
   return 'OTHER';
 }
@@ -93,13 +97,27 @@ const POSITION_ORDER = ['RECEIVABLE_LATE', 'RECEIVABLE_UNPAID', 'RECEIVABLE_UNDA
 const RECEIVABLE_POSITIONS = ['RECEIVABLE_LATE', 'RECEIVABLE_UNPAID'];
 const UNCERTAIN_POSITIONS  = ['RECEIVABLE_UNDATED', 'UNDATED_DELIVERY'];
 
-function placeOrder(l, asAt) {
+function placeOrder(l, asAt, opts = {}) {
   const delivered = l.delivered_date || null;
   const paid = l.payment_date || null;
 
+  /* An order still out is goods in transit, whether the file says so with a
+     "Pending" status or by carrying a delivery date after the cut-off. It was
+     previously lumped with returns and cancellations, which understated the
+     transit line by whatever had not yet arrived. */
+  if (l.group === 'IN_FLIGHT') {
+    return { position: 'IN_TRANSIT',
+             remark: `${GROUP_LABEL[l.group]} as on ${asAt}. Dispatched and not yet delivered — `
+                   + 'not a trade receivable where revenue is recognised on delivery.' };
+  }
   if (l.group !== 'DELIVERED') {
     return { position: 'NOT_DUE',
              remark: `${GROUP_LABEL[l.group]}. No amount recoverable from the customer.` };
+  }
+  if (!delivered && opts.noPaymentDates && l.collected > 0) {
+    return { position: 'PAID_IN_PERIOD',
+             remark: 'Shown as delivered and realised, though the file records no delivery date. '
+                   + 'Taken as realised within the period.' };
   }
   if (!delivered) {
     return { position: 'UNDATED_DELIVERY',
@@ -118,6 +136,15 @@ function placeOrder(l, asAt) {
              remark: `Delivered ${delivered}. No realisation received till date`
                    + `${l.collector ? ` through ${l.collector}` : '; collection channel not identified'}. `
                    + 'Outstanding and recoverable.' };
+  }
+  /* No payment date anywhere in the source: treat a settled order as realised
+     in the period and say so once on the face of the statement, rather than
+     flagging tens of thousands of orders as individually uncertain. */
+  if (!paid && opts.noPaymentDates) {
+    return { position: 'PAID_IN_PERIOD',
+             remark: `Delivered ${delivered}. Realisation received. This payment file records no date `
+                   + 'of receipt for any order, so it cannot be split between before and after the '
+                   + 'reporting date; taken as realised within the period.' };
   }
   if (!paid) {
     return { position: 'RECEIVABLE_UNDATED',
@@ -224,10 +251,54 @@ function buildReceivables(allRows, asAtIn) {
   const refunds   = foldByOrder(allRows, 'REFUND', ['refunded_amount', 'taxable_value', 'tax_amount', 'cgst', 'sgst', 'igst', 'qty']);
   const rtos      = foldByOrder(allRows, 'RTO', TAXY);
 
-  /* One payment row per order. If a month is uploaded twice the later row wins,
-     exactly as re-issuing a settlement replaces the earlier one on Amazon. */
+  /* One payment RECORD per order — but the second format is line-item level, so
+     an order of three items is three rows and the amounts have to be added.
+     Taking the last row (which is right for the one-row-per-order format) threw
+     away every line but one and understated August by a crore. Dates and
+     statuses come from the first row that states them. */
+  const PAY_SUM = ['order_total', 'remitted_amount', 'collectors_total', 'difference',
+                   'cashfree', 'billdesk', 'billdesk_exchange', 'razorpay_exchange', 'shiprocket',
+                   'discount_amount', 'qty'];
+  const PAY_FIRST = ['order_date', 'period', 'financial_status', 'order_status', 'gst_status',
+                     'shipping_state', 'pickup_state', 'payment_method', 'shipping_aggregator',
+                     'collector', 'utr_id', 'payment_date', 'deposit_date', 'delivered_date',
+                     'rto_date', 'cancelled_at', 'remarks', 'entity', 'filename'];
   const payByOrder = new Map();
-  for (const p of payments) if (p.order_id) payByOrder.set(p.order_id, p);
+  for (const p of payments) {
+    if (!p.order_id) continue;
+    /* An order can be PART delivered — one line arrives, another comes back —
+       so a single status per order cannot describe it. The value of the lines
+       that were actually delivered is kept separately, which is how the file's
+       own Summary counts, and is what the bridge compares against. */
+    const lineDelivered = String(p.order_status || '').trim().toLowerCase() === 'delivered';
+    const cur = payByOrder.get(p.order_id);
+    if (!cur) {
+      const rec = { order_id: p.order_id, _lines: 1,
+                    delivered_value: lineDelivered ? (Number(p.order_total) || 0) : 0,
+                    delivered_lines: lineDelivered ? 1 : 0 };
+      for (const f of PAY_SUM) rec[f] = Number(p[f]) || 0;
+      for (const f of PAY_FIRST) rec[f] = p[f] == null ? null : p[f];
+      payByOrder.set(p.order_id, rec);
+    } else {
+      cur._lines += 1;
+      if (lineDelivered) { cur.delivered_value += Number(p.order_total) || 0; cur.delivered_lines += 1; }
+      for (const f of PAY_SUM) cur[f] = (Number(cur[f]) || 0) + (Number(p[f]) || 0);
+      for (const f of PAY_FIRST) if (cur[f] == null && p[f] != null) cur[f] = p[f];
+    }
+  }
+  for (const rec of payByOrder.values()) {
+    for (const f of PAY_SUM) rec[f] = r2(rec[f]);
+    rec.delivered_value = r2(rec.delivered_value);
+    /* the order's headline status is the one its delivered lines give it, if any */
+    if (rec.delivered_lines > 0 && rec.delivered_lines < rec._lines) rec.part_delivered = true;
+    if (rec.delivered_lines > 0) rec.order_status = 'DELIVERED';
+  }
+
+  /* Does this data record WHEN money arrived at all? The second format does
+     not. Without it there is no before/after-the-reporting-date split, and
+     flagging every settled order as "date not recorded" would make the
+     uncertain column the whole book. Said once instead — see placeOrder. */
+  const paymentHasDates = payments.some((p) => p.payment_date);
 
   const ids = new Set([...payByOrder.keys(), ...delivered.keys(), ...refunds.keys(), ...rtos.keys()]);
 
@@ -272,6 +343,8 @@ function buildReceivables(allRows, asAtIn) {
       rto_date: t ? t.rto_date : null,
 
       collected,
+      delivered_value: p && p.delivered_value != null ? p.delivered_value : null,
+      part_delivered: !!(p && p.part_delivered),
       collectors_total: p ? r2(p.collectors_total) : 0,
       cashfree: p ? r2(p.cashfree) : 0,
       billdesk: p ? r2(p.billdesk) : 0,
@@ -321,7 +394,7 @@ function buildReceivables(allRows, asAtIn) {
   const asAt = asAtIn || monthEnd(lastPeriod);
 
   for (const l of ledger) {
-    Object.assign(l, placeOrder(l, asAt));
+    Object.assign(l, placeOrder(l, asAt, { noPaymentDates: !paymentHasDates }));
     /* What this order contributes to each line of the position statement. One
        order contributes to exactly one, so the lines always add back. */
     l.owed      = l.position === 'RECEIVABLE_LATE' ? l.collected
@@ -523,17 +596,22 @@ function buildReceivables(allRows, asAtIn) {
     salesDelivered.set(r.order_id, (salesDelivered.get(r.order_id) || 0) + (Number(r.order_total) || 0));
   }
   const payDelivered = ledger.filter((l) => l.in_payment_file && l.group === 'DELIVERED');
+  /* where the source states a delivered value per line, use it — an order part
+     delivered and part returned contributes only the part that arrived */
+  const deliveredValue = (l) => (l.delivered_value != null && l.delivered_value > 0)
+    ? l.delivered_value : l.billed;
   const payDelivIds = new Set(payDelivered.map((l) => l.order_id));
 
   const common = [...salesDelivered.keys()].filter((k) => payDelivIds.has(k));
   const salesOnly = [...salesDelivered.keys()].filter((k) => !payDelivIds.has(k));
   const payOnly = payDelivered.filter((l) => !salesDelivered.has(l.order_id));
   const payById = new Map(payDelivered.map((l) => [l.order_id, l]));
+  const payValue = (k) => deliveredValue(payById.get(k));
 
   const sumBy = (keys, f) => r2(keys.reduce((a, k) => a + f(k), 0));
   const commonSales = sumBy(common, (k) => salesDelivered.get(k));
-  const commonPay   = sumBy(common, (k) => payById.get(k).billed);
-  const partDelivered = common.filter((k) => Math.abs(salesDelivered.get(k) - payById.get(k).billed) > 0.5);
+  const commonPay   = sumBy(common, payValue);
+  const partDelivered = common.filter((k) => Math.abs(salesDelivered.get(k) - payValue(k)) > 0.5);
 
   const bridge = {
     salesDelivered:      { orders: salesDelivered.size, amount: sumBy([...salesDelivered.keys()], (k) => salesDelivered.get(k)) },
@@ -541,12 +619,12 @@ function buildReceivables(allRows, asAtIn) {
     commonPerSales:      { orders: common.length, amount: commonSales },
     partDelivered:       { orders: partDelivered.length, amount: r2(commonPay - commonSales) },
     commonPerPayment:    { orders: common.length, amount: commonPay },
-    payOnly:             { orders: payOnly.length, amount: r2(payOnly.reduce((a, l) => a + l.billed, 0)) },
-    payDelivered:        { orders: payDelivered.length, amount: r2(payDelivered.reduce((a, l) => a + l.billed, 0)) },
+    payOnly:             { orders: payOnly.length, amount: r2(payOnly.reduce((a, l) => a + deliveredValue(l), 0)) },
+    payDelivered:        { orders: payDelivered.length, amount: r2(payDelivered.reduce((a, l) => a + deliveredValue(l), 0)) },
     collections:         r2(payDelivered.reduce((a, l) => a + l.collected, 0)),
     /* the direction of the part-delivery difference, which is what shows it is
        part delivery and not valuation noise */
-    partHigherInPayment: partDelivered.filter((k) => payById.get(k).billed > salesDelivered.get(k)).length,
+    partHigherInPayment: partDelivered.filter((k) => payValue(k) > salesDelivered.get(k)).length,
   };
   bridge.difference = r2(bridge.salesDelivered.amount - bridge.salesOnly.amount + bridge.partDelivered.amount
                          + bridge.payOnly.amount - bridge.payDelivered.amount);
@@ -615,7 +693,7 @@ function buildReceivables(allRows, asAtIn) {
         'Invoice value'),
   ].filter((x) => x.orders > 0);
 
-  return { gst: gstSummary(allRows), bridge,
+  return { gst: gstSummary(allRows), bridge, paymentHasDates,
            monthsPresent, spansMultipleMonths: monthsPresent.length > 1, monthEnd,
            ledger, byGroup, GROUP_ORDER, GROUP_LABEL, byCollector, byEntity, receivableSplit,
            exceptions, totals, checks, periods, collectorKeys, COLLECTOR_LABEL, bucketOf,

@@ -220,7 +220,18 @@ d30 = pay_deliv[pay_deliv['Delivered Date'] <= CUT]
 late = d30[(d30['Date of Payment'] > CUT)]
 unpaid = d30[d30['rem'] == 0]
 undated = d30[d30['Date of Payment'].isna() & (d30['rem'] != 0)]
-transit = pay_deliv[pay_deliv['Delivered Date'] > CUT]
+# Goods in transit = delivered after the cut-off, PLUS orders still out on the
+# cut-off date (new order / in transit / undelivered / at a hub). Those were
+# previously lumped with returns, which understated the transit line.
+# The Remarks column overrides the status: a "NEW ORDER" remarked Cancel is
+# cancelled, not in transit. The code applies that, so the audit must too.
+_rk = pay['Remarks'].astype(str).str.upper().str.strip()
+_st = pay['st'].str.upper().str.strip()
+IN_FLIGHT = (_st.isin(['NEW ORDER', 'PENDING', 'MANIFESTED'])
+             | _st.str.contains('TRANSIT|UNDELIVERED|HUB', na=False)) \
+            & ~_st.str.startswith('RTO') \
+            & ~_rk.isin(['CANCEL', 'RTO', 'LOST ORDER'])
+transit = pd.concat([pay_deliv[pay_deliv['Delivered Date'] > CUT], pay[IN_FLIGHT]]).drop_duplicates(subset=['oid'])
 rE = findrow('Delivered on or before the reporting date, realised subsequently')
 check('  E realised after the date — orders', cell('Receivables', f'B{rE}'), len(late), 0)
 check('  E realised after the date — amount', cell('Receivables', f'C{rE}'), late['rem'].sum())
