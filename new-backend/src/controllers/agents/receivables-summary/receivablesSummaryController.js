@@ -25,6 +25,7 @@ const { parseReceivablesFile } = require('../../../services/processors/offdutyRe
 const { buildReceivables, buildMonthlyStatements } = require('../../../services/processors/offdutyReceivablesLedger');
 const { buildWorkbook, yearSummarySheet, WRITE_OPTS } = require('../../../services/processors/offdutyReceivablesWorkbook');
 const AdmZip = require('adm-zip');
+const drive = require('../../../services/driveService');
 
 const OUTPUT_DIR = path.join(__dirname, '../../../../outputs');
 const ensureDir = () => fs.ensureDir(OUTPUT_DIR);
@@ -119,6 +120,25 @@ const toRow = (r, filename) => {
   for (const f of FIELDS) if (f !== 'filename') out[f] = r[f] === undefined ? null : r[f];
   return out;
 };
+
+/* Read one workbook and store its rows. Shared so a file uploaded from the
+   desktop and one pulled from Drive go through exactly the same path. */
+async function storeOneFile(Model, brand, originalname, buffer) {
+  let parsed;
+  try { parsed = parseReceivablesFile(buffer, originalname); }
+  catch (e) { return { file: originalname, rows: 0, error: `could not read: ${e.message}` }; }
+  if (!parsed.rows.length) {
+    return { file: originalname, rows: 0, error: 'no order rows found', skipped: parsed.skipped };
+  }
+  const stamp = `${Date.now()}_${uuidv4().slice(0, 8)}`;
+  const filename = `receivables_${brand.name.replace(/[^\w]+/g, '_')}_${stamp}.xlsx`;
+  await ensureDir();
+  await fs.writeFile(path.join(OUTPUT_DIR, filename), buffer);
+  const rows = parsed.rows.map((r) => toRow(r, filename));
+  for (let i = 0; i < rows.length; i += 2000) await Model.bulkCreate(rows.slice(i, i + 2000));
+  return { file: originalname, filename, kind: parsed.kind, entity: parsed.entity,
+           rows: parsed.rows.length, tabs: parsed.tabs, skipped: parsed.skipped };
+}
 
 /**
  * Upload one or more workbooks. The kind of each file is detected from its
@@ -382,53 +402,237 @@ function statementFor(rows, month, brandName, heldFiles) {
  * This is how the year is filed: a statement per month to go with that month's
  * return, and the consolidation to see the year at once.
  */
+/* Every month as its own statement, plus one consolidated, in a single zip.
+ *
+ * ONE MONTH AT A TIME. Loading the year and holding thirteen workbooks killed
+ * the process — 1.55 million rows and every sheet alive at once. Each month is
+ * now queried on its own, written straight to disk, added to the zip from that
+ * file and dropped. Only a few numbers per month are carried forward, for the
+ * consolidation.
+ *
+ * The consolidated statement carries the month-by-month table and the basis,
+ * NOT a ledger of every order in the year — that would be a million-row sheet
+ * nobody can open, and it is what the monthly statements are for.
+ */
+async function buildBundle(Model, brandName, wantedIn, onProgress) {
+  const say = (stage, detail, done, total) =>
+    onProgress && onProgress({ stage, detail, done, total });
+
+  say('reading', 'finding the months held');
+  const periods = await Model.findAll({
+    attributes: [[Model.sequelize.fn('DISTINCT', Model.sequelize.col('period')), 'period']],
+    raw: true,
+  });
+  const all = periods.map((p) => p.period).filter(Boolean).sort();
+  const wanted = (wantedIn && wantedIn.length) ? wantedIn.filter((m) => all.includes(m)) : all;
+  if (!wanted.length) throw new Error('Nothing held for those months');
+
+  await ensureDir();
+  const zip = new AdmZip();
+  const monthly = [];
+  const made = [];
+
+  for (let i = 0; i < wanted.length; i++) {
+    const month = wanted[i];
+    say('month', `${month} — reading`, i, wanted.length);
+    const rows = await Model.findAll({ where: { period: month }, raw: true });
+
+    say('month', `${month} — building the statement`, i, wanted.length);
+    const st = statementFor(rows, month, brandName);
+    const name = `${month}  Statement of Trade Receivables - ${brandName}.xlsx`;
+    const tmp = path.join(OUTPUT_DIR, `.bundle_${Date.now()}_${month}.xlsx`);
+    XLSXStyle.writeFile(st.wb, tmp, WRITE_OPTS);
+    zip.addLocalFile(tmp, '', name);
+    await fs.remove(tmp);
+
+    /* keep only what the consolidation needs — holding each month's full result
+       is what ran the process out of memory */
+    const gc = st.b.gst.consolidated || st.b.gst.blocks[0] || null;
+    monthly.push({
+      month, asAt: st.asAt, hasPayment: st.hasPayment,
+      result: {
+        gst: { consolidated: gc && { sales: gc.sales, rto: gc.rto, refund: gc.refund, net: gc.net },
+               blocks: [] },
+        positionTotals: st.b.positionTotals,
+      },
+    });
+    made.push({ month, hasPayment: st.hasPayment,
+                receivable: st.hasPayment ? st.b.positionTotals.receivable : null,
+                inTransit: st.hasPayment ? st.b.positionTotals.inTransit : null });
+    say('month', `${month} — done`, i + 1, wanted.length);
+  }
+
+  if (monthly.length > 1) {
+    say('consolidating', 'building the consolidated statement', wanted.length, wanted.length);
+    const ents = await Model.findAll({
+      attributes: [[Model.sequelize.fn('DISTINCT', Model.sequelize.col('entity')), 'entity']], raw: true });
+    const yws = yearSummarySheet(monthly, {
+      periodLabel: `${wanted[0]} to ${wanted[wanted.length - 1]}`,
+      entities: ents.map((e) => e.entity).filter((e) => e && !e.includes('+')).sort(),
+    });
+    const wb = XLSXStyle.utils.book_new();
+    XLSXStyle.utils.book_append_sheet(wb, yws, 'Year Summary');
+    const tmp = path.join(OUTPUT_DIR, `.bundle_${Date.now()}_consolidated.xlsx`);
+    XLSXStyle.writeFile(wb, tmp, WRITE_OPTS);
+    zip.addLocalFile(tmp, '', `0  Consolidated - ${brandName}.xlsx`);
+    await fs.remove(tmp);
+  }
+
+  say('zipping', 'writing the zip');
+  const filename = `${brandName} - Receivables ${wanted[0]} to ${wanted[wanted.length - 1]}.zip`;
+  await fs.writeFile(path.join(OUTPUT_DIR, filename), zip.toBuffer());
+  return { filename, months: made, consolidated: monthly.length > 1,
+           statements: monthly.length + (monthly.length > 1 ? 1 : 0) };
+}
+
 const generateBundle = async (req, res, next) => {
+  try {
+    const ctx = await resolve(req, res); if (!ctx) return;
+    await ensureTable(ctx.Model);
+    const out = await buildBundle(ctx.Model, ctx.brand.name, req.body && req.body.months, null);
+    res.json({ success: true, ...out });
+  } catch (error) { console.error('Receivables bundle error:', error); next(error); }
+};
+
+/* ── jobs ──────────────────────────────────────────────────────────────────
+   A year is 46 files and a million and a half rows; the work outlives any
+   request. A job runs in the background and the page polls it, so the person
+   sees which month is being read rather than a spinner that might be dead.
+
+   Held in memory on purpose: a job is only interesting while it runs, and the
+   statements it produces are on disk and listed by the files endpoint. A
+   restart loses the progress, not the work. */
+const JOBS = new Map();
+const JOB_TTL = 60 * 60 * 1000;
+
+function newJob(label) {
+  const id = uuidv4();
+  const job = { id, label, state: 'running', startedAt: Date.now(),
+                stage: 'starting', detail: '', done: 0, total: 0,
+                log: [], result: null, error: null };
+  JOBS.set(id, job);
+  for (const [k, j] of JOBS) if (Date.now() - j.startedAt > JOB_TTL) JOBS.delete(k);
+  return job;
+}
+const step = (job, stage, detail, done, total) => {
+  if (!job) return;
+  job.stage = stage; job.detail = detail || '';
+  if (done !== undefined) job.done = done;
+  if (total !== undefined) job.total = total;
+  job.log.push({ at: Date.now(), stage, detail: job.detail });
+  if (job.log.length > 400) job.log.splice(0, job.log.length - 400);
+};
+
+const getJob = async (req, res) => {
+  const j = JOBS.get(req.params.jobId);
+  if (!j) return res.status(404).json({ error: 'No such job — it may have expired' });
+  res.json({ id: j.id, label: j.label, state: j.state, stage: j.stage, detail: j.detail,
+             done: j.done, total: j.total, result: j.result, error: j.error,
+             seconds: Math.round((Date.now() - j.startedAt) / 1000),
+             log: j.log.slice(-40) });
+};
+
+/**
+ * Take a Google Drive folder, read every workbook in it, store them, then build
+ * a statement for each month and one consolidated — reporting each stage.
+ * Files are read and stored ONE AT A TIME so a year does not have to fit in
+ * memory at once.
+ */
+const ingestDrive = async (req, res, next) => {
   try {
     const ctx = await resolve(req, res); if (!ctx) return;
     const { brand, Model } = ctx;
     await ensureTable(Model);
-    const rows = await Model.findAll({ raw: true });
-    if (!rows.length) return res.status(400).json({ error: 'Nothing uploaded yet' });
+    const folders = String((req.body && req.body.url) || '').split(/[\s,]+/).filter(Boolean);
+    if (!folders.length) return res.status(400).json({ error: 'Give me a Drive folder link' });
+    const replace = !!(req.body && req.body.replace);
+    const buildAfter = (req.body && req.body.build) !== false;
 
-    const wanted = (req.body && Array.isArray(req.body.months) && req.body.months.length)
-      ? req.body.months
-      : [...new Set(rows.map((r) => r.period).filter(Boolean))].sort();
+    const job = newJob(`${brand.name} — ${folders.length} Drive folder(s)`);
+    res.json({ jobId: job.id });          // the page starts polling from here
 
-    await ensureDir();
-    const zip = new AdmZip();
-    const monthly = [];
-    const made = [];
+    (async () => {
+      try {
+        if (replace) {
+          step(job, 'clearing', 'removing what was held before');
+          await Model.destroy({ where: {} });
+        }
 
-    for (const month of wanted) {
-      const st = statementFor(rows, month, brand.name);
-      const name = `${month}  Statement of Trade Receivables - ${brand.name}.xlsx`;
-      zip.addFile(name, XLSXStyle.write(st.wb, { ...WRITE_OPTS, type: 'buffer' }));
-      monthly.push({ month, asAt: st.asAt, hasPayment: st.hasPayment, result: st.b });
-      made.push({ month, hasPayment: st.hasPayment,
-                  receivable: st.hasPayment ? st.b.positionTotals.receivable : null });
-    }
+        step(job, 'extracting', 'listing the Drive folder');
+        const found = [];
+        for (const f of folders) {
+          const root = drive.parseFolderId(f);
+          const walk = async (id, trail, depth) => {
+            if (depth > 5) return;
+            for (const ch of await drive.listChildren(id)) {
+              if (ch.mimeType === drive.FOLDER_MIME) { await walk(ch.id, `${trail}${ch.name}/`, depth + 1); continue; }
+              const sheet = ch.mimeType === 'application/vnd.google-apps.spreadsheet';
+              if (!sheet && !/\.(xlsx|xls)$/i.test(ch.name)) continue;
+              found.push({ id: ch.id, name: ch.name, sheet });
+              step(job, 'extracting', `found ${found.length} workbooks`);
+            }
+          };
+          await walk(root, '', 0);
+        }
+        if (!found.length) throw new Error('No workbooks in that folder');
 
-    /* The consolidation, only when there is more than one month — for a single
-       month it would restate the same figures under a second name. */
-    if (monthly.length > 1) {
-      const all = statementFor(rows, null, brand.name);
-      const yws = yearSummarySheet(monthly, {
-        periodLabel: `${wanted[0]} to ${wanted[wanted.length - 1]}`,
-        entities: all.b.byEntity.map((e) => e.entity).filter((e) => !e.includes('+')),
-      });
-      /* the year sheet goes FIRST in the consolidated workbook */
-      all.wb.SheetNames.unshift('Year Summary');
-      all.wb.Sheets['Year Summary'] = yws;
-      zip.addFile(`0  Consolidated - ${brand.name}.xlsx`,
-                  XLSXStyle.write(all.wb, { ...WRITE_OPTS, type: 'buffer' }));
-    }
+        const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+        let stored = 0;
+        const readReport = [];
+        for (let i = 0; i < found.length; i++) {
+          const f = found[i];
+          step(job, 'processing', `${f.name}`, i, found.length);
+          let buf;
+          try {
+            buf = f.sheet ? await drive.exportFile(f.id, XLSX_MIME) : await drive.downloadFile(f.id);
+          } catch (e) {
+            readReport.push({ file: f.name, error: `could not download: ${e.message}` });
+            continue;
+          }
+          const one = await storeOneFile(Model, brand, f.name, buf);
+          stored += one.rows;
+          readReport.push(one);
+          step(job, 'processing', `${f.name} — ${one.rows.toLocaleString('en-IN')} lines`, i + 1, found.length);
+          buf = null;                       // let it go before the next file
+        }
+        job.readReport = readReport;
 
-    const filename = `${brand.name} - Receivables ${wanted[0]} to ${wanted[wanted.length - 1]}.zip`;
-    await fs.writeFile(path.join(OUTPUT_DIR, filename), zip.toBuffer());
-    res.json({ success: true, filename, months: made,
-               consolidated: monthly.length > 1,
-               statements: monthly.length + (monthly.length > 1 ? 1 : 0) });
-  } catch (error) { console.error('Receivables bundle error:', error); next(error); }
+        if (!buildAfter) {
+          job.result = { stored, files: readReport };
+          job.state = 'done'; step(job, 'done', `${stored.toLocaleString('en-IN')} lines stored`);
+          return;
+        }
+
+        const out = await buildBundle(Model, brand.name, null,
+          (p) => step(job, p.stage, p.detail, p.done, p.total));
+        job.result = { stored, files: readReport, ...out };
+        job.state = 'done';
+        step(job, 'done', `${out.statements} statements`, out.months.length, out.months.length);
+      } catch (e) {
+        job.state = 'failed'; job.error = e.message;
+        step(job, 'failed', e.message);
+        console.error('Receivables ingest failed:', e);
+      }
+    })();
+  } catch (error) { next(error); }
+};
+
+/** Build the bundle in the background, reporting progress. */
+const bundleJob = async (req, res, next) => {
+  try {
+    const ctx = await resolve(req, res); if (!ctx) return;
+    await ensureTable(ctx.Model);
+    const job = newJob(`${ctx.brand.name} — statements`);
+    res.json({ jobId: job.id });
+    (async () => {
+      try {
+        const out = await buildBundle(ctx.Model, ctx.brand.name, req.body && req.body.months,
+          (p) => step(job, p.stage, p.detail, p.done, p.total));
+        job.result = out; job.state = 'done';
+        step(job, 'done', `${out.statements} statements`, out.months.length, out.months.length);
+      } catch (e) { job.state = 'failed'; job.error = e.message; step(job, 'failed', e.message); }
+    })();
+  } catch (error) { next(error); }
 };
 
 const download = async (req, res, next) => {
@@ -468,4 +672,5 @@ const getLedger = async (req, res, next) => {
 };
 
 module.exports = { uploadFiles, listFiles, deleteFile, getSummary, generateWorkbook,
-                   generateBundle, download, getLedger, COLUMNS };
+                   generateBundle, buildBundle, ingestDrive, bundleJob, getJob,
+                   download, getLedger, COLUMNS };

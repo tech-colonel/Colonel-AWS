@@ -586,8 +586,18 @@ function yearSummarySheet(monthly, meta) {
                     : C('not reported', 'gstrow'),
       st.hasPayment ? C(st.result.positionTotals.inTransit, 'gstrow', { fmt: RUP })
                     : C('not reported', 'gstrow'),
-      C(st.hasPayment ? '' : 'No payment reconciliation was produced for this month. Sales, RTO and '
-        + 'returns are complete; no receivable can be stated.', 'sub'));
+      C([
+        st.hasPayment ? '' : 'No payment reconciliation was produced for this month. Sales, RTO and '
+          + 'returns are complete; no receivable can be stated.',
+        /* A nil RTO line reads as an error unless the reason is given. From May
+           2025 the workbooks stopped deducting RTO and excluded those orders
+           from sales instead — the net is the same, and the deduction simply
+           has nothing left to remove. */
+        inv(gc.rto) === 0
+          ? 'No RTO deduction: from May 2025 the GSTR-1 workbooks exclude returned orders from sales '
+            + 'at source rather than including and then deducting them. Net sales are unaffected.'
+          : '',
+      ].filter(Boolean).join('  '), 'sub'));
     g[r - 1][4] = C(`=B${r}+C${r}+D${r}`, 'gstrow', { fmt: RUP });
   }
   const last = g.length;

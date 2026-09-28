@@ -18,6 +18,10 @@ router.get(`${base}/ledger`, authenticateToken, c.getLedger);
 router.post(`${base}/workbook`, authenticateToken, c.generateWorkbook);
 /* every month as its own statement plus one consolidated, zipped */
 router.post(`${base}/bundle`, authenticateToken, c.generateBundle);
+/* the long-running paths: a job runs in the background and the page polls it */
+router.post(`${base}/ingest-drive`, authenticateToken, c.ingestDrive);
+router.post(`${base}/bundle-job`, authenticateToken, c.bundleJob);
+router.get(`${base}/job/:jobId`, authenticateToken, c.getJob);
 router.get(`${base}/download/:filename`, authenticateToken, c.download);
 
 module.exports = router;

@@ -189,7 +189,18 @@ function gstSummary(allRows) {
      1358.0357142857142 carries a sub-paisa fraction, and rounding the running
      total over 12,608 lines drifts by Rs 12 against the accountant's own Sales
      Summary. These heads therefore accumulate at full precision. */
-  const acc = (o, r) => { o.lines += 1; for (const h of HEADS) o[h] += Number(r[h]) || 0; };
+  /* Take the MAGNITUDE for returns and RTO, row by row. The workbooks changed
+     convention mid-year — April and May write returns positive, from June they
+     write them negative — and a month that draws rows from both (a refund tab
+     reaching back into the previous month) would have the two cancelling
+     instead of adding. The direction is applied once, at the block. */
+  const acc = (o, r, magnitude) => {
+    o.lines += 1;
+    for (const h of HEADS) {
+      const v = Number(r[h]) || 0;
+      o[h] += magnitude ? Math.abs(v) : v;
+    }
+  };
 
   for (const r of allRows) {
     if (r.source_kind === 'PAYMENT') continue;          // the payment file carries no tax heads
@@ -197,18 +208,22 @@ function gstSummary(allRows) {
     bucket[e] = bucket[e] || { DELIVERED: zero(), RTO: zero(), REFUND: zero() };
     const b = bucket[e][r.source_kind];
     if (!b) continue;
-    acc(b, r);
+    acc(b, r, r.source_kind === 'REFUND' || r.source_kind === 'RTO');
     /* An RTO row inside the sales tab that came back in the month it was sold
        is ALSO this month's RTO. The accountant's own Sales Summary is cast that
        way: sales = the whole tab, RTO = same-month returns + the previous
        month's returns from the "RTO <prev month>" tab. One that came back later
        is left out here — it is deducted in the month it actually returned. */
-    if (r.source_kind === 'DELIVERED' && isSameMonthRto(r)) acc(bucket[e].RTO, r);
+    if (r.source_kind === 'DELIVERED' && isSameMonthRto(r)) acc(bucket[e].RTO, r, true);
   }
 
-  /* RTO and refund rows are held positive in the source workbooks; on a sales
-     summary they reduce sales, so they are shown negative here. */
-  const neg = (o) => HEADS.reduce((a, h) => ({ ...a, [h]: -o[h] }), { lines: o.lines });
+  /* A return is a DEDUCTION, always shown negative — whatever sign the source
+     used. April and May write returns positive; from June the same workbooks
+     write them negative. Negating blindly therefore produced a positive
+     "Less: Returns" for seven months of the year, which ADDED to net sales on
+     the consolidated table instead of subtracting. The magnitude is what the
+     workbook states; the direction is ours. */
+  const neg = (o) => HEADS.reduce((a, h) => ({ ...a, [h]: -Math.abs(o[h]) }), { lines: o.lines });
   const sum = (...os) => HEADS.reduce((a, h) => ({ ...a, [h]: os.reduce((t, o) => t + o[h], 0) }),
                                       { lines: os.reduce((t, o) => t + (o.lines || 0), 0) });
   const round = (o) => HEADS.reduce((a, h) => ({ ...a, [h]: r2(o[h]) }), { lines: o.lines });
