@@ -93,6 +93,27 @@ const pickRe = (row, h, re) => {
   return null;
 };
 
+/* SUM every column the pattern matches, not the first. May's file carries
+   BOTH "Shiprockt_MAY_" and "Shiprockt_NEW_", and taking the first read a zero
+   and ignored 30.8 lakh sitting in the second. A month can add a collector
+   column at any time, so these are summed by pattern and never by position. */
+const sumRe = (row, h, re) => {
+  let t = 0, seen = false;
+  for (const [name, i] of Object.entries(h.last)) {
+    if (!re.test(name)) continue;
+    const n = num(row[i]);
+    if (n !== null) { t += n; seen = true; }
+  }
+  /* h.last holds one index per NAME; a file with two identically named columns
+     would lose one, so the first-occurrence map is swept too. */
+  for (const [name, i] of Object.entries(h.index)) {
+    if (!re.test(name) || h.last[name] === i) continue;
+    const n = num(row[i]);
+    if (n !== null) { t += n; seen = true; }
+  }
+  return seen ? t : null;
+};
+
 /* Read a value by any of several header spellings. */
 const pick = (row, index, ...names) => {
   for (const n of names) {
@@ -379,13 +400,15 @@ function readPayment(rows, h, tab) {
 
     /* Five collectors. Rebuilding the remittance from these is the first of the
        two checks — the sheet never trusts the stated total on its own. */
-    const cashfree  = num(pickRe(row, h, /^cashfree$/)) || 0;
-    const billdesk  = num(pickRe(row, h, /^bill\s*desk$/)) || 0;
-    const bdExch    = num(pickRe(row, h, /^bill\s*desk.*exchange/)) || 0;
-    const rzpExch   = num(pickRe(row, h, /^razorpay.*exchange/)) || 0;
-    /* Shiprockt_APR__, Shiprockt_MAY__, Shiprocket_JUN, and the correct
-       spelling Shiprocket — month-suffixed AND inconsistently spelled. */
-    const shiprocket = num(pickRe(row, h, /^shiproc/)) || 0;
+    const cashfree  = sumRe(row, h, /^cashfree/) || 0;
+    const billdesk  = sumRe(row, h, /^bill\s*desk$/) || 0;
+    /* "Bill Desk Exc" in May, "Bill Desk with Exchange" in April */
+    const bdExch    = sumRe(row, h, /^bill\s*desk.*(exc|exchange)/) || 0;
+    const rzpExch   = sumRe(row, h, /^razorpay.*exchange/) || 0;
+    /* Shiprockt_APR__, Shiprockt_MAY_, Shiprockt_NEW_, Shiprocket — and
+       "Ithink", the other courier remitting cash on delivery. All of them are
+       COD remittances, and a month may add another without warning. */
+    const shiprocket = sumRe(row, h, /^(shiproc|ithink|i\s*think)/) || 0;
 
     out.push({
       source_kind: 'PAYMENT', source_tab: tab, entity: null,
