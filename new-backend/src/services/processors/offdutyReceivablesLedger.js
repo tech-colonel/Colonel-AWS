@@ -304,12 +304,20 @@ function buildReceivables(allRows, asAtIn) {
 
   /* The cut-off. Default: the end of the latest month the orders cover, which is
      the month-end an accountant would be closing. */
-  const lastPeriod = [...new Set(ledger.map((l) => l.period).filter(Boolean))].sort().pop();
+  const monthsPresent = [...new Set(ledger.map((l) => l.period).filter(Boolean))].sort();
+  const lastPeriod = monthsPresent[monthsPresent.length - 1];
   const monthEnd = (p) => {
     if (!p) return new Date().toISOString().slice(0, 10);
     const [y, m] = p.split('-').map(Number);
     return new Date(Date.UTC(y, m, 0)).toISOString().slice(0, 10);
   };
+  /* Defaulting to the latest month is right for ONE month of data and silently
+     wrong for a year: it would report a single position at the last month end
+     and call it the answer. The default stands (it is what a one-month upload
+     wants), but `monthsPresent` is published so the caller can build one
+     statement per month — see buildMonthlyStatements below — and
+     `spansMultipleMonths` is published so nobody can use a single-month figure
+     over a year's data without knowing they did. */
   const asAt = asAtIn || monthEnd(lastPeriod);
 
   for (const l of ledger) {
@@ -608,9 +616,48 @@ function buildReceivables(allRows, asAtIn) {
   ].filter((x) => x.orders > 0);
 
   return { gst: gstSummary(allRows), bridge,
+           monthsPresent, spansMultipleMonths: monthsPresent.length > 1, monthEnd,
            ledger, byGroup, GROUP_ORDER, GROUP_LABEL, byCollector, byEntity, receivableSplit,
            exceptions, totals, checks, periods, collectorKeys, COLLECTOR_LABEL, bucketOf,
            byPosition, POSITION, POSITION_ORDER, positionTotals, asAt, limits };
 }
 
-module.exports = { buildReceivables, gstSummary, isSameMonthRto, moneyGroup, placeOrder, GROUP_LABEL, GROUP_ORDER, POSITION };
+/**
+ * One statement per month, which is how GSTR-1 is filed and what the user asked
+ * for. A month's rows are the rows whose `period` is that month — and `period`
+ * is already the month the row belongs to IN THE RETURN, not merely the month
+ * the order was placed: a delivered row carries its order month, an RTO row the
+ * month the goods came BACK, a refund row the month it was refunded. So the
+ * scoping needs no calendar of its own.
+ *
+ * Scoping matters as much as the cut-off. Building an April statement from a
+ * whole year's rows with asAt = 30 April would classify every later order as
+ * "goods in transit at 30 April" — orders that had not been placed yet.
+ *
+ * `monthsWithoutPayment` names the months whose payment reconciliation was
+ * never produced (June and September 2025 for Off Duty). Those months get their
+ * sales and GST figures and NO receivable, and the caller must SAY so — a blank
+ * or a zero would read as "nothing is owed".
+ */
+function buildMonthlyStatements(allRows, opts = {}) {
+  const months = [...new Set(allRows.map((r) => r.period).filter(Boolean))].sort();
+  const pad2 = (n) => String(n).padStart(2, '0');
+  const endOf = (p) => { const [y, m] = p.split('-').map(Number);
+                         return `${y}-${pad2(m)}-${pad2(new Date(Date.UTC(y, m, 0)).getUTCDate())}`; };
+  return months.map((month) => {
+    const rows = allRows.filter((r) => r.period === month);
+    const hasPayment = rows.some((r) => r.source_kind === 'PAYMENT');
+    return {
+      month,
+      asAt: endOf(month),
+      hasPayment,
+      /* stated, not implied — see the note above */
+      receivableNote: hasPayment ? null
+        : 'No payment reconciliation was produced for this month, so no receivable is reported. '
+        + 'The sales, RTO and return figures below are complete.',
+      result: buildReceivables(rows, endOf(month)),
+    };
+  });
+}
+
+module.exports = { buildReceivables, buildMonthlyStatements, gstSummary, isSameMonthRto, moneyGroup, placeOrder, GROUP_LABEL, GROUP_ORDER, POSITION };

@@ -161,6 +161,36 @@ led_rec = colsum(ol, 14, rows) if ol.cell(5, 14).value else None
 rE = require('Trade receivables (sundry debtors)')
 print(f'   trade receivables per table E: {val(ws, rE, 3):,.2f}')
 
+# Prose carries figures too, and a sentence is not a cell the other checks look
+# at — "Net sales for the period were Rs 0" survived every check until a human
+# read it. Any rupee figure written into a sentence must be non-zero and must
+# agree with the table it quotes.
+print('\n9b. FIGURES QUOTED IN SENTENCES')
+import re as _re
+# The sentence quotes the INVOICE VALUE of net sales, which is taxable plus the
+# three tax heads — not a single cell on the Sales Summary, so it is summed.
+ss_net_total = None
+for r in range(1, ss.max_row + 1):
+    if str(ss.cell(r, 1).value).strip() == 'All registrations — consolidated':
+        # search forward for the labelled row rather than trusting an offset —
+        # an offset breaks silently the next time a blank line moves
+        nr = next((k for k in range(r, min(r + 15, ss.max_row + 1))
+                   if str(ss.cell(k, 1).value).strip() == 'Net Sales'), None)
+        if nr:
+            ss_net_total = sum(val(ss, nr, c) or 0 for c in range(2, 6))
+        break
+if ss_net_total is None:
+    res.append((False, '  consolidated Net Sales row not found on the Sales Summary sheet', 0, 1))
+for r in range(1, ws.max_row + 1):
+    v = ws.cell(r, 1).value
+    if isinstance(v, str) and 'Net sales for the period were Rs' in v:
+        m_ = _re.search(r'Rs ([\d,]+)', v)
+        quoted = float(m_.group(1).replace(',', '')) if m_ else 0
+        res.append((quoted > 0, '  sentence "Net sales for the period" quotes a non-zero figure',
+                    quoted, '>0'))
+        if ss_net_total:
+            check('  ...and it agrees with the Sales Summary consolidated net', quoted, ss_net_total, 1.0)
+
 print('\n10. LABEL COLLISIONS — the same caption used for two different figures')
 # A caption is only a collision if it sits under the SAME column heading — the
 # same channel legitimately appears under "Collections received" and under

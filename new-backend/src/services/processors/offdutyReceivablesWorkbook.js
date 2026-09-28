@@ -272,6 +272,20 @@ function summarySheet(b, meta) {
   push(C('Records examined', 'meta'), C(meta.sourceLine, 'meta'));
   blank();
 
+  /* A month whose payment reconciliation was never produced has NO receivable,
+     and every collection figure below is nil. Left unsaid, a reader takes nil
+     for "nothing is owed", which is the opposite of the truth. So the statement
+     says it at the top, before any figure. */
+  if (meta.receivableNote) {
+    push(...Array.from({ length: 4 }, (_, i) =>
+      C(i === 0 ? 'NO RECEIVABLE IS REPORTED FOR THIS MONTH' : '', 'gstband', { bg: CLR.due })));
+    push(C(meta.receivableNote, 'note'));
+    push(C('Tables C, D and E below are therefore nil throughout. That is the ABSENCE OF A RECORD, not '
+         + 'a statement that nothing is owed. Tables A and B and the Sales Summary sheet are complete '
+         + 'and unaffected.', 'note'));
+    blank();
+  }
+
   band('THE TWO RECORDS THIS STATEMENT COMPARES', CLR.notes);
   head(['Term used below', 'Orders', 'Amount (₹)', 'The file it means, and what it tells you'], CLR.notes);
   push(C('Shopify', 'gstrow'), C(b.bridge.payDelivered.orders + 0, 'gstrow', { fmt: INT }),
@@ -284,7 +298,9 @@ function summarySheet(b, meta) {
        C('Off Duty- GSTR1 <month>_HR / _KAR / _MH — the delivered, refund and RTO sheets. What was '
        + 'TAXED. A part of Shopify, never more than it.', 'sub'));
   blank();
-  push(C(`Net sales for the period were Rs ${inv(b.gst.consolidated || b.gst.blocks[0].net)
+  /* `consolidated` is the BLOCK, so its net is .net — reading the block itself
+     gave an undefined taxable value and printed "Rs 0" on every statement. */
+  push(C(`Net sales for the period were Rs ${inv((b.gst.consolidated || b.gst.blocks[0]).net)
            .toLocaleString('en-IN', { maximumFractionDigits: 0 })} — see the Sales Summary sheet, which `
        + 'carries sales, RTO and returns for each registration.', 'note'));
   blank();

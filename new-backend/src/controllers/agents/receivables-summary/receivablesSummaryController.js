@@ -22,7 +22,7 @@ const { Brand, Agent } = require('../../../models/master');
 const { getBrandConnection } = require('../../../config/database');
 const { getDynamicModel } = require('../../../models/brand');
 const { parseReceivablesFile } = require('../../../services/processors/offdutyReceivablesParser');
-const { buildReceivables } = require('../../../services/processors/offdutyReceivablesLedger');
+const { buildReceivables, buildMonthlyStatements } = require('../../../services/processors/offdutyReceivablesLedger');
 const { buildWorkbook, WRITE_OPTS } = require('../../../services/processors/offdutyReceivablesWorkbook');
 
 const OUTPUT_DIR = path.join(__dirname, '../../../../outputs');
@@ -205,6 +205,19 @@ const deleteFile = async (req, res, next) => {
   } catch (error) { next(error); }
 };
 
+/* The rows a statement is cast from. A month is scoped by `period`, which is
+   already the month each row belongs to IN THE RETURN. Scoping matters as much
+   as the cut-off: an April statement built from a year's rows would call every
+   later order "goods in transit at 30 April". */
+function scope(rows, month) {
+  if (!month) return { rows, asAt: undefined };
+  const sel = rows.filter((r) => r.period === month);
+  const [y, m] = month.split('-').map(Number);
+  const pad2 = (n) => String(n).padStart(2, '0');
+  const asAt = `${y}-${pad2(m)}-${pad2(new Date(Date.UTC(y, m, 0)).getUTCDate())}`;
+  return { rows: sel, asAt, hasPayment: sel.some((r) => r.source_kind === 'PAYMENT') };
+}
+
 /** Header numbers for the workspace — cheap, no workbook written. */
 const getSummary = async (req, res, next) => {
   try {
@@ -213,9 +226,29 @@ const getSummary = async (req, res, next) => {
     const rows = await ctx.Model.findAll({ raw: true });
     if (!rows.length) return res.json({ empty: true });
 
-    const b = buildReceivables(rows, req.query.asAt);
+    /* One statement per month is what the user files. `month` picks one; with
+       no `month` the behaviour is unchanged, which is what a single-month
+       upload wants. */
+    const sc = scope(rows, req.query.month);
+    if (req.query.month && !sc.rows.length) {
+      return res.json({ empty: true, month: req.query.month, reason: 'no records for that month' });
+    }
+    const b = buildReceivables(sc.rows, req.query.asAt || sc.asAt);
     res.json({
       empty: false,
+      month: req.query.month || null,
+      /* every month held, so the page can offer one statement per month */
+      months: buildMonthlyStatements(rows).map((s) => ({
+        month: s.month, asAt: s.asAt, hasPayment: s.hasPayment, note: s.receivableNote,
+        orders: s.result.totals.orders,
+      })),
+      spansMultipleMonths: b.spansMultipleMonths,
+      /* Stated, never implied: a month with no payment reconciliation has no
+         receivable, and a blank or a zero would read as "nothing is owed". */
+      receivableNote: req.query.month && sc.hasPayment === false
+        ? 'No payment reconciliation was produced for this month, so no receivable is reported. '
+          + 'The sales, RTO and return figures are complete.'
+        : null,
       /* The GST sales summary, in the shape the accountant's own working
          already uses. Shown first, because it is the figure they check. */
       gst: { blocks: b.gst.blocks.map(({ _raw, ...rest }) => rest), consolidated: b.gst.consolidated },
@@ -269,12 +302,15 @@ const generateWorkbook = async (req, res, next) => {
     const rows = await Model.findAll({ raw: true });
     if (!rows.length) return res.status(400).json({ error: 'Nothing uploaded yet' });
 
-    const b = buildReceivables(rows, req.body && req.body.asAt);
+    const month = req.body && req.body.month;
+    const sc = scope(rows, month);
+    if (month && !sc.rows.length) return res.status(400).json({ error: `Nothing held for ${month}` });
+    const b = buildReceivables(sc.rows, (req.body && req.body.asAt) || sc.asAt);
 
     /* Rebuild the "what was read" table from what is actually stored, so the
        Basis sheet describes the data in hand rather than the last upload. */
     const perFile = new Map();
-    for (const r of rows) {
+    for (const r of sc.rows) {
       if (!r.filename) continue;
       let f = perFile.get(r.filename);
       if (!f) { f = { filename: r.filename, tabs: new Map(), skipped: [] }; perFile.set(r.filename, f); }
@@ -285,12 +321,19 @@ const generateWorkbook = async (req, res, next) => {
 
     const wb = buildWorkbook(b, {
       sourceLine: `${files.length} file(s) held by this agent`,
+      /* carried onto the face of the statement, not just the API response */
+      receivableNote: month && sc.hasPayment === false
+        ? 'No payment reconciliation was produced for this month, so no receivable is reported. '
+          + 'The sales, RTO and return figures are complete.'
+        : null,
       entities: b.byEntity.map((e) => e.entity).filter((e) => !e.includes('+')),
       files,
     });
 
     await ensureDir();
     const filename = `Statement of Trade Receivables - ${brand.name} - as on ${b.asAt}.xlsx`;
+    /* the month's own name is in the file name via asAt, so a year of statements
+       sorts correctly in a folder */
     XLSXStyle.writeFile(wb, path.join(OUTPUT_DIR, filename), WRITE_OPTS);
 
     res.json({
@@ -321,7 +364,8 @@ const getLedger = async (req, res, next) => {
     const rows = await ctx.Model.findAll({ raw: true });
     if (!rows.length) return res.json({ rows: [], total: 0 });
 
-    const b = buildReceivables(rows, req.query.asAt);
+    const sc2 = scope(rows, req.query.month);
+    const b = buildReceivables(sc2.rows, req.query.asAt || sc2.asAt);
     const { worklist, limit = 200, offset = 0 } = req.query;
     /* The position lists are not in `exceptions` — they are the ledger sliced by
        where each order fell at the cut-off. */
