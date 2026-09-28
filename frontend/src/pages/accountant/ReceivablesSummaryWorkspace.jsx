@@ -11,7 +11,7 @@ import { useParams } from 'react-router-dom';
 import {
   Upload, FileText, Download, Trash2, Loader2, CheckCircle2, AlertTriangle,
   FileSpreadsheet, X, ChevronRight, Scale, Banknote, Truck, ClipboardList, Inbox,
-  CalendarDays, Layers, Package,
+  CalendarDays, Layers, Package, Link as LinkIcon,
 } from 'lucide-react';
 import { Button } from '../../components/ui/button';
 import { Input } from '../../components/ui/input';
@@ -155,6 +155,15 @@ const ReceivablesSummaryWorkspace = ({ agent }) => {
   const [month, setMonth] = useState(null);       // null = everything held
   const [picks, setPicks] = useState([]);         // for mode === 'many'
   const [bundling, setBundling] = useState(false);
+  /* Three ways the records arrive: the accountant picks files off the desktop,
+     or gives a Drive folder per kind, or one folder holding the lot. A year is
+     46 workbooks and a million and a half lines, so the Drive paths run as a
+     background job the page polls — which lets it say which month is being
+     read rather than show a spinner that might be dead. */
+  const [source, setSource] = useState('upload');   // upload | split | combined
+  const [links, setLinks] = useState({ month: '', payment: '', shopify: '', combined: '' });
+  const [replaceHeld, setReplaceHeld] = useState(true);
+  const [job, setJob] = useState(null);
   const [sched, setSched] = useState(null);
   const [schedRows, setSchedRows] = useState([]);
   const [schedLoading, setSchedLoading] = useState(false);
@@ -207,20 +216,60 @@ const ReceivablesSummaryWorkspace = ({ agent }) => {
     } finally { setBuilding(false); }
   };
 
+  /* Poll a background job until it stops. The interval is deliberately short:
+     the stage text is the whole point, and a year moves through it quickly. */
+  const watchJob = useCallback(async (jobId, onDone) => {
+    let stop = false;
+    const tick = async () => {
+      if (stop) return;
+      try {
+        const r = await api.get(`${base}/job/${jobId}`);
+        setJob(r.data);
+        if (r.data.state === 'running') { setTimeout(tick, 1200); return; }
+        stop = true;
+        if (r.data.state === 'failed') toast.error(r.data.error || 'The job failed');
+        else { toast.success('Done'); if (onDone) onDone(r.data); refresh(); }
+      } catch (e) {
+        stop = true;
+        setJob((j) => (j ? { ...j, state: 'failed', error: 'Lost contact with the job' } : j));
+      }
+    };
+    tick();
+  }, [base, refresh]);
+
+  const startDrive = async () => {
+    const url = source === 'combined'
+      ? links.combined
+      : [links.month, links.payment, links.shopify].filter(Boolean).join(' ');
+    if (!url.trim()) return toast.error('Paste at least one Drive folder link');
+    setJob({ state: 'running', stage: 'starting', detail: '', done: 0, total: 0, log: [] });
+    try {
+      const r = await api.post(`${base}/ingest-drive`, { url, replace: replaceHeld, build: true });
+      watchJob(r.data.jobId);
+    } catch (e) {
+      setJob(null);
+      toast.error(e.response?.data?.error || 'Could not start');
+    }
+  };
+
+  const downloadFile = async (name) => {
+    const dl = await api.get(`${base}/download/${encodeURIComponent(name)}`, { responseType: 'blob' });
+    const url = window.URL.createObjectURL(new Blob([dl.data]));
+    const a = document.createElement('a');
+    a.href = url; a.download = name; document.body.appendChild(a); a.click();
+    a.remove(); window.URL.revokeObjectURL(url);
+  };
+
   /* A statement per month plus one consolidated, zipped. */
   const handleBundle = async () => {
     if (!picks.length) return toast.error('Choose at least one month');
     setBundling(true);
     try {
-      const res = await api.post(`${base}/bundle`, { months: picks });
-      const name = res.data.filename;
-      const dl = await api.get(`${base}/download/${encodeURIComponent(name)}`, { responseType: 'blob' });
-      const url = window.URL.createObjectURL(new Blob([dl.data]));
-      const a = document.createElement('a');
-      a.href = url; a.download = name; document.body.appendChild(a); a.click();
-      a.remove(); window.URL.revokeObjectURL(url);
-      toast.success(`${res.data.statements} statements`
-        + (res.data.consolidated ? ' including the consolidated one' : ''));
+      /* through the job, so a year reports which month it is on instead of
+         hanging the request until it is finished */
+      const res = await api.post(`${base}/bundle-job`, { months: picks });
+      setJob({ state: 'running', stage: 'reading', detail: '', done: 0, total: picks.length, log: [] });
+      watchJob(res.data.jobId, (j) => { if (j.result?.filename) downloadFile(j.result.filename); });
     } catch (e) {
       toast.error(e.response?.data?.error || 'Could not build the statements');
     } finally { setBundling(false); }
@@ -251,7 +300,107 @@ const ReceivablesSummaryWorkspace = ({ agent }) => {
     return m;
   }, [s]);
 
-  /* ── upload panel, used empty and on the Records tab ──────────────────── */
+  /* ── what the job is doing, in the words of the work ──────────────────── */
+  const STAGES = [
+    ['extracting', 'Reading the Drive folder'],
+    ['processing', 'Reading each workbook'],
+    ['month', 'Building each month'],
+    ['consolidating', 'Building the consolidated statement'],
+    ['zipping', 'Packing the download'],
+  ];
+  const stageIndex = job ? STAGES.findIndex(([k]) => k === job.stage) : -1;
+  const progressPanel = job && (
+    <Card className="p-5">
+      <div className="mb-3 flex items-center justify-between">
+        <div className="flex items-center gap-2 text-base font-semibold" style={{ color: 'var(--text-heading)' }}>
+          {job.state === 'running' && <Loader2 className="h-4 w-4 animate-spin" />}
+          {job.state === 'done' && <CheckCircle2 className="h-4 w-4 text-emerald-600" />}
+          {job.state === 'failed' && <AlertTriangle className="h-4 w-4 text-rose-600" />}
+          {job.state === 'running' ? 'Working…' : job.state === 'done' ? 'Finished' : 'Stopped'}
+        </div>
+        <div className="flex items-center gap-3">
+          {job.seconds != null && (
+            <span className="text-xs" style={{ color: 'var(--text-muted)' }}>{job.seconds}s</span>
+          )}
+          {job.state !== 'running' && (
+            <Button size="sm" variant="ghost" onClick={() => setJob(null)}><X className="h-4 w-4" /></Button>
+          )}
+        </div>
+      </div>
+
+      <ol className="mb-3 space-y-1.5">
+        {STAGES.map(([k, label], i) => {
+          const state = job.state === 'done' ? 'done'
+            : stageIndex < 0 ? 'todo'
+            : i < stageIndex ? 'done' : i === stageIndex ? 'now' : 'todo';
+          return (
+            <li key={k} className="flex items-start gap-2 text-sm">
+              <span className={`mt-1 h-2 w-2 shrink-0 rounded-full ${
+                state === 'done' ? 'bg-emerald-500' : state === 'now' ? 'animate-pulse bg-slate-800' : 'bg-slate-300'}`} />
+              <span style={{ color: state === 'todo' ? 'var(--text-muted)' : 'var(--text-heading)',
+                             fontWeight: state === 'now' ? 600 : 400 }}>
+                {label}
+                {state === 'now' && job.detail && (
+                  <span className="ml-2 font-normal" style={{ color: 'var(--text-muted)' }}>— {job.detail}</span>
+                )}
+              </span>
+            </li>
+          );
+        })}
+      </ol>
+
+      {job.total > 0 && (
+        <div className="mb-2">
+          <div className="h-1.5 w-full overflow-hidden rounded-full bg-slate-200">
+            <div className="h-full rounded-full bg-slate-800 transition-all"
+                 style={{ width: `${Math.round((job.done / job.total) * 100)}%` }} />
+          </div>
+          <div className="mt-1 text-xs" style={{ color: 'var(--text-muted)' }}>
+            {int(job.done)} of {int(job.total)}
+          </div>
+        </div>
+      )}
+
+      {job.state === 'failed' && (
+        <div className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-800">
+          {job.error}
+        </div>
+      )}
+
+      {job.state === 'done' && job.result && (
+        <div className="space-y-2">
+          <div className="text-sm" style={{ color: 'var(--text-muted)' }}>
+            {job.result.stored != null && <>{int(job.result.stored)} lines read. </>}
+            {job.result.statements != null && <>{job.result.statements} statements{job.result.consolidated ? ', including the consolidated one' : ''}.</>}
+          </div>
+          {job.result.filename && (
+            <Button onClick={() => downloadFile(job.result.filename)} className="bg-slate-800 hover:bg-slate-900">
+              <Download className="mr-2 h-4 w-4" /> Download {job.result.filename.endsWith('.zip') ? 'the statements' : 'the statement'}
+            </Button>
+          )}
+          {(job.result.files || []).some((f) => f.error) && (
+            <div className="rounded-lg border px-3 py-2 text-xs" style={{ borderColor: 'var(--card-border)', color: 'var(--text-muted)' }}>
+              {(job.result.files || []).filter((f) => f.error).map((f) => (
+                <div key={f.file}><span className="font-medium">{f.file}</span> — {f.error}</div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </Card>
+  );
+
+  /* ── where the records come from ──────────────────────────────────────── */
+  const SOURCES = [
+    ['upload', 'Upload files', Upload],
+    ['split', 'Three Drive links', Layers],
+    ['combined', 'One Drive link', LinkIcon],
+  ];
+  const LINK_BOXES = [
+    ['month', 'Month-wise GSTR-1 workbooks', 'the folder holding each month\'s HR / KAR / MH workbooks'],
+    ['payment', 'Payment reconciliations', 'one file per month'],
+    ['shopify', 'Shopify exports', 'optional — the payment reconciliation already carries these orders'],
+  ];
   const uploadPanel = (
     <Card className="p-5">
       <div className="mb-1 flex items-center gap-2 text-base font-semibold" style={{ color: 'var(--text-heading)' }}>
@@ -260,30 +409,83 @@ const ReceivablesSummaryWorkspace = ({ agent }) => {
       <p className="mb-4 text-sm leading-relaxed" style={{ color: 'var(--text-muted)' }}>
         The GSTR-1 workbook of each registration and the payment reconciliation for the month. Only the
         delivered, refund and RTO sheets are read; every other sheet pertains to a different sales channel
-        and is excluded. Upload them together — each is identified from its contents.
+        and is excluded. Each file is identified from its contents, so the order does not matter.
       </p>
-      <Input type="file" multiple accept=".xlsx,.xls"
-             onChange={(e) => setPicked(Array.from(e.target.files || []))} />
-      {picked.length > 0 && (
-        <ul className="mt-3 space-y-1 text-sm" style={{ color: 'var(--text-muted)' }}>
-          {picked.map((f) => (
-            <li key={f.name} className="flex items-center gap-2">
-              <FileSpreadsheet className="h-4 w-4 shrink-0 text-slate-400" />
-              <span className="truncate">{f.name}</span>
-              <span className="shrink-0 text-xs text-slate-400">{(f.size / 1024 / 1024).toFixed(1)} MB</span>
-            </li>
-          ))}
-        </ul>
+
+      <div className="mb-4 flex flex-wrap gap-1 rounded-lg border p-0.5" style={{ borderColor: 'var(--card-border)' }}>
+        {SOURCES.map(([k, label, Ic]) => (
+          <button key={k} onClick={() => setSource(k)}
+                  className={`flex flex-1 items-center justify-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-medium transition ${
+                    source === k ? 'bg-slate-800 text-white' : 'text-slate-600 hover:bg-slate-100'}`}>
+            <Ic className="h-3.5 w-3.5" />{label}
+          </button>
+        ))}
+      </div>
+
+      {source === 'upload' && (
+        <>
+          <Input type="file" multiple accept=".xlsx,.xls"
+                 onChange={(e) => setPicked(Array.from(e.target.files || []))} />
+          {picked.length > 0 && (
+            <ul className="mt-3 max-h-40 space-y-1 overflow-auto text-sm" style={{ color: 'var(--text-muted)' }}>
+              {picked.map((f) => (
+                <li key={f.name} className="flex items-center gap-2">
+                  <FileSpreadsheet className="h-4 w-4 shrink-0 text-slate-400" />
+                  <span className="truncate">{f.name}</span>
+                  <span className="shrink-0 text-xs text-slate-400">{(f.size / 1024 / 1024).toFixed(1)} MB</span>
+                </li>
+              ))}
+            </ul>
+          )}
+          <Button onClick={handleUpload} disabled={uploading || !picked.length} className="mt-4 w-full">
+            {uploading ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" /> Reading…</>
+                       : <><Upload className="mr-2 h-4 w-4" /> Read {picked.length || ''} file(s)</>}
+          </Button>
+        </>
       )}
-      <Button onClick={handleUpload} disabled={uploading || !picked.length} className="mt-4 w-full">
-        {uploading ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" /> Reading…</>
-                   : <><Upload className="mr-2 h-4 w-4" /> Read {picked.length || ''} record(s)</>}
-      </Button>
+
+      {source !== 'upload' && (
+        <div className="space-y-3">
+          {(source === 'combined'
+            ? [['combined', 'Drive folder', 'one folder holding the workbooks, in subfolders or not']]
+            : LINK_BOXES
+          ).map(([k, label, hint]) => (
+            <div key={k}>
+              <label className="mb-1 block text-sm font-medium" style={{ color: 'var(--text-heading)' }}>
+                {label}
+                <span className="ml-2 font-normal text-xs" style={{ color: 'var(--text-muted)' }}>{hint}</span>
+              </label>
+              <Input value={links[k]} placeholder="https://drive.google.com/drive/folders/…"
+                     onChange={(e) => setLinks((l) => ({ ...l, [k]: e.target.value }))} />
+            </div>
+          ))}
+          <label className="flex items-start gap-2 text-sm" style={{ color: 'var(--text-muted)' }}>
+            <input type="checkbox" className="mt-1" checked={replaceHeld}
+                   onChange={(e) => setReplaceHeld(e.target.checked)} />
+            <span>
+              Replace what is held. Leave this ticked for a fresh year — reading the same workbooks
+              twice would count every line twice.
+            </span>
+          </label>
+          <Button onClick={startDrive} disabled={job?.state === 'running'} className="w-full">
+            {job?.state === 'running'
+              ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" /> Working…</>
+              : <><Download className="mr-2 h-4 w-4" /> Read from Drive and build the statements</>}
+          </Button>
+          <p className="text-xs leading-relaxed" style={{ color: 'var(--text-muted)' }}>
+            The folder must be shared with the service account. Workbooks are read one at a time and each
+            month is built on its own, so a year does not have to fit in memory at once.
+          </p>
+        </div>
+      )}
     </Card>
   );
 
   return (
     <div className="space-y-6" data-testid="receivables-summary-workspace">
+      {/* what the work is doing, above everything, while it runs */}
+      {progressPanel}
+
       {loading && <div className="flex justify-center py-16"><Loader2 className="h-6 w-6 animate-spin text-slate-400" /></div>}
 
       {/* ── empty ─────────────────────────────────────────────────────── */}
