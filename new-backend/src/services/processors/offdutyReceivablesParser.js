@@ -167,6 +167,26 @@ const asDate = (v) => {
      — ordinal suffix, and a trailing zone label that Date() cannot parse, so
      the whole value came back null and every refund fell out of its month. */
   const s = s0.replace(/(\d)(st|nd|rd|th)\b/gi, '$1').replace(/\s*\(GMT[^)]*\).*$/i, '').trim();
+
+  /* DAY FIRST. 2,062 of August's delivery dates are text in DD-MM-YYYY, and
+     Date() reads that as MM-DD: "07-09-2025" is 7 September and came back as
+     9 July, while "16-09-2025" has no 16th month and came back as nothing at
+     all. The 16 is what proves the format is day-first, so it is parsed
+     explicitly rather than handed to Date(). */
+  const dmy = s.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{4})(?:[ T](\d{1,2}):(\d{2})(?::(\d{2}))?)?/);
+  if (dmy) {
+    const [, D, M, Y, hh, mm, ss] = dmy.map((x) => (x === undefined ? x : x));
+    const day = Number(D), mon = Number(M);
+    /* if the first number cannot be a month it is certainly the day; if both
+       could be either, this data is day-first, which the 16-09 rows settle */
+    if (mon >= 1 && mon <= 12 && day >= 1 && day <= 31) {
+      const dt = new Date(Number(Y), mon - 1, day,
+                          Number(hh || 0), Number(mm || 0), Number(ss || 0));
+      return Number.isNaN(dt.getTime()) || dt.getFullYear() < REAL_DATE_FLOOR ? null : dt;
+    }
+    return null;
+  }
+
   const d = new Date(s);
   if (Number.isNaN(d.getTime())) return null;
   return d.getFullYear() < REAL_DATE_FLOOR ? null : d;
