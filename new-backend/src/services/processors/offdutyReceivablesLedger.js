@@ -245,7 +245,62 @@ function gstSummary(allRows) {
  * `asAt` is the cut-off (YYYY-MM-DD). Left out, it is the last day of the
  * latest month present in the data.
  */
-function buildReceivables(allRows, asAtIn) {
+/* ── identical rows arriving from two different workbooks ──────────────────
+   November 2025 exposed this: the Karnataka workbook's Refund tab is a
+   byte-for-byte copy of Haryana's — 1,932 order numbers, all 1,932 in common —
+   and December's Karnataka workbook carries a further 3,742 November refunds.
+   Loaded together, November held 8,762 refund rows for 4,023 orders.
+
+   An exact duplicate — same kind, same order, same month, same amount — is
+   dropped, and what was dropped is REPORTED as a qualification rather than
+   quietly removed. A split shipment is not affected: those rows differ in
+   amount, and sales rows are never deduplicated, because one order genuinely
+   does appear under two registrations when its lines ship from two warehouses. */
+function dedupeExactRows(allRows) {
+  /* NOT row by row. Two registrations legitimately hold the same order at the
+     same value when its lines shipped from two warehouses and were refunded
+     from both — dropping those took April below the figure its own Sales
+     Summary states, which it had matched exactly.
+
+     The real fault is coarser: a WHOLE TAB copied from one registration's
+     workbook into another's. November 2025 is the case — Karnataka's Refund tab
+     is Haryana's, all 1,932 order numbers in common. So tabs are compared as
+     wholes, and a tab that is an exact duplicate of one already seen is set
+     aside entire, with what was set aside reported. Anything short of a
+     complete match is left alone. */
+  const tabs = new Map();
+  allRows.forEach((r, i) => {
+    if (r.source_kind !== 'REFUND' && r.source_kind !== 'RTO') return;
+    /* the registration is the discriminator: the parser does not stamp a
+       filename on rows, and two registrations are exactly what the copied-tab
+       fault spans */
+    const k = `${r.entity || '?'}|${r.source_tab || '?'}|${r.source_kind}|${r.filename || ''}`;
+    const t = tabs.get(k) || { key: k, idx: [], ids: [], total: 0, entity: r.entity, file: r.filename || r.entity };
+    t.idx.push(i);
+    t.ids.push(r.order_id);
+    t.total += Math.abs(Number(r.source_kind === 'REFUND' ? r.refunded_amount : r.order_total) || 0);
+    tabs.set(k, t);
+  });
+
+  const sig = (t) => `${t.idx.length}|${r2(t.total)}|${[...t.ids].sort().join(',')}`;
+  const bySig = new Map();
+  const drop = new Set();
+  const dropped = [];
+  for (const t of tabs.values()) {
+    const g = sig(t);
+    const first = bySig.get(g);
+    if (!first) { bySig.set(g, t); continue; }
+    for (const i of t.idx) { drop.add(i); dropped.push({ row: allRows[i], keptFrom: first.file }); }
+    t.duplicateOf = first;
+  }
+  const duplicateTabs = [...tabs.values()].filter((t) => t.duplicateOf)
+    .map((t) => ({ file: t.file, entity: t.entity, rows: t.idx.length, value: r2(t.total),
+                   copyOf: t.duplicateOf.file, copyOfEntity: t.duplicateOf.entity }));
+  return { kept: allRows.filter((_, i) => !drop.has(i)), dropped, duplicateTabs };
+}
+
+function buildReceivables(allRowsIn, asAtIn) {
+  const { kept: allRows, dropped: duplicateRows, duplicateTabs } = dedupeExactRows(allRowsIn);
   const payments = allRows.filter((r) => r.source_kind === 'PAYMENT');
   const delivered = foldByOrder(allRows, 'DELIVERED', TAXY);
   const refunds   = foldByOrder(allRows, 'REFUND', ['refunded_amount', 'taxable_value', 'tax_amount', 'cgst', 'sgst', 'igst', 'qty']);
@@ -685,6 +740,20 @@ function buildReceivables(allRows, asAtIn) {
       + 'registrations. Taken once at order level; aggregating the registration-wise schedule instead '
       + 'would result in double counting.',
         'Invoice value'),
+    ...(duplicateRows.length ? [{
+      key: 'duplicateRows',
+      label: 'Identical rows found in two workbooks',
+      basis: 'Invoice value',
+      orders: new Set(duplicateRows.map((d) => d.row.order_id)).size,
+      amount: r2(duplicateRows.reduce((a, d) => a
+        + Math.abs(Number(d.row.refunded_amount || d.row.order_total) || 0), 0)),
+      why: 'A whole tab in one registration\'s workbook is an exact copy of another\'s — every order '
+         + 'number, the same value. '
+         + duplicateTabs.map((t) => `${t.entity} (${t.rows} rows) duplicates ${t.copyOfEntity}`).join('; ')
+         + '. The copy has been set aside; counting it would have overstated returns. The workbooks '
+         + 'themselves need correcting, and this statement does not decide which registration those '
+         + 'orders belong to.',
+    }] : []),
     lim('outOfWindow', ledger.filter((l) => !l.in_payment_file), (l) => l.billed,
         'Realisation falls outside the periods produced',
         'Pertaining to a period earlier than the earliest payment reconciliation produced — largely RTOs '
@@ -694,6 +763,7 @@ function buildReceivables(allRows, asAtIn) {
   ].filter((x) => x.orders > 0);
 
   return { gst: gstSummary(allRows), bridge, paymentHasDates,
+           duplicateRows: duplicateRows.length, duplicateTabs,
            monthsPresent, spansMultipleMonths: monthsPresent.length > 1, monthEnd,
            ledger, byGroup, GROUP_ORDER, GROUP_LABEL, byCollector, byEntity, receivableSplit,
            exceptions, totals, checks, periods, collectorKeys, COLLECTOR_LABEL, bucketOf,
