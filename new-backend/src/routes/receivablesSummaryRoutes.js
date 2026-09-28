@@ -16,6 +16,8 @@ router.delete(`${base}/files/:filename`, authenticateToken, c.deleteFile);
 router.get(`${base}/summary`, authenticateToken, c.getSummary);
 router.get(`${base}/ledger`, authenticateToken, c.getLedger);
 router.post(`${base}/workbook`, authenticateToken, c.generateWorkbook);
+/* every month as its own statement plus one consolidated, zipped */
+router.post(`${base}/bundle`, authenticateToken, c.generateBundle);
 router.get(`${base}/download/:filename`, authenticateToken, c.download);
 
 module.exports = router;

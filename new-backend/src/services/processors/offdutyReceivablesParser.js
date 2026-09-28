@@ -157,9 +157,14 @@ const asDate = (v) => {
     }
     return null;
   }
-  const s = text(v);
-  if (!s || s === '-') return null;
-  const d = new Date(s.replace(/(\d)(st|nd|rd|th)\b/gi, '$1'));
+  const s0 = text(v);
+  if (!s0 || s0 === '-') return null;
+  /* The refund tab writes dates as
+       "Sat April 5th 2025, 10:00:39 (GMT+05:30) Asia/Kolkata"
+     — ordinal suffix, and a trailing zone label that Date() cannot parse, so
+     the whole value came back null and every refund fell out of its month. */
+  const s = s0.replace(/(\d)(st|nd|rd|th)\b/gi, '$1').replace(/\s*\(GMT[^)]*\).*$/i, '').trim();
+  const d = new Date(s);
   if (Number.isNaN(d.getTime())) return null;
   return d.getFullYear() < REAL_DATE_FLOOR ? null : d;
 };
@@ -250,6 +255,19 @@ function readDelivered(rows, h, entity, tab) {
   return out;
 }
 
+/* "april" -> "2025-04", using a nearby real date to fix the year. */
+const MONTHS = ['january', 'february', 'march', 'april', 'may', 'june', 'july',
+                'august', 'september', 'october', 'november', 'december'];
+function monthNameToPeriod(name, nearDate) {
+  if (!name) return null;
+  const i = MONTHS.indexOf(String(name).trim().toLowerCase());
+  if (i < 0) return null;
+  const y = nearDate ? nearDate.getFullYear() : new Date().getFullYear();
+  /* a refund in January against a December order belongs to the NEXT year */
+  const yr = (nearDate && nearDate.getMonth() === 11 && i === 0) ? y + 1 : y;
+  return `${yr}-${String(i + 1).padStart(2, '0')}`;
+}
+
 function readRefund(rows, h, entity, tab) {
   const out = [];
   for (let r = h.at + 1; r < rows.length; r++) {
@@ -257,11 +275,15 @@ function readRefund(rows, h, entity, tab) {
     const id = orderId(pick(row, h.index, 'order_number', 'order number'));
     if (!id) continue;
     const rd = asDate(pick(row, h.index, 'refunded_at', 'refunded at'));
+    const od0 = rd || asDate(pick(row, h.index, 'order date'));
     out.push({
       source_kind: 'REFUND', source_tab: tab, entity,
       order_id: id,
       refunded_at: iso(rd),
-      period: period(rd),
+      /* The month the refund belongs to. The date first; the workbook's own
+         "Month" column as a fallback, so a date format we have not met yet
+         cannot silently drop a refund out of every month. */
+      period: period(rd) || monthNameToPeriod(text(pickLast(row, h, 'month')), od0),
       shipping_state: text(pick(row, h.index, 'state')),
       qty: num(pick(row, h.index, 'item_quantity', 'item quantity')),
       order_total: num(pick(row, h.index, 'item_price', 'item price')),
@@ -275,7 +297,11 @@ function readRefund(rows, h, entity, tab) {
       sgst: num(pick(row, h.index, 'sgst')),
       igst: num(pick(row, h.index, 'igst')),
       order_status: text(pick(row, h.index, 'order status')),
+      /* TWO columns are headed "Month": the first is the month the order was
+         placed, the second the month it was refunded. The refund belongs to the
+         second — taking the first put every refund in the wrong period. */
       sales_month: text(pick(row, h.index, 'month')),
+      refund_month: text(pickLast(row, h, 'month')),
     });
   }
   return out;

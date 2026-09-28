@@ -536,6 +536,88 @@ const UNSETTLED_COLS = [
 const UNSETTLED_W = [12, 15, 12, 15, 20, 15, 14, 15, 14, 20, 20, 96];
 const WL_W = [12, 8, 12, 16, 18, 13, 13, 13, 13, 13, 15, 20, 18, 74];
 
+/* ── The year: one row per month, which is what an accountant closes with ──── */
+
+const MON3 = ['', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+              'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const MONTH_LABEL = (p) => {
+  const [y, m] = String(p).split('-').map(Number);
+  return `${MON3[m] || p} ${String(y).slice(2)}`;
+};
+
+/**
+ * The consolidated statement. Its point is the month-by-month table: twelve
+ * monthly statements answer "what happened in July", and only this answers
+ * "what happened over the year, and which month is the odd one".
+ *
+ * A month with no payment reconciliation shows its sales and returns and a
+ * STATED blank against the receivable columns — never a zero, which would read
+ * as "nothing was owed that month".
+ */
+function yearSummarySheet(monthly, meta) {
+  const g = [];
+  const push = (...cells) => { g.push(cells); return g.length; };
+  const blank = () => g.push([]);
+  const inv = (o) => (Number(o.taxable_value) || 0) + (Number(o.cgst) || 0)
+                   + (Number(o.sgst) || 0) + (Number(o.igst) || 0);
+
+  push(C('Off Duty : Consolidated Statement', 'title'));
+  push(C('Period', 'meta'), C(meta.periodLabel || '', 'meta'));
+  push(C('Registrations', 'meta'), C((meta.entities || []).join(', '), 'meta'));
+  push(C('Statements', 'meta'), C(`${monthly.length} monthly statements accompany this consolidation`, 'meta'));
+  blank();
+
+  push(...Array.from({ length: 8 }, (_, i) =>
+    C(i === 0 ? 'MONTH BY MONTH  (invoice value)' : '', 'gstband', { bg: CLR.sales })));
+  push(...['Month', 'Delivered', 'Less: RTO', 'Less: Returns', 'Net sales',
+           'Trade receivables', 'Goods in transit', 'Remarks']
+    .map((h) => C(h, 'gsthead', { bg: CLR.sales })));
+
+  const first = g.length + 1;
+  for (const st of monthly) {
+    const gc = st.result.gst.consolidated || st.result.gst.blocks[0];
+    const r = push(
+      C(MONTH_LABEL(st.month), 'gstrow'),
+      C(inv(gc.sales), 'gstrow', { fmt: RUP }),
+      C(inv(gc.rto), 'gstrow', { fmt: RUP }),
+      C(inv(gc.refund), 'gstrow', { fmt: RUP }),
+      C('', 'gstrow'),
+      st.hasPayment ? C(st.result.positionTotals.receivable, 'gstrow', { fmt: RUP })
+                    : C('not reported', 'gstrow'),
+      st.hasPayment ? C(st.result.positionTotals.inTransit, 'gstrow', { fmt: RUP })
+                    : C('not reported', 'gstrow'),
+      C(st.hasPayment ? '' : 'No payment reconciliation was produced for this month. Sales, RTO and '
+        + 'returns are complete; no receivable can be stated.', 'sub'));
+    g[r - 1][4] = C(`=B${r}+C${r}+D${r}`, 'gstrow', { fmt: RUP });
+  }
+  const last = g.length;
+  const withPay = monthly.filter((m) => m.hasPayment);
+  push(C('Total for the period', 'gsttot', { bg: CLR.sales }),
+    ...[1, 2, 3, 4].map((i) => C(`=SUM(${colLetter(i)}${first}:${colLetter(i)}${last})`, 'gsttot',
+      { fmt: RUP, bg: CLR.sales })),
+    C(withPay.reduce((a, m) => a + m.result.positionTotals.receivable, 0), 'gsttot', { fmt: RUP, bg: CLR.sales }),
+    C(withPay.reduce((a, m) => a + m.result.positionTotals.inTransit, 0), 'gsttot', { fmt: RUP, bg: CLR.sales }),
+    C(`Receivables and transit total ${withPay.length} of ${monthly.length} months — the rest had no `
+      + 'payment reconciliation.', 'sub'));
+  blank();
+
+  push(C('The receivable columns are each month\'s position at ITS OWN month end, not a running '
+       + 'balance. A figure recovered in the following month still belongs to the month it was owed in, '
+       + 'which is why they are added rather than carried forward. Each monthly statement accompanying '
+       + 'this consolidation sets out its own workings, schedules and checks.', 'note'));
+
+  const ws = sheetFrom(g, [14, 16, 15, 16, 16, 18, 18, 62]);
+  ws['!rows'] = g.map((r) => {
+    const k = r && r[0] ? r[0].kind : null;
+    if (k === 'title') return { hpt: 26 };
+    if (k === 'gstband' || k === 'gsthead') return { hpt: 21 };
+    if (k === 'note') return { hpt: 46 };
+    const rem = r && r[7] && typeof r[7].v === 'string' ? r[7].v : '';
+    return { hpt: 4 + Math.max(Math.ceil(rem.length / 62), 1) * 14 };
+  });
+  return ws;
+}
+
 function buildWorkbook(b, meta) {
   const wb = XLSXStyle.utils.book_new();
   const add = (name, ws) => XLSXStyle.utils.book_append_sheet(wb, ws, name.slice(0, 31));
@@ -703,4 +785,4 @@ function buildWorkbook(b, meta) {
    collectors and states repeat thousands of times, that is most of the file. */
 const WRITE_OPTS = { bookType: 'xlsx', bookSST: true, compression: true };
 
-module.exports = { buildWorkbook, WRITE_OPTS };
+module.exports = { buildWorkbook, yearSummarySheet, WRITE_OPTS };

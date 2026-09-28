@@ -11,6 +11,7 @@ import { useParams } from 'react-router-dom';
 import {
   Upload, FileText, Download, Trash2, Loader2, CheckCircle2, AlertTriangle,
   FileSpreadsheet, X, ChevronRight, Scale, Banknote, Truck, ClipboardList, Inbox,
+  CalendarDays, Layers, Package,
 } from 'lucide-react';
 import { Button } from '../../components/ui/button';
 import { Input } from '../../components/ui/input';
@@ -24,6 +25,13 @@ const CLR = { sales: '#FFF7CC', returns: '#FCE4D6', recon: '#DDEBF7', cash: '#E2
               due: '#FFE1E1', notes: '#EDEDED' };
 const STATE_NAME = { HR: 'Haryana', KAR: 'Karnataka', MH: 'Maharashtra' };
 const HEADS = ['taxable_value', 'cgst', 'sgst', 'igst'];
+
+const MON3 = ['', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const monthLabel = (p) => {
+  if (!p) return '';
+  const [y, m] = String(p).split('-').map(Number);
+  return `${MON3[m] || p} ${String(y).slice(2)}`;
+};
 
 const rup = (n) => (n == null || n === '' ? '' : Number(n).toLocaleString('en-IN', { maximumFractionDigits: 0 }));
 const money = (n) => (n == null ? '—' : `₹${Number(n).toLocaleString('en-IN', { maximumFractionDigits: 0 })}`);
@@ -141,6 +149,12 @@ const ReceivablesSummaryWorkspace = ({ agent }) => {
   const [picked, setPicked] = useState([]);
   const [uploadReport, setUploadReport] = useState(null);
   const [tab, setTab] = useState('position');
+  /* One month, or several. The accountant files monthly, so a single month is
+     the default; "several" exists for the year-end pack. */
+  const [mode, setMode] = useState('one');
+  const [month, setMonth] = useState(null);       // null = everything held
+  const [picks, setPicks] = useState([]);         // for mode === 'many'
+  const [bundling, setBundling] = useState(false);
   const [sched, setSched] = useState(null);
   const [schedRows, setSchedRows] = useState([]);
   const [schedLoading, setSchedLoading] = useState(false);
@@ -148,13 +162,16 @@ const ReceivablesSummaryWorkspace = ({ agent }) => {
   const refresh = useCallback(async () => {
     setLoading(true);
     try {
-      const [f, s] = await Promise.all([api.get(`${base}/files`), api.get(`${base}/summary`)]);
+      const [f, s] = await Promise.all([
+        api.get(`${base}/files`),
+        api.get(`${base}/summary`, { params: month ? { month } : {} }),
+      ]);
       setFiles(f.data?.files || []);
       setSummary(s.data?.empty ? null : s.data);
     } catch (e) {
       toast.error(e.response?.data?.error || 'Could not load the receivables data');
     } finally { setLoading(false); }
-  }, [base]);
+  }, [base, month]);
 
   useEffect(() => { refresh(); }, [refresh]);
 
@@ -177,7 +194,7 @@ const ReceivablesSummaryWorkspace = ({ agent }) => {
   const handleBuild = async () => {
     setBuilding(true);
     try {
-      const res = await api.post(`${base}/workbook`);
+      const res = await api.post(`${base}/workbook`, month ? { month } : {});
       const name = res.data.filename;
       const dl = await api.get(`${base}/download/${encodeURIComponent(name)}`, { responseType: 'blob' });
       const url = window.URL.createObjectURL(new Blob([dl.data]));
@@ -190,10 +207,30 @@ const ReceivablesSummaryWorkspace = ({ agent }) => {
     } finally { setBuilding(false); }
   };
 
+  /* A statement per month plus one consolidated, zipped. */
+  const handleBundle = async () => {
+    if (!picks.length) return toast.error('Choose at least one month');
+    setBundling(true);
+    try {
+      const res = await api.post(`${base}/bundle`, { months: picks });
+      const name = res.data.filename;
+      const dl = await api.get(`${base}/download/${encodeURIComponent(name)}`, { responseType: 'blob' });
+      const url = window.URL.createObjectURL(new Blob([dl.data]));
+      const a = document.createElement('a');
+      a.href = url; a.download = name; document.body.appendChild(a); a.click();
+      a.remove(); window.URL.revokeObjectURL(url);
+      toast.success(`${res.data.statements} statements`
+        + (res.data.consolidated ? ' including the consolidated one' : ''));
+    } catch (e) {
+      toast.error(e.response?.data?.error || 'Could not build the statements');
+    } finally { setBundling(false); }
+  };
+
   const openSched = async (key, label) => {
     setSched({ key, label }); setSchedLoading(true); setSchedRows([]);
     try {
-      const res = await api.get(`${base}/ledger`, { params: { worklist: key, limit: 500 } });
+      const res = await api.get(`${base}/ledger`,
+        { params: { worklist: key, limit: 500, ...(month ? { month } : {}) } });
       setSchedRows(res.data.rows || []);
     } catch (e) { toast.error('Could not load that schedule'); }
     finally { setSchedLoading(false); }
@@ -269,6 +306,83 @@ const ReceivablesSummaryWorkspace = ({ agent }) => {
 
       {!loading && s && (
         <>
+          {/* ── which month, and what to download ───────────────────── */}
+          {(s.months || []).length > 0 && (
+            <Card className="p-4">
+              <div className="mb-3 flex flex-wrap items-center gap-2">
+                <span className="text-xs font-medium uppercase tracking-wide"
+                      style={{ color: 'var(--text-muted)' }}>Statement</span>
+                <div className="flex rounded-lg border p-0.5" style={{ borderColor: 'var(--card-border)' }}>
+                  {[['one', 'One month', CalendarDays], ['many', 'Several months', Layers]].map(([k, lbl, Ic]) => (
+                    <button key={k}
+                            onClick={() => { setMode(k); if (k === 'many' && !picks.length)
+                                             setPicks((s.months || []).map((x) => x.month)); }}
+                            className={`flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-medium transition ${
+                              mode === k ? 'bg-slate-800 text-white' : 'text-slate-600 hover:bg-slate-100'}`}>
+                      <Ic className="h-3.5 w-3.5" />{lbl}
+                    </button>
+                  ))}
+                </div>
+                {mode === 'many' && (
+                  <div className="ml-auto flex items-center gap-2">
+                    <button onClick={() => setPicks((s.months || []).map((x) => x.month))}
+                            className="text-xs underline" style={{ color: 'var(--text-muted)' }}>all</button>
+                    <button onClick={() => setPicks([])}
+                            className="text-xs underline" style={{ color: 'var(--text-muted)' }}>none</button>
+                  </div>
+                )}
+              </div>
+
+              <div className="flex flex-wrap gap-1.5">
+                {mode === 'one' && (
+                  <button onClick={() => setMonth(null)}
+                          className={`rounded-lg border px-3 py-1.5 text-sm transition ${
+                            month === null ? 'border-slate-800 bg-slate-800 text-white' : 'hover:bg-slate-50'}`}
+                          style={month === null ? {} : { borderColor: 'var(--card-border)' }}>
+                    Everything held
+                  </button>
+                )}
+                {(s.months || []).map((x) => {
+                  const on = mode === 'one' ? month === x.month : picks.includes(x.month);
+                  return (
+                    <button key={x.month}
+                            onClick={() => mode === 'one'
+                              ? setMonth(x.month)
+                              : setPicks((p) => p.includes(x.month) ? p.filter((m) => m !== x.month) : [...p, x.month])}
+                            title={x.hasPayment ? `${int(x.orders)} orders`
+                                                : 'No payment reconciliation for this month — sales and returns only'}
+                            className={`rounded-lg border px-3 py-1.5 text-sm transition ${
+                              on ? 'border-slate-800 bg-slate-800 text-white' : 'hover:bg-slate-50'}`}
+                            style={on ? {} : { borderColor: 'var(--card-border)' }}>
+                      {monthLabel(x.month)}
+                      {!x.hasPayment && (
+                        <span className={`ml-1.5 rounded px-1 py-px text-[10px] font-semibold ${
+                          on ? 'bg-white/20' : 'bg-amber-100 text-amber-800'}`}>no payment file</span>
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
+
+              {mode === 'many' && (
+                <div className="mt-3 flex flex-wrap items-center gap-3 border-t pt-3"
+                     style={{ borderColor: 'var(--card-border)' }}>
+                  <Button onClick={handleBundle} disabled={bundling || !picks.length}
+                          className="bg-slate-800 hover:bg-slate-900">
+                    {bundling ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" /> Building…</>
+                              : <><Package className="mr-2 h-4 w-4" /> Download {picks.length} statement{picks.length === 1 ? '' : 's'}
+                                  {picks.length > 1 ? ' + consolidated' : ''}</>}
+                  </Button>
+                  <span className="text-xs leading-snug" style={{ color: 'var(--text-muted)' }}>
+                    A zip holding one statement per month{picks.length > 1 ? ', plus a consolidated statement with the month-by-month table' : ''}.
+                    {picks.some((m) => !(s.months.find((x) => x.month === m) || {}).hasPayment)
+                      && ' Months without a payment reconciliation carry their sales and returns and state plainly that no receivable is reported.'}
+                  </span>
+                </div>
+              )}
+            </Card>
+          )}
+
           {/* ── header ──────────────────────────────────────────────── */}
           <div className="flex flex-wrap items-end justify-between gap-4">
             <div>
@@ -287,6 +401,15 @@ const ReceivablesSummaryWorkspace = ({ agent }) => {
                         : <><Download className="mr-2 h-4 w-4" /> Download the statement</>}
             </Button>
           </div>
+
+          {s.receivableNote && (
+            <div className="rounded-xl border px-4 py-3 text-sm"
+                 style={{ borderColor: '#FCA5A5', background: '#FFF1F2', color: '#9F1239' }}>
+              <span className="font-semibold">No receivable is reported for this month.</span>{' '}
+              {s.receivableNote} The sales and returns below are complete; the collection figures are
+              nil because there is no record, not because nothing is owed.
+            </div>
+          )}
 
           {/* ── the numbers that matter ─────────────────────────────── */}
           <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">

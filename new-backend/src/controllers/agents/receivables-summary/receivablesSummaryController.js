@@ -23,7 +23,8 @@ const { getBrandConnection } = require('../../../config/database');
 const { getDynamicModel } = require('../../../models/brand');
 const { parseReceivablesFile } = require('../../../services/processors/offdutyReceivablesParser');
 const { buildReceivables, buildMonthlyStatements } = require('../../../services/processors/offdutyReceivablesLedger');
-const { buildWorkbook, WRITE_OPTS } = require('../../../services/processors/offdutyReceivablesWorkbook');
+const { buildWorkbook, yearSummarySheet, WRITE_OPTS } = require('../../../services/processors/offdutyReceivablesWorkbook');
+const AdmZip = require('adm-zip');
 
 const OUTPUT_DIR = path.join(__dirname, '../../../../outputs');
 const ensureDir = () => fs.ensureDir(OUTPUT_DIR);
@@ -348,6 +349,88 @@ const generateWorkbook = async (req, res, next) => {
   } catch (error) { console.error('Receivables workbook error:', error); next(error); }
 };
 
+/* Shared so a single statement and a bundled one are produced by exactly the
+   same code — a bundle that differed from the file you get on its own would be
+   the worst kind of bug to find later. */
+function statementFor(rows, month, brandName, heldFiles) {
+  const sc = scope(rows, month);
+  const b = buildReceivables(sc.rows, sc.asAt);
+  const perFile = new Map();
+  for (const r of sc.rows) {
+    if (!r.filename) continue;
+    let f = perFile.get(r.filename);
+    if (!f) { f = { filename: r.filename, tabs: new Map() }; perFile.set(r.filename, f); }
+    const key = `${r.source_tab}|${r.source_kind}`;
+    f.tabs.set(key, { tab: r.source_tab, kind: r.source_kind, headerRow: '',
+                      rows: (f.tabs.get(key)?.rows || 0) + 1 });
+  }
+  const files = [...perFile.values()].map((f) => ({ filename: f.filename, tabs: [...f.tabs.values()], skipped: [] }));
+  const wb = buildWorkbook(b, {
+    sourceLine: `${files.length} record(s) for this period`,
+    receivableNote: month && sc.hasPayment === false
+      ? 'No payment reconciliation was produced for this month, so no receivable is reported. '
+        + 'The sales, RTO and return figures are complete.'
+      : null,
+    entities: b.byEntity.map((e) => e.entity).filter((e) => !e.includes('+')),
+    files,
+  });
+  return { b, wb, hasPayment: sc.hasPayment, asAt: b.asAt };
+}
+
+/**
+ * Every month as its own statement, plus one consolidated, in a single zip.
+ * This is how the year is filed: a statement per month to go with that month's
+ * return, and the consolidation to see the year at once.
+ */
+const generateBundle = async (req, res, next) => {
+  try {
+    const ctx = await resolve(req, res); if (!ctx) return;
+    const { brand, Model } = ctx;
+    await ensureTable(Model);
+    const rows = await Model.findAll({ raw: true });
+    if (!rows.length) return res.status(400).json({ error: 'Nothing uploaded yet' });
+
+    const wanted = (req.body && Array.isArray(req.body.months) && req.body.months.length)
+      ? req.body.months
+      : [...new Set(rows.map((r) => r.period).filter(Boolean))].sort();
+
+    await ensureDir();
+    const zip = new AdmZip();
+    const monthly = [];
+    const made = [];
+
+    for (const month of wanted) {
+      const st = statementFor(rows, month, brand.name);
+      const name = `${month}  Statement of Trade Receivables - ${brand.name}.xlsx`;
+      zip.addFile(name, XLSXStyle.write(st.wb, { ...WRITE_OPTS, type: 'buffer' }));
+      monthly.push({ month, asAt: st.asAt, hasPayment: st.hasPayment, result: st.b });
+      made.push({ month, hasPayment: st.hasPayment,
+                  receivable: st.hasPayment ? st.b.positionTotals.receivable : null });
+    }
+
+    /* The consolidation, only when there is more than one month — for a single
+       month it would restate the same figures under a second name. */
+    if (monthly.length > 1) {
+      const all = statementFor(rows, null, brand.name);
+      const yws = yearSummarySheet(monthly, {
+        periodLabel: `${wanted[0]} to ${wanted[wanted.length - 1]}`,
+        entities: all.b.byEntity.map((e) => e.entity).filter((e) => !e.includes('+')),
+      });
+      /* the year sheet goes FIRST in the consolidated workbook */
+      all.wb.SheetNames.unshift('Year Summary');
+      all.wb.Sheets['Year Summary'] = yws;
+      zip.addFile(`0  Consolidated - ${brand.name}.xlsx`,
+                  XLSXStyle.write(all.wb, { ...WRITE_OPTS, type: 'buffer' }));
+    }
+
+    const filename = `${brand.name} - Receivables ${wanted[0]} to ${wanted[wanted.length - 1]}.zip`;
+    await fs.writeFile(path.join(OUTPUT_DIR, filename), zip.toBuffer());
+    res.json({ success: true, filename, months: made,
+               consolidated: monthly.length > 1,
+               statements: monthly.length + (monthly.length > 1 ? 1 : 0) });
+  } catch (error) { console.error('Receivables bundle error:', error); next(error); }
+};
+
 const download = async (req, res, next) => {
   try {
     const file = path.join(OUTPUT_DIR, path.basename(req.params.filename));
@@ -384,4 +467,5 @@ const getLedger = async (req, res, next) => {
   } catch (error) { next(error); }
 };
 
-module.exports = { uploadFiles, listFiles, deleteFile, getSummary, generateWorkbook, download, getLedger, COLUMNS };
+module.exports = { uploadFiles, listFiles, deleteFile, getSummary, generateWorkbook,
+                   generateBundle, download, getLedger, COLUMNS };
