@@ -233,6 +233,18 @@ function readDelivered(rows, h, entity, tab) {
       sgst: num(pick(row, h.index, 'sgst')),
       igst: num(pick(row, h.index, 'igst')),
       order_status: text(pick(row, h.index, 'order status')),
+      /* THE SALES TAB CARRIES RTO ROWS TOO, and says so in two columns.
+         A month's sheet is named either "<STATE> (delivered)" — already
+         filtered — or "<STATE> (excl cancel)", which holds every status.
+         "GST status" marks the RTO rows and "Month Of RTO" says when they came
+         back. An RTO that came back in the SAME month it was sold belongs to
+         this month's RTO; one that came back later appears in the next month's
+         "RTO <prev month>" tab instead. Reading the tab without these two
+         columns understated March's RTO by 20 lakh a state. */
+      gst_status: text(pick(row, h.index, 'gst status')),
+      rto_month: text(pick(row, h.index, 'month of rto')),
+      sales_month: text(pick(row, h.index, 'sales month')),
+      delivered_date: iso(asDate(pick(row, h.index, 'delivered date'))),
     });
   }
   return out;

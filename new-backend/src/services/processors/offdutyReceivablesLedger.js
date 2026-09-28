@@ -142,6 +142,16 @@ function placeOrder(l, asAt) {
    would not agree with the workbook's own Sales Summary.
 
    Returns one block per registration plus a consolidated block. */
+/* Does this sales-tab row represent an RTO that came back in the same month it
+   was sold? Compared as the file states them — "March" against "March" — which
+   needs no filename parsing and no calendar. */
+function isSameMonthRto(r) {
+  if (String(r.gst_status || '').trim().toUpperCase() !== 'RTO') return false;
+  const back = String(r.rto_month || '').trim().toLowerCase();
+  const sold = String(r.sales_month || '').trim().toLowerCase();
+  return !!back && back === sold;
+}
+
 function gstSummary(allRows) {
   const HEADS = ['taxable_value', 'cgst', 'sgst', 'igst'];
   const zero = () => ({ taxable_value: 0, cgst: 0, sgst: 0, igst: 0, lines: 0 });
@@ -161,6 +171,12 @@ function gstSummary(allRows) {
     const b = bucket[e][r.source_kind];
     if (!b) continue;
     acc(b, r);
+    /* An RTO row inside the sales tab that came back in the month it was sold
+       is ALSO this month's RTO. The accountant's own Sales Summary is cast that
+       way: sales = the whole tab, RTO = same-month returns + the previous
+       month's returns from the "RTO <prev month>" tab. One that came back later
+       is left out here — it is deducted in the month it actually returned. */
+    if (r.source_kind === 'DELIVERED' && isSameMonthRto(r)) acc(bucket[e].RTO, r);
   }
 
   /* RTO and refund rows are held positive in the source workbooks; on a sales
@@ -597,4 +613,4 @@ function buildReceivables(allRows, asAtIn) {
            byPosition, POSITION, POSITION_ORDER, positionTotals, asAt, limits };
 }
 
-module.exports = { buildReceivables, gstSummary, moneyGroup, placeOrder, GROUP_LABEL, GROUP_ORDER, POSITION };
+module.exports = { buildReceivables, gstSummary, isSameMonthRto, moneyGroup, placeOrder, GROUP_LABEL, GROUP_ORDER, POSITION };
