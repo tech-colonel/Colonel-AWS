@@ -367,6 +367,12 @@ const BrandAgentsInventory = () => {
     /order[-\s]?cycle/i.test(a.name || '') ||
     ['nykaa', 'settlement-amazon', 'total-sales-analyzer', 'ajio', 'meesho', 'myntra ticket finder'].includes((a.name || '').toLowerCase());
   const isInvoice = (a) => (a.name || '').toLowerCase() === 'invoice process';
+  /* Matched by NAME, never by id. The RECO_ONLY filter keeps an agent only if
+     its UUID appears in RECO_ID_TO_TYPE, and ids are per-environment — this
+     agent's local and production rows are different UUIDs, so an id-keyed gate
+     showed it on localhost (where RECO_ONLY is false and everything renders)
+     and silently hid it on agent.accountant. */
+  const isReceivablesSummary = (a) => (a.name || '').toLowerCase() === 'receivables summary';
   // RESTRICTED brand executives see ONLY the agents on their personal allowlist —
   // which the backend already returns as `assignedAgents` for them. No full
   // catalog, no demo cards, no workflows.
@@ -374,7 +380,7 @@ const BrandAgentsInventory = () => {
   const visibleAgents = restricted
     ? assignedAgents
     : (RECO_ONLY
-        ? allAgents.filter(agent => (RECO_ID_TO_TYPE[agent.id] || isSalesMarketplace(agent) || isInvoice(agent)) && !HIDDEN_WHEN_RECO_ONLY.has(agent.id))
+        ? allAgents.filter(agent => (RECO_ID_TO_TYPE[agent.id] || isSalesMarketplace(agent) || isInvoice(agent) || isReceivablesSummary(agent)) && !HIDDEN_WHEN_RECO_ONLY.has(agent.id))
         : allAgents);
 
   // Group visible agents into category sections; inject the fake receivables
