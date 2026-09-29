@@ -5,8 +5,12 @@ const { authenticateToken } = require('../middleware/authMiddleware');
 
 const c = require('../controllers/agents/receivables-summary/receivablesSummaryController');
 
-/* These workbooks run to 18 MB, well past multer's default. */
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 60 * 1024 * 1024 } });
+/* The client's own payment reconciliations run to 68 MB — March 2026 is 68.5,
+   March's 62.4, December's 63.8 — so a 60 MB cap rejected three of the ten
+   months outright with "File too large" and there was no way to load the year
+   by upload at all. Raised to 150 MB, which clears the largest file the client
+   has produced with room for the year to grow. */
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 150 * 1024 * 1024 } });
 
 const base = '/brands/:brandId/agents/:agentId/receivables-summary';
 
