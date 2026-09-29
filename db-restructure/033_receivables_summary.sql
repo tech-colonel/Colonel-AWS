@@ -86,9 +86,14 @@ CREATE INDEX IF NOT EXISTS receivables_summary_order_idx    ON receivables_summa
 ALTER TABLE receivables_summary ENABLE ROW LEVEL SECURITY;
 ALTER TABLE receivables_summary FORCE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS receivables_summary_brand_policy ON receivables_summary;
+-- No client-settable bypass. 005_harden_rls.sql removed the app.bypass_rls
+-- escape hatch from every policy in this database; all 58 policies on the live
+-- box use the form below and none carries a bypass clause. Writing one here
+-- would have made this table the single exception — a session that can set a
+-- GUC could read every brand's orders. The real postgres superuser still
+-- bypasses RLS natively, which is what migrations and admin work use.
 CREATE POLICY receivables_summary_brand_policy ON receivables_summary
-    USING (current_setting('app.bypass_rls', true) = 'true'
-           OR brand_id::text = current_setting('app.brand_id', true));
+    USING (brand_id::text = current_setting('app.brand_id', true));
 
 -- 004 sets DEFAULT PRIVILEGES for colonel_app, but only for tables created by
 -- the role that ran it. Granting explicitly so this does not depend on who
