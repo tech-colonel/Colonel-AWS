@@ -863,8 +863,7 @@ const AgentWorkspace = () => {
               >
                 ← Back to Agents
               </Button>
-              <h1 className="text-3xl font-bold text-slate-900 tracking-tight">{agent?.name}</h1>
-              <p className="text-slate-600 mt-1">{agent?.description}</p>
+              {/* name + description live in the agent's own identity card below */}
             </div>
             <Button
               onClick={() => setShowWorkflowModal(true)}

@@ -24,6 +24,7 @@ const { getDynamicModel } = require('../../../models/brand');
 const { parseReceivablesFile } = require('../../../services/processors/offdutyReceivablesParser');
 const { buildReceivables, buildMonthlyStatements } = require('../../../services/processors/offdutyReceivablesLedger');
 const { buildWorkbook, yearSummarySheet, WRITE_OPTS } = require('../../../services/processors/offdutyReceivablesWorkbook');
+const { buildOverview, decorateLimits } = require('../../../services/processors/offdutyReceivablesOverview');
 const AdmZip = require('adm-zip');
 const drive = require('../../../services/driveService');
 
@@ -35,6 +36,9 @@ const ensureDir = () => fs.ensureDir(OUTPUT_DIR);
 const COLUMNS = [
   { name: 'id', type: 'UUID', primaryKey: true, defaultValue: 'UUIDV4' },
   { name: 'filename', type: 'STRING' },
+  /* the name it arrived under, so a record can be recognised and removed —
+     see db-restructure/034_receivables_source_file.sql */
+  { name: 'source_file', type: 'STRING' },
   { name: 'source_kind', type: 'STRING' },
   { name: 'source_tab', type: 'STRING' },
   { name: 'entity', type: 'STRING' },
@@ -110,34 +114,95 @@ async function resolve(req, res) {
   if (!brand || !agent) { res.status(404).json({ error: 'Brand or Agent not found' }); return null; }
   const brandDb = getBrandConnection(brand.db_name);
   const tableName = agent.name.replace(/[^a-zA-Z0-9]/g, '_').toLowerCase();
-  const Model = getDynamicModel(brandDb, tableName, agent.columns && agent.columns.length ? agent.columns : COLUMNS);
+
+  /* The agent row carries a copy of the column list, taken when it was seeded.
+     A column added to COLUMNS afterwards is therefore unknown to the model, and
+     Sequelize drops an unknown field on insert WITHOUT ERROR — `source_file`
+     was written on every one of 1.55 million rows and landed as NULL on all of
+     them. The code's list is the authority; the stored one is a cache, so
+     anything the code knows and the cache does not is added back. */
+  const stored = (agent.columns && agent.columns.length) ? agent.columns : [];
+  const known = new Set(stored.map((c) => c.name));
+  const cols = stored.length
+    ? [...stored, ...COLUMNS.filter((c) => !known.has(c.name))]
+    : COLUMNS;
+
+  const Model = getDynamicModel(brandDb, tableName, cols);
   return { brand, agent, Model };
 }
 
+/* THE ORDER ROWS ARE READ IN IS PART OF THE ANSWER.
+   Two folds in the ledger take "the first row that states it" — a payment
+   order's delivered_date among them — and 38,391 orders carry more than one
+   delivery date across their payment rows. Postgres returns rows in heap
+   order, which is not stable, so the same table read twice put different
+   delivery dates on those orders and moved goods-in-transit by a few thousand
+   rupees between runs. An accountant who runs a statement twice and gets two
+   answers cannot use either.
+
+   Ordering on the SOURCE — the file, the tab, then the order — makes the
+   statement a function of the records and nothing else. `id` breaks any
+   remaining tie so the sort is total. COALESCE keeps rows read before
+   source_file existed working, falling back to the stored name. */
+const READ_ORDER = [
+  [require('sequelize').literal('COALESCE(source_file, filename)'), 'ASC'],
+  ['source_tab', 'ASC'],
+  ['order_id', 'ASC'],
+  ['id', 'ASC'],
+];
+
 /* Keep only the columns the table has, so a parser change cannot throw. */
-const toRow = (r, filename) => {
-  const out = { filename };
-  for (const f of FIELDS) if (f !== 'filename') out[f] = r[f] === undefined ? null : r[f];
+const toRow = (r, filename, sourceFile) => {
+  const out = { filename, source_file: sourceFile || null };
+  for (const f of FIELDS) {
+    if (f === 'filename' || f === 'source_file') continue;
+    out[f] = r[f] === undefined ? null : r[f];
+  }
   return out;
 };
 
 /* Read one workbook and store its rows. Shared so a file uploaded from the
    desktop and one pulled from Drive go through exactly the same path. */
-async function storeOneFile(Model, brand, originalname, buffer) {
+async function storeOneFile(Model, brand, originalname, buffer, window) {
   let parsed;
   try { parsed = parseReceivablesFile(buffer, originalname); }
   catch (e) { return { file: originalname, rows: 0, error: `could not read: ${e.message}` }; }
   if (!parsed.rows.length) {
     return { file: originalname, rows: 0, error: 'no order rows found', skipped: parsed.skipped };
   }
+
+  /* Keep only the months asked for. The client's Drive folder holds May 2024
+     through June 2026 — seventy-four workbooks where the year wanted is
+     thirty-six — so without this the agent reads two years it was never asked
+     for and every total on the page covers the wrong period. Rows are dropped
+     here rather than at the folder, because the month a row belongs to is
+     decided by its CONTENTS, not by the folder it sat in. */
+  let kept = parsed.rows;
+  let dropped = 0;
+  if (window && (window.from || window.to)) {
+    kept = parsed.rows.filter((r) => {
+      if (!r.period) return true;                 // undated rows are never silently lost
+      if (window.from && r.period < window.from) return false;
+      if (window.to && r.period > window.to) return false;
+      return true;
+    });
+    dropped = parsed.rows.length - kept.length;
+  }
+  if (!kept.length) {
+    return { file: originalname, rows: 0, droppedOutsideWindow: dropped,
+             error: `every row falls outside ${window.from} to ${window.to}`,
+             skipped: parsed.skipped };
+  }
+
   const stamp = `${Date.now()}_${uuidv4().slice(0, 8)}`;
   const filename = `receivables_${brand.name.replace(/[^\w]+/g, '_')}_${stamp}.xlsx`;
   await ensureDir();
   await fs.writeFile(path.join(OUTPUT_DIR, filename), buffer);
-  const rows = parsed.rows.map((r) => toRow(r, filename));
+  const rows = kept.map((r) => toRow(r, filename, originalname));
   for (let i = 0; i < rows.length; i += 2000) await Model.bulkCreate(rows.slice(i, i + 2000));
   return { file: originalname, filename, kind: parsed.kind, entity: parsed.entity,
-           rows: parsed.rows.length, tabs: parsed.tabs, skipped: parsed.skipped };
+           rows: kept.length, droppedOutsideWindow: dropped,
+           tabs: parsed.tabs, skipped: parsed.skipped };
 }
 
 /**
@@ -186,6 +251,7 @@ const uploadFiles = async (req, res, next) => {
       });
     }
 
+    invalidateOverview(ctx.brand.id);
     res.json({ success: true, stored, files: report });
   } catch (error) { console.error('Receivables upload error:', error); next(error); }
 };
@@ -194,26 +260,47 @@ const listFiles = async (req, res, next) => {
   try {
     const ctx = await resolve(req, res); if (!ctx) return;
     await ensureTable(ctx.Model);
-    const rows = await ctx.Model.findAll({
-      attributes: ['filename', 'source_kind', 'entity', 'period', 'created_at'], raw: true,
-    });
-    const byFile = new Map();
-    for (const r of rows) {
-      if (!r.filename) continue;
-      let f = byFile.get(r.filename);
-      if (!f) { f = { filename: r.filename, rows: 0, kinds: new Set(), entities: new Set(), periods: new Set(), uploadedAt: r.created_at }; byFile.set(r.filename, f); }
-      f.rows += 1;
-      if (r.source_kind) f.kinds.add(r.source_kind);
-      if (r.entity) f.entities.add(r.entity);
-      if (r.period) f.periods.add(r.period);
-      if (r.created_at && (!f.uploadedAt || r.created_at < f.uploadedAt)) f.uploadedAt = r.created_at;
-    }
+    /* Grouped in the database. Pulling a million and a half rows into Node to
+       count them held the whole page up before a single figure was drawn. */
+    const [rows] = await ctx.Model.sequelize.query(
+      `SELECT filename,
+              count(*)::int                                   AS rows,
+              array_agg(DISTINCT source_kind)                 AS kinds,
+              array_remove(array_agg(DISTINCT entity), NULL)  AS entities,
+              array_remove(array_agg(DISTINCT period), NULL)  AS periods,
+              min(created_at)                                 AS "uploadedAt"
+         FROM receivables_summary
+        WHERE filename IS NOT NULL
+        GROUP BY filename
+        ORDER BY min(created_at) DESC`);
     res.json({
-      files: [...byFile.values()].map((f) => ({
-        ...f, kinds: [...f.kinds], entities: [...f.entities], periods: [...f.periods].sort(),
-      })).sort((a, b) => new Date(b.uploadedAt) - new Date(a.uploadedAt)),
+      files: rows.map((f) => ({ ...f,
+        kinds: (f.kinds || []).filter(Boolean),
+        entities: f.entities || [],
+        periods: (f.periods || []).slice().sort() })),
     });
   } catch (error) { next(error); }
+};
+
+/**
+ * Clear everything held, so the next run starts from nothing.
+ *
+ * Irreversible, and the reason it exists: without it a fresh run means
+ * deleting forty-six records one at a time. It removes the RECORDS and the
+ * cached year only. Statements already built and downloaded are left where
+ * they are — they are the output of a run that did happen, and this brand is
+ * not the only one whose files live in that folder.
+ */
+const resetAll = async (req, res, next) => {
+  try {
+    const ctx = await resolve(req, res); if (!ctx) return;
+    await ensureTable(ctx.Model);
+    const [[before]] = await ctx.Model.sequelize.query(
+      'SELECT count(*)::int AS n, count(DISTINCT filename)::int AS f FROM receivables_summary');
+    const removed = await ctx.Model.destroy({ where: {} });
+    invalidateOverview(ctx.brand.id);
+    res.json({ success: true, removedRows: removed, heldRows: before.n, heldFiles: before.f });
+  } catch (error) { console.error('Receivables reset error:', error); next(error); }
 };
 
 const deleteFile = async (req, res, next) => {
@@ -222,6 +309,7 @@ const deleteFile = async (req, res, next) => {
     const { filename } = req.params;
     const removed = await ctx.Model.destroy({ where: { filename } });
     await fs.remove(path.join(OUTPUT_DIR, filename)).catch(() => {});
+    invalidateOverview(ctx.brand.id);
     res.json({ success: true, removed });
   } catch (error) { next(error); }
 };
@@ -239,13 +327,115 @@ function scope(rows, month) {
   return { rows: sel, asAt, hasPayment: sel.some((r) => r.source_kind === 'PAYMENT') };
 }
 
+/** The months held, and whether each was reconciled. One pass, no statements. */
+function monthList(rows) {
+  const pad2 = (n) => String(n).padStart(2, '0');
+  const m = new Map();
+  for (const r of rows) {
+    if (!r.period) continue;
+    let e = m.get(r.period);
+    if (!e) { e = { month: r.period, orders: 0, hasPayment: false, hasShopify: false }; m.set(r.period, e); }
+    /* The Shopify export is a coverage check held alongside, not a source of
+       the statement — counting its rows here would inflate the month's size on
+       the picker by a third. */
+    if (r.source_kind === 'SHOPIFY') { e.hasShopify = true; continue; }
+    e.orders += 1;
+    if (r.source_kind === 'PAYMENT') e.hasPayment = true;
+  }
+  return [...m.values()].sort((a, b) => a.month.localeCompare(b.month)).map((e) => {
+    const [y, mo] = e.month.split('-').map(Number);
+    return { ...e,
+      asAt: `${y}-${pad2(mo)}-${pad2(new Date(Date.UTC(y, mo, 0)).getUTCDate())}`,
+      note: e.hasPayment ? null
+        : 'No payment reconciliation was produced for this month, so no receivable is reported. '
+        + 'The sales, RTO and return figures are complete.' };
+  });
+}
+
+/* The year takes ~20s to build over a million and a half rows, and nothing in
+   it changes until a file is added or removed. Built once, kept until the row
+   count or the newest row changes, so the page is instant every time after the
+   first. */
+const OVERVIEW_CACHE = new Map();
+/* Kept on disk as well as in memory. The build is deterministic — the same rows
+   give the same year — so a backend restart has no reason to spend twenty
+   seconds rebuilding it, and a restart used to leave the page on a spinner. */
+const overviewFile = (brandId) => path.join(OUTPUT_DIR, `.overview-${brandId}.json`);
+/* Asked of the database, not of a million rows in memory. Reading every row
+   just to decide whether the cached year was still good cost eight seconds on
+   every page load — longer than most of the work the page does. */
+const overviewKeyFromDb = async (Model) => {
+  const [[k]] = await Model.sequelize.query(
+    'SELECT count(*)::text AS n, coalesce(max(created_at)::text, \'-\') AS t FROM receivables_summary');
+  return `${k.n}|${k.t}|${CODE_STAMP}`;
+};
+
+/* The cache is keyed on the CODE as well as the rows. The same rows give a
+   different year after the ledger changes, and a cache that only watched the
+   rows would have gone on serving figures the code no longer produces. */
+const CODE_STAMP = [
+  '../../../services/processors/offdutyReceivablesLedger',
+  '../../../services/processors/offdutyReceivablesOverview',
+  '../../../services/processors/offdutyReceivablesParser',
+].map((m) => { try { return fs.statSync(require.resolve(m)).mtimeMs; } catch { return 0; } }).join('.');
+const invalidateOverview = (brandId) => {
+  OVERVIEW_CACHE.delete(brandId);
+  fs.remove(overviewFile(brandId)).catch(() => {});
+};
+
+/**
+ * The whole year on one screen: a row per month, and every finding across the
+ * year ranked by what it costs. This is what the workspace opens on — building
+ * a single position over a year of rows took two minutes and told the reader
+ * less than the twelve rows do.
+ */
+const getOverview = async (req, res, next) => {
+  try {
+    const ctx = await resolve(req, res); if (!ctx) return;
+    await ensureTable(ctx.Model);
+
+    /* Decide on the cache BEFORE reading anything. */
+    const key = await overviewKeyFromDb(ctx.Model);
+    if (key.startsWith('0|')) return res.json({ empty: true });
+    let hit = OVERVIEW_CACHE.get(ctx.brand.id);
+    if (!hit && !req.query.refresh) {
+      hit = await fs.readJson(overviewFile(ctx.brand.id)).catch(() => null);
+      if (hit) OVERVIEW_CACHE.set(ctx.brand.id, hit);
+    }
+    if (hit && hit.key === key && !req.query.refresh) {
+      return res.json({ ...hit.payload, cached: true });
+    }
+
+    const rows = await ctx.Model.findAll({ raw: true, order: READ_ORDER });
+    if (!rows.length) return res.json({ empty: true });
+    const t0 = Date.now();
+    const statements = buildMonthlyStatements(rows);
+    const payload = buildOverview(statements, {
+      empty: false,
+      brand: ctx.brand.name,
+      rows: rows.length,
+      files: new Set(rows.map((r) => r.filename).filter(Boolean)).size,
+      builtInMs: 0,
+    });
+    payload.builtInMs = Date.now() - t0;
+    OVERVIEW_CACHE.set(ctx.brand.id, { key, payload });
+    await ensureDir();
+    fs.writeJson(overviewFile(ctx.brand.id), { key, payload }).catch(() => {});
+    res.json({ ...payload, cached: false });
+  } catch (error) { console.error('Receivables overview error:', error); next(error); }
+};
+
 /** Header numbers for the workspace — cheap, no workbook written. */
 const getSummary = async (req, res, next) => {
   try {
     const ctx = await resolve(req, res); if (!ctx) return;
     await ensureTable(ctx.Model);
-    const rows = await ctx.Model.findAll({ raw: true });
-    if (!rows.length) return res.json({ empty: true });
+    /* Only the month asked for. Reading the year to throw eleven twelfths of it
+       away cost twelve seconds per month opened. */
+    const rows = await ctx.Model.findAll(req.query.month
+      ? { where: { period: req.query.month }, raw: true, order: READ_ORDER }
+      : { raw: true, order: READ_ORDER });
+    if (!rows.length) return res.json({ empty: true, month: req.query.month || null });
 
     /* One statement per month is what the user files. `month` picks one; with
        no `month` the behaviour is unchanged, which is what a single-month
@@ -258,11 +448,10 @@ const getSummary = async (req, res, next) => {
     res.json({
       empty: false,
       month: req.query.month || null,
-      /* every month held, so the page can offer one statement per month */
-      months: buildMonthlyStatements(rows).map((s) => ({
-        month: s.month, asAt: s.asAt, hasPayment: s.hasPayment, note: s.receivableNote,
-        orders: s.result.totals.orders,
-      })),
+      /* Every month held, so the page can offer one statement per month. One
+         pass over the rows — this used to build a full statement per month just
+         to draw a row of buttons, which is a year of work for a month picker. */
+      months: monthList(await ctx.Model.findAll({ attributes: ['period', 'source_kind'], raw: true })),
       spansMultipleMonths: b.spansMultipleMonths,
       /* Stated, never implied: a month with no payment reconciliation has no
          receivable, and a blank or a zero would read as "nothing is owed". */
@@ -284,10 +473,14 @@ const getSummary = async (req, res, next) => {
       asAt: b.asAt,
       position: b.positionTotals,
       byPosition: b.POSITION_ORDER.map((k) => b.byPosition[k]).filter((p) => p.orders),
-      limits: b.limits,
+      limits: decorateLimits(b.limits),
       stillShortToday: b.totals.stillShortToday,
       periods: b.periods,
       entities: b.byEntity.map((e) => e.entity),
+      /* registration by registration, so the month has the same side-by-side
+         table the year has — one row per GST registration instead of per month */
+      byEntity: b.byEntity,
+      gstBlocks: b.gst.blocks.map(({ _raw, ...rest }) => rest),
       splitShipments: b.totals.splitShipments,
       checks: b.checks,
       groups: b.GROUP_ORDER.filter((g) => b.byGroup[g].orders)
@@ -320,7 +513,7 @@ const generateWorkbook = async (req, res, next) => {
     const ctx = await resolve(req, res); if (!ctx) return;
     const { brand, Model } = ctx;
     await ensureTable(Model);
-    const rows = await Model.findAll({ raw: true });
+    const rows = await Model.findAll({ raw: true, order: READ_ORDER });
     if (!rows.length) return res.status(400).json({ error: 'Nothing uploaded yet' });
 
     const month = req.body && req.body.month;
@@ -435,7 +628,7 @@ async function buildBundle(Model, brandName, wantedIn, onProgress) {
   for (let i = 0; i < wanted.length; i++) {
     const month = wanted[i];
     say('month', `${month} — reading`, i, wanted.length);
-    const rows = await Model.findAll({ where: { period: month }, raw: true });
+    const rows = await Model.findAll({ where: { period: month }, raw: true, order: READ_ORDER });
 
     say('month', `${month} — building the statement`, i, wanted.length);
     const st = statementFor(rows, month, brandName);
@@ -547,6 +740,10 @@ const ingestDrive = async (req, res, next) => {
     if (!folders.length) return res.status(400).json({ error: 'Give me a Drive folder link' });
     const replace = !!(req.body && req.body.replace);
     const buildAfter = (req.body && req.body.build) !== false;
+    /* The months to keep, as YYYY-MM. Given, only those months are stored and
+       the rest are counted and reported — never dropped in silence. */
+    const window = (req.body && (req.body.from || req.body.to))
+      ? { from: req.body.from || null, to: req.body.to || null } : null;
 
     const job = newJob(`${brand.name} — ${folders.length} Drive folder(s)`);
     res.json({ jobId: job.id });          // the page starts polling from here
@@ -578,6 +775,7 @@ const ingestDrive = async (req, res, next) => {
 
         const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
         let stored = 0;
+        let outside = 0;            // rows belonging to months not asked for
         const readReport = [];
         for (let i = 0; i < found.length; i++) {
           const f = found[i];
@@ -589,23 +787,31 @@ const ingestDrive = async (req, res, next) => {
             readReport.push({ file: f.name, error: `could not download: ${e.message}` });
             continue;
           }
-          const one = await storeOneFile(Model, brand, f.name, buf);
+          const one = await storeOneFile(Model, brand, f.name, buf, window);
           stored += one.rows;
+          outside += one.droppedOutsideWindow || 0;
           readReport.push(one);
-          step(job, 'processing', `${f.name} — ${one.rows.toLocaleString('en-IN')} lines`, i + 1, found.length);
+          step(job, 'processing',
+               `${f.name} — ${one.rows.toLocaleString('en-IN')} lines`
+               + (one.droppedOutsideWindow
+                   ? `, ${one.droppedOutsideWindow.toLocaleString('en-IN')} outside the period`
+                   : ''),
+               i + 1, found.length);
           buf = null;                       // let it go before the next file
         }
         job.readReport = readReport;
+        job.outsideWindow = outside;
+        invalidateOverview(brand.id);     // the year has changed
 
         if (!buildAfter) {
-          job.result = { stored, files: readReport };
+          job.result = { stored, outsideWindow: outside, files: readReport };
           job.state = 'done'; step(job, 'done', `${stored.toLocaleString('en-IN')} lines stored`);
           return;
         }
 
         const out = await buildBundle(Model, brand.name, null,
           (p) => step(job, p.stage, p.detail, p.done, p.total));
-        job.result = { stored, files: readReport, ...out };
+        job.result = { stored, outsideWindow: outside, files: readReport, ...out };
         job.state = 'done';
         step(job, 'done', `${out.statements} statements`, out.months.length, out.months.length);
       } catch (e) {
@@ -648,7 +854,7 @@ const getLedger = async (req, res, next) => {
   try {
     const ctx = await resolve(req, res); if (!ctx) return;
     await ensureTable(ctx.Model);
-    const rows = await ctx.Model.findAll({ raw: true });
+    const rows = await ctx.Model.findAll({ raw: true, order: READ_ORDER });
     if (!rows.length) return res.json({ rows: [], total: 0 });
 
     const sc2 = scope(rows, req.query.month);
@@ -671,6 +877,6 @@ const getLedger = async (req, res, next) => {
   } catch (error) { next(error); }
 };
 
-module.exports = { uploadFiles, listFiles, deleteFile, getSummary, generateWorkbook,
+module.exports = { uploadFiles, listFiles, deleteFile, resetAll, getSummary, getOverview, generateWorkbook,
                    generateBundle, buildBundle, ingestDrive, bundleJob, getJob,
                    download, getLedger, COLUMNS };

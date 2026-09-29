@@ -563,7 +563,11 @@ function buildReceivables(allRowsIn, asAtIn) {
       delivered_orders: del.length,
       delivered_billed: del.reduce((a, l) => add(a, l.billed), 0),
       delivered_collected: del.reduce((a, l) => add(a, l.collected), 0),
-      receivable: del.reduce((a, l) => add(a, l.receivable), 0),
+      /* `owed`, not a `receivable` field — there is no such field on a ledger
+         line, and summing it gave every collector a receivable of nil while the
+         total stood at lakhs. The receivable of a line IS its owed amount, set
+         from its position, which is the same basis the total uses. */
+      receivable: del.reduce((a, l) => add(a, l.owed), 0),
     };
   });
 
@@ -596,7 +600,7 @@ function buildReceivables(allRowsIn, asAtIn) {
       rto_value: rows.reduce((a, l) => add(a, l.rto_value), 0),
       billed: del.reduce((a, l) => add(a, l.billed), 0),
       collected: del.reduce((a, l) => add(a, l.collected), 0),
-      receivable: del.reduce((a, l) => add(a, l.receivable), 0),
+      receivable: del.reduce((a, l) => add(a, l.owed), 0),
     };
   });
 
@@ -644,6 +648,10 @@ function buildReceivables(allRowsIn, asAtIn) {
     /* 4. every order sits in exactly one position, so the positions must rebuild
           the gross too. This is what stops a date bug from hiding an order. */
     positionSplit: r2(POSITION_ORDER.reduce((a, k) => add(a, byPosition[k].orders), 0) - ledger.length),
+    /* 5. the registration-wise split must rebuild the receivable. Without this
+          one, every registration read nil against a total of lakhs and nothing
+          said so — which is exactly what happened. */
+    entitySplit: r2(byEntity.reduce((a, e) => add(a, e.receivable), 0) - positionTotals.receivable),
   };
 
   const MONTHS = ['', 'January', 'February', 'March', 'April', 'May', 'June', 'July',
@@ -772,9 +780,10 @@ function buildReceivables(allRowsIn, asAtIn) {
     lim('outOfWindow', ledger.filter((l) => !l.in_payment_file), (l) => l.billed,
         'Realisation falls outside the periods produced',
         'Pertaining to a period earlier than the earliest payment reconciliation produced — largely RTOs '
-      + 'of a preceding month. No amount is recoverable on these, but their realisation lies in a period '
-      + 'not examined.',
-        'Invoice value'),
+      + 'and refunds of a preceding month. No amount is recoverable on these, but their realisation lies '
+      + 'in a period not examined. The figure is net of those returns, so it is negative wherever the '
+      + 'returns of an earlier month exceed its sales that fell outside the window.',
+        'Invoice value, net of returns'),
   ].filter((x) => x.orders > 0);
 
   return { gst: gstSummary(allRows), bridge, paymentHasDates,

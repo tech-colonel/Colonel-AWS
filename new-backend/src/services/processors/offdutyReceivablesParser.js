@@ -59,6 +59,8 @@ const REQUIRED = {
   /* the second format: All_Data, keyed on columns the subsets also carry — so
      the TAB NAME decides which one is read, see parseReceivablesFile */
   PAYMENT2:  [['order number'], ['selling price'], ['final status']],
+  /* the raw Shopify order export — its own kind, see readShopify */
+  SHOPIFY:   [['name'], ['created at'], ['total']],
 };
 
 /* Find the header by content: the first row within the first 15 that carries
@@ -532,6 +534,78 @@ function readPaymentV2(rows, h, tab) {
  * how many rows came out of each, so the workspace can show it rather than the
  * user having to trust a single number.
  */
+/* ── the raw Shopify order export ────────────────────────────────────────────
+   Until now this was recognised and deliberately SKIPPED, on the reasoning that
+   "the payment reconciliation already carries every one of these orders". That
+   is true of the ten months that HAVE a payment reconciliation. It is not true
+   of June and September 2025, for which none was ever produced — and for those
+   two months this export is the only order-level record of what was sold.
+
+   It is read as its own kind and joins nothing: the ledger switches on
+   source_kind everywhere it matters, so a SHOPIFY row cannot reach a figure
+   that is already audited. It is a coverage check, not an input to the
+   receivable.
+
+   ONE ROW PER ORDER. Shopify repeats the order across its line items and leaves
+   the order-level money blank on every row but the first, so the continuation
+   rows carry nothing this agent needs — emitting them would multiply the row
+   count fivefold for no figure. */
+function readShopify(rows, h, tab) {
+  /* FOLDED BY ORDER, not "take the header row". Shopify does not blank the same
+     columns on every continuation row — some carry "Created at" with no
+     financial status — so testing for a header column emitted the same order
+     twice and made April 41,214 orders when it holds 35,261. Taking the first
+     stated value of each field per order id is independent of which columns
+     Shopify chose to repeat. */
+  const m = new Map();
+  const first = (rec, f, v) => { if (rec[f] === null || rec[f] === undefined) rec[f] = v; };
+
+  for (let r = h.at + 1; r < rows.length; r++) {
+    const row = rows[r] || [];
+    const id = orderId(pick(row, h.index, 'name'));
+    if (!id) continue;
+
+    let rec = m.get(id);
+    if (!rec) {
+      rec = { source_kind: 'SHOPIFY', source_tab: tab,
+              entity: null,                    // Shopify has no GST registration
+              order_id: id, lines: 0,
+              order_date: null, period: null, order_total: null, tax_amount: null,
+              discount_amount: null, refunded_amount: null, financial_status: null,
+              order_status: null, payment_method: null, shipping_state: null,
+              payment_date: null, delivered_date: null, cancelled_at: null,
+              qty: 0, sku: null, product_name: null };
+      m.set(id, rec);
+    }
+    rec.lines += 1;
+
+    const created = asDate(pick(row, h.index, 'created at'));
+    if (created && !rec.order_date) { rec.order_date = iso(created); rec.period = period(created); }
+
+    first(rec, 'order_total', num(pick(row, h.index, 'total')));
+    first(rec, 'tax_amount', num(pick(row, h.index, 'taxes')));
+    first(rec, 'discount_amount', num(pick(row, h.index, 'discount amount')));
+    first(rec, 'refunded_amount', num(pick(row, h.index, 'refunded amount')));
+    first(rec, 'financial_status', text(pick(row, h.index, 'financial status')));
+    first(rec, 'order_status', text(pick(row, h.index, 'fulfillment status')));
+    first(rec, 'payment_method', text(pick(row, h.index, 'payment method')));
+    first(rec, 'shipping_state', text(pick(row, h.index, 'shipping province name', 'shipping province')));
+    first(rec, 'sku', text(pick(row, h.index, 'lineitem sku')));
+    first(rec, 'product_name', text(pick(row, h.index, 'lineitem name')));
+
+    const paid = asDate(pick(row, h.index, 'paid at'));
+    if (paid && !rec.payment_date) rec.payment_date = iso(paid);
+    const ful = asDate(pick(row, h.index, 'fulfilled at'));
+    if (ful && !rec.delivered_date) rec.delivered_date = iso(ful);
+    const can = asDate(pick(row, h.index, 'cancelled at'));
+    if (can && !rec.cancelled_at) rec.cancelled_at = iso(can);
+
+    /* quantity IS per line item, so this one adds */
+    rec.qty += num(pick(row, h.index, 'lineitem quantity')) || 0;
+  }
+  return [...m.values()];
+}
+
 function parseReceivablesFile(buffer, filename) {
   const wb = XLSX.read(buffer, { type: 'buffer' });   // NOT cellDates — see iso() above
   const entity = entityOf(filename);
@@ -587,8 +661,15 @@ function parseReceivablesFile(buffer, filename) {
        Order Total column sums to the same rupee as Shopify's own Total. */
     const first = (grid[0] || []).map(norm);
     if (first.includes('lineitem sku') && first.includes('financial status')) {
-      skipped.push({ tab: name, why: 'this is the raw Shopify order export — not needed, the payment '
-                                   + 'reconciliation already carries every one of these orders' });
+      const hs = findHeader(grid, 'SHOPIFY');
+      if (hs) {
+        const got = readShopify(grid, hs, name);
+        rows.push(...got);
+        tabs.push({ tab: name, kind: 'SHOPIFY', headerRow: excelRow(hs.at), rows: got.length });
+      } else {
+        skipped.push({ tab: name, why: 'looks like a Shopify export but has no Name / Created at / '
+                                     + 'Total header in the first 15 rows' });
+      }
       continue;
     }
 
@@ -614,7 +695,7 @@ function parseReceivablesFile(buffer, filename) {
 
   const kinds = new Set(tabs.map((t) => t.kind));
   return {
-    kind: kinds.has('PAYMENT') ? 'PAYMENT' : 'SALES',
+    kind: kinds.has('PAYMENT') ? 'PAYMENT' : kinds.has('SHOPIFY') ? 'SHOPIFY' : 'SALES',
     entity,
     rows,
     tabs,
@@ -622,4 +703,4 @@ function parseReceivablesFile(buffer, filename) {
   };
 }
 
-module.exports = { parseReceivablesFile, tabKind, findHeader, entityOf, orderId, asDate };
+module.exports = { parseReceivablesFile, tabKind, findHeader, entityOf, orderId, asDate, readShopify };
