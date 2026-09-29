@@ -1147,19 +1147,33 @@ const InvoiceAgentWorkspace = ({ agent }) => {
   // every brand. Honours the History date range when one is set.
   const [x2betaBusy, setX2betaBusy] = useState(false);
   const [x2betaMenu, setX2betaMenu] = useState(false);
+  // The custom-range picker lives inside the menu; yesterday is the default on
+  // both ends because the usual ask is "give me what I processed yesterday".
+  const yesterdayStr = () => {
+    const d = new Date();
+    d.setDate(d.getDate() - 1);
+    const p = (n) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+  };
+  const [x2betaCustom, setX2betaCustom] = useState(false);
+  const [x2betaFrom, setX2betaFrom] = useState(yesterdayStr);
+  const [x2betaTo, setX2betaTo] = useState(yesterdayStr);
   // scope: 'latest' = only the most recent n8n run's invoices (the per-run sheet),
+  //        'today'  = everything processed today,
+  //        'custom' = an explicit processed-on window the accountant picked,
   //        'all'    = every invoice we hold for this brand.
-  const downloadX2Beta = async (scope) => {
+  const downloadX2Beta = async (scope, range) => {
     setX2betaMenu(false);
+    setX2betaCustom(false);
     setX2betaBusy(true);
     try {
-      // 'latest' and 'today' are server-side scopes; only the unscoped "All data"
-      // picks up the History date range, so a scoped download is never silently
-      // narrowed (or widened) by whatever range the user last looked at.
+      // Every scope is explicit. "All data" deliberately sends no dates — it used
+      // to inherit whatever range the History tab happened to be showing, which
+      // made the same menu item mean different things on different days.
       const params = (scope === 'latest' || scope === 'today') ? { scope } : {};
-      if (scope === 'all' && viewMode === 'history' && dateFrom && dateTo) {
-        params.from = dateFrom;
-        params.to = dateTo;
+      if (scope === 'custom' && range?.from && range?.to) {
+        params.from = range.from;
+        params.to = range.to;
       }
       const res = await api.get(`/api/brands/${brandId}/invoice/x2beta`, {
         params, responseType: 'blob',
@@ -1440,7 +1454,8 @@ const InvoiceAgentWorkspace = ({ agent }) => {
                 {x2betaMenu && !x2betaBusy && (
                   <>
                     {/* click-away catcher */}
-                    <div className="fixed inset-0 z-10" onClick={() => setX2betaMenu(false)} />
+                    <div className="fixed inset-0 z-10"
+                      onClick={() => { setX2betaMenu(false); setX2betaCustom(false); }} />
                     <div className="fixed z-20 w-64 rounded-lg border bg-white shadow-lg overflow-hidden"
                       style={{
                         borderColor: T_BORDER,
@@ -1467,9 +1482,53 @@ const InvoiceAgentWorkspace = ({ agent }) => {
                         className="w-full text-left px-4 py-2.5 hover:bg-slate-50 transition-colors">
                         <div className="text-sm font-bold" style={{ color: T_TEXT_PRIMARY }}>All data</div>
                         <div className="text-[11px] mt-0.5" style={{ color: T_TEXT_SECONDARY }}>
-                          Every invoice for this brand{viewMode === 'history' && dateFrom && dateTo ? ' in the selected dates' : ''}
+                          Every invoice for this brand
                         </div>
                       </button>
+                      <div style={{ borderTop: `1px solid ${T_BORDER_LIGHT}` }} />
+                      {/* Custom range expands in place rather than opening a dialog —
+                          the menu is already anchored, and a second overlay on top of
+                          a fixed-position menu is where click-away handling breaks. */}
+                      <button onClick={() => setX2betaCustom((v) => !v)}
+                        className="w-full text-left px-4 py-2.5 hover:bg-slate-50 transition-colors">
+                        <div className="text-sm font-bold flex items-center justify-between"
+                          style={{ color: T_TEXT_PRIMARY }}>
+                          Custom range
+                          <ChevronDown className="w-3.5 h-3.5 transition-transform"
+                            style={{ transform: x2betaCustom ? 'rotate(180deg)' : 'none' }} />
+                        </div>
+                        <div className="text-[11px] mt-0.5" style={{ color: T_TEXT_SECONDARY }}>
+                          Pick the dates you processed them on
+                        </div>
+                      </button>
+                      {x2betaCustom && (
+                        <div className="px-4 pb-3 pt-1" style={{ background: '#F8FAFC' }}>
+                          <label className="block text-[10px] font-semibold uppercase tracking-wide mb-1"
+                            style={{ color: T_TEXT_SECONDARY }}>From</label>
+                          <input type="date" value={x2betaFrom} max={x2betaTo}
+                            onChange={(e) => setX2betaFrom(e.target.value)}
+                            className="w-full rounded border px-2 py-1.5 text-sm mb-2"
+                            style={{ borderColor: T_BORDER, color: T_TEXT_PRIMARY }} />
+                          <label className="block text-[10px] font-semibold uppercase tracking-wide mb-1"
+                            style={{ color: T_TEXT_SECONDARY }}>To</label>
+                          <input type="date" value={x2betaTo} min={x2betaFrom}
+                            onChange={(e) => setX2betaTo(e.target.value)}
+                            className="w-full rounded border px-2 py-1.5 text-sm mb-2.5"
+                            style={{ borderColor: T_BORDER, color: T_TEXT_PRIMARY }} />
+                          <button
+                            onClick={() => downloadX2Beta('custom', { from: x2betaFrom, to: x2betaTo })}
+                            disabled={!x2betaFrom || !x2betaTo || x2betaFrom > x2betaTo}
+                            className="w-full rounded-lg px-3 py-2 text-sm font-semibold text-white transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+                            style={{ background: '#0748EE' }}>
+                            Download this range
+                          </button>
+                          {x2betaFrom > x2betaTo && (
+                            <div className="text-[11px] mt-1.5" style={{ color: '#DC2626' }}>
+                              The start date is after the end date
+                            </div>
+                          )}
+                        </div>
+                      )}
                     </div>
                   </>
                 )}
