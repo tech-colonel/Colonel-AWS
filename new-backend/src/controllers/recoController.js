@@ -1823,6 +1823,13 @@ const runReco = async (req, res) => {
       form.append('books_combined', String(req.body.books_combined));
     }
 
+    // GSTR-1 vs Books combined mode: one Sales Register for every state + any number
+    // of return files (GSTR-1 OCTA/portal PDF, GSTR-3B PDF), sorted by GSTIN in the
+    // engine. Without this flag the single-file GSTR-1 flow runs exactly as before.
+    if (recoType === 'gstr_1_vs_books' && req.body.gstr1_mode) {
+      form.append('gstr1_mode', String(req.body.gstr1_mode));
+    }
+
     // GSTR-2B vs Books: the portal export leaves Trade/Legal Name blank for every
     // row but the first in a supplier's block (merged cell). The engine flags any
     // supplier still missing a name as `missingTradeLegalNames` (400) unless we

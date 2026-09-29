@@ -1,4 +1,4 @@
-import { useParams } from 'react-router-dom';
+import { useParams, useLocation } from 'react-router-dom';
 import AgentWorkspace from './AgentWorkspace';
 import RecoWorkspace from './RecoWorkspace';
 import RecoMultiStateWorkspace from './RecoMultiStateWorkspace';
@@ -9,6 +9,8 @@ import MyntraTicketFinderWorkspace from './MyntraTicketFinderWorkspace';
 import Gstr3bTallyWorkspace from './Gstr3bTallyWorkspace';
 import EInvoiceWorkspace from './EInvoiceWorkspace';
 import PoExtractWorkspace from './PoExtractWorkspace';
+import Gstr1MultiStateWorkspace from './Gstr1MultiStateWorkspace';
+import Gstr3bBooksWorkspace from './Gstr3bBooksWorkspace';
 
 // Stable UUIDs assigned by seed.js — one per RECO agent
 export const RECO_ID_TO_TYPE = {
@@ -17,6 +19,7 @@ export const RECO_ID_TO_TYPE = {
   'b2d3fad4-0d90-4b49-acdc-d243cfa9c8d5': 'gstr_3b_tally_entry',
   '93d027ac-4333-403b-b448-9c637ebfc13c': 'universal_bank_statement',
   '8b8d0876-3169-4511-96d8-2a7467478007': 'gstr_1_vs_books',
+  'cf70c278-80d7-403f-b9bb-ce8ce90acf4c': 'gstr_3b_vs_books',
   'b2300af8-26d0-4299-b233-0cd48c2b96ec': 'amazon_mtr_consolidator',
   '974ac4f2-1437-4ccc-826c-c2ea68e5b5e3': 'pdf_bank_extract',
   'f3a91c47-0d62-4b8e-9a5d-6c2e83417bd9': 'credit_card_booking',
@@ -33,6 +36,13 @@ export const RECO_ID_TO_TYPE = {
 export default function AgentDispatch() {
   const { agentId } = useParams();
   const recoType = RECO_ID_TO_TYPE[agentId];
+  const { search } = useLocation();
+
+  // GSTR-1 vs Books combined mode (all states, all months) — opt-in via ?mode=combined;
+  // without it the agent opens in its usual single-file RecoWorkspace.
+  if (recoType === 'gstr_1_vs_books' && new URLSearchParams(search).get('mode') === 'combined') {
+    return <Gstr1MultiStateWorkspace />;
+  }
 
   if (recoType === 'amazon_mtr_consolidator') return <MtrWorkspace />;
   if (recoType === 'gstr_2b_books_multistate') return <RecoMultiStateWorkspace />;
@@ -42,6 +52,7 @@ export default function AgentDispatch() {
   if (recoType === 'po_extract') return <PoExtractWorkspace />;
   if (recoType === 'myntra_ticket_finder') return <MyntraTicketFinderWorkspace />;
   if (recoType === 'gstr_3b_tally_entry') return <Gstr3bTallyWorkspace />;
+  if (recoType === 'gstr_3b_vs_books') return <Gstr3bBooksWorkspace />;
   // key by agentId so switching between two RecoWorkspace-backed agents (e.g. Universal → Bank Reco)
   // remounts a fresh instance — prevents stale result/upload state from bleeding across agents.
   if (recoType) return <RecoWorkspace key={agentId} agentTypeProp={recoType} />;

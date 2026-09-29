@@ -36,7 +36,7 @@ const AGENT_LABELS = {
   gstr_2a_vs_2b_vs_books: 'GSTR-2A vs 2B vs Books', gstr_2b_vs_purchase: 'GSTR-2B vs Purchase',
   gstr_2a_2b_books: 'GSTR-2A + 2B vs Books', gstr_3b_vs_2b: 'GSTR-3B vs 2B',
   gstr_3b_tally_entry: 'GSTR-3B Tally Entry', universal_bank_statement: 'Universal Bank Statement',
-  bank_reco: 'Bank Statement', gstr_1_vs_books: 'GSTR-1 vs Books',
+  bank_reco: 'Bank Statement', gstr_1_vs_books: 'GSTR-1 vs Books', gstr_3b_vs_books: 'GSTR-3B vs Books',
   amazon_mtr_consolidator: 'Amazon MTR Consolidator', pdf_bank_extract: 'PDF Bank Extract',
 };
 const agentLabel = (t) => AGENT_LABELS[t] || String(t || '').replace(/_/g, ' ').replace(/\b\w/g, (m) => m.toUpperCase());

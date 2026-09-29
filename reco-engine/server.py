@@ -319,6 +319,17 @@ class ReconciliationHandler(BaseHTTPRequestHandler):
                 self.write_json(payload)
                 return
 
+            # GSTR-3B vs Books — its own agent (all states, all months).
+            if reco_type == "gstr_3b_vs_books":
+                _handle_gstr3b_vs_books(self, fields, files, tolerance)
+                return
+
+            # Combined / multi-state / multi-month GSTR-1 — additive, see
+            # _handle_gstr1_multistate. The single-file branch below is unchanged.
+            if reco_type == "gstr_1_vs_books" and _gstr1_multistate_requested(fields, files):
+                _handle_gstr1_multistate(self, fields, files, tolerance)
+                return
+
             if reco_type == "gstr_1_vs_books":
                 octa_file   = files.get("gstr1_octa") or files.get("gstr1")
                 tally_file  = files.get("tally_sales")
@@ -1464,6 +1475,8 @@ class ReconciliationHandler(BaseHTTPRequestHandler):
             filename_prefix = "bank_statement"
         elif reco_type == "gstr_1_vs_books":
             filename_prefix = "gstr1_vs_books"
+        elif reco_type == "gstr_3b_vs_books":
+            filename_prefix = "gstr3b_vs_books"
         elif reco_type == "gstr_2b_books_multistate":
             filename_prefix = "2b_vs_books_multistate"
         elif reco_type == "gstr_3b_tally_entry":
@@ -1514,6 +1527,10 @@ def build_workbook(results: list[dict], summary: dict[str, int], counts: dict[st
         return build_3b_vs_2b_workbook(results, summary, counts, pivot or [])
     if reco_type == "bank_reco":
         return build_bank_reco_workbook(results, summary, counts)
+    if reco_type == "gstr_3b_vs_books":
+        return build_gstr3b_vs_books_workbook(payload or {})
+    if reco_type == "gstr_1_vs_books" and (payload or {}).get("_multistate"):
+        return build_gstr1_multistate_workbook(payload)
     if reco_type == "gstr_1_vs_books":
         return build_gstr1_workbook(
             results, monthly_summary=[], summary=summary, counts=counts, payload=payload
@@ -2495,6 +2512,985 @@ def resolve_port() -> int:
         return int(os.environ.get("RECO_PORT", "") or "8765")
     except (TypeError, ValueError):
         return 8765
+
+
+# ---------------------------------------------------------------------------
+# GSTR-1 vs Books — combined / multi-state / multi-month mode
+# (recon/gstr_1_multistate.py). Reached only when the UI asks for it
+# (gstr1_mode=multistate), when return files arrive under `gstr1_returns`, or
+# when more than one GSTR-1 OCTA file is uploaded. A single register + a single
+# OCTA file still goes through the original branch above, unchanged.
+# ---------------------------------------------------------------------------
+
+def _gstr1_multistate_requested(fields: dict, files: dict) -> bool:
+    if str(fields.get("gstr1_mode", "")).strip().lower() in ("multistate", "combined", "multi"):
+        return True
+    if files.get("gstr1_returns"):
+        return True
+    return isinstance(files.get("gstr1_octa"), list) or isinstance(files.get("gstr1_pdf"), list)
+
+
+def _gstr1_file_items(files: dict, *names: str) -> list[dict]:
+    out = []
+    for name in names:
+        val = files.get(name)
+        if val is None:
+            continue
+        for item in (val if isinstance(val, list) else [val]):
+            if item and item.get("content"):
+                out.append(item)
+    return out
+
+
+_MS_AMT = ("taxable", "igst", "cgst", "sgst")
+
+
+def _handle_gstr1_multistate(handler, fields: dict, files: dict, tolerance: float) -> None:
+    import pandas as _pd
+    from io import BytesIO as _BytesIO
+    from recon.gstr_1_vs_books import read_tally_sales_raw, read_credit_note_raw
+    from recon.gstr_1_multistate import run_gstr1_multistate, records as _ms_records
+
+    tally_items = _gstr1_file_items(files, "tally_sales")
+    return_items = _gstr1_file_items(files, "gstr1_returns", "gstr1_octa", "gstr1", "gstr1_pdf", "gstr3b_pdf")
+    cn_items = _gstr1_file_items(files, "credit_note")
+    if not tally_items:
+        handler.write_json({"error": "Upload the Tally Sales Register (all states)."}, 400)
+        return
+    if not return_items:
+        handler.write_json({"error": "Upload at least one GSTR-1 (OCTA Excel or GST portal PDF) or GSTR-3B PDF."}, 400)
+        return
+
+    tally_frames = [read_tally_sales_raw(it) for it in tally_items]
+    tally_df = _pd.concat(tally_frames, ignore_index=True) if len(tally_frames) > 1 else tally_frames[0]
+    cn_df = None
+    if cn_items:
+        cn_frames = [read_credit_note_raw(it) for it in cn_items]
+        cn_df = _pd.concat(cn_frames, ignore_index=True) if len(cn_frames) > 1 else cn_frames[0]
+
+    res = run_gstr1_multistate(tally_df, cn_df, return_items, tolerance, tally_files=tally_items)
+
+    tally_cols = res["register_cols"]
+    from recon.gstr_1_vs_books import _find_col as _fc
+    _probe = _pd.DataFrame(columns=tally_cols)
+    _inv_k = _fc(_probe, ["Voucher No.", "Voucher No", "Invoice No", "Doc No", "Bill No"])
+    _date_k = _fc(_probe, ["Date", "Invoice Date", "Voucher Date"])
+    _part_k = _fc(_probe, ["Particulars", "Party Name", "Buyer", "Ledger Name"])
+    _gst_k = _fc(_probe, ["GSTIN", "GSTIN/UIN", "Buyer GSTIN"])
+    b2b_ui_rows = [{
+        "state": _r.get("_reg_state"), "reg_gstin": _r.get("_reg_gstin"),
+        "date": _r.get(_date_k), "inv_no": _r.get(_inv_k), "party": _r.get(_part_k), "gstin": _r.get(_gst_k),
+        "t_taxable": _r.get("Total Sales", 0), "t_igst": _r.get("Total IGST", 0),
+        "t_cgst": _r.get("Total CGST", 0), "t_sgst": _r.get("Total SGST", 0),
+        "g1_inv": _r.get("_gstr1_inv_no"), "g1_taxable": _r.get("_gstr1_taxable", 0),
+        "g1_igst": _r.get("_gstr1_igst", 0), "g1_cgst": _r.get("_gstr1_cgst", 0), "g1_sgst": _r.get("_gstr1_sgst", 0),
+        "diff_taxable": _r.get("_diff_taxable", 0), "diff_igst": _r.get("_diff_igst", 0),
+        "diff_cgst": _r.get("_diff_cgst", 0), "diff_sgst": _r.get("_diff_sgst", 0),
+        "remark": _r.get("_remark"), "remark3": _r.get("_remark3", ""),
+    } for _r in res["all_b2b"]]
+
+    tot = {side: {k: round(sum(s[f"{side}_{k}"] for s in res["state_summary"]), 2) for k in _MS_AMT}
+           for side in ("books", "gstr1", "gstr3b")}
+    summary = {
+        "Registrations": len(res["regs"]),
+        "Books taxable": tot["books"]["taxable"],
+        "GSTR-1 taxable": tot["gstr1"]["taxable"],
+        "Books - GSTR-1": round(tot["books"]["taxable"] - tot["gstr1"]["taxable"], 2),
+        "Unassigned Books rows": res["unassigned_rows"],
+        "Checks passed": f"{sum(1 for c in res['checks'] if c['ok'])}/{len(res['checks'])}",
+    }
+    states_public = [{
+        "state": st["state"], "gstin": st["gstin"], "gstr1_source": st["gstr1_source"],
+        "books_rows": st["books_rows"], "gstr1_rows": st["gstr1_rows"],
+        "gstr3b_available": st["gstr3b_available"], "sections": st["sections"],
+        "totals": st["totals"], "summary": st["summary"],
+    } for st in res["states"]]
+
+    pdf_rows = []
+    for g, per in sorted(res["g1_pdf"].items()):
+        for p, v in sorted(per.items()):
+            pdf_rows.append({"gstin": g, "period": p, "month": v["month"], "file": v.get("_file"),
+                             "nil_filed": v["nil_filed"], "parsed_ok": v["parsed_ok"],
+                             "tables": v["tables"], "total": v["total"], "b2b": v["b2b"], "b2c": v["b2c"]})
+    p3_rows = []
+    for g, per in sorted(res["g3b_pdf"].items()):
+        for p, v in sorted(per.items()):
+            p3_rows.append({"gstin": g, "period": p, "month": v["month"], "file": v.get("_file"),
+                            "filing_date": v.get("filing_date"), "rows": v["rows"],
+                            "outward": v["outward"], "parsed_ok": v["parsed_ok"]})
+
+    job_id = uuid4().hex
+    payload = {
+        "job_id": job_id,
+        "reco_type": "gstr_1_vs_books",
+        "summary": summary,
+        "counts": {
+            "tally_rows": int(len(tally_df)),
+            "return_files": len(return_items),
+            "states": len(res["regs"]),
+            "b2b_reco_rows": len(b2b_ui_rows),
+            "b2c_reco_rows": len(res["all_b2c"]),
+            "total_records": len(b2b_ui_rows) + len(res["all_b2c"]),
+        },
+        "results": [],
+        "_multistate": True,
+        "_ms": {
+            "state_summary": res["state_summary"], "all_sections": res["all_sections"],
+            "states": [{**sp, "pivot_rows": st["pivot_rows"]} for sp, st in zip(states_public, res["states"])],
+            "all_b2b": res["all_b2b"], "all_b2c": res["all_b2c"], "tally_cols": tally_cols,
+            "status_grid": res["status_grid"], "checks": res["checks"], "files": res["files"],
+            "warnings": res["warnings"], "register_row_checks": res["register_row_checks"],
+            "pdf_rows": pdf_rows, "p3_rows": p3_rows, "split_ok": res["split_ok"],
+            "invoice_mode": res["invoice_mode"], "grand_total": res["grand_total"],
+            "unassigned": _ms_records(res["unassigned_df"]),
+            "books_with_reg": _ms_records(res["books_with_reg"]),
+            "raw_gstr1": _ms_records(res["raw_gstr1"]), "raw_gstr3b": _ms_records(res["raw_gstr3b"]),
+            "raw_cn": _ms_records(cn_df) if cn_df is not None else None,
+        },
+    }
+    try:
+        _wb = build_gstr1_multistate_workbook(payload)
+        _buf = _BytesIO()
+        _wb.save(_buf)
+        payload["_xlsx_bytes"] = _buf.getvalue()
+    except Exception as _e:
+        logging.getLogger(__name__).exception("GSTR-1 multi-state workbook failed: %s", _e)
+        payload["_xlsx_bytes"] = None
+    JOBS[job_id] = payload
+
+    public = {k: v for k, v in payload.items() if not k.startswith("_")}
+    public.update({
+        "multistate": True,
+        "state_summary": res["state_summary"],
+        "gst_reco_sections": res["all_sections"],
+        "states": states_public,
+        "status_grid": res["status_grid"],
+        "checks": res["checks"],
+        "files": res["files"],
+        "warnings": res["warnings"],
+        "register_row_checks": res["register_row_checks"],
+        "split_ok": res["split_ok"],
+        "invoice_mode": res["invoice_mode"],
+        "returns_info": res["returns_info"],
+        "b2b_ui_rows": b2b_ui_rows,
+        "b2c_rows": res["all_b2c"],
+    })
+    handler.write_json(public)
+
+
+def _ms_title(ws, row, text, width=20, bg=None):
+    c = ws.cell(row=row, column=1, value=text)
+    _cell_style(c, bold=True, bg=bg or _NAVY, fg="FFFFFF")
+    for ci in range(2, width + 1):
+        _cell_style(ws.cell(row=row, column=ci), bg=bg or _NAVY)
+    return row + 1
+
+
+def _ms_table(ws, row, headers, rows, num_cols=None, diff_cols=None, bold_last=False):
+    """Plain table: header row + data rows. Returns the next free row."""
+    num_cols = set(num_cols or [])
+    diff_cols = set(diff_cols or [])
+    for ci, h in enumerate(headers, 1):
+        _cell_style(ws.cell(row=row, column=ci, value=h), bold=True, bg=_MED_BLUE, fg="FFFFFF",
+                    border=_header_border(), align="center", wrap=True)
+    row += 1
+    for ri, r in enumerate(rows):
+        last = bold_last and ri == len(rows) - 1
+        bg = _GREY_TOTAL if last else (_LIGHT_BLUE if ri % 2 else None)
+        for ci, v in enumerate(r, 1):
+            cell = ws.cell(row=row, column=ci, value=_json_to_xl(v) if not isinstance(v, (int, float)) else v)
+            is_num = isinstance(v, (int, float)) and not isinstance(v, bool)
+            fg = "000000"
+            if (ci in diff_cols) and is_num and abs(v) > 1:
+                fg = _RED_FG
+            _cell_style(cell, bold=last, bg=bg, fg=fg, num_fmt=_NUM_FMT if is_num and ci in num_cols else None,
+                        border=_data_border(), align="right" if is_num else "left")
+        row += 1
+    return row
+
+
+class _MsStyles:
+    """Style objects built ONCE and shared by every cell. The generic writers build a
+    new Font/Fill/Border per cell — fine for a single state, but a full-year,
+    all-states workbook is millions of cells and spent minutes on styling alone."""
+    def __init__(self):
+        self.head_font = Font(bold=True, color="FFFFFF")
+        self.head_fill = PatternFill("solid", fgColor=_MED_BLUE)
+        self.navy_fill = PatternFill("solid", fgColor=_NAVY)
+        self.head_align = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        self.bold = Font(bold=True)
+        self.red = Font(color=_RED_FG)
+        self.remark = {k: (Font(bold=True, color=fg), PatternFill("solid", fgColor=bg) if bg else None)
+                       for k, (fg, bg) in _REMARK_COLORS.items()}
+        self.r3 = (Font(bold=True, color=_ORANGE_FG), PatternFill("solid", fgColor=_ORANGE_BG))
+
+
+def _ms_fast_sheet(wb, title, headers, rows, st: "_MsStyles", group_row=None, freeze="A2"):
+    """Header row + plain data rows; numbers get the money format, nothing else is
+    styled per cell. `rows` are lists aligned with `headers`."""
+    ws = wb.create_sheet(title)
+    r0 = 1
+    if group_row:
+        for ci, label in group_row:
+            c = ws.cell(row=1, column=ci, value=label)
+            c.font, c.fill = st.head_font, st.navy_fill
+        r0 = 2
+    for ci, h in enumerate(headers, 1):
+        c = ws.cell(row=r0, column=ci, value=h)
+        c.font, c.fill, c.alignment = st.head_font, st.head_fill, st.head_align
+    for ri, row in enumerate(rows, r0 + 1):
+        for ci, v in enumerate(row, 1):
+            if v is None or v == "":
+                continue
+            c = ws.cell(row=ri, column=ci, value=v if isinstance(v, (int, float)) else _json_to_xl(v))
+            if isinstance(v, float):
+                c.number_format = _NUM_FMT
+    for ci, h in enumerate(headers, 1):
+        ws.column_dimensions[ws.cell(row=r0, column=ci).column_letter].width = max(10, min(32, len(str(h)) + 4))
+    ws.freeze_panes = ws.cell(row=r0 + 1, column=1).coordinate if freeze else None
+    return ws
+
+
+def _ms_records_sheet(wb, title, records, st):
+    if not records:
+        return None
+    headers = list(records[0].keys())
+    return _ms_fast_sheet(wb, title, headers, [[r.get(h) for h in headers] for r in records], st)
+
+
+def build_gstr1_multistate_workbook(payload: dict) -> Workbook:
+    from recon.gstr_2b_books import GST_STATE_CODES
+    ms = payload.get("_ms") or {}
+    wb = Workbook()
+    split_ok = ms.get("split_ok", True)
+
+    # ── Summary ────────────────────────────────────────────────────────────
+    ws = wb.active
+    ws.title = "Summary"
+    ws.sheet_view.showGridLines = False
+    r = _ms_title(ws, 1, "GSTR-1 vs Books — All States (taxable value and tax, full period)", 22)
+    r += 1
+    heads = ["Registration", "GSTIN", "GSTR-1 source", "Books rows",
+             "Books Taxable", "Books IGST", "Books CGST", "Books SGST",
+             "GSTR-1 Taxable", "GSTR-1 IGST", "GSTR-1 CGST", "GSTR-1 SGST",
+             "GSTR-3B Taxable", "GSTR-3B IGST", "GSTR-3B CGST", "GSTR-3B SGST",
+             "Books − GSTR-1 Taxable", "Books − GSTR-1 IGST", "Books − GSTR-1 CGST", "Books − GSTR-1 SGST",
+             "GSTR-1 − GSTR-3B Taxable", "GSTR-1 − GSTR-3B Tax"]
+    rows = []
+    tot = [0.0] * 18
+    for s in ms.get("state_summary") or []:
+        vals = [s[f"books_{k}"] for k in _MS_AMT] + [s[f"gstr1_{k}"] for k in _MS_AMT] + \
+               [s[f"gstr3b_{k}"] for k in _MS_AMT] + [s[f"diff_books_gstr1_{k}"] for k in _MS_AMT] + \
+               [s["diff_gstr1_gstr3b_taxable"],
+                round(s["diff_gstr1_gstr3b_igst"] + s["diff_gstr1_gstr3b_cgst"] + s["diff_gstr1_gstr3b_sgst"], 2)]
+        tot = [a + b for a, b in zip(tot, vals)]
+        rows.append([s["state"], s["gstin"], s["gstr1_source"], s["books_rows"]] + vals)
+    rows.append(["All States", "", "", sum(s["books_rows"] for s in ms.get("state_summary") or [])]
+                + [round(v, 2) for v in tot])
+    r = _ms_table(ws, r, heads, rows, num_cols=range(5, 23), diff_cols=range(17, 23), bold_last=True)
+    ws.cell(row=r, column=1, value="GSTR-3B columns cover only the months a GSTR-3B was uploaded for "
+                                   "(see 'Return Status'). Differences are Books minus GSTR-1, and GSTR-1 minus GSTR-3B.")
+    r += 2
+
+    r = _ms_title(ws, r, "Checks — nothing dropped, nothing double counted", 22)
+    r = _ms_table(ws, r, ["Check", "Expected", "Actual", "Result", "Note"],
+                  [[c["check"], c["expected"], c["actual"], "OK" if c["ok"] else "CHECK", c.get("note", "")]
+                   for c in ms.get("checks") or []], num_cols={2, 3})
+    for rr in range(r - len(ms.get("checks") or []), r):
+        cell = ws.cell(row=rr, column=4)
+        ok = cell.value == "OK"
+        _cell_style(cell, bold=True, bg=_GREEN_BG if ok else _RED_BG, fg=_GREEN_FG if ok else _RED_FG,
+                    border=_data_border(), align="center")
+    r += 1
+    if ms.get("warnings"):
+        r = _ms_title(ws, r, "Notes", 22, bg=_ORANGE_FG)
+        for w in ms["warnings"]:
+            _cell_style(ws.cell(row=r, column=1, value="• " + w), fg=_ORANGE_FG)
+            r += 1
+    _auto_col_width(ws, min_width=12, max_width=26)
+    ws.column_dimensions["A"].width = 60
+    ws.freeze_panes = "A4"
+
+    # ── Return Status ──────────────────────────────────────────────────────
+    ws = wb.create_sheet("Return Status")
+    ws.sheet_view.showGridLines = False
+    r = _ms_title(ws, 1, "Which return was read for each registration and month", 7)
+    grid = ms.get("status_grid") or []
+    r = _ms_table(ws, r + 1, ["Registration", "GSTIN", "Month", "Books has sales", "GSTR-1", "GSTR-3B", "Flag"],
+                  [[g["state"], g["gstin"], g["month"], "Yes" if g["books_has_sales"] else "No",
+                    g["gstr1"], g["gstr3b"], g["flag"]] for g in grid])
+    for rr in range(3, r):
+        if ws.cell(row=rr, column=7).value:
+            _cell_style(ws.cell(row=rr, column=7), bold=True, bg=_RED_BG, fg=_RED_FG, border=_data_border())
+    _auto_col_width(ws, min_width=12, max_width=45)
+    ws.freeze_panes = "A3"
+
+    # ── GST Reco (All States, then each registration) ─────────────────────
+    ws = wb.create_sheet("GST Reco")
+    ws.sheet_view.showGridLines = False
+    configs = [
+        ("As per books (All sales) vs GSTR-1", "books_all_vs_gstr1", "As per books", "GSTR-1"),
+        ("As per books (All sales) vs GSTR-3B 3.1", "books_all_vs_gstr3b", "As per books", "GSTR-3B"),
+        ("GSTR-1 vs GSTR-3B", "gstr1_vs_gstr3b", "GSTR-1", "GSTR-3B"),
+        ("As per books B2B vs GSTR-1 B2B", "books_b2b_vs_gstr1", "As per books B2B", "GSTR-1 B2B"),
+        ("As per books B2C vs GSTR-1 B2C", "books_b2c_vs_gstr1", "As per books B2C", "GSTR-1 B2C"),
+    ]
+    blocks = [("ALL STATES", None, ms.get("all_sections") or {}, any(s["gstr3b_available"] for s in ms.get("states") or []))]
+    for st in ms.get("states") or []:
+        title = f"{st['state'].upper()} — {st['gstin']}" if st["gstin"] else st["state"].upper() + " — rows whose state could not be identified"
+        blocks.append((title, st, st["sections"], st["gstr3b_available"]))
+    r = 1
+    for title, st, sections, has_3b in blocks:
+        r = _ms_title(ws, r, title, 20, bg=_MED_BLUE)
+        r += 1
+        for sec_title, key, ll, rl in configs:
+            if key in ("books_b2b_vs_gstr1", "books_b2c_vs_gstr1") and not split_ok:
+                r = _write_section_unavailable_note(ws, r, sec_title,
+                    "Not available — the Sales Register has no Category or buyer-GSTIN column, so Books "
+                    "cannot be split into B2B and B2C. Use 'All sales' above.")
+            elif "gstr3b" in key and not has_3b:
+                r = _write_section_unavailable_note(ws, r, sec_title, "No GSTR-3B uploaded for this registration.")
+            else:
+                r = _write_gst_reco_section(ws, r, sec_title, ll, rl, sections.get(key) or [], key)
+            r += 2
+        r += 2
+    _auto_col_width(ws, min_width=12, max_width=22)
+
+    # ── GSTR-1 PDF tables ──────────────────────────────────────────────────
+    if ms.get("pdf_rows"):
+        ws = wb.create_sheet("GSTR-1 PDF Tables")
+        ws.sheet_view.showGridLines = False
+        r = _ms_title(ws, 1, "GSTR-1 portal PDFs — table-wise taxable value (tax in the Total Liability columns)", 16)
+        tabs = [("4A", "4A B2B"), ("4B", "4B B2B RCM"), ("5", "5 B2CL"), ("6A", "6A Export"), ("6B", "6B SEZ"),
+                ("6C", "6C Deemed"), ("7", "7 B2CS"), ("9B_R", "9B CDNR"), ("9B_U", "9B CDNUR")]
+        heads = ["Registration", "GSTIN", "Period", "Nil"] + [t[1] for t in tabs] + \
+                ["Amendments (9A/9C/10)", "TL Taxable", "TL IGST", "TL CGST", "TL SGST", "Self-check", "File"]
+        rows = []
+        for p in ms["pdf_rows"]:
+            t = p["tables"]
+            amend = sum((t.get(k) or {}).get("taxable", 0) for k in ("9A_b2b", "9A_b2c", "9C_R", "9C_U", "10"))
+            rows.append([GST_STATE_CODES.get(p["gstin"][:2], ""), p["gstin"], p["period"], "Yes" if p["nil_filed"] else ""]
+                        + [(t.get(k) or {}).get("taxable", 0) for k, _ in tabs]
+                        + [round(amend, 2)] + [p["total"][k] for k in _MS_AMT]
+                        + ["OK" if p["parsed_ok"] else "Does not tie", p["file"]])
+        _ms_table(ws, r + 1, heads, rows, num_cols=range(5, 20))
+        _auto_col_width(ws, min_width=10, max_width=24)
+        ws.freeze_panes = "E3"
+
+    if ms.get("p3_rows"):
+        ws = wb.create_sheet("GSTR-3B PDF 3.1")
+        ws.sheet_view.showGridLines = False
+        r = _ms_title(ws, 1, "GSTR-3B portal PDFs — table 3.1 (outward supplies)", 14)
+        heads = ["Registration", "GSTIN", "Period", "3.1(a) Taxable", "3.1(a) IGST", "3.1(a) CGST", "3.1(a) SGST",
+                 "3.1(b) Zero-rated", "3.1(c) Nil/Exempt", "3.1(d) RCM inward", "3.1(e) Non-GST", "ARN date", "File"]
+        rows = []
+        for p in ms["p3_rows"]:
+            rw = p["rows"]
+            a = rw.get("a") or {}
+            rows.append([GST_STATE_CODES.get(p["gstin"][:2], ""), p["gstin"], p["period"],
+                         a.get("taxable", 0), a.get("igst", 0), a.get("cgst", 0), a.get("sgst", 0),
+                         (rw.get("b") or {}).get("taxable", 0), (rw.get("c") or {}).get("taxable", 0),
+                         (rw.get("d") or {}).get("taxable", 0), (rw.get("e") or {}).get("taxable", 0),
+                         p.get("filing_date"), p["file"]])
+        _ms_table(ws, r + 1, heads, rows, num_cols=range(4, 12))
+        _auto_col_width(ws, min_width=10, max_width=24)
+
+    # ── Invoice level (only when a GSTR-1 OCTA file was uploaded) ──────────
+    st_ = _MsStyles()
+    if ms.get("invoice_mode"):
+        tally_display = [c for c in (ms.get("tally_cols") or []) if not str(c).startswith("_")]
+        g1_keys = [("GSTR-1 Invoice No", "_gstr1_inv_no"), ("GSTR-1 GSTIN", "_gstr1_gstin"),
+                   ("GSTR-1 Taxable", "_gstr1_taxable"), ("GSTR-1 IGST", "_gstr1_igst"),
+                   ("GSTR-1 CGST", "_gstr1_cgst"), ("GSTR-1 SGST", "_gstr1_sgst")]
+        d_keys = [("Diff Taxable", "_diff_taxable"), ("Diff IGST", "_diff_igst"),
+                  ("Diff CGST", "_diff_cgst"), ("Diff SGST", "_diff_sgst")]
+        headers = (["Registration", "Registration GSTIN"] + tally_display + [h for h, _ in g1_keys]
+                   + [h for h, _ in d_keys] + ["Remark", "Remark 3 (cross-state)"])
+        rows = []
+        for x in ms.get("all_b2b") or []:
+            rows.append([x.get("_reg_state"), x.get("_reg_gstin")] + [x.get(c) for c in tally_display]
+                        + [x.get(k) for _, k in g1_keys] + [x.get(k) for _, k in d_keys]
+                        + [x.get("_remark"), x.get("_remark3") or None])
+        n_t = 2 + len(tally_display)
+        ws = _ms_fast_sheet(wb, "B2B Reco", headers, rows, st_,
+                            group_row=[(1, "Sales Register"), (n_t + 1, "GSTR-1"),
+                                       (n_t + 7, "Difference (Books − GSTR-1)"), (n_t + 11, "Remarks")])
+        rem_col, r3_col = len(headers) - 1, len(headers)
+        for ri, x in enumerate(ms.get("all_b2b") or [], 3):
+            font, fill = st_.remark.get(x.get("_remark"), (st_.bold, None))
+            c = ws.cell(row=ri, column=rem_col)
+            c.font = font
+            if fill:
+                c.fill = fill
+            if x.get("_remark3"):
+                c3 = ws.cell(row=ri, column=r3_col)
+                c3.font, c3.fill = st_.r3
+            for dc in range(n_t + 7, n_t + 11):
+                v = ws.cell(row=ri, column=dc).value
+                if isinstance(v, (int, float)) and abs(v) > 1:
+                    ws.cell(row=ri, column=dc).font = st_.red
+        ws.column_dimensions[ws.cell(row=2, column=r3_col).column_letter].width = 60
+        ws.freeze_panes = "C3"
+
+        ws = wb.create_sheet("B2C Reco")
+        ws.sheet_view.showGridLines = False
+        _write_b2c_reco_sheet(ws, ms.get("all_b2c") or [])
+        for st in ms.get("states") or []:
+            if st.get("pivot_rows"):
+                ws = wb.create_sheet(f"GSTR-1 Pivot {st['state']}"[:31])
+                ws.sheet_view.showGridLines = False
+                _write_pivot_sheet(ws, st["pivot_rows"])
+
+    if ms.get("unassigned"):
+        _ms_records_sheet(wb, "Unassigned Books", ms["unassigned"], st_)
+    if ms.get("register_row_checks"):
+        _ms_records_sheet(wb, "Register Row Checks", ms["register_row_checks"], st_)
+    _ms_records_sheet(wb, "Files", [{
+        "File": f["file"], "Read as": f["kind"], "GSTIN": f["gstin"], "Registration": f["state"],
+        "Period(s)": ", ".join(f.get("periods") or []), "Rows": f.get("rows") or "", "Status": f["status"],
+        "Note": f.get("note", "")} for f in ms.get("files") or []], st_)
+    # The register as reconciled — every row, credit notes folded in, returns netted,
+    # with the registration each row was tied to and why. Replaces a separate raw copy.
+    _ms_records_sheet(wb, "Sales Register", ms.get("books_with_reg") or [], st_)
+    if ms.get("raw_cn") is not None:
+        _ms_records_sheet(wb, "Credit Note", ms["raw_cn"], st_)
+    if ms.get("raw_gstr1"):
+        _ms_records_sheet(wb, "Final GSTR-1", ms["raw_gstr1"], st_)
+    if ms.get("raw_gstr3b"):
+        _ms_records_sheet(wb, "GSTR3B", ms["raw_gstr3b"], st_)
+    return wb
+
+
+
+# ---------------------------------------------------------------------------
+# GSTR-3B vs Books — its own agent (recon/gstr_3b_vs_books.py). Output in the
+# accountant's "GST Summary" layout (state-wise + month-wise) with GSTR-3B on top.
+# ---------------------------------------------------------------------------
+
+def _handle_gstr3b_vs_books(handler, fields: dict, files: dict, tolerance: float) -> None:
+    from io import BytesIO as _BytesIO
+    from recon.gstr_3b_vs_books import run_gstr3b_vs_books
+    from recon.gstr_1_vs_books import _FY_MONTHS as _FYM
+
+    tally_items = _gstr1_file_items(files, "tally_sales")
+    return_items = _gstr1_file_items(files, "gstr3b_returns", "gstr3b", "gstr3b_pdf")
+    cn_items = _gstr1_file_items(files, "credit_note")
+    if not tally_items:
+        handler.write_json({"error": "Upload the Sales Register (all states)."}, 400)
+        return
+    res = run_gstr3b_vs_books(tally_items, cn_items, return_items, tolerance)
+    summ = res["summ"]
+
+    month_rows = []
+    for st in res["states"]:
+        for m in _FYM:
+            c = res["comp"][st][m]
+            if not c["status"]:
+                continue
+            b, g, d = c["books"], c["g3b"], c["diff"]
+            month_rows.append({
+                "state": summ["labels"].get(st, st), "gstin": res["gstin_of"].get(st, ""), "month": m,
+                "books_taxable": b["net"], "books_tax": round(b["cgst"] + b["sgst"] + b["igst"], 2),
+                "gstr3b_taxable": g["net"] if g else None,
+                "gstr3b_tax": round(g["cgst"] + g["sgst"] + g["igst"], 2) if g else None,
+                "diff_taxable": d["net"] if d else None,
+                "diff_tax": round(d["cgst"] + d["sgst"] + d["igst"], 2) if d else None,
+                "status": c["status"], "source": c["source"], "doc": c.get("doc", ""),
+            })
+    summary_rows = []
+    for st in res["states"]:
+        a = res["comp_annual"][st]
+        summary_rows.append({
+            "state": summ["labels"].get(st, st), "gstin": res["gstin_of"].get(st, ""),
+            "months_with_3b": a["months"], "matched_months": a["matched"],
+            "books_cmp_taxable": a["books"]["net"], "gstr3b_taxable": a["g3b"]["net"],
+            "diff_taxable": a["diff"]["net"],
+            "books_cmp_igst": a["books"]["igst"], "books_cmp_cgst": a["books"]["cgst"], "books_cmp_sgst": a["books"]["sgst"],
+            "gstr3b_igst": a["g3b"]["igst"], "gstr3b_cgst": a["g3b"]["cgst"], "gstr3b_sgst": a["g3b"]["sgst"],
+            "diff_tax": round(sum(a["diff"][k] for k in ("cgst", "sgst", "igst")), 2),
+        })
+    books_sections = {sec: [{"state": summ["labels"][s], **summ["annual"][sec][s]} for s in summ["states"]]
+                      for sec in ("sales", "interbranch", "returns", "net", "total")}
+    cmp_rows = [r for r in month_rows if r["gstr3b_taxable"] is not None]
+    matched = sum(1 for r in cmp_rows if r["status"].startswith("Matched"))
+    tot_books = round(sum(v["net"] for v in summ["annual"]["total"].values()), 2)
+    summary = {
+        "Registrations": len(summ["states"]),
+        "Books — Sales less Returns incl. Interbranch": tot_books,
+        "Months compared (3B / GSTR-1)": len(cmp_rows),
+        "…of which vs GSTR-1 (no 3B)": sum(1 for r in cmp_rows if r.get("doc") == "GSTR-1"),
+        "Matched months": matched,
+        "Checks passed": f"{sum(1 for c in res['checks'] if c['ok'])}/{len(res['checks'])}",
+        "total": len(cmp_rows), "matched": matched, "unmatched": len(cmp_rows) - matched,
+    }
+    job_id = uuid4().hex
+    payload = {"job_id": job_id, "reco_type": "gstr_3b_vs_books", "summary": summary,
+               "counts": {"register_rows": len(res["books"]["rows"]), "blocks": len(res["books"]["blocks"]),
+                          "return_files": len(return_items), "total_records": len(cmp_rows)},
+               "results": month_rows, "_g3b_res": res}
+    try:
+        _wb = build_gstr3b_vs_books_workbook(payload)
+        _buf = _BytesIO()
+        _wb.save(_buf)
+        payload["_xlsx_bytes"] = _buf.getvalue()
+    except Exception as _e:
+        logging.getLogger(__name__).exception("GSTR-3B vs Books workbook failed: %s", _e)
+        payload["_xlsx_bytes"] = None
+    payload.pop("_g3b_res", None)        # large; the workbook is already built
+    JOBS[job_id] = payload
+    public = {k: v for k, v in payload.items() if not k.startswith("_")}
+    status_grid = [{"state": r["state"], "gstin": r["gstin"], "month": r["month"],
+                    "flag": "Books has sales but no GSTR-3B or GSTR-1 uploaded"} for r in month_rows
+                   if r["status"] == "Return not uploaded"]
+    public.update({"summary_rows": summary_rows, "books_sections": books_sections, "checks": res["checks"],
+                   "notes": res["notes"], "warnings": res["warnings"], "status_grid": status_grid,
+                   "files": res["files"], "fy": res["fy"], "company": res["company"],
+                   "blocks": [{"label": b["label"], "rows": b["rows"], "basis": b["basis"],
+                               "variance": b["variance"]} for b in res["tie"]["blocks"]]})
+    try:                                   # the report's eight lines, for the page
+        from recon.gstr_3b_report import report_values
+        public["report"] = report_values(res)
+    except Exception as _e:
+        logging.getLogger(__name__).exception("GSTR-3B vs Books report values failed: %s", _e)
+    handler.write_json(public)
+
+
+class _GsStyles:
+    """The accountant's GST Summary look."""
+    NUM = '#,##0.00;\\(#,##0.00\\);\\-'
+    NUM0 = '#,##0;\\(#,##0\\);\\-'
+
+    def __init__(self):
+        thin = Side(style="thin", color="BFBFBF")
+        self.border = Border(left=thin, right=thin, top=thin, bottom=thin)
+        self.title = Font(bold=True, size=14)
+        self.sub = Font(size=9, color="595959")
+        self.bar_font, self.bar_fill = Font(bold=True, size=11, color="FFFFFF"), PatternFill("solid", fgColor="1F4E78")
+        self.head_font, self.head_fill = Font(bold=True, size=10, color="FFFFFF"), PatternFill("solid", fgColor="2E75B6")
+        self.sub_font, self.sub_fill = Font(bold=True, size=9, color="FFFFFF"), PatternFill("solid", fgColor="7F7F7F")
+        self.tot_fill = PatternFill("solid", fgColor="595959")
+        self.body, self.bold = Font(size=10), Font(bold=True, size=10)
+        self.center = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        self.wrap = Alignment(wrap_text=True, vertical="top")
+        self.ok = (Font(bold=True, size=10, color=_GREEN_FG), PatternFill("solid", fgColor=_GREEN_BG))
+        self.bad = (Font(bold=True, size=10, color=_RED_FG), PatternFill("solid", fgColor=_RED_BG))
+        self.warn = (Font(bold=True, size=10, color=_ORANGE_FG), PatternFill("solid", fgColor=_ORANGE_BG))
+
+
+def _gs_bar(ws, row, text, width, s):
+    for ci in range(1, width + 1):
+        c = ws.cell(row=row, column=ci)
+        c.fill, c.border = s.bar_fill, s.border
+    c = ws.cell(row=row, column=1, value=text)
+    c.font = s.bar_font
+    return row + 1
+
+
+def _gs_header(ws, row, heads, s, start_col=1):
+    for i, h in enumerate(heads):
+        c = ws.cell(row=row, column=start_col + i, value=h)
+        c.font, c.fill, c.alignment, c.border = s.head_font, s.head_fill, s.center, s.border
+    return row + 1
+
+
+def _gs_line(ws, row, values, s, bold=False, fmt=None):
+    fmt = fmt or s.NUM
+    for i, v in enumerate(values):
+        c = ws.cell(row=row, column=1 + i, value=v)
+        c.border, c.font = s.border, (s.bold if bold else s.body)
+        if isinstance(v, (int, float)) and not isinstance(v, bool):
+            c.number_format = fmt
+    return row + 1
+
+
+def _gs_amounts(a):
+    gst = round(a["cgst"] + a["sgst"] + a["igst"], 2)
+    return [a["net"], a["cgst"], a["sgst"], a["igst"], gst, round(a["net"] + gst, 2)]
+
+
+def _gs_return_table(ws, r, title, annual, comp_states, labels, gstin_of, s, total_row=True):
+    """Annual Books-vs-return table with every tax head on its own (Books / Return / Diff)."""
+    heads = (("net", "Net Sales", "Return Taxable", "Taxable Diff"), ("cgst", "CGST (Books)", "CGST (Return)", "CGST Diff"),
+             ("sgst", "SGST (Books)", "SGST (Return)", "SGST Diff"), ("igst", "IGST (Books)", "IGST (Return)", "IGST Diff"))
+    hdr = ["State", "GSTIN", "Months compared"]
+    for _k, a, b, c in heads:
+        hdr += [a if _k != "net" else "Net Sales (Books)", b, c]
+    hdr += ["Matched months", "Not matched", "…vs GSTR-1 (no 3B)"]
+    r = _gs_bar(ws, r, title, len(hdr), s)
+    r = _gs_header(ws, r, hdr, s)
+    red = Font(bold=True, size=10, color=_RED_FG)
+    diff_cols = {4 + 3 * i + 2 for i in range(4)}           # 1-based columns of the Diff cells
+    tot = [0.0] * 12
+    for st in comp_states:
+        a = annual[st]
+        if not a["months"]:
+            r = _gs_line(ws, r, [labels.get(st, st), "", 0, "No GSTR-3B or GSTR-1 uploaded for this state"]
+                         + [None] * (len(hdr) - 4), s)
+            ws.cell(row=r - 1, column=4).font = Font(italic=True, size=10, color="7F7F7F")
+            continue
+        vals = []
+        for k, *_ in heads:
+            vals += [a["books"][k], a["g3b"][k], round(a["books"][k] - a["g3b"][k], 2)]
+        tot = [x + y for x, y in zip(tot, vals)]
+        r = _gs_line(ws, r, [labels.get(st, st), gstin_of.get(st, ""), a["months"]] + vals
+                     + [a["matched"], a["months"] - a["matched"], a.get("vs_gstr1", 0)], s)
+        for ci in diff_cols:
+            v = ws.cell(row=r - 1, column=ci).value
+            if isinstance(v, (int, float)) and abs(v) > 1:
+                ws.cell(row=r - 1, column=ci).font = red
+    if total_row:
+        r = _gs_line(ws, r, ["Total", "", sum(annual[st]["months"] for st in comp_states)]
+                     + [round(v, 2) for v in tot]
+                     + [sum(annual[st]["matched"] for st in comp_states), None, None], s, bold=True)
+        for ci in diff_cols:
+            v = ws.cell(row=r - 1, column=ci).value
+            if isinstance(v, (int, float)) and abs(v) > 1:
+                ws.cell(row=r - 1, column=ci).font = red
+    return r
+
+
+def build_gstr3b_vs_books_workbook(payload: dict) -> Workbook:
+    """The accountant's approved report: one "1-3B vs Books" tab + the input sheets
+    (recon/gstr_3b_report.py). The earlier GST Summary layout is kept below as
+    _build_gstr3b_gst_summary_workbook for rollback."""
+    from recon.gstr_3b_report import build_report
+    res = payload.get("_g3b_res")
+    if res is None:
+        raise ValueError("GSTR-3B vs Books: result not kept for a rebuild — run the reconciliation again.")
+    return build_report(res)
+
+
+def _build_gstr3b_gst_summary_workbook(payload: dict) -> Workbook:
+    from recon.gstr_1_vs_books import _FY_MONTHS as _FYM
+    res = payload.get("_g3b_res")
+    if res is None:
+        raise ValueError("GSTR-3B vs Books: result not kept for a rebuild — run the reconciliation again.")
+    s = _GsStyles()
+    summ, tie, books = res["summ"], res["tie"], res["books"]
+    states, labels = summ["states"], summ["labels"]
+    comp_states = res["states"]
+    wb = Workbook()
+
+    # =================================================================== GST Summary
+    ws = wb.active
+    ws.title = "GST Summary"
+    ws.sheet_view.showGridLines = False
+    who = f" ({res['company']})" if res["company"] else ""
+    ws.cell(row=1, column=1, value=f"GST Summary — FY {res['fy']} Sales Register{who}").font = s.title
+    blocks_txt = "; ".join(f"{b['label']} rows {b['first_row']}-{b['last_row']}" for b in tie["blocks"])
+    ws.cell(row=2, column=1, value="Sales shown EXCLUDING Interbranch Services (separate section). Source: "
+                                   f"{blocks_txt}; Nature as marked; each block's own total row used for tie-out."
+            ).font = s.sub
+    heads = ["State", "Net Sales (Rs.)", "CGST (Rs.)", "SGST (Rs.)", "IGST (Rs.)", "Total GST (Rs.)", "Gross Sales (Rs.)"]
+    r = 4
+    for title, sec in (("1. SALES SUMMARY (excluding Interbranch)", "sales"),
+                       ("2. INTERBRANCH SERVICES (shown separately)", "interbranch"),
+                       ("3. SALES RETURNS SUMMARY", "returns"),
+                       ("4. NET POSITION (Sales excl. Interbranch, less Returns)", "net")):
+        r = _gs_bar(ws, r, title, 7, s)
+        r = _gs_header(ws, r, heads, s)
+        tot = [0.0] * 6
+        for st in states:
+            vals = _gs_amounts(summ["annual"][sec][st])
+            tot = [a + b for a, b in zip(tot, vals)]
+            r = _gs_line(ws, r, [labels[st]] + vals, s)
+        r = _gs_line(ws, r, ["Total"] + [round(v, 2) for v in tot], s, bold=True)
+        r += 1
+    if res["g3b"]:
+        r = _gs_return_table(ws, r, "4A. NET POSITION vs GSTR-3B / GSTR-1 (Net Sales excl. Interbranch vs the month's "
+                             "GSTR-3B 3.1(a)+(b), else its GSTR-1; Diff = Books − Return, per tax head)",
+                             res["comp_net_annual"], comp_states, labels, res["gstin_of"], s)
+        r += 1
+    r = _gs_bar(ws, r, "5. TOTAL INCLUDING INTERBRANCH (reconciles to register)", 7, s)
+    r = _gs_header(ws, r, ["", "Net Value (Rs.)", "CGST (Rs.)", "SGST (Rs.)", "IGST (Rs.)", "Total GST (Rs.)", "Gross (Rs.)"], s)
+
+    def _sum_sec(sec):
+        return {k: round(sum(summ["annual"][sec][st][k] for st in states), 2) for k in ("net", "cgst", "sgst", "igst")}
+    net_t, ib_t, tot_t = _sum_sec("net"), _sum_sec("interbranch"), _sum_sec("total")
+    r = _gs_line(ws, r, ["Net position (Section 4)"] + _gs_amounts(net_t), s)
+    r = _gs_line(ws, r, ["Add: Interbranch Services (Section 2)"] + _gs_amounts(ib_t), s)
+    r = _gs_line(ws, r, ["Total Sales less Returns"] + _gs_amounts(tot_t), s, bold=True)
+    r += 1
+    r = _gs_bar(ws, r, "6. MEMO — SALES LEDGER-WISE (Net Value, Sales less Returns)", 7, s)
+    r = _gs_header(ws, r, ["Ledger", "Net Value (Rs.)", "", "", "", "", "Rows"], s)
+    for x in summ["ledger_memo"]:
+        r = _gs_line(ws, r, [x["ledger"], x["net"], None, None, None, None, x["rows"]], s)
+    r = _gs_line(ws, r, ["Total", round(sum(x["net"] for x in summ["ledger_memo"]), 2), None, None, None, None,
+                         None], s, bold=True)
+    r += 1
+    r = _gs_bar(ws, r, "7. TIE-OUT TO EACH BLOCK'S OWN TOTAL ROW", 7, s)
+    for b in tie["blocks"]:
+        r = _gs_header(ws, r, [f"Bridge — {b['label']}", "Net Value (Rs.)", "CGST (Rs.)", "SGST (Rs.)",
+                               "IGST (Rs.)", "Total GST (Rs.)", ""], s)
+        base = b["sales_less_returns"] if b["basis"].startswith("Sales") else b["compared"]
+
+        def _g(a):
+            return [a["net"], a["cgst"], a["sgst"], a["igst"], round(a["cgst"] + a["sgst"] + a["igst"], 2)]
+        r = _gs_line(ws, r, [f"{b['basis']} (rows {b['first_row']}-{b['last_row']})"] + _g(base), s)
+        for i, x in enumerate(b["bridges"]):
+            r = _gs_line(ws, r, [f"({chr(97 + i)}) {x['label']}"] + _g(x), s)
+        r = _gs_line(ws, r, ["Adjusted total"] + _g(b["compared"]), s, bold=True)
+        if b["grand_total"] is not None:
+            r = _gs_line(ws, r, [f"Block total row (row {b['gt_row']})"] + _g(b["grand_total"]), s)
+            r = _gs_line(ws, r, ["Unexplained variance"] + _g(b["variance"]), s, bold=True)
+        else:
+            r = _gs_line(ws, r, ["No total row in this block — nothing to tie to", None, None, None, None, None], s)
+        r += 1
+    r = _gs_line(ws, r, ["Row count: Sales + Returns vs data rows", tie["n_sales"] + tie["n_returns"],
+                         tie["n_rows"], (tie["n_sales"] + tie["n_returns"]) - tie["n_rows"]], s, bold=True, fmt="0")
+    r += 2
+    if res["g3b"]:
+        r = _gs_return_table(ws, r, "8. GSTR-3B / GSTR-1 vs BOOKS (Section 5 incl. Interbranch vs the month's GSTR-3B "
+                             "3.1(a)+(b), else its GSTR-1; Diff = Books − Return, per tax head)",
+                             res["comp_annual"], comp_states, labels, res["gstin_of"], s)
+        r += 1
+    r = _gs_bar(ws, r, "Checks", 7, s)
+    r = _gs_header(ws, r, ["Check", "Expected", "Actual", "Result", "Note", "", ""], s)
+    for c in res["checks"]:
+        r = _gs_line(ws, r, [c["check"], c["expected"], c["actual"], "OK" if c["ok"] else "CHECK", c.get("note", "")], s)
+        cell = ws.cell(row=r - 1, column=4)
+        cell.font, cell.fill = s.ok if c["ok"] else s.bad
+    r += 1
+    r = _gs_bar(ws, r, "Notes / Data-Quality Flags", 7, s)
+    for i, n in enumerate(res["notes"] + res["warnings"], 1):
+        ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=7)
+        c = ws.cell(row=r, column=1, value=f"{i}. {n}")
+        c.font, c.alignment = s.sub, s.wrap
+        ws.row_dimensions[r].height = max(15, 13 * (1 + len(n) // 140))
+        r += 1
+    ws.column_dimensions["A"].width = 46
+    for col, w in (("B", 20), ("C", 18), ("D", 18), ("E", 18), ("F", 18), ("G", 20), ("H", 16), ("I", 14),
+                   ("J", 12), ("K", 12)):
+        ws.column_dimensions[col].width = w
+    for col in "HIJKLMNOPQR":                      # the per-tax-head return tables run to column R
+        ws.column_dimensions[col].width = 15
+    ws.freeze_panes = "A4"
+
+    # ============================================================ GST Summary - Monthwise
+    ws = wb.create_sheet("GST Summary - Monthwise")
+    ws.sheet_view.showGridLines = False
+    ws.cell(row=1, column=1, value=f"GST Summary — FY {res['fy']} Month-wise, State-wise "
+                                   "(Interbranch Services shown separately)").font = s.title
+    ws.cell(row=2, column=1, value="Source: " + blocks_txt + ". Month = calendar month of transaction date. "
+                                   "Interbranch Services are excluded from Sections 1, 3, 4 and shown only in "
+                                   "Sections 2 and 5.").font = s.sub
+    sub = ["Net Sales", "CGST", "SGST", "IGST", "Total GST", "Gross"]
+    width = 1 + 6 * (len(states) + 1)
+    month_ends = res["month_ends"]
+
+    def month_block(r, title, sec):
+        r = _gs_bar(ws, r, title, width, s)
+        ws.merge_cells(start_row=r, start_column=1, end_row=r + 1, end_column=1)
+        c = ws.cell(row=r, column=1, value="Month")
+        c.font, c.alignment = s.bold, s.center
+        for i, st in enumerate(states + ["Total"]):
+            col = 2 + 6 * i
+            ws.merge_cells(start_row=r, start_column=col, end_row=r, end_column=col + 5)
+            c = ws.cell(row=r, column=col, value=labels.get(st, st))
+            c.font, c.alignment = s.head_font, s.center
+            c.fill = s.tot_fill if st == "Total" else s.head_fill
+            for j, h in enumerate(sub):
+                cc = ws.cell(row=r + 1, column=col + j, value=h)
+                cc.font, cc.fill, cc.alignment, cc.border = s.sub_font, s.sub_fill, s.center, s.border
+        r += 2
+        tots = [[0.0] * 6 for _ in range(len(states) + 1)]
+        for m in _FYM:
+            c = ws.cell(row=r, column=1, value=month_ends[m])
+            c.number_format, c.font, c.alignment, c.border = "mmm-yyyy", s.bold, s.center, s.border
+            row_tot = [0.0] * 6
+            for i, st in enumerate(states):
+                vals = _gs_amounts(summ["monthly"][sec][st][m])
+                row_tot = [a + b for a, b in zip(row_tot, vals)]
+                tots[i] = [a + b for a, b in zip(tots[i], vals)]
+                for j, v in enumerate(vals):
+                    cc = ws.cell(row=r, column=2 + 6 * i + j, value=v)
+                    cc.number_format, cc.border, cc.font = s.NUM0, s.border, s.body
+            tots[-1] = [a + b for a, b in zip(tots[-1], row_tot)]
+            for j, v in enumerate(row_tot):
+                cc = ws.cell(row=r, column=2 + 6 * len(states) + j, value=round(v, 2))
+                cc.number_format, cc.border, cc.font = s.NUM0, s.border, s.body
+            r += 1
+        c = ws.cell(row=r, column=1, value="Total")
+        c.font, c.alignment, c.border = s.bold, s.center, s.border
+        for i, t in enumerate(tots):
+            for j, v in enumerate(t):
+                cc = ws.cell(row=r, column=2 + 6 * i + j, value=round(v, 2))
+                cc.number_format, cc.border, cc.font = s.NUM0, s.border, s.bold
+        return r + 2, tots[-1]
+
+    def net_vs_3b_block(r):
+        """Net Position (Section 4) vs GSTR-3B 3.1(a)+(b), per state per month."""
+        # Every tax head on its own — the accountant decides which head needs the entry.
+        heads = (("net", "Net Sales"), ("cgst", "CGST"), ("sgst", "SGST"), ("igst", "IGST"))
+        sub4 = []
+        for _k, lab in heads:
+            sub4 += [f"{lab} (Books)" if _k != "net" else "Net Sales (Books)",
+                     f"{lab} (Return)" if _k != "net" else "Return Taxable",
+                     f"{lab} Diff" if _k != "net" else "Taxable Diff"]
+        sub4.append("Status")
+        W = len(sub4)                                     # 13 columns per registration
+        diff_idx = {2, 5, 8, 11}
+        cols = comp_states + ["Total"]
+        w = 1 + W * len(cols)
+        r = _gs_bar(ws, r, "4A. NET POSITION vs GSTR-3B / GSTR-1 — MONTHWISE (Net Sales excl. Interbranch vs the "
+                           "month's GSTR-3B 3.1(a)+(b), else its GSTR-1; Diff = Books − Return, per tax head)", w, s)
+        ws.merge_cells(start_row=r, start_column=1, end_row=r + 1, end_column=1)
+        c = ws.cell(row=r, column=1, value="Month")
+        c.font, c.alignment = s.bold, s.center
+        for i, st in enumerate(cols):
+            col = 2 + W * i
+            ws.merge_cells(start_row=r, start_column=col, end_row=r, end_column=col + W - 1)
+            gst = res["gstin_of"].get(st, "")
+            c = ws.cell(row=r, column=col, value=("All States" if st == "Total" else
+                                                  labels.get(st, st) + (f" — {gst}" if gst else "")))
+            c.font, c.alignment = s.head_font, s.center
+            c.fill = s.tot_fill if st == "Total" else s.head_fill
+            for j, h in enumerate(sub4):
+                cc = ws.cell(row=r + 1, column=col + j, value=h)
+                cc.font, cc.fill, cc.alignment, cc.border = s.sub_font, s.sub_fill, s.center, s.border
+        r += 2
+        red = Font(bold=True, size=10, color=_RED_FG)
+
+        def _sty(t):
+            t = t or ""
+            if t.startswith("Matched"):
+                return s.ok
+            if t.startswith("Short") or t.endswith("filed Nil"):
+                return s.bad
+            if t.startswith("Excess"):
+                return s.warn
+            return None
+
+        def _triples(b, g):
+            out = []
+            for k, _lab in heads:
+                if g is None:
+                    out += [b[k], None, None]
+                else:
+                    out += [b[k], g[k], round(b[k] - g[k], 2)]
+            return out
+
+        def _put(row, col0, vals, bold=False):
+            for j, v in enumerate(vals):
+                cc = ws.cell(row=row, column=col0 + j, value=(round(v, 2) if isinstance(v, float) else v))
+                cc.border = s.border
+                if isinstance(v, (int, float)):
+                    cc.number_format = s.NUM0
+                    cc.font = s.bold if bold else s.body
+                    if j in diff_idx and abs(v) > 1:
+                        cc.font = red
+
+        tot = {st: [0.0] * (W - 1) for st in cols}
+        for m in _FYM:
+            c = ws.cell(row=r, column=1, value=month_ends[m])
+            c.number_format, c.font, c.alignment, c.border = "mmm-yyyy", s.bold, s.center, s.border
+            all_row, any3b = [0.0] * (W - 1), False
+            for i, st in enumerate(comp_states):
+                x = res["comp_net"][st][m]
+                vals = _triples(x["books"], x["g3b"])
+                if x["g3b"] is not None:
+                    tot[st] = [a + v for a, v in zip(tot[st], vals)]
+                    all_row = [a + v for a, v in zip(all_row, vals)]
+                    any3b = True
+                _put(r, 2 + W * i, vals)
+                sc = ws.cell(row=r, column=2 + W * i + W - 1, value=x["status"] or None)
+                sc.border = s.border
+                if _sty(x["status"]):
+                    sc.font, sc.fill = _sty(x["status"])
+                elif x["status"]:
+                    sc.font = Font(italic=True, size=9, color="7F7F7F")
+            col = 2 + W * len(comp_states)
+            if any3b:
+                tot["Total"] = [a + v for a, v in zip(tot["Total"], all_row)]
+                _put(r, col, all_row)
+            else:
+                for j in range(W - 1):
+                    ws.cell(row=r, column=col + j).border = s.border
+            ws.cell(row=r, column=col + W - 1).border = s.border
+            r += 1
+        c = ws.cell(row=r, column=1, value="Total (months compared)")
+        c.font, c.alignment, c.border = s.bold, s.center, s.border
+        for i, st in enumerate(cols):
+            _put(r, 2 + W * i, tot[st], bold=True)
+            ws.cell(row=r, column=2 + W * i + W - 1).border = s.border
+        r += 1
+        if any(any(abs(v) > 0 for v in (summ["annual"]["interbranch"].get(st) or {}).values()) for st in comp_states):
+            ws.cell(row=r, column=1, value="Interbranch Services are reported inside GSTR-3B 3.1(a) too, so a "
+                                           "registration that made them shows that amount as a difference here; "
+                                           "\"Matched incl. Interbranch\" = the gap is exactly its Interbranch "
+                                           "value. The Status table below compares including Interbranch.").font = s.sub
+            r += 1
+        ws.cell(row=r, column=1, value="Return = the month's GSTR-3B (3.1(a)+(b)); where no GSTR-3B was uploaded, "
+                                       "that month's GSTR-1 — shown as \"(vs GSTR-1)\" in Status. See the "
+                                       "\"Returns Read\" sheet for which return each month used.").font = s.sub
+        r += 1
+        return r + 1
+
+    # Month-wise sheet: Sections 1–4, the Net Position vs return table (4A) and the
+    # status grid. (Total incl. Interbranch, the annual tie-out, the by-source memo and
+    # the incl.-Interbranch comparison stay on the "GST Summary" sheet only.)
+    r = 4
+    grand = {}
+    for title, sec in (("1. SALES — MONTHWISE (excluding Interbranch)", "sales"),
+                       ("2. INTERBRANCH SERVICES — MONTHWISE (shown separately)", "interbranch"),
+                       ("3. SALES RETURNS — MONTHWISE", "returns"),
+                       ("4. NET POSITION — MONTHWISE (Sales excl. Interbranch, less Returns)", "net")):
+        r, grand[sec] = month_block(r, title, sec)
+        if sec == "net" and res["g3b"]:
+            r = net_vs_3b_block(r)
+    if res["g3b"]:
+        r = _gs_bar(ws, r, "Status — GSTR-3B / GSTR-1 vs Books (Sales less Returns incl. Interbranch)",
+                    1 + len(comp_states), s)
+        r = _gs_header(ws, r, ["Month"] + [labels.get(st, st) for st in comp_states], s)
+        for m in _FYM:
+            c = ws.cell(row=r, column=1, value=month_ends[m])
+            c.number_format, c.font, c.border = "mmm-yyyy", s.bold, s.border
+            for i, st in enumerate(comp_states):
+                stt = res["comp"][st][m]["status"]
+                cc = ws.cell(row=r, column=2 + i, value=stt or None)
+                cc.border = s.border
+                sty = (s.ok if stt.startswith("Matched") else s.bad if (stt.startswith("Short") or stt.endswith("filed Nil"))
+                       else s.warn if stt.startswith("Excess") else None)
+                if sty:
+                    cc.font, cc.fill = sty
+            r += 1
+        r += 1
+    ws.cell(row=r, column=1, value='Notes: allocation, Sales/Returns marking and flagged items are described on the '
+                                   '"GST Summary" sheet.').font = s.sub
+    ws.column_dimensions["A"].width = 30
+    for ci in range(2, max(width, 1 + 13 * (len(comp_states) + 1)) + 1):
+        ws.column_dimensions[ws.cell(row=1, column=ci).column_letter].width = 14
+    for ci in range(2, 2 + len(comp_states)):           # status grid columns carry text
+        ws.column_dimensions[ws.cell(row=1, column=ci).column_letter].width = 24
+    ws.freeze_panes = "B7"
+
+    # ======================================================= supporting sheets
+    st_ = _MsStyles()
+    if res["detail"]:
+        _ms_records_sheet(wb, "Returns Read", res["detail"], st_)
+    data = []
+    for r_ in books["rows"]:
+        a = r_["amt"]
+        gst = round(a["cgst"] + a["sgst"] + a["igst"], 2)
+        data.append({
+            "Source": r_["source"], "Sheet": r_["sheet"], "Row": r_["row"],
+            "Date": r_["date"].strftime("%Y-%m-%d") if r_["date"] else "", "Month": r_["month"],
+            "Particulars": r_["particulars"], "Voucher Type": r_["voucher_type"], "Narration": r_["narration"],
+            "Nature": r_["nature"], "Interbranch": "Interbranch" if r_["interbranch"] else "External",
+            "State field": r_["state_field"], "Eff. State": r_["state_label"], "How assigned": r_["state_why"],
+            "State field vs tax-col": "Mismatch" if r_["state_mismatch"] else "OK",
+            "Net Value (Excl. GST)": a["net"], "CGST": a["cgst"], "SGST": a["sgst"], "IGST": a["igst"],
+            "Total GST": gst, "Gross": round(a["net"] + gst, 2),
+            "Register Gross Total": r_["gross"],
+        })
+    _ms_records_sheet(wb, "Books Data", data, st_)
+    if res["files"]:
+        _ms_records_sheet(wb, "Files", [{
+            "File": f["file"], "Read as": f["kind"], "GSTIN": f["gstin"], "Registration": f["state"],
+            "Period(s)": ", ".join(f.get("periods") or []), "Status": f["status"], "Note": f.get("note", "")}
+            for f in res["files"]], st_)
+    return wb
+
 
 
 def main() -> None:

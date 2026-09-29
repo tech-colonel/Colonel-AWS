@@ -1596,6 +1596,34 @@ const RecoWorkspace = ({ agentTypeProp } = {}) => {
           </div>
         )}
 
+        {/* ── GSTR-1: switch to combined mode (all states / all months) ── */}
+        {agentType === 'gstr_1_vs_books' && !result && (
+          <div className="glass-card" style={{
+            display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16,
+            padding: '13px 18px', marginBottom: 20,
+          }}>
+            <div style={{ minWidth: 0 }}>
+              <p style={{ fontSize: 13, fontWeight: 700, fontFamily: 'Barlow', color: 'var(--text-heading)', margin: 0, marginBottom: 2 }}>
+                Combined Sales Register — all states, all months
+              </p>
+              <p style={{ fontSize: 11.5, color: 'var(--text-muted)', margin: 0, lineHeight: 1.5 }}>
+                One register for every state, with every month's GSTR-1 (OCTA or portal PDF) and GSTR-3B PDFs.
+              </p>
+            </div>
+            <button
+              data-testid="gstr1-combined-mode"
+              onClick={() => navigate(`/brands/${effectiveBrandId || brandId}/agents/8b8d0876-3169-4511-96d8-2a7467478007?mode=combined`)}
+              style={{
+                flexShrink: 0, padding: '8px 14px', borderRadius: 8, fontSize: 12, fontWeight: 700,
+                background: config.bg, border: `1px solid ${config.border}`, color: config.color,
+                cursor: 'pointer', fontFamily: 'Barlow',
+              }}
+            >
+              Open combined mode
+            </button>
+          </div>
+        )}
+
         {/* ── Upload Form ─────────────────────────────────────────────── */}
         {!result && isReceivableCycle && (
           <div className="glass-card" style={{ padding: 24, marginBottom: 28 }}>
