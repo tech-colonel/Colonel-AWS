@@ -45,6 +45,7 @@
 > | **[SERVERS.md](SERVERS.md)** | Ports, start/restart, pm2, health checks, fresh-machine bring-up |
 > | **[RECO.md](RECO.md)** | Python reco engine + every agent (2B/2A-2B/3B/GSTR-1/E-Invoice/bank/GSTR-3B Tally/Zepto) |
 > | **[DATABASES.md](DATABASES.md)** | Schema, RLS, migrations, per-brand tables, seed/restore |
+| **[TALLY.md](TALLY.md)** | Tally Connector (branch `tally-connector`) — purpose, how it works, what's done/verified, current blocker, next steps |
 > | **`../../AWS2.md`** | 🟢 **CURRENT live infra — READ FIRST for anything touching AWS.** agent.accountant, account #2, nginx/HTTPS, security hardening, deploy + rollback. Absolute path: `/Users/dhavalchauhan/Colonel Full/AWS2.md` |
 > | **[AWS.md](AWS.md)** | ⚠️ **HISTORICAL** — the OLD ngrok box (now stopped). Deploy flow, crons, backups. Superseded by `AWS2.md`; cross-check before trusting any IP/account/URL here |
 
