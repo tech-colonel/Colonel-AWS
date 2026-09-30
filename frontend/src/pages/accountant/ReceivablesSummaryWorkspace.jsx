@@ -11,7 +11,7 @@ import { useParams } from 'react-router-dom';
 import {
   Upload, FileText, Download, Trash2, Loader2, CheckCircle2, AlertTriangle,
   FileSpreadsheet, X, ChevronRight, Scale, Banknote, Truck, ClipboardList, Inbox,
-  CalendarDays, Layers, Package, Link as LinkIcon, Zap, RotateCcw,
+  CalendarDays, Layers, Package, Link as LinkIcon, Zap, RotateCcw, Eye,
 } from 'lucide-react';
 import { Button } from '../../components/ui/button';
 import { Input } from '../../components/ui/input';
@@ -472,7 +472,7 @@ const ReceivablesSummaryWorkspace = ({ agent }) => {
      took two minutes to draw and told the reader less than twelve rows do, so
      the year is its own view: what each month came to, and what is wrong.
      A month is opened from it. */
-  const [view, setView] = useState('year');       // year | month | input
+  const [view, setView] = useState('reports');    // reports | year | month | input
   const [overview, setOverview] = useState(null);
   const [monthLoading, setMonthLoading] = useState(false);
   const [ovLoading, setOvLoading] = useState(true);
@@ -481,6 +481,9 @@ const ReceivablesSummaryWorkspace = ({ agent }) => {
      store said about it. */
   const [needsBuild, setNeedsBuild] = useState(false);
   const [buildingYear, setBuildingYear] = useState(false);
+  /* The reports produced so far. This is what the agent opens on — the work
+     already done, not a form asking for more. */
+  const [reports, setReports] = useState([]);
   const [confirmReset, setConfirmReset] = useState(false);
   const fileRef = useRef(null);
   const [resetting, setResetting] = useState(false);
@@ -518,6 +521,11 @@ const ReceivablesSummaryWorkspace = ({ agent }) => {
     } catch (e) {
       toast.error(e.response?.data?.error || 'Could not load the records');
     } finally { setLoading(false); }
+
+    try {
+      const r = await api.get(`${base}/statements`);
+      setReports(r.data?.reports || []);
+    } catch { /* the list is a convenience; the views below still work */ }
 
     setOvLoading(true);
     try {
@@ -558,6 +566,34 @@ const ReceivablesSummaryWorkspace = ({ agent }) => {
       setJob(null);
       toast.error(e.response?.data?.error || 'Could not start the build');
     } finally { setBuildingYear(false); }
+  };
+
+  /* Download the workbook for one month, straight from the history row. */
+  const downloadMonth = async (m) => {
+    try {
+      const res = await api.post(`${base}/workbook`, { month: m });
+      await downloadFile(res.data.filename);
+    } catch (e) { toast.error(e.response?.data?.error || 'Could not build that workbook'); }
+  };
+
+  /* Every month plus the consolidated, zipped — the year row's download. */
+  const handleBundleAll = () => {
+    setPicks((monthsHeld || []).map((x) => x.month));
+    setMode('many');
+    handleBundle();
+  };
+
+  /* Remove a produced statement. The records it was built from are untouched —
+     this deletes the report, not the data. */
+  const removeReport = async (r) => {
+    try {
+      const url = r.scope === 'YEAR'
+        ? `${base}/statements/YEAR`
+        : `${base}/statements/MONTH/${r.period}`;
+      await api.delete(url);
+      toast.success(`${r.label} removed`);
+      refresh();
+    } catch (e) { toast.error(e.response?.data?.error || 'Could not remove that statement'); }
   };
 
   /* Open a month from anywhere on the year view. */
@@ -1154,7 +1190,8 @@ const ReceivablesSummaryWorkspace = ({ agent }) => {
       {!loading && (files.length > 0 || ov) && (
         <div className="flex flex-wrap items-center gap-1 rounded-xl border p-1"
              style={{ borderColor: 'var(--card-border)', background: 'var(--surface)' }}>
-          {[['year', ov ? `The year — ${ov.year.from} to ${ov.year.to}`
+          {[['reports', `Statements${reports.length ? ` (${reports.length})` : ''}`, FileText],
+            ['year', ov ? `The year — ${ov.year.from} to ${ov.year.to}`
                         : ovLoading ? 'The year — reading…'
                         : needsBuild ? 'The year — not built yet' : 'The year', Layers],
             ['month', month ? `${monthLabel(month)} in full` : 'One month in full', CalendarDays],
@@ -1173,6 +1210,139 @@ const ReceivablesSummaryWorkspace = ({ agent }) => {
           </span>
         </div>
       )}
+
+      {/* ── the reports produced so far: what the agent opens on ───────── */}
+      {!loading && view === 'reports' && (
+        <>
+          <div className="flex flex-wrap items-end justify-between gap-4">
+            <div>
+              <div style={{ ...TITLE, fontSize: 19 }}>Statements produced</div>
+              <p className="mt-1 text-sm" style={{ color: 'var(--text-muted)' }}>
+                Already built and stored. Opening one is a read — nothing is recomputed.
+              </p>
+            </div>
+            <div className="flex items-center gap-2">
+              <Button variant="outline" onClick={refresh} disabled={loading}>
+                <RotateCcw className="mr-2 h-4 w-4" /> Refresh
+              </Button>
+              <Button onClick={() => setView('input')} className="bg-slate-800 hover:bg-slate-900">
+                <Zap className="mr-2 h-4 w-4" /> Generate report
+              </Button>
+            </div>
+          </div>
+
+          <div className="grid gap-4 sm:grid-cols-3">
+            <Stat icon={FileSpreadsheet} label="Statements" value={int(reports.length)}
+                  sub="One for the year, one per month." />
+            <Stat icon={Inbox} label="Records held" value={int(files.reduce((a, f) => a + (f.rows || 0), 0))}
+                  sub={`From ${int(files.length)} workbooks.`} />
+            <Stat icon={CalendarDays} label="Months covered"
+                  value={int(reports.filter((r) => r.scope === 'MONTH').length)}
+                  sub={reports.some((r) => r.stale)
+                        ? 'Some were built before the records changed.'
+                        : 'All current with the records held.'} />
+          </div>
+
+          <Card className="p-0">
+            <div className="flex items-center justify-between px-5 py-3.5 border-b"
+                 style={{ borderColor: 'var(--card-border)' }}>
+              <div className="flex items-center gap-2 text-base font-semibold"
+                   style={{ color: 'var(--text-heading)' }}>
+                <FileText className="h-4 w-4" /> Report history
+                <span className="rounded-full px-2 py-0.5 text-xs"
+                      style={{ background: 'var(--page-bg)', color: 'var(--text-muted)' }}>
+                  {reports.length}
+                </span>
+              </div>
+              <span className="text-xs" style={{ color: 'var(--text-muted)' }}>
+                Click View to open the statement
+              </span>
+            </div>
+
+            {reports.length === 0 ? (
+              <div className="px-5 py-12 text-center">
+                <FileText className="mx-auto mb-3 h-8 w-8 text-slate-300" />
+                <div style={{ ...TITLE, fontSize: 16 }}>Nothing produced yet</div>
+                <p className="mx-auto mt-2 max-w-lg text-sm leading-relaxed"
+                   style={{ color: 'var(--text-muted)' }}>
+                  {files.length
+                    ? 'The records are held. Generate the report and it is stored — after that, opening it costs nothing.'
+                    : 'Add the records first, then generate the report.'}
+                </p>
+                <Button onClick={() => (files.length ? buildYear() : setView('input'))}
+                        disabled={buildingYear || job?.state === 'running'}
+                        className="mt-4 bg-slate-800 hover:bg-slate-900">
+                  {buildingYear || job?.state === 'running'
+                    ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" /> Building…</>
+                    : <><Zap className="mr-2 h-4 w-4" /> {files.length ? 'Generate report' : 'Add records'}</>}
+                </Button>
+              </div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="text-left text-xs uppercase tracking-wide"
+                        style={{ color: 'var(--text-muted)' }}>
+                      <th className="px-5 py-2.5">Statement</th>
+                      <th className="px-3 py-2.5">Covers</th>
+                      <th className="px-3 py-2.5 text-right">Orders</th>
+                      <th className="px-3 py-2.5">Built</th>
+                      <th className="px-3 py-2.5 text-right">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {reports.map((r) => (
+                      <tr key={`${r.scope}-${r.period || 'year'}`} className="border-t"
+                          style={{ borderColor: 'var(--card-border)' }}>
+                        <td className="px-5 py-3">
+                          <div className="flex items-center gap-2.5">
+                            <span className="flex h-7 w-7 items-center justify-center rounded-lg"
+                                  style={{ background: r.scope === 'YEAR' ? AGENT.bg : 'var(--page-bg)' }}>
+                              {r.scope === 'YEAR'
+                                ? <Layers className="h-3.5 w-3.5" style={{ color: AGENT.color }} />
+                                : <CalendarDays className="h-3.5 w-3.5 text-slate-400" />}
+                            </span>
+                            <span className="font-medium" style={{ color: 'var(--text-heading)' }}>
+                              {r.label}
+                            </span>
+                            {r.stale && <Chip tone="amber">records changed</Chip>}
+                          </div>
+                        </td>
+                        <td className="px-3 py-3" style={{ color: 'var(--text-muted)' }}>
+                          {r.scope === 'YEAR' ? 'All months held' : r.period}
+                        </td>
+                        <td className="px-3 py-3 text-right tabular-nums">{int(r.orders)}</td>
+                        <td className="px-3 py-3 text-xs" style={{ color: 'var(--text-muted)' }}>
+                          {r.builtAt ? format(new Date(r.builtAt), 'dd MMM yyyy HH:mm') : '—'}
+                        </td>
+                        <td className="px-3 py-3">
+                          <div className="flex items-center justify-end gap-1.5">
+                            <Button size="sm"
+                                    onClick={() => (r.scope === 'YEAR' ? setView('year') : openMonth(r.period))}
+                                    className="bg-slate-800 hover:bg-slate-900">
+                              <Eye className="mr-1.5 h-3.5 w-3.5" /> View
+                            </Button>
+                            <Button size="sm" variant="ghost"
+                                    onClick={() => (r.scope === 'YEAR' ? handleBundleAll() : downloadMonth(r.period))}
+                                    title="Download the workbook">
+                              <Download className="h-4 w-4" />
+                            </Button>
+                            <Button size="sm" variant="ghost" onClick={() => removeReport(r)}
+                                    title="Remove this statement — the records stay">
+                              <Trash2 className="h-4 w-4 text-rose-600" />
+                            </Button>
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </Card>
+        </>
+      )}
+
 
       {/* ── the year ──────────────────────────────────────────────────── */}
       {!loading && ovLoading && !ov && view === 'year' && (

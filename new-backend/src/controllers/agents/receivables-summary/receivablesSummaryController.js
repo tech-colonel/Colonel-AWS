@@ -24,7 +24,7 @@ const { getDynamicModel } = require('../../../models/brand');
 const { parseReceivablesFile } = require('../../../services/processors/offdutyReceivablesParser');
 const { buildReceivables, buildMonthlyStatements } = require('../../../services/processors/offdutyReceivablesLedger');
 const { buildWorkbook, yearSummarySheet, WRITE_OPTS } = require('../../../services/processors/offdutyReceivablesWorkbook');
-const { buildOverview, decorateLimits, slim } = require('../../../services/processors/offdutyReceivablesOverview');
+const { buildOverview, decorateLimits, slim, label } = require('../../../services/processors/offdutyReceivablesOverview');
 const AdmZip = require('adm-zip');
 const drive = require('../../../services/driveService');
 
@@ -496,6 +496,57 @@ const clearStatements = async (Model, brandId) => {
    accountant who has already produced a statement should not lose it because
    a file was added. */
 const invalidateOverview = () => {};
+
+/**
+ * The reports that have been produced, newest first — the list the agent opens
+ * on. Reads the statements table only: no payload, no order rows, so this is a
+ * few rows of metadata however large the year is.
+ */
+const listStatements = async (req, res, next) => {
+  try {
+    const ctx = await resolve(req, res); if (!ctx) return;
+    await ensureTable(ctx.Model);
+    const { rows: heldRows, fp } = await fingerprint(ctx.Model);
+
+    const [rows] = await ctx.Model.sequelize.query(
+      `SELECT scope, period, source_rows, source_fingerprint, built_ms, built_at,
+              length(payload::text) AS bytes
+         FROM ${STATEMENTS_TABLE}
+        WHERE brand_id = :b
+        ORDER BY CASE scope WHEN 'YEAR' THEN 0 ELSE 1 END, period`,
+      { replacements: { b: ctx.brand.id } });
+
+    res.json({
+      heldRows,
+      brand: ctx.brand.name,
+      reports: rows.map((r) => ({
+        scope: r.scope,
+        period: r.period,
+        label: r.scope === 'YEAR' ? 'The year' : label(r.period),
+        orders: Number(r.source_rows) || 0,
+        builtAt: r.built_at,
+        builtMs: r.built_ms,
+        bytes: Number(r.bytes) || 0,
+        /* built from records that are no longer what is held */
+        stale: r.source_fingerprint !== fp,
+      })),
+    });
+  } catch (error) { next(error); }
+};
+
+/** Remove one produced report. The records it was built from are untouched. */
+const deleteStatement = async (req, res, next) => {
+  try {
+    const ctx = await resolve(req, res); if (!ctx) return;
+    const { scope } = req.params;
+    const period = req.params.period || null;
+    const [, meta] = await ctx.Model.sequelize.query(
+      `DELETE FROM ${STATEMENTS_TABLE}
+        WHERE brand_id = :b AND scope = :s AND COALESCE(period,'') = COALESCE(:p,'')`,
+      { replacements: { b: ctx.brand.id, s: scope, p: period } });
+    res.json({ success: true, removed: (meta && meta.rowCount) || 0 });
+  } catch (error) { next(error); }
+};
 
 /**
  * The whole year on one screen — SERVED, never built. If no statement has been
@@ -1034,6 +1085,6 @@ const getLedger = async (req, res, next) => {
   } catch (error) { next(error); }
 };
 
-module.exports = { uploadFiles, listFiles, deleteFile, resetAll, getSummary, getOverview, buildStatements, generateWorkbook,
+module.exports = { uploadFiles, listFiles, deleteFile, resetAll, getSummary, getOverview, buildStatements, listStatements, deleteStatement, generateWorkbook,
                    generateBundle, buildBundle, ingestDrive, bundleJob, getJob,
                    download, getLedger, COLUMNS };
