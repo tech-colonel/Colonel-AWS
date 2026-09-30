@@ -297,13 +297,34 @@ const resetAll = async (req, res, next) => {
     await ensureTable(ctx.Model);
     const [[before]] = await ctx.Model.sequelize.query(
       'SELECT count(*)::int AS n, count(DISTINCT filename)::int AS f FROM receivables_summary');
+
+    /* The uploaded workbooks go with the records they were read into. They are
+       the bulk of what this agent leaves on disk — sixty megabytes each, and
+       nothing reads them again once the rows are in the table. */
+    const [files] = await ctx.Model.sequelize.query(
+      'SELECT DISTINCT filename FROM receivables_summary WHERE filename IS NOT NULL');
+    let freed = 0;
+    for (const { filename } of files) {
+      const f = path.join(OUTPUT_DIR, filename);
+      try {
+        const st = await fs.stat(f);
+        await fs.remove(f);
+        freed += st.size;
+      } catch { /* already gone */ }
+    }
+
     const removed = await ctx.Model.destroy({ where: {} });
-    /* A new run means the records AND the statements built from them go — that
-       is what the button says. Adding or removing ONE file does not: there the
-       statements stay and are marked stale, so nobody loses work they have
-       already produced. */
-    await clearStatements(ctx.Model, ctx.brand.id);
-    res.json({ success: true, removedRows: removed, heldRows: before.n, heldFiles: before.f });
+
+    /* The STATEMENTS stay.
+     *
+     * Reset clears the run — the records read in and the workbooks they were
+     * read from. It does not throw away the reports made from them. Those are
+     * finished work; an accountant may have filed them, and they are still
+     * downloadable because each one remembers the file it was written to.
+     * Deleting a report is its own button, on its own row. */
+    invalidateOverview(ctx.brand.id);
+    res.json({ success: true, removedRows: removed, heldRows: before.n, heldFiles: before.f,
+               freedBytes: freed, statementsKept: true });
   } catch (error) { console.error('Receivables reset error:', error); next(error); }
 };
 
@@ -389,12 +410,31 @@ const fingerprint = async (Model) => {
 /* The built statement as the page renders it. scope 'YEAR' has no period. */
 async function readStatement(Model, brandId, scope, period = null) {
   const [rows] = await Model.sequelize.query(
-    `SELECT payload, source_rows, source_fingerprint, built_ms, built_at
+    `SELECT payload, source_rows, source_fingerprint, built_ms, built_at, workbook_file
        FROM ${STATEMENTS_TABLE}
       WHERE brand_id = :b AND scope = :s AND COALESCE(period,'') = COALESCE(:p,'')
       LIMIT 1`,
     { replacements: { b: brandId, s: scope, p: period } });
   return rows[0] || null;
+}
+
+/* Remember the workbook a statement was written to.
+ *
+ * The file is the only place the order-by-order detail survives — the statement
+ * payload deliberately does not carry it. Pointing at the file is what lets the
+ * download outlive the records it was cast from. */
+async function rememberWorkbook(Model, brandId, scope, period, filename) {
+  await Model.sequelize.query(
+    `UPDATE ${STATEMENTS_TABLE} SET workbook_file = :f
+      WHERE brand_id = :b AND scope = :s AND COALESCE(period,'') = COALESCE(:p,'')`,
+    { replacements: { b: brandId, s: scope, p: period || null, f: filename } });
+}
+
+/** The saved workbook for a statement, if one was produced and still exists. */
+async function savedWorkbook(Model, brandId, scope, period) {
+  const st = await readStatement(Model, brandId, scope, period);
+  if (!st || !st.workbook_file) return null;
+  return (await fs.pathExists(path.join(OUTPUT_DIR, st.workbook_file))) ? st.workbook_file : null;
 }
 
 async function writeStatement(Model, brandId, scope, period, payload, fp, rowCount, ms, userId) {
@@ -408,7 +448,11 @@ async function writeStatement(Model, brandId, scope, period, payload, fp, rowCou
                    source_fingerprint = EXCLUDED.source_fingerprint,
                    built_ms = EXCLUDED.built_ms,
                    built_by = EXCLUDED.built_by,
-                   built_at = NOW()`,
+                   built_at = NOW(),
+                   /* a rebuilt statement is not the one the old file was
+                      written from — forget it rather than serve a workbook
+                      that disagrees with the figures on screen */
+                   workbook_file = NULL`,
     { replacements: { b: brandId, s: scope, p: period, payload: JSON.stringify(payload),
                       rows: rowCount, fp, ms, who: userId || null } });
 }
@@ -486,11 +530,6 @@ async function buildAndStore(ctx, userId, onProgress) {
   return { built: true, months: slimStatements.length, ms: overview.builtInMs, rows: rowCount };
 }
 
-const clearStatements = async (Model, brandId) => {
-  await Model.sequelize.query(`DELETE FROM ${STATEMENTS_TABLE} WHERE brand_id = :b`,
-                              { replacements: { b: brandId } });
-};
-
 /* Records changed, so the built statements no longer describe what is held.
    They are LEFT IN PLACE and marked stale by the fingerprint comparison — an
    accountant who has already produced a statement should not lose it because
@@ -510,16 +549,22 @@ const listStatements = async (req, res, next) => {
 
     const [rows] = await ctx.Model.sequelize.query(
       `SELECT scope, period, source_rows, source_fingerprint, built_ms, built_at,
-              length(payload::text) AS bytes
+              workbook_file, length(payload::text) AS bytes
          FROM ${STATEMENTS_TABLE}
         WHERE brand_id = :b
         ORDER BY CASE scope WHEN 'YEAR' THEN 0 ELSE 1 END, period`,
       { replacements: { b: ctx.brand.id } });
 
-    res.json({
-      heldRows,
-      brand: ctx.brand.name,
-      reports: rows.map((r) => ({
+    /* Cleared records are not the same as changed records. After a reset every
+       report would read "records changed", which is true and useless — what
+       matters is whether it can still be downloaded. */
+    const cleared = heldRows === 0;
+
+    const reports = [];
+    for (const r of rows) {
+      const saved = r.workbook_file
+        && await fs.pathExists(path.join(OUTPUT_DIR, r.workbook_file));
+      reports.push({
         scope: r.scope,
         period: r.period,
         label: r.scope === 'YEAR' ? 'The year' : label(r.period),
@@ -528,9 +573,15 @@ const listStatements = async (req, res, next) => {
         builtMs: r.built_ms,
         bytes: Number(r.bytes) || 0,
         /* built from records that are no longer what is held */
-        stale: r.source_fingerprint !== fp,
-      })),
-    });
+        stale: !cleared && r.source_fingerprint !== fp,
+        recordsCleared: cleared,
+        /* rebuildable from the records, or already written to a file */
+        downloadable: !cleared || !!saved,
+        savedFile: saved ? r.workbook_file : null,
+      });
+    }
+
+    res.json({ heldRows, recordsCleared: cleared, brand: ctx.brand.name, reports });
   } catch (error) { next(error); }
 };
 
@@ -540,6 +591,15 @@ const deleteStatement = async (req, res, next) => {
     const ctx = await resolve(req, res); if (!ctx) return;
     const { scope } = req.params;
     const period = req.params.period || null;
+
+    /* The workbook goes with the report. Nothing else points at it, and these
+       run to sixty megabytes each — left behind they would quietly fill the
+       disk with files no screen lists. */
+    const gone = await readStatement(ctx.Model, ctx.brand.id, scope, period);
+    if (gone && gone.workbook_file) {
+      await fs.remove(path.join(OUTPUT_DIR, gone.workbook_file)).catch(() => {});
+    }
+
     const [, meta] = await ctx.Model.sequelize.query(
       `DELETE FROM ${STATEMENTS_TABLE}
         WHERE brand_id = :b AND scope = :s AND COALESCE(period,'') = COALESCE(:p,'')`,
@@ -559,15 +619,20 @@ const getOverview = async (req, res, next) => {
     await ensureTable(ctx.Model);
 
     const { rows: rowCount, fp } = await fingerprint(ctx.Model);
-    if (!rowCount) return res.json({ empty: true });
-
     const saved = await readStatement(ctx.Model, ctx.brand.id, 'YEAR');
+
+    /* No records AND no statement is genuinely empty. No records but a
+       statement built earlier is a finished report, and it is still shown —
+       the reset cleared the run, not the work. */
+    if (!rowCount && !saved) return res.json({ empty: true });
+
     if (!saved) {
       return res.json({ empty: false, needsBuild: true, stale: false,
                         heldRows: rowCount,
                         reason: 'No statement has been built for these records yet.' });
     }
-    const stale = saved.source_fingerprint !== fp;
+    const cleared = rowCount === 0;
+    const stale = !cleared && saved.source_fingerprint !== fp;
     res.json({
       ...saved.payload,
       served: true,
@@ -576,6 +641,9 @@ const getOverview = async (req, res, next) => {
       builtInMs: saved.built_ms,
       builtFromRows: saved.source_rows,
       heldRows: rowCount,
+      recordsCleared: cleared,
+      ...(cleared ? { reason: `The records were cleared. This is the statement built from the `
+                            + `${Number(saved.source_rows).toLocaleString('en-IN')} lines held at the time.` } : {}),
       ...(stale ? { reason: `Built from ${Number(saved.source_rows).toLocaleString('en-IN')} lines; `
                           + `${rowCount.toLocaleString('en-IN')} are held now.` } : {}),
     });
@@ -687,17 +755,20 @@ const getSummary = async (req, res, next) => {
     const month = req.query.month || null;
 
     const { rows: rowCount, fp } = await fingerprint(ctx.Model);
-    if (!rowCount) return res.json({ empty: true, month });
 
-    /* stored first — this is the whole point */
+    /* stored first — this is the whole point. It is also what keeps a month
+       readable after the records are cleared: the report stands on its own. */
     if (month && !req.query.refresh) {
       const saved = await readStatement(ctx.Model, ctx.brand.id, 'MONTH', month);
       if (saved) {
         return res.json({ ...saved.payload, served: true,
-                          stale: saved.source_fingerprint !== fp,
+                          stale: rowCount > 0 && saved.source_fingerprint !== fp,
+                          recordsCleared: rowCount === 0,
                           builtAt: saved.built_at });
       }
     }
+
+    if (!rowCount) return res.json({ empty: true, month });
 
     /* No month means the whole year in one position, which is a million and a
        half lines in heap and the thing that used to take the backend down. The
@@ -743,10 +814,20 @@ const generateWorkbook = async (req, res, next) => {
     }
 
     const rows = await Model.findAll({ where: { period: month }, raw: true, order: READ_ORDER });
-    if (!rows.length) return res.status(400).json({ error: `Nothing held for ${month}` });
+
+    /* The records have been cleared but the workbook was produced while they
+       were here. Hand back the file — a statement already issued should not
+       stop being downloadable because the run it came from was reset. */
+    if (!rows.length) {
+      const saved = await savedWorkbook(Model, brand.id, 'MONTH', month);
+      if (saved) return res.json({ success: true, filename: saved, served: true, sheets: [] });
+      return res.status(400).json({
+        error: `Nothing held for ${month}, and no workbook was produced for it before the records were cleared.`,
+      });
+    }
 
     const sc = scope(rows, month);
-    if (month && !sc.rows.length) return res.status(400).json({ error: `Nothing held for ${month}` });
+    if (!sc.rows.length) return res.status(400).json({ error: `Nothing held for ${month}` });
     const b = buildReceivables(sc.rows, (req.body && req.body.asAt) || sc.asAt);
 
     /* Rebuild the "what was read" table from what is actually stored, so the
@@ -777,6 +858,8 @@ const generateWorkbook = async (req, res, next) => {
     /* the month's own name is in the file name via asAt, so a year of statements
        sorts correctly in a folder */
     XLSXStyle.writeFile(wb, path.join(OUTPUT_DIR, filename), WRITE_OPTS);
+    /* so the download survives a reset of the records */
+    await rememberWorkbook(Model, brand.id, 'MONTH', month, filename).catch(() => {});
 
     res.json({
       success: true, filename,
@@ -846,6 +929,12 @@ async function buildBundle(Model, brandName, wantedIn, onProgress) {
   });
   const all = periods.map((p) => p.period).filter(Boolean).sort();
   const wanted = (wantedIn && wantedIn.length) ? wantedIn.filter((m) => all.includes(m)) : all;
+  /* Without this the zip is named "undefined to undefined" and holds nothing. */
+  if (!wanted.length) {
+    const e = new Error('No records are held, so there is nothing to build a workbook from.');
+    e.noRecords = true;
+    throw e;
+  }
   if (!wanted.length) throw new Error('Nothing held for those months');
 
   await ensureDir();
@@ -906,12 +995,37 @@ async function buildBundle(Model, brandName, wantedIn, onProgress) {
            statements: monthly.length + (monthly.length > 1 ? 1 : 0) };
 }
 
+/* The year's zip, saved against the YEAR statement so it outlives a reset.
+   Asking for a subset of months is a one-off download, not the year, so only a
+   full bundle is remembered. */
+async function bundleAndRemember(ctx, months, onProgress) {
+  const out = await buildBundle(ctx.Model, ctx.brand.name, months, onProgress);
+  if (!months || !months.length) {
+    await rememberWorkbook(ctx.Model, ctx.brand.id, 'YEAR', null, out.filename).catch(() => {});
+  }
+  return out;
+}
+
+/** The saved zip, when the records it would be rebuilt from are gone. */
+async function bundleFallback(ctx, months) {
+  if (months && months.length) return null;
+  return savedWorkbook(ctx.Model, ctx.brand.id, 'YEAR', null);
+}
+
 const generateBundle = async (req, res, next) => {
   try {
     const ctx = await resolve(req, res); if (!ctx) return;
     await ensureTable(ctx.Model);
-    const out = await buildBundle(ctx.Model, ctx.brand.name, req.body && req.body.months, null);
-    res.json({ success: true, ...out });
+    const months = req.body && req.body.months;
+    try {
+      const out = await bundleAndRemember(ctx, months, null);
+      return res.json({ success: true, ...out });
+    } catch (e) {
+      if (!e.noRecords) throw e;
+      const saved = await bundleFallback(ctx, months);
+      if (saved) return res.json({ success: true, filename: saved, served: true, months: [] });
+      return res.status(400).json({ error: `${e.message} No workbook was produced before they were cleared.` });
+    }
   } catch (error) { console.error('Receivables bundle error:', error); next(error); }
 };
 
@@ -1058,13 +1172,23 @@ const bundleJob = async (req, res, next) => {
     await ensureTable(ctx.Model);
     const job = newJob(`${ctx.brand.name} — statements`);
     res.json({ jobId: job.id });
+    const months = req.body && req.body.months;
     (async () => {
       try {
-        const out = await buildBundle(ctx.Model, ctx.brand.name, req.body && req.body.months,
+        const out = await bundleAndRemember(ctx, months,
           (p) => step(job, p.stage, p.detail, p.done, p.total));
         job.result = out; job.state = 'done';
         step(job, 'done', `${out.statements} statements`, out.months.length, out.months.length);
-      } catch (e) { job.state = 'failed'; job.error = e.message; step(job, 'failed', e.message); }
+      } catch (e) {
+        /* records cleared, but the zip was produced while they were here */
+        const saved = e.noRecords ? await bundleFallback(ctx, months).catch(() => null) : null;
+        if (saved) {
+          job.result = { filename: saved, served: true, months: [] }; job.state = 'done';
+          step(job, 'done', 'served the workbook produced earlier', 1, 1);
+          return;
+        }
+        job.state = 'failed'; job.error = e.message; step(job, 'failed', e.message);
+      }
     })();
   } catch (error) { next(error); }
 };

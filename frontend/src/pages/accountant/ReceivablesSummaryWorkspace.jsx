@@ -362,7 +362,7 @@ const YearTable = ({ ov, onMonth }) => {
 
 const Chip = ({ tone, children }) => {
   const T = { amber: 'bg-amber-100 text-amber-800', rose: 'bg-rose-100 text-rose-800',
-              emerald: 'bg-emerald-100 text-emerald-800' };
+              emerald: 'bg-emerald-100 text-emerald-800', slate: 'bg-slate-100 text-slate-700' };
   return <span className={`rounded px-1.5 py-px text-[10px] font-semibold ${T[tone]}`}>{children}</span>;
 };
 
@@ -484,6 +484,9 @@ const ReceivablesSummaryWorkspace = ({ agent }) => {
   /* The reports produced so far. This is what the agent opens on — the work
      already done, not a form asking for more. */
   const [reports, setReports] = useState([]);
+  /* The year's zip, if one was produced. Every month is a sheet inside it, so
+     it is the fallback for a month that has no file of its own. */
+  const yearFile = (reports.find((r) => r.scope === 'YEAR') || {}).savedFile || null;
   const [confirmReset, setConfirmReset] = useState(false);
   const fileRef = useRef(null);
   const [resetting, setResetting] = useState(false);
@@ -576,11 +579,21 @@ const ReceivablesSummaryWorkspace = ({ agent }) => {
     } catch (e) { toast.error(e.response?.data?.error || 'Could not build that workbook'); }
   };
 
-  /* Every month plus the consolidated, zipped — the year row's download. */
-  const handleBundleAll = () => {
-    setPicks((monthsHeld || []).map((x) => x.month));
-    setMode('many');
-    handleBundle();
+  /* Every month plus the consolidated, zipped — the year row's download.
+     Sent with no month list, which means "all of them" to the server. That is
+     also the only form it remembers the file for, and the only form that can
+     fall back to the zip produced earlier once the records have been cleared —
+     so this must NOT go through the month picks. */
+  const handleBundleAll = async () => {
+    setBundling(true);
+    try {
+      const res = await api.post(`${base}/bundle-job`, {});
+      setJob({ state: 'running', stage: 'reading', detail: '', done: 0,
+               total: (monthsHeld || []).length, log: [] });
+      watchJob(res.data.jobId, (j) => { if (j.result?.filename) downloadFile(j.result.filename); });
+    } catch (e) {
+      toast.error(e.response?.data?.error || 'Could not build the year');
+    } finally { setBundling(false); }
   };
 
   /* Remove a produced statement. The records it was built from are untouched —
@@ -709,10 +722,16 @@ const ReceivablesSummaryWorkspace = ({ agent }) => {
     setResetting(true);
     try {
       const r = await api.post(`${base}/reset`);
-      toast.success(`${int(r.data.heldRows)} lines from ${int(r.data.heldFiles)} records cleared`);
+      const mb = Math.round((r.data.freedBytes || 0) / 1048576);
+      toast.success(`${int(r.data.heldRows)} lines from ${int(r.data.heldFiles)} records cleared`
+        + (mb ? ` · ${mb} MB freed` : '')
+        + ' · your reports are untouched');
       setConfirmReset(false);
-      setOverview(null); setSummary(null); setMonth(null); setPicks([]);
-      setUploadReport(null); setJob(null); setView('input');
+      setSummary(null); setMonth(null); setPicks([]);
+      setUploadReport(null); setJob(null);
+      /* Back to the reports, not to the upload form — the work that survives is
+         the point of clearing the run. */
+      setView('reports');
       refresh();
     } catch (e) {
       toast.error(e.response?.data?.error || 'Could not clear the records');
@@ -1306,6 +1325,11 @@ const ReceivablesSummaryWorkspace = ({ agent }) => {
                               {r.label}
                             </span>
                             {r.stale && <Chip tone="amber">records changed</Chip>}
+                            {r.recordsCleared && (
+                              <Chip tone={r.savedFile ? 'slate' : 'amber'}>
+                                {r.savedFile ? 'records cleared · file kept' : 'records cleared'}
+                              </Chip>
+                            )}
                           </div>
                         </td>
                         <td className="px-3 py-3" style={{ color: 'var(--text-muted)' }}>
@@ -1322,13 +1346,25 @@ const ReceivablesSummaryWorkspace = ({ agent }) => {
                                     className="bg-slate-800 hover:bg-slate-900">
                               <Eye className="mr-1.5 h-3.5 w-3.5" /> View
                             </Button>
+                            {/* A month whose own workbook was never written is
+                                still a sheet inside the year's zip, so the year
+                                is offered rather than nothing. */}
                             <Button size="sm" variant="ghost"
-                                    onClick={() => (r.scope === 'YEAR' ? handleBundleAll() : downloadMonth(r.period))}
-                                    title="Download the workbook">
+                                    disabled={r.downloadable === false && !yearFile}
+                                    onClick={() => ((r.scope === 'YEAR' || r.downloadable === false)
+                                      ? handleBundleAll() : downloadMonth(r.period))}
+                                    title={r.downloadable !== false
+                                      ? (r.savedFile ? `Download ${r.savedFile}` : 'Download the workbook')
+                                      : yearFile
+                                        ? `This month was never written to its own file, but it is a sheet `
+                                          + `inside the year's download. Click to get the year.`
+                                        : 'The records were cleared before this workbook was produced. '
+                                          + 'Read the records in again to produce it.'}>
                               <Download className="h-4 w-4" />
                             </Button>
                             <Button size="sm" variant="ghost" onClick={() => removeReport(r)}
-                                    title="Remove this statement — the records stay">
+                                    title="Remove this report and its workbook — any records held stay">
+
                               <Trash2 className="h-4 w-4 text-rose-600" />
                             </Button>
                           </div>
@@ -1915,15 +1951,29 @@ const ReceivablesSummaryWorkspace = ({ agent }) => {
       {/* ── clearing everything is confirmed on its own, with the counts ── */}
       <Dialog open={confirmReset} onOpenChange={(o) => !o && setConfirmReset(false)}>
         <DialogContent className="max-w-lg">
-          <DialogHeader><DialogTitle>Clear everything held?</DialogTitle></DialogHeader>
+          <DialogHeader><DialogTitle>Clear the records and start a new run?</DialogTitle></DialogHeader>
           <p className="text-sm leading-relaxed" style={{ color: 'var(--text-muted)' }}>
             This removes <span className="font-semibold" style={{ color: 'var(--text-heading)' }}>
             {int(files.reduce((a, f) => a + (f.rows || 0), 0))} lines from {int(files.length)} workbooks</span>
-            {monthsHeld.length > 0 && <> covering {monthsHeld.length} month{monthsHeld.length === 1 ? '' : 's'}</>}.
-            Every figure on this page goes with them, and the records would have to be read again.
-            Statements already built and downloaded are left where they are.
+            {monthsHeld.length > 0 && <> covering {monthsHeld.length} month{monthsHeld.length === 1 ? '' : 's'}</>},
+            and deletes the uploaded workbooks themselves. To work on this data again it would
+            have to be read in again.
           </p>
-          <p className="text-sm font-medium" style={{ color: '#9F1239' }}>This cannot be undone.</p>
+          {/* The distinction the button used to get wrong: the run goes, the
+              reports do not. */}
+          <div className="rounded-lg border px-3 py-2.5 text-sm leading-relaxed"
+               style={{ borderColor: '#A7F3D0', background: '#ECFDF5', color: '#065F46' }}>
+            <span className="font-semibold">
+              {reports.length > 0
+                ? `Your ${reports.length} report${reports.length === 1 ? '' : 's'} stay.`
+                : 'Reports are never cleared by this.'}
+            </span>{' '}
+            They stay readable on screen, and any whose workbook has been produced stays
+            downloadable. Removing a report is its own button, on its own row.
+          </div>
+          <p className="text-sm font-medium" style={{ color: '#9F1239' }}>
+            Clearing the records cannot be undone.
+          </p>
           <div className="mt-2 flex justify-end gap-2">
             <Button variant="ghost" onClick={() => setConfirmReset(false)} disabled={resetting}>Keep them</Button>
             <Button onClick={handleReset} disabled={resetting} className="bg-rose-600 hover:bg-rose-700">
