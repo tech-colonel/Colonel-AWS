@@ -487,6 +487,10 @@ const ReceivablesSummaryWorkspace = ({ agent }) => {
   /* The year's zip, if one was produced. Every month is a sheet inside it, so
      it is the fallback for a month that has no file of its own. */
   const yearFile = (reports.find((r) => r.scope === 'YEAR') || {}).savedFile || null;
+  /* Reports exist but the records behind them were cleared. Several counts on
+     this page then describe what a statement was built FROM rather than what
+     is held, and have to say so. */
+  const recordsCleared = reports.length > 0 && reports.every((r) => r.recordsCleared);
   const [confirmReset, setConfirmReset] = useState(false);
   const fileRef = useRef(null);
   const [resetting, setResetting] = useState(false);
@@ -1111,8 +1115,14 @@ const ReceivablesSummaryWorkspace = ({ agent }) => {
               <p style={{ ...TITLE, fontSize: 15, color: '#9F1239', margin: 0 }}>Start a new run</p>
               <p className="mt-1 max-w-2xl text-sm leading-relaxed" style={{ color: 'var(--text-muted)' }}>
                 Clears every record held — {int(files.reduce((a, f) => a + (f.rows || 0), 0))} lines from{' '}
-                {int(files.length)} workbooks — so the next run starts from nothing. Statements already
-                downloaded are not touched. This cannot be undone.
+                {int(files.length)} workbooks — and deletes the uploaded workbooks themselves, so the next
+                run starts from nothing.{' '}
+                <span className="font-semibold" style={{ color: 'var(--text-heading)' }}>
+                  {reports.length > 0
+                    ? `The ${reports.length} report${reports.length === 1 ? '' : 's'} already produced stay,`
+                    : 'Reports already produced stay,'} readable and still downloadable.
+                </span>{' '}
+                Clearing the records cannot be undone.
               </p>
             </div>
             <Button variant="outline" onClick={() => setConfirmReset(true)}
@@ -1223,8 +1233,11 @@ const ReceivablesSummaryWorkspace = ({ agent }) => {
           ))}
           <span className="ml-auto flex items-center gap-2 pr-2 text-xs" style={{ color: 'var(--text-muted)' }}>
             {ovLoading && <Loader2 className="h-3 w-3 animate-spin" />}
-            {ov ? `${int(ov.rows)} lines from ${int(ov.files)} workbooks${
-                    ov.builtAt ? ` · built ${format(new Date(ov.builtAt), 'dd MMM HH:mm')}` : ''}`
+            {/* Once the records are cleared these counts describe what the
+                statement was BUILT from, not what is held — say so, or the
+                line reads as a claim that 22 lakh rows are still here. */}
+            {ov ? `${recordsCleared ? 'built from ' : ''}${int(ov.rows)} lines from ${int(ov.files)} workbooks${
+                    ov.builtAt ? ` · ${format(new Date(ov.builtAt), 'dd MMM HH:mm')}` : ''}`
                 : `${int(files.reduce((a, f) => a + (f.rows || 0), 0))} lines from ${int(files.length)} records`}
           </span>
         </div>
@@ -1254,12 +1267,16 @@ const ReceivablesSummaryWorkspace = ({ agent }) => {
             <Stat icon={FileSpreadsheet} label="Statements" value={int(reports.length)}
                   sub="One for the year, one per month." />
             <Stat icon={Inbox} label="Records held" value={int(files.reduce((a, f) => a + (f.rows || 0), 0))}
-                  sub={`From ${int(files.length)} workbooks.`} />
+                  sub={recordsCleared
+                        ? 'Cleared. The reports below were kept.'
+                        : `From ${int(files.length)} workbooks.`} />
             <Stat icon={CalendarDays} label="Months covered"
                   value={int(reports.filter((r) => r.scope === 'MONTH').length)}
-                  sub={reports.some((r) => r.stale)
-                        ? 'Some were built before the records changed.'
-                        : 'All current with the records held.'} />
+                  sub={recordsCleared
+                        ? 'Built while the records were held.'
+                        : reports.some((r) => r.stale)
+                          ? 'Some were built before the records changed.'
+                          : 'All current with the records held.'} />
           </div>
 
           <Card className="p-0">
