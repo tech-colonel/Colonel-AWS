@@ -401,16 +401,43 @@ function resolveMasterValidate(col, row, masterData, missingTracker, masterCache
 
 // ─── File Header Extraction (all sheets) ─────────────────────────────────────
 
+// Some exports (courier/3PL "order report" downloads, mainly) prefix the real
+// header with a category-grouping row — mostly blank, one or two label cells —
+// so treating row 1 as headers yields garbage column names (__EMPTY_12, …) and
+// every "source" column lookup misses. The true header row is reliably the one
+// with the most non-blank cells among the first few rows: a header row has
+// every used column filled in, so no data row (which always has *some* blanks)
+// can beat it, and the stray category row above it has far fewer. Ties go to
+// the earliest row, so a normal single-header-row file still picks row 1.
+function detectHeaderRowIndex(aoa, maxScan = 15) {
+  let bestIdx = 0, bestCount = -1;
+  for (let i = 0; i < Math.min(aoa.length, maxScan); i++) {
+    const count = (aoa[i] || []).filter(v => String(v ?? '').trim() !== '').length;
+    if (count > bestCount) { bestCount = count; bestIdx = i; }
+  }
+  return bestIdx;
+}
+
+// Row-objects for one sheet, auto-detecting which row is the real header
+// (see detectHeaderRowIndex) instead of always assuming row 1.
+function sheetToRowsAutoHeader(ws) {
+  const aoa = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' });
+  const headerIdx = detectHeaderRowIndex(aoa);
+  const headers = (aoa[headerIdx] || []).map(h => String(h ?? '').trim());
+  return aoa.slice(headerIdx + 1).map(arr => {
+    const obj = {};
+    headers.forEach((h, i) => { if (h) obj[h] = arr[i] !== undefined ? arr[i] : ''; });
+    return obj;
+  });
+}
+
 function extractAllSheetsFromBuffer(buffer) {
   const workbook = XLSX.read(buffer, { type: 'buffer', cellDates: true, raw: false });
   return workbook.SheetNames.map(sheetName => {
-    const ws   = workbook.Sheets[sheetName];
-    const rows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' });
-    let columns = [];
-    for (const row of rows) {
-      const headers = row.map(h => String(h || '').trim()).filter(h => h !== '');
-      if (headers.length > 0) { columns = headers; break; }
-    }
+    const ws  = workbook.Sheets[sheetName];
+    const aoa = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' });
+    const headerIdx = detectHeaderRowIndex(aoa);
+    const columns = (aoa[headerIdx] || []).map(h => String(h || '').trim()).filter(h => h !== '');
     return { name: sheetName, columns };
   });
 }
@@ -515,10 +542,17 @@ function applyMerge(mergeConfig, rawSheetMap, sheetResults, wfSheets) {
         const k = cmp(row[commonKey]);
         if (!rightMap.has(k)) rightMap.set(k, row);
       }
-      resultRows = resultRows.map(leftRow => ({
-        ...leftRow,
-        ...pickCols(rightMap.get(cmp(leftRow[commonKey])) || {}, src.columns),
-      }));
+      resultRows = resultRows.map(leftRow => {
+        const picked = pickCols(rightMap.get(cmp(leftRow[commonKey])) || {}, src.columns);
+        // If a source's own `columns` happens to include the join key (e.g. it was
+        // listed for clarity, or copy-pasted from another source), never let it
+        // overwrite the running key: on a row this source doesn't match, `picked`
+        // would carry the join key as '' and silently rewrite leftRow's real key —
+        // corrupting every later source's lookup for this row, which then matches
+        // whatever unrelated row happens to also key on ''.
+        delete picked[commonKey];
+        return { ...leftRow, ...picked };
+      });
     }
     return resultRows;
   }
@@ -738,7 +772,14 @@ function buildSubtotalFormulaSheet(orderedCols, outputRows, formulaCells, dataSt
       }
       const v = row[col.label];
       if (v === '' || v === null || v === undefined) return;
-      ws[addr] = typeof v === 'number' ? { t: 'n', v } : { t: 's', v: String(v) };
+      // A `source` column's raw cell may come back as a JS Date (cellDates:true
+      // when reading the uploaded file) — write it as a real Excel date (`t:'d'`),
+      // not `String(v)`, which silently corrupts it into Date.toString()'s locale
+      // text ("Thu Jul 30 2026 23:59:50 GMT+0530 (India Standard Time)") instead
+      // of a sortable, formula-usable date cell.
+      ws[addr] = typeof v === 'number' ? { t: 'n', v }
+        : v instanceof Date ? { t: 'd', v, z: 'yyyy-mm-dd hh:mm:ss' }
+        : { t: 's', v: String(v) };
     });
   });
 
@@ -802,7 +843,7 @@ function applyMultiSheetWorkflow(sheets, fileBufferOrMap, masterData = {}, fileI
     const wb = XLSX.read(buf, { type: 'buffer', cellDates: true, raw: false });
     const rsm = {};
     for (const sn of wb.SheetNames) {
-      rsm[sn] = XLSX.utils.sheet_to_json(wb.Sheets[sn], { defval: '' }).map(normalizeRow);
+      rsm[sn] = sheetToRowsAutoHeader(wb.Sheets[sn]).map(normalizeRow);
     }
     return rsm;
   };
@@ -845,6 +886,40 @@ function applyMultiSheetWorkflow(sheets, fileBufferOrMap, masterData = {}, fileI
         throw new Error(`applyMultiSheetWorkflow: template sheet "${wfSheet.templateSheetName}" not found in file input "${fid}"`);
       }
       const newWs = deepCopySheet(srcWs);
+      applyTemplateRefresh(newWs, wfSheet.refresh, dateVars);
+      sheetRowCounts[wfSheet.name] = sheetLastRowFromRef(newWs);
+      XLSX.utils.book_append_sheet(outBook, newWs, safeSheetName);
+      sheetResults.push(null);
+      sheetOutputs.push([]);
+      continue;
+    }
+
+    // ── Master sheet (brand's saved sku_master/ledger_master as a sheet) ───────
+    // Same idea as `type: 'template'` — carries a whole reference table into the
+    // output workbook for `formula`-type VLOOKUP columns to key off — but sourced
+    // from the brand's saved master data instead of a sheet in an uploaded file,
+    // so the workflow only needs this month's raw report, not a re-upload of last
+    // month's output every run. `refresh` (e.g. a month-suffix regex) still runs,
+    // same as a template sheet's.
+    if (wfSheet.type === 'master') {
+      let masterRows = (wfSheet.masterType === 'sku' ? masterData.sku_master : masterData.ledger_master) || [];
+      // Optional `columns: [{header, key}]` remaps the brand's saved master
+      // data — whose own column names/order vary brand to brand (e.g. one
+      // brand's ledger master calls it "Ledger", another "Debtor") — onto a
+      // FIXED, known header layout, via the same flexible (case/whitespace-
+      // insensitive) field matching `master_lookup` columns already use. This
+      // decouples the Sales sheet's VLOOKUP formula ranges from whatever
+      // schema the uploaded master file happens to use.
+      if (Array.isArray(wfSheet.columns) && wfSheet.columns.length) {
+        masterRows = masterRows.map(row => {
+          const out = {};
+          for (const { header, key } of wfSheet.columns) {
+            out[header] = findMasterField(row, key) ?? '';
+          }
+          return out;
+        });
+      }
+      const newWs = XLSX.utils.json_to_sheet(masterRows.length ? masterRows : [{}]);
       applyTemplateRefresh(newWs, wfSheet.refresh, dateVars);
       sheetRowCounts[wfSheet.name] = sheetLastRowFromRef(newWs);
       XLSX.utils.book_append_sheet(outBook, newWs, safeSheetName);
@@ -985,7 +1060,17 @@ function applyMultiSheetWorkflow(sheets, fileBufferOrMap, masterData = {}, fileI
     } else {
       const finalRows = applyGroupBy(outputRows, wfSheet.groupBy);
       sheetOutputs.push(finalRows); // this sheet's actual output rows, for downstream prev_sheet sourcing
-      XLSX.utils.book_append_sheet(outBook, XLSX.utils.json_to_sheet(finalRows), safeSheetName);
+      const newWs = XLSX.utils.json_to_sheet(finalRows);
+      // `autoFilter: true` turns on a real Excel column-header filter dropdown
+      // (e.g. so a reviewer can pick "Omnivio"/"Velocity"/"Eshopbox" on an
+      // RTO/Return column and see just that source's rows) — covers the header
+      // row plus every data row, even when there are zero data rows.
+      if (wfSheet.autoFilter && orderedCols.length) {
+        newWs['!autofilter'] = { ref: XLSX.utils.encode_range(
+          { s: { r: 0, c: 0 }, e: { r: finalRows.length, c: orderedCols.length - 1 } }
+        ) };
+      }
+      XLSX.utils.book_append_sheet(outBook, newWs, safeSheetName);
     }
   }
 

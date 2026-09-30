@@ -2,7 +2,10 @@
   "name": "shopify dchica",
   "description": "D'Chica Shopify \"Total sales breakdown\" working file — fills Product Type / HSN / GST Rate, computes Net Qty, Invoice Value, Taxable value and the IGST vs CGST+SGST split (seller state fixed to Delhi per SOP), plus master dumps and GSTR pivot summaries.",
   "fileInputs": [
-    { "id": "file_0", "label": "Shopify Total Sales Breakdown Dump (CSV)" }
+    { "id": "file_0", "label": "Shopify Total Sales Breakdown Dump (CSV)" },
+    { "id": "file_1", "label": "RTO/Return Omnivio" },
+    { "id": "file_2", "label": "RTO/Return Velocity" },
+    { "id": "file_3", "label": "RTO/Return Eshopbox" }
   ],
   "sheets": [
     {
@@ -68,10 +71,74 @@
       ]
     },
     {
+      "id": "rto_omnivio_extract",
+      "name": "RTO Omnivio Extract",
+      "fileInputId": "file_1",
+      "rawSheetName": "Report",
+      "filters": [],
+      "columns": [
+        { "order": 1, "type": "source", "label": "Order ID", "key": "CLIENT ORDER ID" },
+        {
+          "order": 2, "type": "computed", "label": "Order Id Num",
+          "formula": "Number(String({Order ID}).replace('#', ''))"
+        },
+        { "order": 3, "type": "source", "label": "RTO/Return Omnivio", "key": "STATUS" },
+        { "order": 4, "type": "source", "label": "Payement Method Omnivio", "key": "PAY MODE" }
+      ]
+    },
+    {
+      "id": "rto_velocity_extract",
+      "name": "RTO Velocity Extract",
+      "fileInputId": "file_2",
+      "rawSheetName": "DCHICA FAS-Order Report-2026091",
+      "filters": [],
+      "columns": [
+        { "order": 1, "type": "source", "label": "Order ID", "key": "Order ID" },
+        {
+          "order": 2, "type": "computed", "label": "Order Id Num",
+          "formula": "Number(String({Order ID}).replace('#', ''))"
+        },
+        { "order": 3, "type": "source", "label": "RTO/Return Velocity", "key": "Order Status" },
+        { "order": 4, "type": "source", "label": "Payement Method Velocity", "key": "Payment Method" }
+      ]
+    },
+    {
+      "id": "rto_eshopbox_extract",
+      "name": "RTO Eshopbox Extract",
+      "fileInputId": "file_3",
+      "rawSheetName": "sale_order_report_v2_2609101023",
+      "filters": [],
+      "columns": [
+        { "order": 1, "type": "source", "label": "Order ID", "key": "Customer order ID" },
+        {
+          "order": 2, "type": "computed", "label": "Order Id Num",
+          "formula": "Number(String({Order ID}).replace('#', ''))"
+        },
+        { "order": 3, "type": "source", "label": "RTO/Return Eshopbox", "key": "Current status" },
+        { "order": 4, "type": "source", "label": "Payement Method Eshopbox", "key": "Payment mode" }
+      ]
+    },
+    {
+      "id": "rto_merge",
+      "name": "RTO Merge",
+      "type": "merge",
+      "mergeConfig": {
+        "mergeType": "join",
+        "commonJoinKey": "Order Id Num",
+        "sources": [
+          { "type": "output", "sheetName": "Raw+Lookups", "columns": [] },
+          { "type": "output", "sheetName": "RTO Omnivio Extract", "columns": ["RTO/Return Omnivio", "Payement Method Omnivio"] },
+          { "type": "output", "sheetName": "RTO Velocity Extract", "columns": ["RTO/Return Velocity", "Payement Method Velocity"] },
+          { "type": "output", "sheetName": "RTO Eshopbox Extract", "columns": ["RTO/Return Eshopbox", "Payement Method Eshopbox"] }
+        ]
+      },
+      "filters": []
+    },
+    {
       "id": "working",
       "name": "Working",
       "sourceType": "prev_sheet",
-      "prevSheetName": "Raw+Lookups",
+      "prevSheetName": "RTO Merge",
       "filters": [],
       "columns": [
         { "order": 1, "type": "source", "label": "Day", "key": "Day" },
@@ -114,8 +181,6 @@
           "order": 34, "type": "computed", "label": "Remark2",
           "formula": "({Gross sales}==0 && {Discounts}==0 && {Returns}==0 && {Net sales}==0 && {Shipping charges}==0 && {Return fees}==0 && {Taxes}==0 && {Total sales}==0) ? (({Quantity ordered}==0 && {Quantity returned}==0 && {Orders}==0) ? 'NO Data, Blank' : 'NO Data, Only Qty') : (({Quantity ordered}==0 && {Quantity returned}==0) ? 'Shipping' : '')"
         },
-        { "order": 35, "type": "source", "label": "RTO Status (EshopBox)", "key": "__blank_spacer__" },
-        { "order": 36, "type": "source", "label": "RTO Status (Omnivio)", "key": "__blank_spacer__" },
         {
           "order": 37, "type": "master_lookup", "label": "HSN Code",
           "masterType": "ledger", "lookupColumn": "Product Type For HSN",
@@ -131,7 +196,25 @@
         { "order": 41, "type": "computed", "label": "Taxable", "formula": "{Raw+Lookups.No Data Flag} ? '' : ({Invoice Value} / (100 + {GST Rate}) * 100)" },
         { "order": 42, "type": "computed", "label": "IGST", "formula": "{Raw+Lookups.No Data Flag} ? '' : ({Shipping region} == 'Delhi' ? 0 : {Taxable} * {GST Rate} / 100)" },
         { "order": 43, "type": "computed", "label": "CGST", "formula": "{Shipping region} == 'Delhi' ? ({Taxable} * {GST Rate} / 100) / 2 : 0" },
-        { "order": 44, "type": "computed", "label": "SGST", "formula": "{Shipping region} == 'Delhi' ? ({Taxable} * {GST Rate} / 100) / 2 : 0" }
+        { "order": 44, "type": "computed", "label": "SGST", "formula": "{Shipping region} == 'Delhi' ? ({Taxable} * {GST Rate} / 100) / 2 : 0" },
+        { "order": 45, "type": "source", "label": "RTO/Return Omnivio", "key": "RTO/Return Omnivio" },
+        { "order": 46, "type": "source", "label": "RTO/Return Velocity", "key": "RTO/Return Velocity" },
+        { "order": 47, "type": "source", "label": "RTO/Return Eshopbox", "key": "RTO/Return Eshopbox" },
+        { "order": 48, "type": "source", "label": "Payement Method Omnivio", "key": "Payement Method Omnivio" },
+        { "order": 49, "type": "source", "label": "Payement Method Velocity", "key": "Payement Method Velocity" },
+        { "order": 50, "type": "source", "label": "Payement Method Eshopbox", "key": "Payement Method Eshopbox" },
+        {
+          "order": 51, "type": "computed", "label": "RTO/Return Source",
+          "formula": "{RTO/Return Omnivio} ? 'Omnivio' : ({RTO/Return Velocity} ? 'Velocity' : ({RTO/Return Eshopbox} ? 'Eshopbox' : ''))"
+        },
+        {
+          "order": 52, "type": "computed", "label": "Final RTO/Return Status",
+          "formula": "{RTO/Return Omnivio} ? {RTO/Return Omnivio} : ({RTO/Return Velocity} ? {RTO/Return Velocity} : ({RTO/Return Eshopbox} ? {RTO/Return Eshopbox} : ''))"
+        },
+        {
+          "order": 53, "type": "computed", "label": "Final Payement Method status",
+          "formula": "{RTO/Return Omnivio} ? {Payement Method Omnivio} : ({RTO/Return Velocity} ? {Payement Method Velocity} : ({RTO/Return Eshopbox} ? {Payement Method Eshopbox} : ''))"
+        }
       ]
     },
     {
@@ -236,6 +319,28 @@
           "Sum of SGST": "sum"
         }
       }
+    },
+    {
+      "id": "gstr_b2c_rto_filter",
+      "name": "GSTR B2C (RTO Filter)",
+      "description": "Same columns as GSTR B2C, row-level (not grouped) plus an RTO/Return column — built to test the Excel AutoFilter dropdown: filter the RTO/Return column to Omnivio / Velocity / Eshopbox and only that source's rows show.",
+      "sourceType": "prev_sheet",
+      "prevSheetName": "Working",
+      "autoFilter": true,
+      "filters": [
+        { "column": "Sales channel", "operator": "not_equals", "value": "Return Prime: Order Return" },
+        { "column": "Remark2", "operator": "not_equals", "value": "NO Data, Blank" },
+        { "column": "Remark2", "operator": "not_equals", "value": "NO Data, Only Qty" }
+      ],
+      "columns": [
+        { "order": 1, "type": "source", "label": "GST Rate", "key": "GST Rate" },
+        { "order": 2, "type": "source", "label": "Shipping region", "key": "Shipping region" },
+        { "order": 3, "type": "source", "label": "Taxable", "key": "Taxable" },
+        { "order": 4, "type": "source", "label": "IGST", "key": "IGST" },
+        { "order": 5, "type": "source", "label": "CGST", "key": "CGST" },
+        { "order": 6, "type": "source", "label": "SGST", "key": "SGST" },
+        { "order": 7, "type": "source", "label": "RTO/Return", "key": "RTO/Return Source" }
+      ]
     }
   ]
 }
