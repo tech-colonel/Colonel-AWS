@@ -31,6 +31,8 @@ from .gstr_2b_books import (
     _append_rcm_rows,
     _find_octa_sheet_name,
     _resolve_missing_supplier_names,
+    _new_layout_sheet_names,
+    _apply_probable_matches,
 )
 
 
@@ -169,6 +171,8 @@ def reconcile_gstr2b_vs_books_multistate(
     # Tally state allocation". Skip Phase 2 entirely in that case; Passes 1-5 already
     # matched these rows correctly on their own merits.
     if books_shared:
+        # LAST step: vendor + amount pass over what is still unmatched.
+        results = _apply_probable_matches(results)
         if return_missing:
             return all_gstr2b, all_books, results, missing_list
         return all_gstr2b, all_books, results
@@ -267,6 +271,9 @@ def reconcile_gstr2b_vs_books_multistate(
                         )
                         break
 
+    # LAST step — after the cross-state Remark 3 above: vendor + amount pass over what
+    # is still unmatched (rows with a Remark 3 are left alone).
+    results = _apply_probable_matches(results)
     if return_missing:
         return all_gstr2b, all_books, results, missing_list
     return all_gstr2b, all_books, results
@@ -309,12 +316,18 @@ def _merge_state_into_sheets(wb, file_bytes: bytes, label_prefix: str) -> None:
         # OCTA 2B exports carry their data on one flat sheet — copy it as-is, don't
         # filter to B2B tabs. Portal exports keep the ALLOWED_SHEETS filter below.
         octa_sheet = _find_octa_sheet_name(xlsx_bytes) if label_prefix == "2B" else None
+        new_layout_sheets = (_new_layout_sheet_names(xlsx_bytes)
+                             if label_prefix == "2B" and octa_sheet is None else None)
         src_wb = openpyxl.load_workbook(BytesIO(xlsx_bytes), read_only=True, data_only=True)
 
         for src_sheet_name in src_wb.sheetnames:
             # For 2B only copy the same sheets the base engine copies
             if label_prefix == "2B":
-                if octa_sheet is not None:
+                if new_layout_sheets:
+                    # New (learned) layout: the sheets its saved mapping reads.
+                    if src_sheet_name not in new_layout_sheets:
+                        continue
+                elif octa_sheet is not None:
                     # OCTA: only the data sheet. This path APPENDS rows into an existing
                     # output tab, so letting the "Overview" cover sheet through would
                     # inject its metadata rows into state 2-N invoice data.

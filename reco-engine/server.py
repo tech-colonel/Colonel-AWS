@@ -185,6 +185,42 @@ _MAX_RECO = int(os.environ.get("MAX_CONCURRENT_RECO", "8"))
 _RECO_SEMAPHORE = threading.Semaphore(_MAX_RECO)
 
 
+def _prep_gstr2b_layouts(gstr2b_files: list, fields: dict) -> None:
+    """Before a 2B run: forget each file's cached layout (so this run's AI use and
+    confirm status are reported fresh), then save the accountant's corrected columns
+    — sent as gstr2bColumnOverride after they said a new layout's output was wrong."""
+    from recon.gstr_2b_books import forget_gstr2b_format, _ensure_xlsx
+    from recon.gstr2b_formats import apply_override
+    override = None
+    raw = fields.get("gstr2bColumnOverride") or ""
+    if raw:
+        try:
+            override = json.loads(raw)
+        except Exception:
+            override = None
+    for blob in gstr2b_files:
+        if not blob:
+            continue
+        data = _ensure_xlsx(blob)
+        forget_gstr2b_format(data)
+        if override:
+            apply_override(data, override)
+
+
+def _gstr2b_formats_for(named_files: list) -> list:
+    """[{file, format, ...}] — the layout each 2B file was read as (never calls the API)."""
+    from recon.gstr_2b_books import gstr2b_format_info
+    out = []
+    for name, blob in named_files:
+        if not blob:
+            continue
+        try:
+            out.append({"file": name, **gstr2b_format_info(blob)})
+        except Exception:
+            out.append({"file": name, "format": "unknown"})
+    return out
+
+
 class ReconciliationHandler(BaseHTTPRequestHandler):
     server_version = "CARecon/0.1"
 
@@ -223,6 +259,9 @@ class ReconciliationHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/x2beta/build":
             self.handle_x2beta_build()
+            return
+        if parsed.path == "/api/gstr2b-format/confirm":
+            self.handle_gstr2b_format_confirm()
             return
         if parsed.path != "/api/reconcile":
             self.write_json({"error": "Not found"}, 404)
@@ -500,6 +539,9 @@ class ReconciliationHandler(BaseHTTPRequestHandler):
                     name_corrections = json.loads(fields.get("nameCorrections", "") or "{}")
                 except Exception:
                     name_corrections = {}
+                # GSTR-2B layout: forget what this process last knew about the file, and
+                # save the accountant's corrected columns (new layouts only) before reading.
+                _prep_gstr2b_layouts([gstr2b_bytes], fields)
                 gstr2b_records, books_records, results, missing_names = reconcile_gstr2b_vs_books(
                     gstr2b_bytes,
                     purchase_bytes,
@@ -530,6 +572,9 @@ class ReconciliationHandler(BaseHTTPRequestHandler):
                         "result_rows": len(results),
                     },
                     "results": [result.as_dict() for result in results],
+                    # Which layout the 2B was read as; a 'new' one asks the accountant
+                    # to confirm the output before its column mapping is kept.
+                    "gstr2b_formats": _gstr2b_formats_for([(gstr2b_file.get("filename", ""), gstr2b_bytes)]),
                     "_gstr2b_b64": base64.b64encode(gstr2b_bytes).decode("utf-8"),
                     "_purchase_b64": base64.b64encode(purchase_bytes).decode("utf-8"),
                     "_debit_b64": base64.b64encode(debit_bytes).decode("utf-8"),
@@ -596,6 +641,12 @@ class ReconciliationHandler(BaseHTTPRequestHandler):
                 gstr2b_items  = _file_items("gstr2b")
                 gstr2b_list   = [it["content"] for it in gstr2b_items]
                 entity_gstins = [_entity_gstin_from_filename(it.get("filename", "")) for it in gstr2b_items]
+                # A file whose name carries no GSTIN (e.g. the Combined workbook) may state
+                # it in its title — '... (GSTIN 27AAQCM9664F1ZS)'. Filename still wins.
+                from recon.gstr2b_formats import entity_gstin_from_workbook
+                from recon.gstr_2b_books import _ensure_xlsx as _xlsx_2b
+                entity_gstins = [g or entity_gstin_from_workbook(_xlsx_2b(it["content"]))
+                                 for g, it in zip(entity_gstins, gstr2b_items)]
 
                 purchase_list = _file_list("purchase")
                 debit_list    = _file_list("debit")
@@ -615,6 +666,7 @@ class ReconciliationHandler(BaseHTTPRequestHandler):
                     name_corrections = json.loads(fields.get("nameCorrections", "") or "{}")
                 except Exception:
                     name_corrections = {}
+                _prep_gstr2b_layouts(gstr2b_list, fields)
                 gstr2b_recs, books_recs, results, missing_names = reconcile_gstr2b_vs_books_multistate(
                     gstr2b_list, purchase_list, debit_list or [b""] * len(purchase_list),
                     tolerance=tolerance,
@@ -667,6 +719,8 @@ class ReconciliationHandler(BaseHTTPRequestHandler):
                         "file_count":     len(gstr2b_list),
                     },
                     "results": [result.as_dict() for result in results],
+                    "gstr2b_formats": _gstr2b_formats_for(
+                        [(it.get("filename", ""), it["content"]) for it in gstr2b_items]),
                     # First file of each type (for base workbook source sheets — state 1);
                     # the SAME object as element 0 of the list below, not a re-encode.
                     "_gstr2b_b64":   _all_g[0] if _all_g else "",
@@ -1241,6 +1295,22 @@ class ReconciliationHandler(BaseHTTPRequestHandler):
             }
             JOBS[job_id] = payload
             self.write_json({k: v for k, v in payload.items() if not k.startswith("_")})
+        except Exception as exc:  # noqa: BLE001
+            self.write_json({"error": str(exc)}, 500)
+
+    def handle_gstr2b_format_confirm(self) -> None:
+        """The accountant's answer on a NEW GSTR-2B layout: {signature, accept}.
+        accept=true keeps the column mapping for good; false drops a pending one."""
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            data = json.loads(self.rfile.read(length) if length else b"{}")
+            sig = str(data.get("signature") or "").strip()
+            if not re.fullmatch(r"[0-9a-f]{20}", sig):
+                self.write_json({"error": "signature required"}, 400)
+                return
+            from recon.gstr2b_formats import confirm_template
+            out = confirm_template(sig, bool(data.get("accept")))
+            self.write_json(out, 200 if out.get("ok") else 404)
         except Exception as exc:  # noqa: BLE001
             self.write_json({"error": str(exc)}, 500)
 

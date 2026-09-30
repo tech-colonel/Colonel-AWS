@@ -22,6 +22,7 @@ import ZeptoFilePicker from './ZeptoFilePicker';
 import DriveOrUpload from '../../components/DriveOrUpload';
 import OpenInSheetsButton from '../../components/OpenInSheetsButton';
 import MissingTradeNameModal from '../../components/reco/MissingTradeNameModal';
+import Gstr2bFormatReview from '../../components/reco/Gstr2bFormatReview';
 
 const HISTORY_MONTHS_SHORT = ['', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
@@ -823,6 +824,8 @@ const RecoWorkspace = ({ agentTypeProp } = {}) => {
         formData.append('nameCorrections', JSON.stringify(overrides.nameCorrections));
       }
       if (overrides.proceedWithoutNames) formData.append('proceedWithoutNames', 'true');
+      // New GSTR-2B layout the accountant said was read wrong: their corrected columns.
+      if (overrides.gstr2bColumnOverride) formData.append('gstr2bColumnOverride', JSON.stringify(overrides.gstr2bColumnOverride));
       const response = await api.post('/api/reco/run', formData, {
         headers: { 'Content-Type': 'multipart/form-data' },
         onUploadProgress: (evt) => {
@@ -857,7 +860,9 @@ const RecoWorkspace = ({ agentTypeProp } = {}) => {
         setMissingTradeNames(missing);
         setShowMissingTradeNamesModal(true);
       } else {
-        toast.error(err.response?.data?.error || 'Reconciliation failed');
+        // Engine messages about the 2B file's layout are long and actionable — keep them up.
+        const msg = err.response?.data?.error || 'Reconciliation failed';
+        toast.error(msg, msg.length > 120 ? { duration: 15000 } : undefined);
       }
     } finally { setRunning(false); }
   };
@@ -2085,6 +2090,14 @@ const RecoWorkspace = ({ agentTypeProp } = {}) => {
         {/* ── Results ─────────────────────────────────────────────────── */}
         {result && !is3b && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+
+            {/* GSTR-2B vs Books: which layout the 2B was read as; a NEW one asks for confirmation */}
+            <Gstr2bFormatReview
+              formats={result.gstr2b_formats}
+              accent={config.color}
+              running={running}
+              onRerunWithColumns={(override) => handleRun({ gstr2bColumnOverride: override })}
+            />
 
             {/* Monthly Summary */}
             {result.monthly_summary?.length > 0 && (

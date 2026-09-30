@@ -1833,6 +1833,9 @@ const runReco = async (req, res) => {
     if (pythonRecoType === 'gstr_2b_books' || pythonRecoType === 'gstr_2b_books_multistate') {
       if (req.body.proceedWithoutNames) form.append('proceedWithoutNames', String(req.body.proceedWithoutNames));
       if (req.body.nameCorrections) form.append('nameCorrections', String(req.body.nameCorrections));
+      // A NEW GSTR-2B layout the accountant said was read wrong: their corrected
+      // column mapping, applied (and saved as pending) by the engine before reading.
+      if (req.body.gstr2bColumnOverride) form.append('gstr2bColumnOverride', String(req.body.gstr2bColumnOverride));
     }
 
     // Receivable Cycle: forward the selected period so the engine's Receivable
@@ -2162,6 +2165,25 @@ const openInSheets = async (req, res) => {
 /**
  * GET /api/reco/health
  */
+// The accountant's answer on a NEW GSTR-2B layout ("is this output right?").
+// accept=true keeps the engine's column mapping for that layout for good; false
+// drops a pending one. Templates live on disk shared by every engine process, so
+// any engine can answer.
+const confirmGstr2bFormat = async (req, res) => {
+  const signature = String(req.body?.signature || '');
+  if (!/^[0-9a-f]{20}$/.test(signature)) return res.status(400).json({ error: 'signature required' });
+  const engine = enginePool.acquireEngine();
+  try {
+    const r = await axios.post(`${engine}/api/gstr2b-format/confirm`,
+      { signature, accept: !!req.body?.accept }, { timeout: 30000 });
+    return res.json(r.data);
+  } catch (err) {
+    return res.status(err.response?.status || 500).json({ error: err.response?.data?.error || err.message });
+  } finally {
+    enginePool.releaseEngine(engine);
+  }
+};
+
 const checkHealth = async (req, res) => {
   try {
     // Python server serves index.html on GET / — use that as health probe.
@@ -2255,4 +2277,4 @@ const purgeSessionMaster = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
-module.exports = { runReco, exportReco, openInSheets, checkHealth, getLedgerStatus, deleteRecoJob, detectZeptoFiles, purgeSessionMaster };
+module.exports = { runReco, exportReco, openInSheets, checkHealth, getLedgerStatus, deleteRecoJob, detectZeptoFiles, purgeSessionMaster, confirmGstr2bFormat };

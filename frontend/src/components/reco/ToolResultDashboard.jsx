@@ -141,6 +141,8 @@ const STATUS_COLORS = {
   'Showing in 2B but Not in Books': '#D97706',
   'Showing in Books but Not in 2B': '#E11D48',
   'Amount Mismatch': '#F59E0B',
+  'Probable Match': '#8B5CF6',
+  'Probable Match (AI)': '#0D9488',
 };
 const FALLBACK_CYCLE = ['#0748EE', '#7C3AED', '#F115F8', '#0F766E', '#94A3B8'];
 const statusColor = (name, i = 0) => STATUS_COLORS[name] || FALLBACK_CYCLE[i % FALLBACK_CYCLE.length];

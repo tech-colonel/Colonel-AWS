@@ -16,6 +16,7 @@ import { StatusDonut, ByReasons, FeedbackModal, distOf } from '../../components/
 import DriveMultiState from '../../components/DriveMultiState';
 import OpenInSheetsButton from '../../components/OpenInSheetsButton';
 import MissingTradeNameModal from '../../components/reco/MissingTradeNameModal';
+import Gstr2bFormatReview from '../../components/reco/Gstr2bFormatReview';
 
 const COLOR  = '#7C3AED';
 const PAGE_SIZE = 100;
@@ -81,6 +82,9 @@ const CAT_CFG = {
   'Matched':                        { bg: 'rgba(5,150,105,0.08)',   color: '#059669', border: 'rgba(5,150,105,0.2)' },
   'Amount Mismatch':                { bg: 'rgba(217,119,6,0.08)',   color: '#D97706', border: 'rgba(217,119,6,0.2)' },
   'Partially Matched':              { bg: 'rgba(217,119,6,0.08)',   color: '#D97706', border: 'rgba(217,119,6,0.2)' },
+  // Last-step vendor + amount pairs — colours used by no other status
+  'Probable Match':                 { bg: 'rgba(139,92,246,0.10)',  color: '#8B5CF6', border: 'rgba(139,92,246,0.25)' },
+  'Probable Match (AI)':            { bg: 'rgba(13,148,136,0.10)',  color: '#0D9488', border: 'rgba(13,148,136,0.25)' },
   'Showing in 2B but Not in Books': { bg: 'rgba(29,78,216,0.08)',   color: '#1D4ED8', border: 'rgba(29,78,216,0.2)' },
   'In GSTR-2B not in Books':        { bg: 'rgba(29,78,216,0.08)',   color: '#1D4ED8', border: 'rgba(29,78,216,0.2)' },
   'Showing in Books but Not in 2B': { bg: 'rgba(225,29,72,0.08)',   color: '#E11D48', border: 'rgba(225,29,72,0.2)' },
@@ -94,6 +98,7 @@ const getCatCfg = (cat = '') => {
 };
 
 const isMatched   = (cat) => /^matched$/i.test(cat?.trim() || '');
+const isProbable  = (cat) => /^probable match/i.test(cat?.trim() || '');
 const isMismatch  = (cat) => /mismatch|partially/i.test(cat || '');
 const is2BOnly    = (cat) => /2b.*not.*book|not in book/i.test(cat || '');
 const isBooksOnly = (cat) => /book.*not.*2b|not in.*2b|not in gstr/i.test(cat || '');
@@ -392,6 +397,8 @@ const RecoMultiStateWorkspace = () => {
         formData.append('nameCorrections', JSON.stringify(overrides.nameCorrections));
       }
       if (overrides.proceedWithoutNames) formData.append('proceedWithoutNames', 'true');
+      // New GSTR-2B layout the accountant said was read wrong: their corrected columns.
+      if (overrides.gstr2bColumnOverride) formData.append('gstr2bColumnOverride', JSON.stringify(overrides.gstr2bColumnOverride));
       if (useDrive) {
         // Files come from Drive, grouped per state — backend downloads via the SA.
         formData.append('drive_states', JSON.stringify(driveStates));
@@ -445,7 +452,9 @@ const RecoMultiStateWorkspace = () => {
         setMissingTradeNames(missing);
         setShowMissingTradeNamesModal(true);
       } else {
-        toast.error(err.response?.data?.error || 'Reconciliation failed');
+        // Engine messages about the 2B file's layout are long and actionable — keep them up.
+        const msg = err.response?.data?.error || 'Reconciliation failed';
+        toast.error(msg, msg.length > 120 ? { duration: 15000 } : undefined);
       }
     } finally { setRunning(false); }
   };
@@ -506,15 +515,16 @@ const RecoMultiStateWorkspace = () => {
   }), [result]);
 
   const totals = useMemo(() => {
-    let matched = 0, mismatch = 0, only2b = 0, onlyBk = 0, cross = 0;
+    let matched = 0, mismatch = 0, only2b = 0, onlyBk = 0, cross = 0, probable = 0;
     for (const r of flatRows) {
       if (isMatched(r.category))        matched++;
+      else if (isProbable(r.category))  probable++;
       else if (isMismatch(r.category))  mismatch++;
       else if (is2BOnly(r.category))    only2b++;
       else if (isBooksOnly(r.category)) onlyBk++;
       if (r.remark_3) cross++;
     }
-    return { matched, mismatch, only2b, onlyBk, cross, total: flatRows.length };
+    return { matched, mismatch, only2b, onlyBk, cross, probable, total: flatRows.length };
   }, [flatRows]);
 
   // Status donut = full remark_1 distribution (incl. Matched).
@@ -564,7 +574,7 @@ const RecoMultiStateWorkspace = () => {
       if (g) m.g_taxable += g.taxable_value || 0;
       if (b) m.b_taxable += b.taxable_value || 0;
       const cat = row.category || '';
-      if (isMatched(cat))        m.matched++;
+      if (isMatched(cat) || isProbable(cat)) m.matched++;
       else if (is2BOnly(cat))    m.only_2b++;
       else if (isBooksOnly(cat)) m.only_bk++;
       if (row.suggested_action_3) m.cross++;
@@ -578,6 +588,7 @@ const RecoMultiStateWorkspace = () => {
     { key: 'All',       label: 'All Records',    count: totals.total   },
     { key: 'Matched',   label: 'Matched',        count: totals.matched },
     { key: 'Mismatch',  label: 'Mismatch',       count: totals.mismatch },
+    { key: 'Probable',  label: 'Probable Match', count: totals.probable },
     { key: '2B Only',   label: 'In 2B Not Books', count: totals.only2b },
     { key: 'Books Only',label: 'In Books Not 2B', count: totals.onlyBk },
     { key: 'Cross',     label: 'Cross-State',    count: totals.cross   },
@@ -588,6 +599,7 @@ const RecoMultiStateWorkspace = () => {
     switch (activeTab) {
       case 'Matched':    return isMatched(r.category);
       case 'Mismatch':   return isMismatch(r.category);
+      case 'Probable':   return isProbable(r.category);
       case '2B Only':    return is2BOnly(r.category);
       case 'Books Only': return isBooksOnly(r.category);
       case 'Cross':      return !!r.remark_3;
@@ -1065,11 +1077,20 @@ const RecoMultiStateWorkspace = () => {
         {result && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
 
+            {/* Which layout each GSTR-2B was read as; a NEW layout asks for confirmation */}
+            <Gstr2bFormatReview
+              formats={result.gstr2b_formats}
+              accent={COLOR}
+              running={running}
+              onRerunWithColumns={(override) => handleRun({ gstr2bColumnOverride: override })}
+            />
+
             {/* Stat cards — left-bordered flat design */}
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(150px, 1fr))', gap: 12 }}>
               {[
                 { label: 'Matched',         count: totals.matched,  color: '#059669', tabKey: 'Matched'    },
                 { label: 'Amount Mismatch', count: totals.mismatch, color: '#D97706', tabKey: 'Mismatch'   },
+                { label: 'Probable Match',  count: totals.probable, color: '#8B5CF6', tabKey: 'Probable'   },
                 { label: 'In 2B Not Books', count: totals.only2b,   color: '#1D4ED8', tabKey: '2B Only'    },
                 { label: 'In Books Not 2B', count: totals.onlyBk,   color: '#E11D48', tabKey: 'Books Only' },
                 { label: 'Cross-State',     count: totals.cross,    color: '#C2410C', tabKey: 'Cross'      },
