@@ -70,8 +70,14 @@ function monthRow(s) {
   const b = s.result;
   const g = (b.gst.consolidated || b.gst.blocks[0] || {});
   const heads = (o) => o ? r2((o.cgst || 0) + (o.sgst || 0) + (o.igst || 0)) : 0;
-  const ex = b.exceptions;
   const amt = (rows, f) => r2(rows.reduce((a, l) => a + (Number(l[f]) || 0), 0));
+  /* slim() leaves exceptionTotals behind so the arrays can be released. */
+  const ex = b.exceptionTotals || {
+    taxedNowhere:   { orders: b.exceptions.taxedNowhere.length,   amount: amt(b.exceptions.taxedNowhere, 'billed') },
+    statusConflict: { orders: b.exceptions.statusConflict.length, amount: amt(b.exceptions.statusConflict, 'billed') },
+    noCollector:    { orders: b.exceptions.noCollector.length,    amount: amt(b.exceptions.noCollector, 'billed') },
+    shortPaid:      { orders: b.exceptions.shortPaid.length,      amount: amt(b.exceptions.shortPaid, 'still_short') },
+  };
 
   return {
     month: s.month,
@@ -111,13 +117,7 @@ function monthRow(s) {
     checks: b.checks,
     checksOk: Object.values(b.checks).every((v) => Math.abs(v) < 0.5),
 
-    exceptions: {
-      taxedNowhere:   { orders: ex.taxedNowhere.length,   amount: amt(ex.taxedNowhere, 'billed') },
-      statusConflict: { orders: ex.statusConflict.length, amount: amt(ex.statusConflict, 'billed') },
-      noCollector:    { orders: ex.noCollector.length,    amount: amt(ex.noCollector, 'billed') },
-      shortPaid:      { orders: ex.shortPaid.length,      amount: amt(ex.shortPaid, 'still_short') },
-      duplicateRows:  { orders: b.duplicateRows, amount: 0 },
-    },
+    exceptions: { ...ex, duplicateRows: { orders: b.duplicateRows, amount: 0 } },
     duplicateTabs: b.duplicateTabs || [],
     entities: b.byEntity.map((e) => e.entity).filter((e) => !e.includes('+')),
   };
@@ -157,10 +157,14 @@ function buildFindings(statements, rows) {
       if (!s.hasPayment && !FROM_THE_RECORDS_THEMSELVES.has(l.key)) continue;
       push(l.key, l.label, l.basis || '', l.orders, l.amount, s.month, l.why);
     }
-    const sp = s.result.exceptions.shortPaid;
-    if (sp.length) {
+    /* Pre-reduced by slim() when the month was built, so the exception arrays
+       themselves do not have to be kept alive to reach this point. */
+    const sp = s.result.shortPaidTotals
+      || { orders: s.result.exceptions.shortPaid.length,
+           amount: r2(s.result.exceptions.shortPaid.reduce((a, l) => a + (Number(l.still_short) || 0), 0)) };
+    if (sp.orders) {
       push('shortPaid', 'Part realisation received', 'Amount short',
-           sp.length, r2(sp.reduce((a, l) => a + (Number(l.still_short) || 0), 0)), s.month,
+           sp.orders, sp.amount, s.month,
            'Delivered and part realised through a collection channel. The balance is short and has '
            + 'not been received.');
     }
@@ -278,4 +282,35 @@ function decorateLimits(limits) {
     .sort((a, b) => (SEV_RANK[a.severity] - SEV_RANK[b.severity]) || (b.amount - a.amount));
 }
 
-module.exports = { buildOverview, buildFindings, monthRow, label, SEVERITY, ACTION, decorateLimits };
+/**
+ * Everything the year needs from one month, with the heavy parts left behind.
+ *
+ * A month's full result holds its entire ledger — every order, every exception
+ * list. Twelve of those alive at once is what made building the year cost a
+ * gigabyte and take the backend down. The year only ever reads totals, so a
+ * month is reduced to those the moment it is built and the ledger is dropped.
+ */
+function slim(result) {
+  const amt = (rows, f) => r2((rows || []).reduce((a, l) => a + (Number(l[f]) || 0), 0));
+  const ex = result.exceptions;
+  return {
+    gst: result.gst,
+    totals: result.totals,
+    positionTotals: result.positionTotals,
+    bridge: { difference: result.bridge.difference },
+    checks: result.checks,
+    limits: result.limits,
+    duplicateRows: result.duplicateRows,
+    duplicateTabs: result.duplicateTabs,
+    byEntity: result.byEntity.map((e) => ({ entity: e.entity })),
+    exceptionTotals: {
+      taxedNowhere:   { orders: ex.taxedNowhere.length,   amount: amt(ex.taxedNowhere, 'billed') },
+      statusConflict: { orders: ex.statusConflict.length, amount: amt(ex.statusConflict, 'billed') },
+      noCollector:    { orders: ex.noCollector.length,    amount: amt(ex.noCollector, 'billed') },
+      shortPaid:      { orders: ex.shortPaid.length,      amount: amt(ex.shortPaid, 'still_short') },
+    },
+    shortPaidTotals: { orders: ex.shortPaid.length, amount: amt(ex.shortPaid, 'still_short') },
+  };
+}
+
+module.exports = { buildOverview, slim, buildFindings, monthRow, label, SEVERITY, ACTION, decorateLimits };

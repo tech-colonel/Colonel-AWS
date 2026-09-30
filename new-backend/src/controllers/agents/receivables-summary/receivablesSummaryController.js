@@ -24,7 +24,7 @@ const { getDynamicModel } = require('../../../models/brand');
 const { parseReceivablesFile } = require('../../../services/processors/offdutyReceivablesParser');
 const { buildReceivables, buildMonthlyStatements } = require('../../../services/processors/offdutyReceivablesLedger');
 const { buildWorkbook, yearSummarySheet, WRITE_OPTS } = require('../../../services/processors/offdutyReceivablesWorkbook');
-const { buildOverview, decorateLimits } = require('../../../services/processors/offdutyReceivablesOverview');
+const { buildOverview, decorateLimits, slim } = require('../../../services/processors/offdutyReceivablesOverview');
 const AdmZip = require('adm-zip');
 const drive = require('../../../services/driveService');
 
@@ -298,7 +298,11 @@ const resetAll = async (req, res, next) => {
     const [[before]] = await ctx.Model.sequelize.query(
       'SELECT count(*)::int AS n, count(DISTINCT filename)::int AS f FROM receivables_summary');
     const removed = await ctx.Model.destroy({ where: {} });
-    invalidateOverview(ctx.brand.id);
+    /* A new run means the records AND the statements built from them go — that
+       is what the button says. Adding or removing ONE file does not: there the
+       statements stay and are marked stale, so nobody loses work they have
+       already produced. */
+    await clearStatements(ctx.Model, ctx.brand.id);
     res.json({ success: true, removedRows: removed, heldRows: before.n, heldFiles: before.f });
   } catch (error) { console.error('Receivables reset error:', error); next(error); }
 };
@@ -352,110 +356,223 @@ function monthList(rows) {
   });
 }
 
-/* The year takes ~20s to build over a million and a half rows, and nothing in
-   it changes until a file is added or removed. Built once, kept until the row
-   count or the newest row changes, so the page is instant every time after the
-   first. */
-const OVERVIEW_CACHE = new Map();
-/* Kept on disk as well as in memory. The build is deterministic — the same rows
-   give the same year — so a backend restart has no reason to spend twenty
-   seconds rebuilding it, and a restart used to leave the page on a spinner. */
-const overviewFile = (brandId) => path.join(OUTPUT_DIR, `.overview-${brandId}.json`);
-/* Asked of the database, not of a million rows in memory. Reading every row
-   just to decide whether the cached year was still good cost eight seconds on
-   every page load — longer than most of the work the page does. */
-const overviewKeyFromDb = async (Model) => {
+/* ── BUILT STATEMENTS ARE ARTIFACTS, NOT A CACHE ──────────────────────────
+   Opening this agent used to REBUILD the year from the raw rows — 1.3 million
+   of them, twelve statements, twenty to sixty seconds and about a gigabyte of
+   heap on the shared backend, every time the cache missed. It missed often: it
+   lived in a file under outputs/ and its key included the mtimes of the
+   processor files, so every deploy threw it away and the next person to open
+   the page paid for it, competing with every other agent for the same node
+   process.
+
+   The Order Cycle agent already solved this — compute once, write the result to
+   the brand database, and afterwards opening a saved output is a read. Same
+   shape here: the FINISHED statement is stored in receivables_statements, the
+   page reads it, and a build only happens when somebody asks for one.
+
+   Staleness is known without recomputing, by comparing the fingerprint of the
+   records now against the fingerprint they had when the statement was built.
+   Different means the records moved — the page says so and offers a rebuild,
+   rather than either serving a stale figure silently or silently spending a
+   minute making a new one. */
+
+const STATEMENTS_TABLE = 'receivables_statements';
+
+/* Count and newest row of the records — asked of the database, never by
+   reading a million rows into memory. */
+const fingerprint = async (Model) => {
   const [[k]] = await Model.sequelize.query(
     'SELECT count(*)::text AS n, coalesce(max(created_at)::text, \'-\') AS t FROM receivables_summary');
-  return `${k.n}|${k.t}|${CODE_STAMP}`;
+  return { rows: Number(k.n), fp: `${k.n}|${k.t}` };
 };
 
-/* The cache is keyed on the CODE as well as the rows. The same rows give a
-   different year after the ledger changes, and a cache that only watched the
-   rows would have gone on serving figures the code no longer produces. */
-const CODE_STAMP = [
-  '../../../services/processors/offdutyReceivablesLedger',
-  '../../../services/processors/offdutyReceivablesOverview',
-  '../../../services/processors/offdutyReceivablesParser',
-].map((m) => { try { return fs.statSync(require.resolve(m)).mtimeMs; } catch { return 0; } }).join('.');
-const invalidateOverview = (brandId) => {
-  OVERVIEW_CACHE.delete(brandId);
-  fs.remove(overviewFile(brandId)).catch(() => {});
+/* The built statement as the page renders it. scope 'YEAR' has no period. */
+async function readStatement(Model, brandId, scope, period = null) {
+  const [rows] = await Model.sequelize.query(
+    `SELECT payload, source_rows, source_fingerprint, built_ms, built_at
+       FROM ${STATEMENTS_TABLE}
+      WHERE brand_id = :b AND scope = :s AND COALESCE(period,'') = COALESCE(:p,'')
+      LIMIT 1`,
+    { replacements: { b: brandId, s: scope, p: period } });
+  return rows[0] || null;
+}
+
+async function writeStatement(Model, brandId, scope, period, payload, fp, rowCount, ms, userId) {
+  await Model.sequelize.query(
+    `INSERT INTO ${STATEMENTS_TABLE}
+       (brand_id, scope, period, payload, source_rows, source_fingerprint, built_ms, built_by)
+     VALUES (:b, :s, :p, CAST(:payload AS JSONB), :rows, :fp, :ms, :who)
+     ON CONFLICT (brand_id, scope, COALESCE(period, ''))
+     DO UPDATE SET payload = EXCLUDED.payload,
+                   source_rows = EXCLUDED.source_rows,
+                   source_fingerprint = EXCLUDED.source_fingerprint,
+                   built_ms = EXCLUDED.built_ms,
+                   built_by = EXCLUDED.built_by,
+                   built_at = NOW()`,
+    { replacements: { b: brandId, s: scope, p: period, payload: JSON.stringify(payload),
+                      rows: rowCount, fp, ms, who: userId || null } });
+}
+
+/* Build the year AND every month, and store all of them.
+ *
+ * ONE MONTH AT A TIME. Reading the whole table and holding twelve full results
+ * alive is what cost a gigabyte and took the backend down mid-build — the same
+ * fault the zip builder already avoids. Each month is queried on its own, built,
+ * REDUCED to the totals the year needs (slim), stored, and dropped. Only the
+ * slim months survive the loop, and they are small.
+ */
+async function buildAndStore(ctx, userId, onProgress) {
+  const say = (stage, detail, done, total) => onProgress && onProgress(stage, detail, done, total);
+  const { rows: rowCount, fp } = await fingerprint(ctx.Model);
+  if (!rowCount) return { empty: true };
+
+  const t0 = Date.now();
+
+  /* the month list and the file count, without reading a single order row */
+  const [meta] = await ctx.Model.sequelize.query(
+    `SELECT period, count(*)::int AS n,
+            bool_or(source_kind = 'PAYMENT') AS has_payment
+       FROM receivables_summary WHERE period IS NOT NULL
+      GROUP BY period ORDER BY period`);
+  const [[fileRow]] = await ctx.Model.sequelize.query(
+    'SELECT count(DISTINCT filename)::int AS f FROM receivables_summary');
+
+  const months = monthList(
+    await ctx.Model.findAll({ attributes: ['period', 'source_kind'], raw: true }));
+  const pad2 = (n) => String(n).padStart(2, '0');
+  const endOf = (p) => { const [y, m] = p.split('-').map(Number);
+                         return `${y}-${pad2(m)}-${pad2(new Date(Date.UTC(y, m, 0)).getUTCDate())}`; };
+
+  const slimStatements = [];
+  for (let i = 0; i < meta.length; i++) {
+    const period = meta[i].period;
+    say('month', `${period} — building the statement`, i, meta.length);
+
+    let rows = await ctx.Model.findAll({ where: { period }, raw: true, order: READ_ORDER });
+    const asAt = endOf(period);
+    const hasPayment = rows.some((r) => r.source_kind === 'PAYMENT');
+    const result = buildReceivables(rows, asAt);
+
+    /* store the month exactly as the page will render it */
+    await writeStatement(ctx.Model, ctx.brand.id, 'MONTH', period,
+      summaryPayload(result, period, asAt, hasPayment, months),
+      fp, result.totals.orders, null, userId);
+
+    /* keep only what the year reads, then let the month go */
+    slimStatements.push({
+      month: period, asAt, hasPayment,
+      receivableNote: hasPayment ? null
+        : 'No payment reconciliation was produced for this month, so no receivable is reported. '
+        + 'The sales, RTO and return figures below are complete.',
+      result: slim(result),
+    });
+    rows = null;
+    say('month', `${period} — stored`, i + 1, meta.length);
+  }
+
+  say('consolidating', 'building the year from the months');
+  const overview = buildOverview(slimStatements, {
+    empty: false,
+    brand: ctx.brand.name,
+    rows: rowCount,
+    files: fileRow.f,
+    builtInMs: 0,
+  });
+  overview.builtInMs = Date.now() - t0;
+
+  await writeStatement(ctx.Model, ctx.brand.id, 'YEAR', null, overview, fp, rowCount,
+                       overview.builtInMs, userId);
+
+  return { built: true, months: slimStatements.length, ms: overview.builtInMs, rows: rowCount };
+}
+
+const clearStatements = async (Model, brandId) => {
+  await Model.sequelize.query(`DELETE FROM ${STATEMENTS_TABLE} WHERE brand_id = :b`,
+                              { replacements: { b: brandId } });
 };
+
+/* Records changed, so the built statements no longer describe what is held.
+   They are LEFT IN PLACE and marked stale by the fingerprint comparison — an
+   accountant who has already produced a statement should not lose it because
+   a file was added. */
+const invalidateOverview = () => {};
 
 /**
- * The whole year on one screen: a row per month, and every finding across the
- * year ranked by what it costs. This is what the workspace opens on — building
- * a single position over a year of rows took two minutes and told the reader
- * less than the twelve rows do.
+ * The whole year on one screen — SERVED, never built. If no statement has been
+ * built yet, or the records have moved since it was, that is said plainly and
+ * the page offers a build instead of starting one.
  */
 const getOverview = async (req, res, next) => {
   try {
     const ctx = await resolve(req, res); if (!ctx) return;
     await ensureTable(ctx.Model);
 
-    /* Decide on the cache BEFORE reading anything. */
-    const key = await overviewKeyFromDb(ctx.Model);
-    if (key.startsWith('0|')) return res.json({ empty: true });
-    let hit = OVERVIEW_CACHE.get(ctx.brand.id);
-    if (!hit && !req.query.refresh) {
-      hit = await fs.readJson(overviewFile(ctx.brand.id)).catch(() => null);
-      if (hit) OVERVIEW_CACHE.set(ctx.brand.id, hit);
-    }
-    if (hit && hit.key === key && !req.query.refresh) {
-      return res.json({ ...hit.payload, cached: true });
-    }
+    const { rows: rowCount, fp } = await fingerprint(ctx.Model);
+    if (!rowCount) return res.json({ empty: true });
 
-    const rows = await ctx.Model.findAll({ raw: true, order: READ_ORDER });
-    if (!rows.length) return res.json({ empty: true });
-    const t0 = Date.now();
-    const statements = buildMonthlyStatements(rows);
-    const payload = buildOverview(statements, {
-      empty: false,
-      brand: ctx.brand.name,
-      rows: rows.length,
-      files: new Set(rows.map((r) => r.filename).filter(Boolean)).size,
-      builtInMs: 0,
+    const saved = await readStatement(ctx.Model, ctx.brand.id, 'YEAR');
+    if (!saved) {
+      return res.json({ empty: false, needsBuild: true, stale: false,
+                        heldRows: rowCount,
+                        reason: 'No statement has been built for these records yet.' });
+    }
+    const stale = saved.source_fingerprint !== fp;
+    res.json({
+      ...saved.payload,
+      served: true,
+      stale,
+      builtAt: saved.built_at,
+      builtInMs: saved.built_ms,
+      builtFromRows: saved.source_rows,
+      heldRows: rowCount,
+      ...(stale ? { reason: `Built from ${Number(saved.source_rows).toLocaleString('en-IN')} lines; `
+                          + `${rowCount.toLocaleString('en-IN')} are held now.` } : {}),
     });
-    payload.builtInMs = Date.now() - t0;
-    OVERVIEW_CACHE.set(ctx.brand.id, { key, payload });
-    await ensureDir();
-    fs.writeJson(overviewFile(ctx.brand.id), { key, payload }).catch(() => {});
-    res.json({ ...payload, cached: false });
   } catch (error) { console.error('Receivables overview error:', error); next(error); }
 };
 
-/** Header numbers for the workspace — cheap, no workbook written. */
-const getSummary = async (req, res, next) => {
+/** Build the year and every month, and store them. The only path that computes. */
+const buildStatements = async (req, res, next) => {
   try {
     const ctx = await resolve(req, res); if (!ctx) return;
     await ensureTable(ctx.Model);
-    /* Only the month asked for. Reading the year to throw eleven twelfths of it
-       away cost twelve seconds per month opened. */
-    const rows = await ctx.Model.findAll(req.query.month
-      ? { where: { period: req.query.month }, raw: true, order: READ_ORDER }
-      : { raw: true, order: READ_ORDER });
-    if (!rows.length) return res.json({ empty: true, month: req.query.month || null });
+    const job = newJob(`${ctx.brand.name} — building the year`);
+    res.json({ jobId: job.id });
 
-    /* One statement per month is what the user files. `month` picks one; with
-       no `month` the behaviour is unchanged, which is what a single-month
-       upload wants. */
-    const sc = scope(rows, req.query.month);
-    if (req.query.month && !sc.rows.length) {
-      return res.json({ empty: true, month: req.query.month, reason: 'no records for that month' });
-    }
-    const b = buildReceivables(sc.rows, req.query.asAt || sc.asAt);
-    res.json({
+    (async () => {
+      try {
+        step(job, 'month', 'reading the records held');
+        const out = await buildAndStore(ctx, req.user && req.user.id,
+          (stage, detail, done, total) => step(job, stage, detail, done, total));
+        job.result = out;
+        job.state = 'done';
+        step(job, 'done', out.empty ? 'nothing held'
+          : `${out.months} months built in ${Math.round(out.ms / 1000)}s`);
+      } catch (e) {
+        job.state = 'failed'; job.error = e.message;
+        step(job, 'failed', e.message);
+        console.error('Receivables build failed:', e);
+      }
+    })();
+  } catch (error) { next(error); }
+};
+
+/* One month's statement, in the shape the page renders. Extracted so that a
+   month STORED by buildAndStore and a month built live are the same object by
+   construction — two code paths producing "the same" statement is how they
+   drift. */
+function summaryPayload(b, month, asAt, hasPayment, months) {
+    return {
       empty: false,
-      month: req.query.month || null,
+      month: month || null,
       /* Every month held, so the page can offer one statement per month. One
          pass over the rows — this used to build a full statement per month just
          to draw a row of buttons, which is a year of work for a month picker. */
-      months: monthList(await ctx.Model.findAll({ attributes: ['period', 'source_kind'], raw: true })),
+      months,
       spansMultipleMonths: b.spansMultipleMonths,
       /* Stated, never implied: a month with no payment reconciliation has no
          receivable, and a blank or a zero would read as "nothing is owed". */
-      receivableNote: req.query.month && sc.hasPayment === false
+      receivableNote: month && hasPayment === false
         ? 'No payment reconciliation was produced for this month, so no receivable is reported. '
           + 'The sales, RTO and return figures are complete.'
         : null,
@@ -503,7 +620,47 @@ const getSummary = async (req, res, next) => {
         { key: 'taxedNowhere', label: 'Not in GSTR-1', rows: b.exceptions.taxedNowhere.length },
         { key: 'noDeposit', label: 'Bank date not recorded', rows: b.exceptions.noDeposit.length },
       ],
-    });
+    };
+}
+
+/**
+ * One month — SERVED from the stored statement when there is one, and only
+ * built live when there is not. Building a month live still costs seconds and
+ * holds the rows in memory; the store exists so that opening a month the user
+ * has already produced costs a read.
+ */
+const getSummary = async (req, res, next) => {
+  try {
+    const ctx = await resolve(req, res); if (!ctx) return;
+    await ensureTable(ctx.Model);
+    const month = req.query.month || null;
+
+    const { rows: rowCount, fp } = await fingerprint(ctx.Model);
+    if (!rowCount) return res.json({ empty: true, month });
+
+    /* stored first — this is the whole point */
+    if (month && !req.query.refresh) {
+      const saved = await readStatement(ctx.Model, ctx.brand.id, 'MONTH', month);
+      if (saved) {
+        return res.json({ ...saved.payload, served: true,
+                          stale: saved.source_fingerprint !== fp,
+                          builtAt: saved.built_at });
+      }
+    }
+
+    /* nothing stored for this month: build just this one, which is bounded */
+    const rows = await ctx.Model.findAll(month
+      ? { where: { period: month }, raw: true, order: READ_ORDER }
+      : { raw: true, order: READ_ORDER });
+    if (!rows.length) return res.json({ empty: true, month });
+
+    const sc = scope(rows, month);
+    if (month && !sc.rows.length) {
+      return res.json({ empty: true, month, reason: 'no records for that month' });
+    }
+    const b = buildReceivables(sc.rows, req.query.asAt || sc.asAt);
+    const months = monthList(await ctx.Model.findAll({ attributes: ['period', 'source_kind'], raw: true }));
+    res.json({ ...summaryPayload(b, month, sc.asAt, sc.hasPayment, months), served: false });
   } catch (error) { next(error); }
 };
 
@@ -877,6 +1034,6 @@ const getLedger = async (req, res, next) => {
   } catch (error) { next(error); }
 };
 
-module.exports = { uploadFiles, listFiles, deleteFile, resetAll, getSummary, getOverview, generateWorkbook,
+module.exports = { uploadFiles, listFiles, deleteFile, resetAll, getSummary, getOverview, buildStatements, generateWorkbook,
                    generateBundle, buildBundle, ingestDrive, bundleJob, getJob,
                    download, getLedger, COLUMNS };

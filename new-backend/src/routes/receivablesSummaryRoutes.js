@@ -20,8 +20,10 @@ router.delete(`${base}/files/:filename`, authenticateToken, c.deleteFile);
 /* clear everything held, so the next run starts from nothing */
 router.post(`${base}/reset`, authenticateToken, c.resetAll);
 router.get(`${base}/summary`, authenticateToken, c.getSummary);
-/* the year on one screen — a row per month and every finding, cached */
+/* the year on one screen — SERVED from the stored statement, never built here */
 router.get(`${base}/overview`, authenticateToken, c.getOverview);
+/* the only path that computes: builds the year and every month, and stores them */
+router.post(`${base}/build`, authenticateToken, c.buildStatements);
 router.get(`${base}/ledger`, authenticateToken, c.getLedger);
 router.post(`${base}/workbook`, authenticateToken, c.generateWorkbook);
 /* every month as its own statement plus one consolidated, zipped */

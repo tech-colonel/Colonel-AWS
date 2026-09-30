@@ -476,6 +476,11 @@ const ReceivablesSummaryWorkspace = ({ agent }) => {
   const [overview, setOverview] = useState(null);
   const [monthLoading, setMonthLoading] = useState(false);
   const [ovLoading, setOvLoading] = useState(true);
+  /* The year is no longer built when the page opens — it is READ from the
+     statement stored when somebody last built it. These two carry what the
+     store said about it. */
+  const [needsBuild, setNeedsBuild] = useState(false);
+  const [buildingYear, setBuildingYear] = useState(false);
   const [confirmReset, setConfirmReset] = useState(false);
   const fileRef = useRef(null);
   const [resetting, setResetting] = useState(false);
@@ -517,7 +522,9 @@ const ReceivablesSummaryWorkspace = ({ agent }) => {
     setOvLoading(true);
     try {
       const o = await api.get(`${base}/overview`);
-      setOverview(o.data?.empty ? null : o.data);
+      const d = o.data || {};
+      setNeedsBuild(!!d.needsBuild);
+      setOverview(d.empty || d.needsBuild ? null : d);
     } catch (e) {
       toast.error(e.response?.data?.error || 'Could not build the year');
     } finally { setOvLoading(false); }
@@ -538,6 +545,20 @@ const ReceivablesSummaryWorkspace = ({ agent }) => {
       .finally(() => { if (live) setMonthLoading(false); });
     return () => { live = false; };
   }, [base, month]);
+
+  /* Build the year and every month, once, and store them. The only thing that
+     computes — everything else reads what this produced. */
+  const buildYear = async () => {
+    setBuildingYear(true);
+    setJob({ state: 'running', stage: 'month', detail: 'starting', done: 0, total: 0, log: [] });
+    try {
+      const r = await api.post(`${base}/build`);
+      watchJob(r.data.jobId, () => { setNeedsBuild(false); });
+    } catch (e) {
+      setJob(null);
+      toast.error(e.response?.data?.error || 'Could not start the build');
+    } finally { setBuildingYear(false); }
+  };
 
   /* Open a month from anywhere on the year view. */
   const openMonth = useCallback((m) => {
@@ -1134,7 +1155,8 @@ const ReceivablesSummaryWorkspace = ({ agent }) => {
         <div className="flex flex-wrap items-center gap-1 rounded-xl border p-1"
              style={{ borderColor: 'var(--card-border)', background: 'var(--surface)' }}>
           {[['year', ov ? `The year — ${ov.year.from} to ${ov.year.to}`
-                        : ovLoading ? 'The year — building…' : 'The year', Layers],
+                        : ovLoading ? 'The year — reading…'
+                        : needsBuild ? 'The year — not built yet' : 'The year', Layers],
             ['month', month ? `${monthLabel(month)} in full` : 'One month in full', CalendarDays],
             ['input', 'Add records', Upload]].map(([k, lbl, Ic]) => (
             <button key={k} onClick={() => setView(k)}
@@ -1145,28 +1167,60 @@ const ReceivablesSummaryWorkspace = ({ agent }) => {
           ))}
           <span className="ml-auto flex items-center gap-2 pr-2 text-xs" style={{ color: 'var(--text-muted)' }}>
             {ovLoading && <Loader2 className="h-3 w-3 animate-spin" />}
-            {ov ? `${int(ov.rows)} lines from ${int(ov.files)} workbooks`
+            {ov ? `${int(ov.rows)} lines from ${int(ov.files)} workbooks${
+                    ov.builtAt ? ` · built ${format(new Date(ov.builtAt), 'dd MMM HH:mm')}` : ''}`
                 : `${int(files.reduce((a, f) => a + (f.rows || 0), 0))} lines from ${int(files.length)} records`}
           </span>
         </div>
       )}
 
       {/* ── the year ──────────────────────────────────────────────────── */}
-      {!loading && !ov && ovLoading && view === 'year' && (
+      {!loading && ovLoading && !ov && view === 'year' && (
         <Card className="p-8 text-center">
           <Loader2 className="mx-auto h-6 w-6 animate-spin text-slate-400" />
-          <div className="mt-3 text-base font-semibold" style={{ color: 'var(--text-heading)' }}>
-            Building every month of the year
-          </div>
-          <p className="mx-auto mt-2 max-w-xl text-sm leading-relaxed" style={{ color: 'var(--text-muted)' }}>
-            A statement is built for each month held and the exceptions are gathered across all of them.
-            Over a million and a half lines this takes about twenty seconds, and only the first time —
-            it is kept until a record is added or removed. Meanwhile{' '}
-            <button onClick={() => setView('input')} className="underline">add records</button> or{' '}
-            <button onClick={() => setView('month')} className="underline">open a single month</button>,
-            both of which are ready now.
-          </p>
+          <p className="mt-3 text-sm" style={{ color: 'var(--text-muted)' }}>Reading the stored statement…</p>
         </Card>
+      )}
+
+      {/* Nothing has been built for these records yet. The page does NOT build
+          one on its own — that is a minute of work on the shared backend and
+          nobody asked for it by opening a page. */}
+      {!loading && !ovLoading && needsBuild && view === 'year' && (
+        <Card className="p-8 text-center">
+          <Layers className="mx-auto mb-3 h-8 w-8" style={{ color: AGENT.color, opacity: 0.45 }} />
+          <div style={{ ...TITLE, fontSize: 17 }}>No statement has been built yet</div>
+          <p className="mx-auto mt-2 max-w-2xl text-sm leading-relaxed" style={{ color: 'var(--text-muted)' }}>
+            The records are held and ready. Building produces one statement per month and the year
+            across them, and stores the lot — after that, opening this page is a read and costs
+            nothing. It is the only step that spends real time.
+          </p>
+          <Button onClick={buildYear} disabled={buildingYear || job?.state === 'running'}
+                  className="mt-4 bg-slate-800 hover:bg-slate-900">
+            {buildingYear || job?.state === 'running'
+              ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" /> Building…</>
+              : <><Zap className="mr-2 h-4 w-4" /> Build the statements</>}
+          </Button>
+        </Card>
+      )}
+
+      {/* The records moved after this statement was built. The figures are still
+          shown — an accountant who produced a statement should not lose sight of
+          it because a file was added — but the page says so and offers a rebuild
+          rather than quietly serving an old number. */}
+      {!loading && ov && ov.stale && view === 'year' && (
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border px-4 py-3"
+             style={{ borderColor: '#FCD34D', background: '#FFFBEB' }}>
+          <div className="text-sm" style={{ color: '#92400E' }}>
+            <span className="font-semibold">The records have changed since this was built.</span>{' '}
+            {ov.reason} The figures below are the ones last produced.
+          </div>
+          <Button size="sm" onClick={buildYear} disabled={buildingYear || job?.state === 'running'}
+                  className="bg-amber-600 hover:bg-amber-700">
+            {buildingYear || job?.state === 'running'
+              ? <><Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" /> Rebuilding…</>
+              : <><Zap className="mr-2 h-3.5 w-3.5" /> Rebuild</>}
+          </Button>
+        </div>
       )}
 
       {!loading && ov && view === 'year' && (
