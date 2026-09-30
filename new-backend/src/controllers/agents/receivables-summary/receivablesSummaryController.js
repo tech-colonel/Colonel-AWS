@@ -699,10 +699,19 @@ const getSummary = async (req, res, next) => {
       }
     }
 
+    /* No month means the whole year in one position, which is a million and a
+       half lines in heap and the thing that used to take the backend down. The
+       year is served by /overview from the store; there is no reason to build
+       it here and every reason not to. */
+    if (!month) {
+      return res.status(400).json({
+        error: 'Ask for a month. The year is served by the overview.',
+        hint: 'GET …/receivables-summary/overview',
+      });
+    }
+
     /* nothing stored for this month: build just this one, which is bounded */
-    const rows = await ctx.Model.findAll(month
-      ? { where: { period: month }, raw: true, order: READ_ORDER }
-      : { raw: true, order: READ_ORDER });
+    const rows = await ctx.Model.findAll({ where: { period: month }, raw: true, order: READ_ORDER });
     if (!rows.length) return res.json({ empty: true, month });
 
     const sc = scope(rows, month);
@@ -721,10 +730,21 @@ const generateWorkbook = async (req, res, next) => {
     const ctx = await resolve(req, res); if (!ctx) return;
     const { brand, Model } = ctx;
     await ensureTable(Model);
-    const rows = await Model.findAll({ raw: true, order: READ_ORDER });
-    if (!rows.length) return res.status(400).json({ error: 'Nothing uploaded yet' });
 
     const month = req.body && req.body.month;
+    /* One workbook for the whole year would mean holding the whole year. The
+       bundle already produces every month plus a consolidated sheet, and it
+       does it a month at a time. */
+    if (!month) {
+      return res.status(400).json({
+        error: 'Name a month. A whole-year workbook is produced by the bundle, which builds it a month at a time.',
+        hint: 'POST …/receivables-summary/bundle',
+      });
+    }
+
+    const rows = await Model.findAll({ where: { period: month }, raw: true, order: READ_ORDER });
+    if (!rows.length) return res.status(400).json({ error: `Nothing held for ${month}` });
+
     const sc = scope(rows, month);
     if (month && !sc.rows.length) return res.status(400).json({ error: `Nothing held for ${month}` });
     const b = buildReceivables(sc.rows, (req.body && req.body.asAt) || sc.asAt);
@@ -1057,31 +1077,69 @@ const download = async (req, res, next) => {
   } catch (error) { next(error); }
 };
 
-/** A slice of the ledger, for the on-screen table. */
+/* The position lists are not in `exceptions` — they are the ledger sliced by
+   where each order fell at the cut-off. */
+const POSITION_LISTS = {
+  receivable: (l) => l.position === 'RECEIVABLE_LATE' || l.position === 'RECEIVABLE_UNPAID',
+  uncertain:  (l) => l.uncertain > 0,
+  inTransit:  (l) => l.position === 'IN_TRANSIT',
+};
+
+/** The rows behind one figure, for one month. */
+function ledgerSlice(rows, month, asAt, worklist) {
+  const sc = scope(rows, month);
+  if (!sc.rows.length) return [];
+  const b = buildReceivables(sc.rows, asAt || sc.asAt);
+  if (POSITION_LISTS[worklist]) return b.ledger.filter(POSITION_LISTS[worklist]);
+  if (worklist && b.exceptions[worklist]) return b.exceptions[worklist];
+  return b.ledger;
+}
+
+/**
+ * A slice of the ledger, for the on-screen table.
+ *
+ * Drilling into a figure used to read the entire table — every month, a million
+ * and a half lines — to hand back two hundred rows. It is read a month at a
+ * time now, so the cost of opening a schedule is one month regardless of how
+ * many years are held.
+ */
 const getLedger = async (req, res, next) => {
   try {
     const ctx = await resolve(req, res); if (!ctx) return;
     await ensureTable(ctx.Model);
-    const rows = await ctx.Model.findAll({ raw: true, order: READ_ORDER });
-    if (!rows.length) return res.json({ rows: [], total: 0 });
+    const { worklist, asAt, month } = req.query;
+    const limit = Number(req.query.limit || 200);
+    const offset = Number(req.query.offset || 0);
 
-    const sc2 = scope(rows, req.query.month);
-    const b = buildReceivables(sc2.rows, req.query.asAt || sc2.asAt);
-    const { worklist, limit = 200, offset = 0 } = req.query;
-    /* The position lists are not in `exceptions` — they are the ledger sliced by
-       where each order fell at the cut-off. */
-    const POSITION_LISTS = {
-      receivable: (l) => l.position === 'RECEIVABLE_LATE' || l.position === 'RECEIVABLE_UNPAID',
-      uncertain:  (l) => l.uncertain > 0,
-      inTransit:  (l) => l.position === 'IN_TRANSIT',
-    };
-    const source = POSITION_LISTS[worklist] ? b.ledger.filter(POSITION_LISTS[worklist])
-                 : (worklist && b.exceptions[worklist]) ? b.exceptions[worklist]
-                 : b.ledger;
-    res.json({
-      total: source.length,
-      rows: source.slice(Number(offset), Number(offset) + Number(limit)),
+    if (month) {
+      const rows = await ctx.Model.findAll({ where: { period: month }, raw: true, order: READ_ORDER });
+      if (!rows.length) return res.json({ rows: [], total: 0 });
+      const source = ledgerSlice(rows, month, asAt, worklist);
+      return res.json({ total: source.length, rows: source.slice(offset, offset + limit) });
+    }
+
+    /* No month: walk the months in order and keep only the page being asked
+       for. `total` still counts the year, but one month is ever in hand. */
+    const periods = await ctx.Model.findAll({
+      attributes: [[ctx.Model.sequelize.fn('DISTINCT', ctx.Model.sequelize.col('period')), 'period']],
+      raw: true,
     });
+    const months = periods.map((p) => p.period).filter(Boolean).sort();
+    if (!months.length) return res.json({ rows: [], total: 0 });
+
+    let total = 0;
+    const page = [];
+    for (const m of months) {
+      const rows = await ctx.Model.findAll({ where: { period: m }, raw: true, order: READ_ORDER });
+      const source = ledgerSlice(rows, m, asAt, worklist);
+      /* where this month's rows sit in the year-long list */
+      const from = Math.max(0, offset - total);
+      if (page.length < limit && from < source.length) {
+        page.push(...source.slice(from, from + (limit - page.length)));
+      }
+      total += source.length;
+    }
+    res.json({ total, rows: page });
   } catch (error) { next(error); }
 };
 
