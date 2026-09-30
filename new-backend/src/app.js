@@ -62,6 +62,8 @@ const complianceRoutes      = require('./routes/complianceRoutes');
 const attachmentsRoutes     = require('./routes/attachmentsRoutes');
 const statutoryRoutes       = require('./routes/statutoryRoutes');
 const databaseRoutes        = require('./routes/databaseRoutes');
+// ── Tally Connector ──────────────────────────────────────────────────────────
+const tallyRoutes           = require('./routes/tallyRoutes');
 const { salesRunLogger }    = require('./middleware/salesRunLogger');
 
 app.use(salesRunLogger);  // logs sales/marketplace agent runs → reco_jobs (who/which/brand/from-where)
@@ -101,6 +103,7 @@ app.use('/api',           complianceRoutes);
 app.use('/api',           attachmentsRoutes);
 app.use('/api',           statutoryRoutes);
 app.use('/api',           databaseRoutes);
+app.use('/api',           tallyRoutes);
 
 // Error handling middleware
 app.use((err, req, res, next) => {

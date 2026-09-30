@@ -4,6 +4,7 @@ const { migrateAllBrands } = require('./src/db/migrate');
 const { migrateZoho } = require('./src/db/zohoMigrate');
 const { migrateCompliance } = require('./src/db/complianceMigrate');
 const { migrateStatutory } = require('./src/db/statutoryMigrate');
+const { migrateTally } = require('./src/db/tallyMigrate');
 const dotenv = require('dotenv');
 
 dotenv.config();
@@ -85,6 +86,9 @@ const start = async () => {
 
     // 4d. Statutory Compliance table (master DB, idempotent)
     await migrateStatutory();
+
+    // 4e. Tally mirror tables (master DB, idempotent)
+    await migrateTally();
 
     // 5. Start Express Server
     app.listen(PORT, () => {

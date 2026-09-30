@@ -1,4 +1,4 @@
-import { LayoutDashboard, Building2, Bot, Users as UsersIcon, Link as LinkIcon, ClipboardList, Workflow, Plug, Flag, Sparkles, Video, BookOpen, MessageSquare, Landmark, Database } from 'lucide-react';
+import { LayoutDashboard, Building2, Bot, Users as UsersIcon, Link as LinkIcon, ClipboardList, Workflow, Plug, Flag, Sparkles, Video, BookOpen, MessageSquare, Landmark, Database, Cable } from 'lucide-react';
 
 const readRole = () => {
   try { return JSON.parse(localStorage.getItem('user') || '{}').role || ''; }
@@ -37,6 +37,7 @@ export const ADMIN_SIDEBAR = [
   { path: '/admin/plans',       label: 'Plans',       icon: Workflow,        testId: 'nav-plans' },
   { path: '/admin/feedback',    label: 'Feedback',    icon: Flag,            testId: 'nav-feedback' },
   { path: '/admin/integrations',label: 'Integrations',icon: Plug,            testId: 'nav-integrations' },
+  { path: '/admin/tally',       label: 'Tally',       icon: Cable,           testId: 'nav-tally' },
   { path: '/admin/assignments', label: 'Assignments', icon: LinkIcon,        testId: 'nav-assignments' },
 ];
 

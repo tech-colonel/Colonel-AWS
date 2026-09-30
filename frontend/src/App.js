@@ -20,6 +20,7 @@ import DatabasePage       from './pages/admin/DatabasePage';
 import PlansPage         from './pages/admin/PlansPage';
 import PlanEditor        from './pages/admin/PlanEditor';
 import IntegrationsPage  from './pages/admin/IntegrationsPage';
+import TallyPage         from './pages/admin/TallyPage';
 import MeetingsPage      from './pages/accountant/MeetingsPage';
 import ZohoBooksPage     from './pages/accountant/ZohoBooksPage';
 import FeedbackPage      from './pages/developer/FeedbackPage';
@@ -86,6 +87,7 @@ function App() {
                   <Route path="/plans"       element={<PlansPage />} />
                   <Route path="/plans/:id"   element={<PlanEditor />} />
                   <Route path="/integrations" element={<IntegrationsPage />} />
+                  <Route path="/tally"       element={<TallyPage />} />
                   <Route path="/feedback"    element={<FeedbackPage />} />
                   <Route path="/assignments" element={<AssignmentsPage />} />
                 </Routes>
