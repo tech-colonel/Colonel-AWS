@@ -8,6 +8,7 @@ const { Op } = require('sequelize');
 const { Brand, Agent } = require('../../../models/master');
 const { getBrandConnection } = require('../../../config/database');
 const { feedTick } = require('../../../utils/invoiceEvents');
+const { computeTaxes } = require('./poSheetLayout');
 
 const s = (v) => (v === undefined || v === null || v === 'null' || v === 'undefined') ? null : String(v).trim() || null;
 const num = (v) => {
@@ -23,6 +24,10 @@ const pick = (row, q, ...keys) => {
   }
   return null;
 };
+
+// Taxable/IGST/CGST/SGST are computed here (not trusted from n8n) — same rule
+// as the Sheet formulas, via poSheetLayout.computeTaxes.
+const withTaxes = (m) => ({ ...m, ...computeTaxes(m) });
 
 async function feedPOFromN8n(req, res, next) {
   try {
@@ -67,7 +72,7 @@ async function feedPOFromN8n(req, res, next) {
     const batchTotal = Number(pick(meta, q, 'batch_total', 'batchTotal')) || 0;
 
     // Map each incoming line item to the po_extractor column set.
-    const mapped = rows.map((r) => ({
+    const mapped = rows.map((r) => withTaxes({
       run_id: runId || s(r.run_id),
       source_file: s(r.source_file || r.file || r.filename),
       po_pdf_link: s(r.po_pdf_link || r.pdf_link || r.webViewLink),
@@ -79,6 +84,8 @@ async function feedPOFromN8n(req, res, next) {
       product_description: s(r.product_description || r.description || r.item_description || r.product_name),
       unit_cost: num(r.unit_cost != null ? r.unit_cost : (r.basic_cost_price != null ? r.basic_cost_price : r.rate)),
       gst_rate: num(r.gst_rate != null ? r.gst_rate : r.gst),
+      material_code: s(r.material_code != null ? r.material_code : (r.sku_code != null ? r.sku_code : r.item_code)),
+      qty: num(r.qty != null ? r.qty : r.quantity),
       status: s(r.status) || 'Extracted',
     }));
 
@@ -102,10 +109,10 @@ async function feedPOFromN8n(req, res, next) {
           `INSERT INTO po_extractor
              (agent_id, run_id, source_file, po_pdf_link, po_number, po_date,
               supplier_gstin, buyer_gstin, billing_address, product_description,
-              unit_cost, gst_rate, status)
+              unit_cost, gst_rate, material_code, qty, taxable_value, igst, cgst, sgst, status)
            VALUES (:agent_id, :run_id, :source_file, :po_pdf_link, :po_number, :po_date,
               :supplier_gstin, :buyer_gstin, :billing_address, :product_description,
-              :unit_cost, :gst_rate, :status)`,
+              :unit_cost, :gst_rate, :material_code, :qty, :taxable_value, :igst, :cgst, :sgst, :status)`,
           { replacements: { agent_id: agent.id, ...m } });
         inserted++;
       } catch (e) { console.warn('[n8n po feed] row insert failed (skipped):', e.message); }
