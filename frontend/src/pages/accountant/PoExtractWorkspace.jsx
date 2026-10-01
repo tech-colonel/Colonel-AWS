@@ -2,8 +2,9 @@ import React, { useState, useRef, useCallback, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import {
   FileText, Sheet, Mail, UploadCloud, FolderOpen, RefreshCw, Loader2, X, Maximize2,
-  Trash2, ChevronRight, ChevronDown, ExternalLink, Settings, Pencil, Check,
+  Trash2, ChevronRight, ChevronDown, ExternalLink, Settings, Pencil, Check, Database,
 } from 'lucide-react';
+import PoMasterDataModal from './PoMasterDataModal';
 import DashboardLayout from '../../components/layout/DashboardLayout';
 import { sidebarFor } from '../../lib/adminNav';
 import api, { API_URL } from '../../lib/api';
@@ -53,9 +54,21 @@ const PO_LINE_FIELDS = [
   { key: 'buyer_gstin', label: 'Buyer GSTIN' },
   { key: 'billing_address', label: 'Billing address / Deliver to', wide: true },
   { key: 'product_description', label: 'Product description', wide: true },
+  { key: 'material_code', label: 'Material / SKU code' },
   { key: 'unit_cost', label: 'Unit cost', number: true },
   { key: 'gst_rate', label: 'GST %', number: true },
+  { key: 'qty', label: 'QTY', number: true },
 ];
+// Read-only on the line table: Vendor name + FG come live from the masters,
+// Taxable/IGST/CGST/SGST are recomputed by the backend on every save.
+const LINE_COLUMNS = ['Product description', 'Material code', 'FG', 'Unit cost', 'GST %', 'QTY', 'Taxable', 'IGST', 'CGST', 'SGST', 'Source', ''];
+const NotInMaster = ({ onClick, title }) => (
+  <button onClick={onClick} title={title}
+    className="inline-flex items-center rounded-full px-1.5 py-0.5 text-[9px] font-bold uppercase whitespace-nowrap"
+    style={{ background: '#FFFBEB', color: '#92400E', border: '1px solid #FEF3C7' }}>
+    Not in master +
+  </button>
+);
 // PO-level fields (repeated identically on every line item of the same PO) —
 // edited once here and pushed to ALL of that PO's rows, instead of one at a time.
 const PO_HEADER_FIELDS = PO_LINE_FIELDS.filter((f) =>
@@ -95,6 +108,8 @@ export default function PoExtractWorkspace() {
   const [editingPO, setEditingPO] = useState(null);
   const [poEditForm, setPoEditForm] = useState({});
   const [savingPO, setSavingPO] = useState(false);
+  // Master Data modal: null = closed, else { tab: 'vendor'|'sku', prefillKey }
+  const [masterModal, setMasterModal] = useState(null);
   const sseAbortRef = useRef(null);
   const fileInputRef = useRef(null);
 
@@ -253,7 +268,11 @@ export default function PoExtractWorkspace() {
     setSavingRow(true);
     try {
       const body = {};
-      for (const f of PO_LINE_FIELDS) body[f.key] = f.number ? Number(editForm[f.key]) || 0 : (editForm[f.key] ?? '');
+      for (const f of PO_LINE_FIELDS) {
+        const v = editForm[f.key];
+        // Blank numbers go up as null (e.g. QTY not on the PO), never as a fake 0.
+        body[f.key] = f.number ? (v === '' || v == null ? null : Number(v)) : (v ?? '');
+      }
       const { data } = await api.patch(`/api/brands/${brandId}/agents/${agentId}/po-rows/${id}`, body);
       setRows((prev) => prev.map((r) => (r.id === id ? { ...r, ...data.data } : r)));
       setEditingId(null); setEditForm({});
@@ -366,6 +385,12 @@ export default function PoExtractWorkspace() {
                   className="inline-flex items-center gap-2 rounded-lg border px-4 py-2 text-sm font-semibold transition-all hover:bg-slate-50 disabled:opacity-50"
                   style={{ borderColor: T_BORDER, color: T_TEXT_SECONDARY }}>
                   <RefreshCw className={`w-4 h-4 ${rowsLoading ? 'animate-spin' : ''}`} /> Refresh
+                </button>
+                <button onClick={() => setMasterModal({ tab: 'vendor' })}
+                  title="Vendor master (Buyer GSTIN → Tally name) and SKU master (Material code → FG)"
+                  className="inline-flex items-center gap-2 rounded-lg border px-4 py-2 text-sm font-semibold transition-all hover:bg-slate-50"
+                  style={{ borderColor: T_BORDER, color: T_TEXT_SECONDARY }}>
+                  <Database className="w-4 h-4" /> Master Data
                 </button>
                 <button onClick={() => setShowSettings(true)}
                   title="Set which Drive folder / Google Sheet this brand uses"
@@ -522,6 +547,15 @@ export default function PoExtractWorkspace() {
                           {head.buyer_gstin ? `Buyer ${head.buyer_gstin} · ` : ''}
                           {items.length} line item{items.length !== 1 ? 's' : ''}
                         </div>
+                        {head.buyer_gstin && (
+                          <div className="text-xs mt-0.5 flex items-center gap-1.5" style={{ color: T_TEXT_SECONDARY }}>
+                            Tally vendor:
+                            {head.vendor_name_tally
+                              ? <span className="font-semibold" style={{ color: T_TEXT_PRIMARY }}>{head.vendor_name_tally}</span>
+                              : <NotInMaster title="Add this Buyer GSTIN to the Vendor master"
+                                  onClick={(e) => { e.stopPropagation(); setMasterModal({ tab: 'vendor', prefillKey: head.buyer_gstin }); }} />}
+                          </div>
+                        )}
                       </div>
                       <span className="text-[11px] font-bold px-2 py-0.5 rounded-full" style={{ background: st.bg, color: st.color, border: `1px solid ${st.border}` }}>{head.status}</span>
                       <button onClick={(e) => startEditPO(po, head, e)} title="Fix the PO number, date, GSTINs, or billing address (applies to every line item)" style={{ color: T_BLUE }}>
@@ -566,7 +600,7 @@ export default function PoExtractWorkspace() {
                       <div className="px-5 pb-4 overflow-auto">
                         <table className="w-full text-xs">
                           <thead><tr style={{ background: '#F8FAFC' }}>
-                            {['Product description', 'Unit cost', 'GST %', 'Billing / Deliver-to', 'Source', ''].map((h) => (
+                            {LINE_COLUMNS.map((h) => (
                               <th key={h} className="px-2 py-1.5 text-left font-bold" style={{ color: T_TEXT_SECONDARY, whiteSpace: 'nowrap' }}>{h}</th>
                             ))}
                           </tr></thead>
@@ -575,9 +609,20 @@ export default function PoExtractWorkspace() {
                               <React.Fragment key={it.id}>
                                 <tr style={{ borderTop: `1px solid ${T_BORDER_LIGHT}` }}>
                                   <td className="px-2 py-1.5" style={{ color: T_TEXT_PRIMARY, minWidth: 220 }}>{it.product_description}</td>
+                                  <td className="px-2 py-1.5 whitespace-nowrap" style={{ color: T_TEXT_PRIMARY }}>{it.material_code}</td>
+                                  <td className="px-2 py-1.5" style={{ color: T_TEXT_PRIMARY, minWidth: 140 }}>
+                                    {it.fg || (it.material_code
+                                      ? <NotInMaster title="Add this code to the SKU master"
+                                          onClick={(e) => { e.stopPropagation(); setMasterModal({ tab: 'sku', prefillKey: it.material_code }); }} />
+                                      : '')}
+                                  </td>
                                   <td className="px-2 py-1.5 text-right" style={{ color: T_TEXT_PRIMARY }}>{money(it.unit_cost)}</td>
-                                  <td className="px-2 py-1.5 text-right" style={{ color: T_TEXT_PRIMARY }}>{it.gst_rate != null ? `${it.gst_rate}%` : ''}</td>
-                                  <td className="px-2 py-1.5" style={{ color: T_TEXT_SECONDARY, maxWidth: 320 }}>{it.billing_address}</td>
+                                  <td className="px-2 py-1.5 text-right" style={{ color: T_TEXT_PRIMARY }}>{it.gst_rate != null ? `${Number(it.gst_rate)}%` : ''}</td>
+                                  <td className="px-2 py-1.5 text-right" style={{ color: T_TEXT_PRIMARY }}>{it.qty != null ? Number(it.qty) : ''}</td>
+                                  <td className="px-2 py-1.5 text-right" style={{ color: T_TEXT_PRIMARY }}>{money(it.taxable_value)}</td>
+                                  <td className="px-2 py-1.5 text-right" style={{ color: T_TEXT_PRIMARY }}>{money(it.igst)}</td>
+                                  <td className="px-2 py-1.5 text-right" style={{ color: T_TEXT_PRIMARY }}>{money(it.cgst)}</td>
+                                  <td className="px-2 py-1.5 text-right" style={{ color: T_TEXT_PRIMARY }}>{money(it.sgst)}</td>
                                   <td className="px-2 py-1.5" style={{ color: T_TEXT_SECONDARY }}>
                                     {it.po_pdf_link
                                       ? <a href={it.po_pdf_link} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1" style={{ color: T_BLUE }}>{it.source_file || 'PDF'} <ExternalLink className="w-3 h-3" /></a>
@@ -596,7 +641,7 @@ export default function PoExtractWorkspace() {
                                 </tr>
                                 {editingId === it.id && (
                                   <tr style={{ background: T_BLUE_BG }}>
-                                    <td colSpan={6} className="px-3 py-3">
+                                    <td colSpan={LINE_COLUMNS.length} className="px-3 py-3">
                                       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
                                         {PO_LINE_FIELDS.map((f) => (
                                           <div key={f.key} className={f.wide ? 'col-span-2 md:col-span-2' : ''}>
@@ -680,6 +725,16 @@ export default function PoExtractWorkspace() {
             )}
           </div>
         </div>
+      )}
+
+      {masterModal && (
+        <PoMasterDataModal
+          brandId={brandId}
+          initialTab={masterModal.tab}
+          prefillKey={masterModal.prefillKey}
+          onClose={() => setMasterModal(null)}
+          onChanged={fetchRows}
+        />
       )}
 
       {/* Settings modal — which Drive folder / Sheet this brand's PO Extractor uses */}
