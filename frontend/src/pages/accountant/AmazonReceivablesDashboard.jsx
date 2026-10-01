@@ -24,11 +24,12 @@ import { useParams, useNavigate } from 'react-router-dom';
 import {
   RefreshCw, Download, AlertTriangle, AlertCircle, Info, ChevronRight,
   Package, Receipt, Banknote, X, Loader2, ArrowLeft,
-  LayoutDashboard, Bot, ClipboardList,
+  LayoutDashboard, Bot,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import api from '../../lib/api';
 import DashboardLayout from '../../components/layout/DashboardLayout';
+import { sidebarFor } from '../../lib/adminNav';
 
 const inr = (n, dp = 2) => (n === null || n === undefined || Number.isNaN(n) ? '—'
   : (n < 0 ? '-' : '') + Math.abs(n).toLocaleString('en-IN',
@@ -117,13 +118,25 @@ export default function AmazonReceivablesDashboard() {
     } finally { setRunning(false); }
   };
 
-  /* The sidebar belongs on EVERY state of the page, loading included — a shell
-     that appears only once the data lands reads as the navigation breaking. */
-  const sidebarItems = [
+  /* sidebarFor() builds the role's FULL menu — an accountant gets the same
+     eleven items here as on every other agent page, an admin gets the admin
+     menu, a brand executive gets their restricted two. Hand-rolling a short
+     list, which is what the demo page did, silently dropped Statutory
+     Compliance, Colonel AI, Meetings, Tasks and the rest, so this page alone
+     looked like a different product.
+
+     It belongs on EVERY state including loading: a shell that appears only once
+     the data lands flickers the navigation away on each reload. */
+  /* The labels must MATCH the base menu's own ("Dashboard", "Agents"), because
+     sidebarFor merges by label: an unmatched label is appended as an extra
+     item instead of overriding, so passing "All Agents" produced a second
+     agents entry carrying the same testId and React warned about duplicate
+     keys. Matching the label overrides the path with this brand's, which is
+     the whole point of passing them. */
+  const sidebarItems = sidebarFor([
     { path: `/brands/${brandId}/dashboard`, label: 'Dashboard', icon: LayoutDashboard, testId: 'nav-dashboard' },
-    { path: `/brands/${brandId}/agents`, label: 'All Agents', icon: Bot, testId: 'nav-agents' },
-    { path: `/brands/${brandId}/reco`, label: 'Reconciliation', icon: ClipboardList, testId: 'nav-reco' },
-  ];
+    { path: `/brands/${brandId}/agents`, label: 'Agents', icon: Bot, testId: 'nav-agents' },
+  ]);
 
   if (loading) {
     return (
