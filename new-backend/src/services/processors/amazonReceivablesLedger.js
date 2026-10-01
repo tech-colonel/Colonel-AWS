@@ -51,6 +51,7 @@ const { monthKey, num, r2 } = require('./amazonThreeWay');
 /* The closing state of an order. Exactly one applies, so the buckets sum to the
    order count and nothing can be counted twice or lost between them. */
 const STATUS = {
+  NOT_AMAZON: 'Not an Amazon sale (MCF)',
   SETTLED_IN_MONTH: 'Settled in the month',
   SETTLED_LATER: 'Settled in a later month',
   RETURNED: 'Returned / refunded',
@@ -154,8 +155,10 @@ function foldPlaced(orderRows) {
     const id = String(r['amazon-order-id'] || '').trim();
     if (!id) continue;
     let o = byOrder.get(id);
-    if (!o) o = { id, month: monthKey(r['purchase-date']), statuses: new Set(), charged: 0 }, byOrder.set(id, o);
+    if (!o) o = { id, month: monthKey(r['purchase-date']), statuses: new Set(),
+                  charged: 0, channel: '' }, byOrder.set(id, o);
     o.statuses.add(String(r['order-status'] || '').trim());
+    o.channel = o.channel || String(r['sales-channel'] || '').trim();
     if (String(r['order-status'] || '').trim() !== 'Cancelled') {
       o.charged += num(r['item-price']) + num(r['item-tax']);
     }
@@ -194,7 +197,17 @@ function buildLedger(src, months) {
     if (!months.includes(m)) continue;
 
     let status;
-    if (p.cancelled && !i.shipped) status = STATUS.CANCELLED;
+    /* Multi-channel fulfilment: Amazon SHIPPED it but did not SELL it — the
+       order came from another channel. There is no Amazon invoice and never
+       will be a settlement, so counting it as an unpaid receivable makes Amazon
+       look like it owes money it never collected. These were the only
+       "outstanding" orders in two months and each was worth nil, which is what
+       gave them away. */
+    /* ANCHORED. Amazon's own value for a multi-channel order is the string
+       "Non-Amazon", which contains "Amazon" — so an unanchored test marks it as
+       an Amazon sale and the exclusion silently does nothing. Match the start. */
+    if (p.channel && !/^amazon/i.test(p.channel)) status = STATUS.NOT_AMAZON;
+    else if (p.cancelled && !i.shipped) status = STATUS.CANCELLED;
     else if (!s) status = STATUS.OUTSTANDING;
     else if (i.refunded > 0 || s.refundRows > 0) status = STATUS.RETURNED;
     else if (s.month === m) status = STATUS.SETTLED_IN_MONTH;
@@ -216,7 +229,8 @@ function buildLedger(src, months) {
 
   for (const m of months) {
     const mine = rows.filter((r) => r.month === m);
-    const billable = mine.filter((r) => r.status !== STATUS.CANCELLED);
+    const billable = mine.filter((r) => r.status !== STATUS.CANCELLED
+                                     && r.status !== STATUS.NOT_AMAZON);
 
     const invoiced = sum(billable, 'invoiced');
     const refunded = sum(billable, 'refunded');
@@ -254,7 +268,13 @@ function buildLedger(src, months) {
       /* of the above, what arrived after the month closed — the carry */
       settledLater: { count: billable.filter((r) => r.settled !== 0 && r.settledMonth && r.settledMonth !== m).length,
                       amount: settledLater },
+      /* TWO DIFFERENT FACTS, kept apart. `closing` is the arithmetic residual —
+         due less received — and is real money. `unpaidOrders` is how many orders
+         have no settlement at all. Reporting "3 orders worth 4,752.53" fused
+         them, and those three orders were worth nil. */
       closing: { count: closingRows.length, amount: closingAmt },
+      unpaidOrders: { count: closingRows.length,
+                      amount: r2(closingRows.reduce((a, x) => a + x.invoiced, 0)) },
       byStatus: Object.values(STATUS).map((st) => {
         const g = mine.filter((r) => r.status === st);
         return { status: st, count: g.length, amount: sum(g, 'invoiced') };

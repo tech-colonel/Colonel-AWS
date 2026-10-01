@@ -180,7 +180,14 @@ function reconcile(src, months) {
 
   const inWindow = (m) => months.includes(m);
   const shipped = new Set([...M.values()].filter((m) => m.shipped).map((m) => m.id));
-  const settled = new Set([...S.values()].filter((s) => !s.month || inWindow(s.month)).map((s) => s.id));
+  /* "Settled" means the order HAS been paid — not "was paid inside this
+     window". Restricting it to the window made an order that settled in
+     September count as unsettled, so this tab reported 148 outstanding while
+     the receivables ledger, asking the same question without that restriction,
+     reported 4. Two tabs of one workbook disagreeing on one quantity is worse
+     than either answer. The window already decides which orders are in scope;
+     it has no business also deciding whether they were paid. */
+  const settled = new Set([...S.values()].map((s) => s.id));
 
   const perMonth = months.map((month) => {
     const all = [...O.values()].filter((o) => o.month === month);

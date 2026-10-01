@@ -62,14 +62,20 @@ function auditLedger(ledger, context = {}) {
 
     /* ── 2. still outstanding ─────────────────────────────────────────────
        Expected at the tail of a month, alarming when it is old. */
-    if (m.closing.count > 0 && m.closing.amount > 1) {
+    /* The residual: due less received. Real money, independent of how many
+       orders have no settlement row. */
+    if (Math.abs(m.closing.amount) > 1) {
       const isLatest = m.month === ledger.months[ledger.months.length - 1];
       add({
         key: 'outstanding', month: m.month,
         severity: isLatest ? 'info' : 'warning',
-        title: `${m.month}: ${m.closing.count} orders worth ${money(m.closing.amount)} not yet received`,
-        amount: m.closing.amount, count: m.closing.count,
-        what: `${m.closing.count} orders invoiced in ${m.month} have no settlement against them yet.`,
+        title: `${m.month}: ${money(m.closing.amount)} of this month’s invoices not yet received`,
+        amount: m.closing.amount, count: m.unpaidOrders ? m.unpaidOrders.count : m.closing.count,
+        what: `Due from Amazon was ${money(m.expected.amount)} and ${money(m.settled.amount)} has `
+            + `arrived, leaving ${money(m.closing.amount)}. Separately, `
+            + `${m.unpaidOrders ? m.unpaidOrders.count : 0} order(s) have no settlement row at all, `
+            + `worth ${money(m.unpaidOrders ? m.unpaidOrders.amount : 0)} — the shortfall is mostly `
+            + 'part-settlements, not whole orders missing.',
         why: isLatest
           ? 'Amazon settles about every seven days, so the end of the most recent month always settles '
             + 'in the month after. This is the normal tail, not a loss.'
