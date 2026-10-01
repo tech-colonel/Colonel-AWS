@@ -41,6 +41,7 @@ const poRoutes              = require('./routes/poRoutes');
 const orderCycleRoutes      = require('./routes/orderCycleRoutes');
 const settlementRoutes      = require('./routes/settlementRoutes');
 const receivablesSummaryRoutes = require('./routes/receivablesSummaryRoutes');
+const amazonReceivablesRoutes  = require('./routes/amazonReceivablesRoutes');
 // ── CFO dashboards ────────────────────────────────────────────────────────────
 const cfoAnalyticsRoutes    = require('./routes/cfoAnalyticsRoutes');
 const mtrRoutes             = require('./routes/mtrRoutes');
@@ -82,6 +83,7 @@ app.use('/api',           poRoutes);
 app.use('/api',           orderCycleRoutes);
 app.use('/api',           settlementRoutes);
 app.use('/api',           receivablesSummaryRoutes);
+app.use('/api',           amazonReceivablesRoutes);
 app.use('/api',           cfoAnalyticsRoutes);
 app.use('/api',           mtrRoutes);
 app.use('/api',           plansRoutes);
