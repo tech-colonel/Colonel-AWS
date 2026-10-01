@@ -767,6 +767,33 @@ def _is_discount_col(c: str) -> bool:
     return "discount" in str(c).lower().replace(" ", "")
 
 
+# Columns that describe a voucher rather than post money to it. A register WITH a
+# "Gross Total" lists its ledgers after it, so these never reach the amount scan;
+# a simplified register WITHOUT one (Date … Narration, Taxable Value, IGST …) is
+# scanned from its first column, and a voucher number like "676" then read as an
+# amount — the Books taxable became Voucher No. + Supplier Invoice No. (676 + 676)
+# instead of its own Taxable Value. Matched on the header, never on the values.
+_ID_EXACT = {
+    "date", "particulars", "supplier", "buyer", "party", "party name", "ledger",
+    "voucher type", "narration", "gstin", "gstin/uin", "gstin uin", "pan", "pan no",
+    "hsn", "hsn/sac", "sac", "place of supply", "state", "address", "consignee",
+    "quantity", "qty", "rate", "uom", "unit", "units", "s no", "s.no", "sr no",
+    "sr. no", "sl no", "serial no", "remarks", "remark",
+}
+_ID_PATTERN = re.compile(
+    r"(\bno\.?$|\bnumber$|\bnum$|\bref\b|reference|\bdate$|\bgstin|\bnarration"
+    r"|\bvoucher type|\bhsn|\bquantity|\bqty\b)"
+)
+
+
+def _is_identifier_col(c: str) -> bool:
+    """True for a descriptive column (number, reference, date, GSTIN, narration,
+    party, quantity …) that holds text or IDs, never money. Used only when a register
+    has no "Gross Total" column to start the ledger scan after."""
+    n = _norm(c)
+    return n in _ID_EXACT or bool(_ID_PATTERN.search(n))
+
+
 def _is_summary_col(c: str) -> bool:
     """True for a column that RESTATES the taxable value rather than posting to it.
 
@@ -985,6 +1012,8 @@ def audit_row_figures(row: dict[str, Any], default_type: str) -> dict[str, float
         ks = str(k)
         if _is_tax_col(ks) or _is_tds_col(ks) or _is_round_off_col(ks):
             continue
+        if gt_pos < 0 and _is_identifier_col(ks):
+            continue
         amt = round_money(row.get(k))
         if not amt:
             continue
@@ -1156,6 +1185,10 @@ def parse_books(purchase_data: bytes, debit_data: bytes) -> list[NormalizedInvoi
                 if ks.startswith("_"):
                     continue
                 if _is_tax_col(ks) or _is_tds_col(ks) or _is_round_off_col(ks):
+                    continue
+                # No "Gross Total" → the scan starts at the first column; voucher /
+                # invoice numbers, GSTIN, narration etc. must not be read as money.
+                if gt_pos < 0 and _is_identifier_col(ks):
                     continue
                 amt = round_money(row.get(k))
                 if not amt:
