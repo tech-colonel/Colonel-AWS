@@ -708,7 +708,8 @@ const fetchSettlementFromAmazon = async (req, res, next) => {
                is what gets checked when a figure is queried. Percentages and
                totals are live formulas, not baked values, so a reader can click
                a cell and see how it was derived. */
-            const { aoa, checks, colWidths } = buildSummaryAoA(report.rows, result.settlement, result.rows.length);
+            const { aoa, checks, colWidths, workings, traceMismatches } =
+              buildSummaryAoA(report.rows, result.settlement, result.rows.length);
             const summarySheet = XLSXStyle.utils.aoa_to_sheet(aoa);
             summarySheet['!cols'] = colWidths;
             styleSummarySheet(summarySheet, aoa, checks);
@@ -716,6 +717,35 @@ const fetchSettlementFromAmazon = async (req, res, next) => {
 
             const sheet = XLSXStyle.utils.json_to_sheet(result.rows, { cellDates: true });
             XLSXStyle.utils.book_append_sheet(book, sheet, 'Settlement');
+
+            /* ── Workings ─────────────────────────────────────────────────────
+               Every ledger line and the summary line it feeds. The Summary's
+               amounts are SUMIFS over this sheet, so a figure that gets queried
+               can be answered by clicking it: the formula names the filter, and
+               filtering column H here lists the exact rows — with the order id
+               each one belongs to, and whether that order is from this period.
+
+               Appended, never substituted: Summary and Settlement are written
+               exactly as before. */
+            if (workings) {
+              const wSheet = XLSXStyle.utils.aoa_to_sheet(workings.aoa);
+              wSheet['!cols'] = workings.colWidths;
+              wSheet['!autofilter'] = {
+                ref: XLSXStyle.utils.encode_range({
+                  s: { r: 0, c: 0 },
+                  e: { r: Math.max(0, workings.aoa.length - 1), c: 8 },
+                }),
+              };
+              wSheet['!freeze'] = { xSplit: 0, ySplit: 1 };
+              XLSXStyle.utils.book_append_sheet(book, wSheet, 'Workings');
+            }
+
+            /* A formula that disagrees with the figure beside it is worse than
+               no formula, so say so loudly rather than let it ship silently. */
+            if (traceMismatches && traceMismatches.length) {
+              console.warn(`[settlement ${settlementId}] traced formulas disagree with computed figures:`,
+                           traceMismatches);
+            }
             await fs.writeFile(path.join(OUTPUT_DIR, filename),
                                XLSXStyle.write(book, { type: 'buffer', bookType: 'xlsx' }));
 
