@@ -20,13 +20,15 @@
    trust, which is worth much less.
    ────────────────────────────────────────────────────────────────────────────── */
 import React, { useState, useEffect, useCallback } from 'react';
-import { useParams } from 'react-router-dom';
+import { useParams, useNavigate } from 'react-router-dom';
 import {
   RefreshCw, Download, AlertTriangle, AlertCircle, Info, ChevronRight,
-  FileText, Package, Receipt, Banknote, X, Loader2,
+  Package, Receipt, Banknote, X, Loader2, ArrowLeft,
+  LayoutDashboard, Bot, ClipboardList,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import api from '../../lib/api';
+import DashboardLayout from '../../components/layout/DashboardLayout';
 
 const inr = (n, dp = 2) => (n === null || n === undefined || Number.isNaN(n) ? '—'
   : (n < 0 ? '-' : '') + Math.abs(n).toLocaleString('en-IN',
@@ -63,6 +65,7 @@ const SEV = {
 
 export default function AmazonReceivablesDashboard() {
   const { brandId } = useParams();
+  const navigate = useNavigate();
   const [agentId, setAgentId] = useState(null);
   const [data, setData] = useState(null);
   const [status, setStatus] = useState(null);
@@ -114,10 +117,22 @@ export default function AmazonReceivablesDashboard() {
     } finally { setRunning(false); }
   };
 
+  /* The sidebar belongs on EVERY state of the page, loading included — a shell
+     that appears only once the data lands reads as the navigation breaking. */
+  const sidebarItems = [
+    { path: `/brands/${brandId}/dashboard`, label: 'Dashboard', icon: LayoutDashboard, testId: 'nav-dashboard' },
+    { path: `/brands/${brandId}/agents`, label: 'All Agents', icon: Bot, testId: 'nav-agents' },
+    { path: `/brands/${brandId}/reco`, label: 'Reconciliation', icon: ClipboardList, testId: 'nav-reco' },
+  ];
+
   if (loading) {
-    return <div className="p-10 flex items-center gap-3 text-slate-500">
-      <Loader2 className="h-5 w-5 animate-spin" /> Loading Amazon receivables…
-    </div>;
+    return (
+      <DashboardLayout sidebarItems={sidebarItems}>
+        <div className="p-6 flex items-center gap-3 text-slate-500">
+          <Loader2 className="h-5 w-5 animate-spin" /> Loading Amazon receivables…
+        </div>
+      </DashboardLayout>
+    );
   }
 
   const months = data?.ledger?.months || data?.months || [];
@@ -127,7 +142,14 @@ export default function AmazonReceivablesDashboard() {
   const sources = data?.sources || [];
 
   return (
+    <DashboardLayout sidebarItems={sidebarItems}>
     <div className="p-6 space-y-6 max-w-[1500px]">
+      <button onClick={() => navigate(`/brands/${brandId}/reco`)}
+              className="flex items-center gap-1.5 text-sm text-slate-500 hover:text-blue-600 group transition-colors">
+        <ArrowLeft className="w-3.5 h-3.5 group-hover:-translate-x-0.5 transition-transform" />
+        Back to Reconciliation
+      </button>
+
       {/* ── header ─────────────────────────────────────────────────────── */}
       <div className="flex items-start justify-between gap-4">
         <div>
@@ -187,6 +209,7 @@ export default function AmazonReceivablesDashboard() {
 
       {drill && <DrillPanel drill={drill} data={data} onClose={() => setDrill(null)} />}
     </div>
+    </DashboardLayout>
   );
 }
 
