@@ -1934,7 +1934,10 @@ const runReco = async (req, res) => {
         // are instant — give that build headroom for larger multi-state jobs.
         // Raised to 10 min: on the small EC2 box heavy recos run slower but DO complete;
         // 180s was cutting them off mid-build (engine still returned 200 afterwards).
-        timeout: 600000
+        // Multi-State with a full year of monthly 2B files per state (combined by the
+        // engine) takes ~13 min on the t3.large, so that agent alone gets 30 min.
+        // Interim until big runs become background jobs; every other agent stays at 10.
+        timeout: recoType === 'gstr_2b_books_multistate' ? 1800000 : 600000
       });
     } finally {
       enginePool.releaseEngine(mainEngine);
