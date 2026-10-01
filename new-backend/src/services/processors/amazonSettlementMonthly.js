@@ -191,6 +191,7 @@ function buildDifferenceAoA(monthKey, monthLabel, invoice, lines) {
   push();
 
   push(S('WHAT AMAZON INVOICED'));
+  push(S('Note: the Total column INCLUDES GST. The fee table below is ex GST — compare like with like.'));
   push(S('Document'), S('Type'), S('Date'), S('State'), S('Fees ex GST'), S('GST'), S('Total'));
   const docFirst = aoa.length + 1;
   for (const d of invoice.docs) {
@@ -202,8 +203,8 @@ function buildDifferenceAoA(monthKey, monthLabel, invoice, lines) {
                     F(`SUM(G${docFirst}:G${docLast})`));
   push();
 
-  push(S('FEE BY FEE'));
-  push(S('Fee'), S('Invoiced'), S('Settlement'), S('Difference'), S('Note'));
+  push(S('FEE BY FEE — EX GST'));
+  push(S('Fee'), S('Invoiced ex GST'), S('Settlement ex GST'), S('Difference'), S('Note'));
   const lineFirst = aoa.length + 1;
   for (const l of lines) {
     const row = aoa.length + 1;
@@ -217,14 +218,24 @@ function buildDifferenceAoA(monthKey, monthLabel, invoice, lines) {
                     S('positive = invoiced more than deducted'));
   push();
 
+  /* ── the difference, on BOTH bases ────────────────────────────────────────
+     The invoice block above ends on a total that INCLUDES GST, and the fee
+     table is ex GST. Reading one against the other is the obvious mistake and
+     it has already been made, so neither figure is shown without its base
+     named, and both bases are set out side by side. */
   push(S('THE DIFFERENCE'));
-  push(S('Invoiced, net of credit notes (ex GST)'), F(`E${rInv}`));
-  push(S('Deducted by the settlements (ex GST)'),   F(`C${rTot}`));
-  const rDiff = push(S('Difference (ex GST)'), F(`B${aoa.length - 1}-B${aoa.length}`));
+  push(S(''), S('ex GST'), S('GST'), S('incl GST'));
+  const rI = push(S('Invoiced, net of credit notes'), F(`E${rInv}`), F(`F${rInv}`), F(`G${rInv}`));
+  const rS = push(S('Deducted by the settlements'), F(`C${rTot}`),
+                  F(`ABS(${M('gst_on_fees')})`), F(`B${rI + 1}+C${rI + 1}`));
+  const rDiff = push(S('Difference'), F(`B${rI}-B${rS}`), F(`C${rI}-C${rS}`), F(`D${rI}-D${rS}`));
+  push(S('negative = the settlements took more than Amazon invoiced'));
   push();
 
   push(S('HOW TO READ THIS'));
   for (const t of [
+    'Totals on the invoice block include GST. The fee-by-fee table is ex GST. The Difference',
+    '    section states both, so the two are never read against each other by accident.',
     'An invoice is dated when the fee was CHARGED. A settlement carries it when it POSTED.',
     'Fees charged at the end of a month settle in the next one, so a residual difference is expected.',
     'Closing it properly means matching fee by fee on order id, not month against month.',
