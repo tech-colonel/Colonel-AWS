@@ -9,7 +9,7 @@ const fs = require('fs-extra');
 const amazonReports = require('../../../services/amazonReports');
 const amazonTokenStore = require('../../../services/amazonTokenStore');
 const { pivotSettlementRows, verifyBalance } = require('../../../services/processors/amazonSettlementPivot');
-const { buildSummaryAoA, styleSummarySheet } = require('../../../services/processors/amazonSettlementSummary');
+const { buildSummaryAoA, styleSummarySheet, feeSplitRows } = require('../../../services/processors/amazonSettlementSummary');
 /* xlsx-js-style is SheetJS with cell styling that survives the write; the
    stock build drops every style silently. Scoped to this workbook only. */
 const XLSXStyle = require('xlsx-js-style');
@@ -708,43 +708,49 @@ const fetchSettlementFromAmazon = async (req, res, next) => {
                is what gets checked when a figure is queried. Percentages and
                totals are live formulas, not baked values, so a reader can click
                a cell and see how it was derived. */
-            const { aoa, checks, colWidths, workings, traceMismatches } =
+            const { aoa, checks, colWidths, feeColumns, verifyAgainst } =
               buildSummaryAoA(report.rows, result.settlement, result.rows.length);
             const summarySheet = XLSXStyle.utils.aoa_to_sheet(aoa);
             summarySheet['!cols'] = colWidths;
             styleSummarySheet(summarySheet, aoa, checks);
             XLSXStyle.utils.book_append_sheet(book, summarySheet, 'Summary');
 
-            const sheet = XLSXStyle.utils.json_to_sheet(result.rows, { cellDates: true });
-            XLSXStyle.utils.book_append_sheet(book, sheet, 'Settlement');
+            /* ── the settlement report, with the fee split spelled out ────────
+               Every amount on the Summary is a SUM or SUMIFS over a column of
+               THIS sheet, so clicking a figure highlights the cells it came
+               from. The report as Amazon sends it merges commission, closing
+               fee and their GST into one `selling_fees` column, which leaves
+               "Commission" with nothing to point at — so each fee line gets its
+               own column here.
 
-            /* ── Workings ─────────────────────────────────────────────────────
-               Every ledger line and the summary line it feeds. The Summary's
-               amounts are SUMIFS over this sheet, so a figure that gets queried
-               can be answered by clicking it: the formula names the filter, and
-               filtering column H here lists the exact rows — with the order id
-               each one belongs to, and whether that order is from this period.
-
-               Appended, never substituted: Summary and Settlement are written
-               exactly as before. */
-            if (workings) {
-              const wSheet = XLSXStyle.utils.aoa_to_sheet(workings.aoa);
-              wSheet['!cols'] = workings.colWidths;
-              wSheet['!autofilter'] = {
-                ref: XLSXStyle.utils.encode_range({
-                  s: { r: 0, c: 0 },
-                  e: { r: Math.max(0, workings.aoa.length - 1), c: 8 },
-                }),
-              };
-              wSheet['!freeze'] = { xSplit: 0, ySplit: 1 };
-              XLSXStyle.utils.book_append_sheet(book, wSheet, 'Workings');
+               The split is grouped with the pivot's own key in the pivot's own
+               order, and the alignment is checked on `order_id` before anything
+               is written. These columns are added to the SHEET only; the rows
+               stored in the database are untouched. */
+            let sheetRows = result.rows;
+            const split = feeSplitRows(report.rows);
+            const aligned = split.length === result.rows.length
+              && result.rows.every((r, i) => (r.order_id || null) === (split[i]._order || null));
+            if (aligned) {
+              sheetRows = result.rows.map((r, i) => {
+                const out = { ...r };
+                for (const c of feeColumns) out[c] = split[i][c];
+                return out;
+              });
+            } else {
+              console.warn(`[settlement ${settlementId}] fee-split rows do not align with the pivot `
+                + `(${split.length} vs ${result.rows.length}); writing the settlement sheet without them.`);
             }
+
+            const sheet = XLSXStyle.utils.json_to_sheet(sheetRows, { cellDates: true });
+            XLSXStyle.utils.book_append_sheet(book, sheet, 'Settlement');
 
             /* A formula that disagrees with the figure beside it is worse than
                no formula, so say so loudly rather than let it ship silently. */
-            if (traceMismatches && traceMismatches.length) {
-              console.warn(`[settlement ${settlementId}] traced formulas disagree with computed figures:`,
-                           traceMismatches);
+            const mismatches = aligned ? verifyAgainst(sheetRows) : [];
+            if (mismatches.length) {
+              console.warn(`[settlement ${settlementId}] summary formulas disagree with the settlement sheet:`,
+                           mismatches);
             }
             await fs.writeFile(path.join(OUTPUT_DIR, filename),
                                XLSXStyle.write(book, { type: 'buffer', bookType: 'xlsx' }));
