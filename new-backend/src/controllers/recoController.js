@@ -1126,8 +1126,20 @@ const runReco = async (req, res) => {
       try { states = JSON.parse(req.body.drive_states); } catch (_) { states = null; }
       if (Array.isArray(states) && states.length) {
         req.files = req.files || [];
+        // A state's GSTR-2B may be several monthly portal files (gstr2b = [..]). They
+        // are all sent, in order, and gstr2b_counts tells the engine how many belong to
+        // each state so it can combine them (recon/gstr2b_combine.py). One file per
+        // state sends no counts — exactly the request it always was.
+        const gstr2bCounts = [];
         for (const st of states) {
+          const many = Array.isArray(st && st.gstr2b) ? st.gstr2b.filter((x) => x && x.fileId) : null;
+          gstr2bCounts.push(many ? many.length : (st && st.gstr2b && st.gstr2b.fileId ? 1 : 0));
+          for (const it of (many || [])) {
+            const buffer = await drive.downloadFile(it.fileId);
+            req.files.push({ fieldname: 'gstr2b', originalname: it.name || 'gstr2b.xlsx', buffer, size: buffer.length });
+          }
           for (const key of ['gstr2b', 'purchase', 'debit']) {
+            if (key === 'gstr2b' && many) continue;
             const item = st && st[key];
             if (item && item.fileId) {
               const buffer = await drive.downloadFile(item.fileId);
@@ -1138,6 +1150,7 @@ const runReco = async (req, res) => {
             }
           }
         }
+        if (gstr2bCounts.some((n) => n > 1)) req.body.gstr2b_counts = JSON.stringify(gstr2bCounts);
       }
     }
 
@@ -1821,6 +1834,11 @@ const runReco = async (req, res) => {
     // and to skip the per-state-file cross-state remarks, which cannot apply to it.
     if (recoType === 'gstr_2b_books_multistate' && req.body.books_combined) {
       form.append('books_combined', String(req.body.books_combined));
+    }
+    // Several monthly GSTR-2B files per state: how many belong to each state, in state
+    // order, so the engine combines each state's months into one 2B first.
+    if (recoType === 'gstr_2b_books_multistate' && req.body.gstr2b_counts) {
+      form.append('gstr2b_counts', String(req.body.gstr2b_counts));
     }
 
     // GSTR-1 vs Books combined mode: one Sales Register for every state + any number

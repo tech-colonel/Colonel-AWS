@@ -570,6 +570,13 @@ def _known_layout_problem(data: bytes, records: list[NormalizedInvoice]) -> str 
         if unread / len(records) > 0.5:
             return (f"{unread} of {len(records)} rows came out without an invoice number or amounts "
                     "— the column headings were not recognised")
+        # A heading band shifted by hand-merging keeps the invoice number and value but
+        # loses the Taxable Value column: every row then reads Rs 0 taxable against a
+        # real invoice value, and the reconciliation would quietly be all mismatches.
+        zero_taxable = sum(1 for r in records if not r.taxable_value and r.invoice_value)
+        if zero_taxable / len(records) > 0.5:
+            return (f"{zero_taxable} of {len(records)} rows have an invoice value but Rs 0 taxable value "
+                    "— the Taxable Value column was not recognised")
         return None
     try:
         import openpyxl

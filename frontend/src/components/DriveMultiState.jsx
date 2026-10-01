@@ -40,8 +40,13 @@ export default function DriveMultiState({ onConfirmed }) {
   const buildDriveStates = (selArr, sts) =>
     sts.map((_, i) => {
       const s = selArr[i] || {};
+      // GSTR-2B may be several monthly files for a state (s.gstr2b = [fileId…]). One
+      // file is sent exactly as before; several go as a list and the engine combines
+      // them into one 2B (recon/gstr2b_combine.py).
+      const g = (Array.isArray(s.gstr2b) ? s.gstr2b : (s.gstr2b ? [s.gstr2b] : [])).filter(Boolean);
       return {
-        gstr2b: s.gstr2b ? { fileId: s.gstr2b, name: nameOf(s.gstr2b) } : null,
+        gstr2b: g.length > 1 ? g.map((id) => ({ fileId: id, name: nameOf(id) }))
+          : g.length === 1 ? { fileId: g[0], name: nameOf(g[0]) } : null,
         purchase: s.purchase ? { fileId: s.purchase, name: nameOf(s.purchase) } : null,
         debit: s.debit ? { fileId: s.debit, name: nameOf(s.debit) } : null,
       };
@@ -56,13 +61,13 @@ export default function DriveMultiState({ onConfirmed }) {
       const { data } = await api.post('/api/drive/route', { folder_url: target, agent_type: AGENT_TYPE });
       const sts = data.states || [];
       const seed = sts.map((st) => ({
-        gstr2b: st.gstr2b?.[0]?.fileId || '',
+        gstr2b: (st.gstr2b || []).map((x) => x.fileId).filter(Boolean),
         purchase: st.purchase?.[0]?.fileId || '',
         debit: st.debit?.[0]?.fileId || '',
       }));
       setScan(data); setSel(seed); setLastAnalyzed(target);
       // Auto-confirm when every detected state has at least GSTR-2B + Purchase.
-      const allReady = sts.length > 0 && seed.every((s) => s.gstr2b && s.purchase);
+      const allReady = sts.length > 0 && seed.every((s) => s.gstr2b.length && s.purchase);
       if (allReady) {
         setConfirmed(true);
         onConfirmed && onConfirmed(buildDriveStates(seed, sts));
@@ -88,7 +93,10 @@ export default function DriveMultiState({ onConfirmed }) {
     setSel((p) => p.map((s, idx) => idx === i ? { ...s, [key]: fileId } : s));
   };
 
-  const missing = states.filter((_, i) => !(sel[i]?.gstr2b) || !(sel[i]?.purchase));
+  const missing = states.filter((_, i) => !(sel[i]?.gstr2b?.length) || !(sel[i]?.purchase));
+  const g2bOf = (i) => (Array.isArray(sel[i]?.gstr2b) ? sel[i].gstr2b : (sel[i]?.gstr2b ? [sel[i].gstr2b] : []));
+  const addG2b = (i, fileId) => fileId && !g2bOf(i).includes(fileId) && setStateSlot(i, 'gstr2b', [...g2bOf(i), fileId]);
+  const removeG2b = (i, fileId) => setStateSlot(i, 'gstr2b', g2bOf(i).filter((x) => x !== fileId));
   const confirm = () => {
     if (missing.length) return;
     setConfirmed(true);
@@ -167,7 +175,27 @@ export default function DriveMultiState({ onConfirmed }) {
                   State {i + 1} — {st.label} <span style={{ color: 'var(--text-muted)', fontWeight: 500 }}>({st.code})</span>
                 </div>
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8 }}>
-                  {[['gstr2b', 'GSTR-2B *'], ['purchase', 'Purchase *'], ['debit', 'Debit Note']].map(([key, label]) => (
+                  <div>
+                    <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', display: 'block', marginBottom: 3 }}>
+                      GSTR-2B * {g2bOf(i).length > 1 && <span style={{ fontWeight: 500 }}>({g2bOf(i).length} months — combined)</span>}
+                    </label>
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginBottom: 4 }}>
+                      {g2bOf(i).map((id) => (
+                        <span key={id} title={nameOf(id)} style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 10.5,
+                          fontFamily: 'monospace', padding: '2px 6px', borderRadius: 5, border: '1px solid var(--card-border)',
+                          background: 'var(--page-bg)', color: 'var(--text-heading)', maxWidth: '100%' }}>
+                          <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{nameOf(id).slice(0, 22)}</span>
+                          <button type="button" aria-label={`Remove ${nameOf(id)}`} onClick={() => removeG2b(i, id)}
+                            style={{ border: 'none', background: 'none', cursor: 'pointer', padding: 0, color: 'var(--text-muted)' }}>×</button>
+                        </span>
+                      ))}
+                    </div>
+                    <select value="" onChange={(e) => addG2b(i, e.target.value)} style={selectStyle}>
+                      <option value="">{g2bOf(i).length ? '+ add another month' : '— pick GSTR-2B —'}</option>
+                      {files.filter((f) => !g2bOf(i).includes(f.fileId)).map((f) => <option key={f.fileId} value={f.fileId}>{f.name}</option>)}
+                    </select>
+                  </div>
+                  {[['purchase', 'Purchase *'], ['debit', 'Debit Note']].map(([key, label]) => (
                     <div key={key}>
                       <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', display: 'block', marginBottom: 3 }}>{label}</label>
                       <select value={sel[i]?.[key] || ''} onChange={(e) => setStateSlot(i, key, e.target.value)} style={selectStyle}>

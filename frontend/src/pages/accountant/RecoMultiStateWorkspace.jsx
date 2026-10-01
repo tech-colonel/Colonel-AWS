@@ -58,7 +58,9 @@ const loadSlotsFromStorage = (brandId) => {
     const raw = localStorage.getItem(storageKey(brandId));
     if (!raw) return null;
     return JSON.parse(raw).map(slot => ({
-      gstr2b:   slot.gstr2b   ? b64ToFile(slot.gstr2b)   : null,
+      gstr2b:   Array.isArray(slot.gstr2b)
+        ? (slot.gstr2b.length > 1 ? slot.gstr2b.map(b64ToFile) : (slot.gstr2b[0] ? b64ToFile(slot.gstr2b[0]) : null))
+        : (slot.gstr2b ? b64ToFile(slot.gstr2b) : null),
       purchase: slot.purchase ? b64ToFile(slot.purchase) : null,
       debit:    slot.debit    ? b64ToFile(slot.debit)    : null,
     }));
@@ -120,6 +122,131 @@ const DiffCell = ({ v }) => {
 };
 
 // ── Mini file dropzone (per state slot) ──────────────────────────────────────
+// ── GSTR-2B: several monthly portal files per state ──────────────────────────
+// A state's 2B slot holds one File or an array of Files (monthly downloads). The
+// engine combines a state's months into one 2B (recon/gstr2b_combine.py); the
+// checks below are early warnings read from the portal file names
+// (MMYYYY_<GSTIN>_GSTR2B_…) — the engine re-checks from inside each file.
+const g2bFiles = (v) => (Array.isArray(v) ? v : (v ? [v] : []));
+const _MON = ['', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const portalMeta = (name = '') => {
+  const m = /^(\d{2})(\d{4})_([0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][0-9A-Z]Z[0-9A-Z])_/i.exec(name);
+  if (!m || +m[1] < 1 || +m[1] > 12) return null;
+  return { key: +m[2] * 100 + +m[1], label: `${_MON[+m[1]]}-${m[2]}`, gstin: m[3].toUpperCase() };
+};
+const describeMonths = (files) => {
+  const metas = files.map((f) => portalMeta(f.name));
+  const known = metas.filter(Boolean).sort((a, b) => a.key - b.key);
+  const gstins = [...new Set(known.map((m) => m.gstin))];
+  const dupes = known.filter((m, i) => i > 0 && m.key === known[i - 1].key).map((m) => m.label);
+  let missing = [];
+  if (known.length > 1) {
+    for (let k = known[0].key; k < known[known.length - 1].key;) {
+      let y = Math.floor(k / 100), mo = k % 100;
+      if (mo === 12) { y += 1; mo = 1; } else mo += 1;
+      k = y * 100 + mo;
+      if (!known.some((m) => m.key === k) && k < known[known.length - 1].key) missing.push(`${_MON[mo]}-${y}`);
+    }
+  }
+  return {
+    span: known.length ? `${known[0].label} → ${known[known.length - 1].label}` : '',
+    gstins, dupes: [...new Set(dupes)], missing, unknown: metas.filter((m) => !m).length,
+  };
+};
+
+const MultiMonthDropzone = ({ label, hint, files, onChange, required, stepIndex }) => {
+  const inputRef = useRef(null);
+  const [drag, setDrag] = useState(false);
+  const list = g2bFiles(files);
+  const add = (incoming) => {
+    const fresh = Array.from(incoming || []).filter((f) => !list.some((x) => x.name === f.name && x.size === f.size));
+    const next = [...list, ...fresh];
+    onChange(next.length ? (next.length === 1 ? next[0] : next) : null);
+  };
+  const remove = (i) => {
+    const next = list.filter((_, idx) => idx !== i);
+    onChange(next.length ? (next.length === 1 ? next[0] : next) : null);
+  };
+  const info = describeMonths(list);
+  const warn = [
+    info.gstins.length > 1 && `Different GSTINs: ${info.gstins.join(', ')}`,
+    info.dupes.length > 0 && `Same month twice: ${info.dupes.join(', ')}`,
+  ].filter(Boolean);
+  return (
+    <div
+      onDragOver={(e) => { e.preventDefault(); setDrag(true); }}
+      onDragLeave={() => setDrag(false)}
+      onDrop={(e) => { e.preventDefault(); setDrag(false); add(e.dataTransfer.files); }}
+      style={{
+        position: 'relative', padding: '12px 14px', borderRadius: 9,
+        background: list.length ? 'rgba(5,150,105,0.06)' : drag ? 'rgba(124,58,237,0.05)' : 'var(--surface)',
+        border: `1px solid ${warn.length ? 'rgba(225,29,72,0.35)' : list.length ? 'rgba(5,150,105,0.25)' : drag ? 'rgba(124,58,237,0.3)' : 'var(--card-border)'}`,
+        borderLeft: `2px solid ${warn.length ? '#E11D48' : list.length ? '#059669' : drag ? COLOR : 'transparent'}`,
+        transition: 'all 0.15s ease',
+      }}
+    >
+      <input ref={inputRef} type="file" multiple accept=".xlsx,.xls,.csv" className="hidden"
+        onChange={(e) => { add(e.target.files); e.target.value = ''; }} />
+      <div role="button" tabIndex={0} aria-label={`Upload ${label}${required ? ' (required)' : ''}`}
+        onClick={() => inputRef.current?.click()}
+        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') inputRef.current?.click(); }}
+        style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
+        <div style={{
+          width: 28, height: 28, borderRadius: 6, flexShrink: 0,
+          background: list.length ? 'rgba(5,150,105,0.12)' : 'var(--page-bg)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+        }}>
+          {list.length
+            ? <FileSpreadsheet style={{ width: 13, height: 13, color: '#059669' }} />
+            : <Upload style={{ width: 12, height: 12, color: 'var(--text-muted)' }} />}
+        </div>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <p style={{ fontSize: 12, fontWeight: 700, fontFamily: 'Barlow', margin: 0,
+            color: list.length ? '#059669' : 'var(--text-heading)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {list.length === 0 && <>{label}{required && <span style={{ color: '#E11D48', marginLeft: 3, fontWeight: 400 }}>*</span>}</>}
+            {list.length === 1 && list[0].name}
+            {list.length > 1 && `${list.length} monthly files${info.span ? ` · ${info.span}` : ''}`}
+          </p>
+          <p style={{ fontSize: 10, fontFamily: 'monospace', margin: 0, color: list.length ? 'rgba(5,150,105,0.65)' : 'var(--text-muted)' }}>
+            {list.length === 0 ? `${hint} · you can add multiple 2B files (one per month)` : list.length === 1 ? `${(list[0].size / 1024).toFixed(1)} KB · READY · click to add more months` : 'READY · combined into one 2B · click to add more'}
+          </p>
+        </div>
+        <span style={{ fontFamily: 'Barlow', fontWeight: 700, fontSize: 28, lineHeight: 1,
+          color: list.length ? 'rgba(5,150,105,0.08)' : 'rgba(0,0,0,0.04)', userSelect: 'none' }}>
+          {String(stepIndex + 1).padStart(2, '0')}
+        </span>
+      </div>
+      {list.length > 1 && (
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginTop: 8 }}>
+          {list.map((f, i) => {
+            const m = portalMeta(f.name);
+            return (
+              <span key={`${f.name}-${i}`} title={f.name} style={{
+                display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 10.5, fontFamily: 'monospace',
+                padding: '2px 6px', borderRadius: 5, background: 'var(--page-bg)', border: '1px solid var(--card-border)',
+                color: 'var(--text-heading)',
+              }}>
+                {m ? m.label : f.name.slice(0, 18)}
+                <button type="button" aria-label={`Remove ${f.name}`} onClick={(e) => { e.stopPropagation(); remove(i); }}
+                  style={{ border: 'none', background: 'none', cursor: 'pointer', padding: 0, color: 'var(--text-muted)', fontSize: 12, lineHeight: 1 }}>×</button>
+              </span>
+            );
+          })}
+        </div>
+      )}
+      {list.length > 1 && (info.missing.length > 0 || info.unknown > 0) && (
+        <p style={{ fontSize: 10.5, color: 'var(--text-muted)', margin: '6px 0 0' }}>
+          {info.missing.length > 0 && `No file for ${info.missing.join(', ')}. `}
+          {info.unknown > 0 && `${info.unknown} file name${info.unknown > 1 ? 's' : ''} not in the portal pattern — the engine will read the month from inside.`}
+        </p>
+      )}
+      {warn.map((w) => (
+        <p key={w} style={{ fontSize: 10.5, color: '#E11D48', fontWeight: 600, margin: '6px 0 0' }}>{w}</p>
+      ))}
+    </div>
+  );
+};
+
 const MiniDropzone = ({ label, hint, file, onChange, required, stepIndex }) => {
   const inputRef = useRef(null);
   const [drag, setDrag] = useState(false);
@@ -314,7 +441,9 @@ const RecoMultiStateWorkspace = () => {
       try {
         const serialised = await Promise.all(
           stateSlots.map(async slot => ({
-            gstr2b:   slot.gstr2b   ? await fileToB64(slot.gstr2b)   : null,
+            gstr2b:   Array.isArray(slot.gstr2b)
+              ? await Promise.all(slot.gstr2b.map(fileToB64))
+              : (slot.gstr2b ? await fileToB64(slot.gstr2b) : null),
             purchase: slot.purchase ? await fileToB64(slot.purchase) : null,
             debit:    slot.debit    ? await fileToB64(slot.debit)    : null,
           }))
@@ -408,18 +537,23 @@ const RecoMultiStateWorkspace = () => {
         // compare Books file numbers that a shared register does not have.
         formData.append('books_combined', 'true');
         for (const slot of stateSlots) {
-          if (slot.gstr2b) formData.append('gstr2b', slot.gstr2b);
+          for (const f of g2bFiles(slot.gstr2b)) formData.append('gstr2b', f);
         }
         formData.append('purchase', sharedBooks.purchase);
         if (sharedBooks.debit) formData.append('debit', sharedBooks.debit);
         else                   formData.append('debit', new Blob([]), 'empty.xlsx');
       } else {
         for (const slot of stateSlots) {
-          if (slot.gstr2b)   formData.append('gstr2b',   slot.gstr2b);
+          for (const f of g2bFiles(slot.gstr2b)) formData.append('gstr2b', f);
           if (slot.purchase) formData.append('purchase', slot.purchase);
           if (slot.debit)    formData.append('debit',    slot.debit);
           else               formData.append('debit',    new Blob([]), 'empty.xlsx');
         }
+      }
+      // Several monthly 2B files in a state: tell the engine how many belong to each
+      // state (in order) so it combines them. One file per state sends nothing extra.
+      if (!useDrive && stateSlots.some((sl) => g2bFiles(sl.gstr2b).length > 1)) {
+        formData.append('gstr2b_counts', JSON.stringify(stateSlots.map((sl) => g2bFiles(sl.gstr2b).length)));
       }
       const response = await api.post('/api/reco/run', formData, {
         headers: { 'Content-Type': 'multipart/form-data' },
@@ -759,6 +893,8 @@ const RecoMultiStateWorkspace = () => {
                   Add one row per state/GSTIN. All files are merged and reconciled together.
                   If an invoice appears "missing" but belongs to another state's file,{' '}
                   <strong style={{ color: '#C2410C' }}>Remark 3</strong> will explain why.
+                  {' '}You can add <strong style={{ color: 'var(--text-heading)' }}>multiple GSTR-2B files per state</strong>
+                  {' '}(one per month, GST-portal download) — we combine them for you, no manual merging.
                 </p>
               </div>
             </div>
@@ -899,8 +1035,8 @@ const RecoMultiStateWorkspace = () => {
                       gap: combinedBooks ? 0 : 10,
                       transition: 'grid-template-columns 0.32s cubic-bezier(0.4,0,0.2,1), gap 0.32s',
                     }}>
-                      <MiniDropzone label="GSTR-2B" hint=".xlsx / .xls" required stepIndex={0}
-                        file={slot.gstr2b} onChange={f => setSlotFile(idx, 'gstr2b', f)} />
+                      <MultiMonthDropzone label="GSTR-2B" hint=".xlsx / .xls" required stepIndex={0}
+                        files={slot.gstr2b} onChange={f => setSlotFile(idx, 'gstr2b', f)} />
                       <div style={{
                         overflow: 'hidden', minWidth: 0,
                         opacity: combinedBooks ? 0 : 1,
@@ -1084,6 +1220,23 @@ const RecoMultiStateWorkspace = () => {
               running={running}
               onRerunWithColumns={(override) => handleRun({ gstr2bColumnOverride: override })}
             />
+
+            {/* Monthly 2B files combined per state (engine: recon/gstr2b_combine.py) */}
+            {(result.gstr2b_months || []).length > 0 && (
+              <div style={{ fontSize: 12, color: 'var(--text-muted)', lineHeight: 1.6,
+                border: '1px solid var(--card-border)', borderRadius: 10, padding: '10px 14px', background: 'var(--surface)' }}>
+                <b style={{ color: 'var(--text-heading)' }}>GSTR-2B months combined</b> — full detail in the “2B Months” sheet of the Excel.
+                {result.gstr2b_months.map((st) => (
+                  <div key={st.state}>
+                    State {st.state}{st.gstin ? ` (${st.gstin})` : ''}: {st.combined
+                      ? <>{st.files} months, {st.from} → {st.to} · {Number(st.records || 0).toLocaleString('en-IN')} records · taxable ₹{fmt(st.taxable)}</>
+                      : <>1 file</>}
+                    {(st.missing_months || []).length > 0 && <span style={{ color: '#D97706' }}> · no file for {st.missing_months.join(', ')}</span>}
+                    {(st.skipped || []).length > 0 && <span> · {st.skipped.length} duplicate file{st.skipped.length > 1 ? 's' : ''} used once</span>}
+                  </div>
+                ))}
+              </div>
+            )}
 
             {/* Stat cards — left-bordered flat design */}
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(150px, 1fr))', gap: 12 }}>

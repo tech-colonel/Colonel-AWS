@@ -650,6 +650,28 @@ class ReconciliationHandler(BaseHTTPRequestHandler):
                     return m.group(0).upper() if m else ""
 
                 gstr2b_items  = _file_items("gstr2b")
+                # Several monthly GSTR-2B portal files per state: the page sends
+                # gstr2b_counts (files per state, in state order). Each state's months are
+                # combined into ONE portal-layout 2B here, so everything below runs exactly
+                # as it does for one file per state. See recon/gstr2b_combine.py.
+                gstr2b_months: list = []
+                if fields.get("gstr2b_counts"):
+                    from recon.gstr2b_combine import (
+                        combine_monthly_2b, group_by_counts, Gstr2bCombineError)
+                    try:
+                        groups = group_by_counts(gstr2b_items, json.loads(fields["gstr2b_counts"]))
+                        combined_items = []
+                        for gi, grp in enumerate(groups):
+                            if not grp:
+                                raise Gstr2bCombineError(f"State {gi + 1} has no GSTR-2B file.")
+                            item, info = combine_monthly_2b(grp)
+                            combined_items.append(item)
+                            if info.get("combined") or info.get("skipped"):
+                                gstr2b_months.append({"state": gi + 1, **info})
+                        gstr2b_items = combined_items
+                    except Gstr2bCombineError as e:
+                        self.write_json({"error": str(e)}, 400)
+                        return
                 gstr2b_list   = [it["content"] for it in gstr2b_items]
                 entity_gstins = [_entity_gstin_from_filename(it.get("filename", "")) for it in gstr2b_items]
                 # A file whose name carries no GSTIN (e.g. the Combined workbook) may state
@@ -732,6 +754,8 @@ class ReconciliationHandler(BaseHTTPRequestHandler):
                     "results": [result.as_dict() for result in results],
                     "gstr2b_formats": _gstr2b_formats_for(
                         [(it.get("filename", ""), it["content"]) for it in gstr2b_items]),
+                    # Months combined per state (empty when each state had one file).
+                    "gstr2b_months": gstr2b_months,
                     # First file of each type (for base workbook source sheets — state 1);
                     # the SAME object as element 0 of the list below, not a re-encode.
                     "_gstr2b_b64":   _all_g[0] if _all_g else "",
