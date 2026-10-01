@@ -249,6 +249,23 @@ function reconcile(src, months) {
       },
     },
     unsettled,
+    /* ── the orders behind every step of the chain ────────────────────────
+       The chain was six numbers nobody could open. A figure an accountant
+       cannot drill into is a figure they have to take on trust, which is the
+       one thing this report is trying not to ask for.
+
+       One flat list rather than six, because every step is a FILTER of the
+       same population — placed, cancelled, net, invoiced, settled, unsettled —
+       and six pre-built lists would ship the same orders six times over. The
+       flags say which file knows each fact: `cancelled` is the order report's
+       own status, `invoiced` is presence in the MTR, `settled` is presence in
+       the settlement. */
+    orderRows: [...O.values()].filter((o) => inWindow(o.month)).map((o) => ({
+      orderId: o.id, month: o.month, status: o.status, cancelled: !!o.cancelled,
+      invoiced: shipped.has(o.id), settled: settled.has(o.id),
+      value: o.value, shipState: o.shipState, lines: o.lines,
+    })).sort((a, b) => (a.month === b.month ? b.value - a.value
+                                            : a.month.localeCompare(b.month))),
     counts: { orderRows: (src.orders || []).length, mtrRows: (src.mtr || []).length,
               settlementRows: (src.settlement || []).length,
               orders: O.size, mtrOrders: M.size, settlementOrders: S.size },
