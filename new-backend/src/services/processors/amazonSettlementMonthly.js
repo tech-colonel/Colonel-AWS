@@ -28,7 +28,11 @@ const r2 = (n) => Number((n || 0).toFixed(2));
 
 /* Column letters resolved by NAME from the settlement sheet's own order, never
    hardcoded — the same rule the Summary follows, for the same reason. */
-const SHEET_COLS = [...ROW_COLUMNS, ...FEE_COLUMNS.map(([c]) => c)];
+/* `posted_month` is a helper column the monthly workbook adds to the Settlement
+   sheet: the IST month each row posted in, so a figure can be filtered to the
+   month without the reader having to parse a timestamp. Sheet only — it is
+   never stored. */
+const SHEET_COLS = [...ROW_COLUMNS, ...FEE_COLUMNS.map(([c]) => c), 'posted_month'];
 function colLetter(name) {
   const i = SHEET_COLS.indexOf(name);
   if (i < 0) throw new Error(`settlement sheet has no column "${name}"`);
@@ -158,4 +162,79 @@ function coverageGaps(parts, year, month) {
     : `${pad(g.a)}-${pad(month)}-${year} to ${pad(g.b)}-${pad(month)}-${year}`));
 }
 
-module.exports = { buildPivotAoA, coverageGaps, PIVOT_COLUMNS, colLetter };
+/* ── Difference: Amazon's fee invoices against what the settlements took ──────
+   Amazon bills its fees on a monthly tax invoice per state, and separately
+   deducts them settlement by settlement. The two should describe the same
+   money. Where they do not, somebody has to be able to see by how much and on
+   which fee — which is the whole question this tab exists to answer.
+
+   The settlement side is a SUMIFS over the Settlement tab filtered on
+   `posted_month`, so it stays clickable like every other figure in the book.
+   The invoice side is typed from the PDFs and is stated as such.
+
+   A caution is printed on the face of it, because it changes how the number
+   should be read: an invoice carries the date a fee was CHARGED, a settlement
+   the date it POSTED. Fees dated at the end of a month settle in the next one.
+   So a residual difference is expected, and only a fee-by-fee match on order id
+   can turn this into a claim rather than a question. */
+function buildDifferenceAoA(monthKey, monthLabel, invoice, lines) {
+  const aoa = [];
+  const S = (v) => ({ t: 's', v });
+  const A = (v) => ({ t: 'n', v: Number(v) || 0, z: FMT_AMT });
+  const F = (f, z) => ({ t: 'n', v: 0, f, z: z || FMT_AMT });
+  const push = (...c) => { aoa.push(c); return aoa.length; };
+  const M = (col) => `SUMIFS(${C(col)},${C('posted_month')},"${monthKey}")`;
+
+  push(S(`${monthLabel} — what Amazon invoiced against what the settlements deducted`));
+  push(S('Settlement figures are live SUMIFS over the Settlement tab, filtered to fees posted in this month. '
+       + 'Invoice figures are read from Amazon’s monthly tax invoices.'));
+  push();
+
+  push(S('WHAT AMAZON INVOICED'));
+  push(S('Document'), S('Type'), S('Date'), S('State'), S('Fees ex GST'), S('GST'), S('Total'));
+  const docFirst = aoa.length + 1;
+  for (const d of invoice.docs) {
+    push(S(d.num), S(d.kind), S(d.date), S(d.state), A(d.fees), A(d.gst), A(d.total));
+  }
+  const docLast = aoa.length;
+  const rInv = push(S(`Net invoiced — ${invoice.docs.length} documents`), S(''), S(''), S(''),
+                    F(`SUM(E${docFirst}:E${docLast})`), F(`SUM(F${docFirst}:F${docLast})`),
+                    F(`SUM(G${docFirst}:G${docLast})`));
+  push();
+
+  push(S('FEE BY FEE'));
+  push(S('Fee'), S('Invoiced'), S('Settlement'), S('Difference'), S('Note'));
+  const lineFirst = aoa.length + 1;
+  for (const l of lines) {
+    const row = aoa.length + 1;
+    push(S(l.label), A(l.invoiced),
+         l.col ? F(`ABS(${M(l.col)})`) : A(0),
+         F(`B${row}-C${row}`), S(l.note || ''));
+  }
+  const lineLast = aoa.length;
+  const rTot = push(S('Total'), F(`SUM(B${lineFirst}:B${lineLast})`),
+                    F(`SUM(C${lineFirst}:C${lineLast})`), F(`SUM(D${lineFirst}:D${lineLast})`),
+                    S('positive = invoiced more than deducted'));
+  push();
+
+  push(S('THE DIFFERENCE'));
+  push(S('Invoiced, net of credit notes (ex GST)'), F(`E${rInv}`));
+  push(S('Deducted by the settlements (ex GST)'),   F(`C${rTot}`));
+  const rDiff = push(S('Difference (ex GST)'), F(`B${aoa.length - 1}-B${aoa.length}`));
+  push();
+
+  push(S('HOW TO READ THIS'));
+  for (const t of [
+    'An invoice is dated when the fee was CHARGED. A settlement carries it when it POSTED.',
+    'Fees charged at the end of a month settle in the next one, so a residual difference is expected.',
+    'Closing it properly means matching fee by fee on order id, not month against month.',
+    'Storage, long-term storage and inbound transportation are billed to the account, not per order,',
+    '    so they appear on an invoice but never in a settlement fee column.',
+  ]) push(S(t));
+
+  return { aoa, diffRow: rDiff,
+           colWidths: [{ wch: 40 }, { wch: 14 }, { wch: 14 }, { wch: 14 }, { wch: 46 },
+                       { wch: 12 }, { wch: 12 }] };
+}
+
+module.exports = { buildPivotAoA, buildDifferenceAoA, coverageGaps, PIVOT_COLUMNS, colLetter };
