@@ -33,12 +33,15 @@ const fs = require('fs-extra');
 const { Brand, Agent } = require('../../../models/master');
 const { getBrandConnection } = require('../../../config/database');
 const amazonReports = require('../../../services/amazonReports');
-const { reconcile, monthKey } = require('../../../services/processors/amazonThreeWay');
+const { reconcile, monthKey, num } = require('../../../services/processors/amazonThreeWay');
+const { buildLedger } = require('../../../services/processors/amazonReceivablesLedger');
+const { auditLedger, drillFor } = require('../../../services/processors/amazonReceivablesAudit');
 
 const OUTPUT_DIR = path.join(__dirname, '../../../../outputs');
 const UPLOAD_ROOT = path.join(OUTPUT_DIR, 'amazon-receivables');
 const RUNS_TABLE = 'amazon_threeway_runs';
 
+const r2 = (n) => Number((n || 0).toFixed(2));
 const safe = (s) => String(s || '').replace(/[^a-zA-Z0-9_-]/g, '_');
 const brandDir = (brand, kind) => path.join(UPLOAD_ROOT, safe(brand.name), kind);
 
@@ -105,6 +108,12 @@ async function resolve(req, res) {
 
 const q = (db, sql, replacements) => db.query(sql, { replacements });
 
+/* Sequelize expands an ARRAY replacement into a comma-separated list, so one
+   placeholder becomes N expressions and Postgres rejects the statement with
+   "INSERT has more expressions than target columns". A text[] has to be handed
+   over as a literal and cast on the other side. */
+const pgArray = (a) => `{${(a || []).map((x) => `"${String(x).replace(/"/g, '\\"')}"`).join(',')}}`;
+
 /* ── the sources a run will read ──────────────────────────────────────── */
 async function gather(ctx, months) {
   const orders = await readDir(brandDir(ctx.brand, 'orders'), { delim: '\t' });
@@ -126,8 +135,17 @@ async function gather(ctx, months) {
       if (!piv.settlement || seen.has(piv.settlement.settlement_id)) continue;
       seen.add(piv.settlement.settlement_id);
       for (const r of piv.rows) {
-        ledgerRows.push({ order_id: r.order_id, type: r.type,
-                          date_time: r.date_time, product_sales: r.product_sales });
+        /* Carry the DEDUCTION columns too, not just the sale. Dropping them
+           made Amazon's fees read as zero for every month sourced from the
+           ledgers, which silently overstated what Amazon still owed. */
+        ledgerRows.push({
+          order_id: r.order_id, type: r.type, date_time: r.date_time,
+          product_sales: r.product_sales, total: r.total,
+          selling_fees: r.selling_fees, fba_fees: r.fba_fees,
+          other_transaction_fees: r.other_transaction_fees, other: r.other,
+          tds_194o: r.tds_194o,
+          'TCS-CGST': r.tcs_cgst, 'TCS-SGST': r.tcs_sgst, 'TCS-IGST': r.tcs_igst,
+        });
       }
     }
   }
@@ -269,7 +287,41 @@ const runReco = async (req, res, next) => {
     if (!src.orders.length) {
       return res.status(400).json({ error: 'No order reports held. Fetch them from Amazon first.' });
     }
-    const result = reconcile(src, months);
+    /* All three views from one read of the sources: the CHAIN (how the three
+       files relate), the LEDGER (the money, by cohort), and the AUDIT (what is
+       wrong and what would fix it). The page shows all three because showing
+       only the money would hide which file each figure came from. */
+    const three = reconcile(src, months);
+    const ledger = buildLedger(src, months);
+    const sourceKind = {};
+    for (const m of months) sourceKind[m] = src.uploadedMonths.includes(m) ? 'unified' : 'ledger';
+    const audit = auditLedger(ledger, { sources: sourceKind });
+    const drills = {};
+    for (const i of audit.issues) if (i.drill) drills[i.id] = drillFor(ledger, i).slice(0, 400);
+
+    /* what each file contributed per month, so all three are visible */
+    const perSource = months.map((m) => {
+      const o = src.orders.filter((r) => monthKey(r['purchase-date']) === m);
+      const t = src.mtr.filter((r) => String(r['Transaction Type'] || '').trim() === 'Shipment'
+        && monthKey(r['Invoice Date'] || r['Shipment Date']) === m);
+      const st = src.settlement.filter((r) => monthKey(r.date_time ?? r['date/time']) === m);
+      /* The three files spell the same field differently — the settlement is
+         `order id` when uploaded and `order_id` once pivoted — so a lookup by
+         one name silently returns nothing. Take the first key that is present. */
+      const uniq = (rows, ...keys) => new Set(
+        rows.map((r) => keys.map((k) => r[k]).find((v) => v !== undefined && v !== '')).filter(Boolean)
+      ).size;
+      return { month: m,
+        order: { rows: o.length, orders: uniq(o, 'amazon-order-id'),
+                 value: r2(o.filter((r) => r['order-status'] !== 'Cancelled')
+                   .reduce((a, r) => a + num(r['item-price']) + num(r['item-tax']), 0)) },
+        mtr: { rows: t.length, orders: uniq(t, 'Order Id', 'order_id'),
+               value: r2(t.reduce((a, r) => a + num(r['Invoice Amount']), 0)) },
+        settlement: { rows: st.length, orders: uniq(st, 'order_id', 'order id', 'order-id'),
+                      value: r2(st.reduce((a, r) => a + num(r.product_sales ?? r['product sales']), 0)) } };
+    });
+
+    const result = { three, ledger, audit, drills, sources: perSource, sourceKind };
     const ms = Date.now() - t0;
     const fp = `${src.orders.length}|${src.mtr.length}|${src.settlement.length}`;
 
@@ -277,14 +329,14 @@ const runReco = async (req, res, next) => {
       `INSERT INTO ${RUNS_TABLE}
          (brand_id, window_months, payload, order_rows, mtr_rows, settlement_rows,
           source_fingerprint, built_ms, built_by)
-       VALUES (:b, :m, CAST(:p AS JSONB), :o, :mt, :s, :fp, :ms, :who)
+       VALUES (:b, CAST(:m AS text[]), CAST(:p AS JSONB), :o, :mt, :s, :fp, :ms, :who)
        ON CONFLICT (brand_id, window_months)
        DO UPDATE SET payload = EXCLUDED.payload, order_rows = EXCLUDED.order_rows,
                      mtr_rows = EXCLUDED.mtr_rows, settlement_rows = EXCLUDED.settlement_rows,
                      source_fingerprint = EXCLUDED.source_fingerprint,
                      built_ms = EXCLUDED.built_ms, built_by = EXCLUDED.built_by,
                      built_at = NOW()`,
-      { b: ctx.brand.id, m: months, p: JSON.stringify({ ...result, files: src.files }),
+      { b: ctx.brand.id, m: pgArray(months), p: JSON.stringify({ ...result, files: src.files }),
         o: src.orders.length, mt: src.mtr.length, s: src.settlement.length,
         fp, ms, who: (req.user && req.user.id) || null });
 
@@ -299,9 +351,9 @@ const getRun = async (req, res, next) => {
     const months = String(req.query.months || '').split(',').map((s) => s.trim()).filter(Boolean);
     const [rows] = await q(ctx.db,
       months.length
-        ? `SELECT * FROM ${RUNS_TABLE} WHERE brand_id = :b AND window_months = :m LIMIT 1`
+        ? `SELECT * FROM ${RUNS_TABLE} WHERE brand_id = :b AND window_months = CAST(:m AS text[]) LIMIT 1`
         : `SELECT * FROM ${RUNS_TABLE} WHERE brand_id = :b ORDER BY built_at DESC LIMIT 1`,
-      months.length ? { b: ctx.brand.id, m: months } : { b: ctx.brand.id });
+      months.length ? { b: ctx.brand.id, m: pgArray(months) } : { b: ctx.brand.id });
     if (!rows || !rows.length) return res.json({ empty: true });
     const r = rows[0];
     const src = await gather(ctx, r.window_months);
@@ -319,8 +371,8 @@ const deleteRun = async (req, res, next) => {
     const months = String(req.query.months || '').split(',').map((s) => s.trim()).filter(Boolean);
     if (!months.length) return res.status(400).json({ error: 'months required' });
     const [, meta] = await q(ctx.db,
-      `DELETE FROM ${RUNS_TABLE} WHERE brand_id = :b AND window_months = :m`,
-      { b: ctx.brand.id, m: months });
+      `DELETE FROM ${RUNS_TABLE} WHERE brand_id = :b AND window_months = CAST(:m AS text[])`,
+      { b: ctx.brand.id, m: pgArray(months) });
     res.json({ success: true, removed: (meta && meta.rowCount) || 0 });
   } catch (e) { next(e); }
 };

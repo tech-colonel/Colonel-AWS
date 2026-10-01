@@ -71,6 +71,18 @@ function monthKey(value) {
     const i = new Date(d.getTime() + IST_MS);
     return `${i.getUTCFullYear()}-${String(i.getUTCMonth() + 1).padStart(2, '0')}`;
   }
+  /* DD-MM-YYYY. Amazon's MTR export is NOT consistent between files: the July
+     B2C file dates as 2026-07-01 while the June and August files of the same
+     report type date as 03-06-2026. Reading only ISO left those two months
+     without an invoice month at all, and they silently fell back to the order
+     report's purchase date — a different thing, and one that would quietly
+     mis-state which month a receivable belongs to.
+     13-08-2026 exists in the data, so the leading field is the day. */
+  m = s.match(/^(\d{2})-(\d{2})-(\d{4})/);
+  if (m) {
+    const dd = +m[1], mm = +m[2];
+    if (mm >= 1 && mm <= 12 && dd >= 1 && dd <= 31) return `${m[3]}-${m[2]}`;
+  }
   /* "1 Jun 2026 7:20:46 am UTC" — the unified transaction report's format */
   m = s.match(/^(\d{1,2})\s+([A-Za-z]{3})[a-z]*\s+(\d{4})/);
   if (m) {
