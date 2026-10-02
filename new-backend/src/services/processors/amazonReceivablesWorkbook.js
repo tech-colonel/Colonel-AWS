@@ -153,42 +153,54 @@ const colLetter = (n) => {
    One place, used for the cell notes AND the visible "what this is" column, so
    the sheet cannot end up explaining a figure two different ways. */
 const LINES = [
-  { key: 'invoiced', label: 'Invoiced (incl GST)', sign: '+', src: 'MTR',
-    what: 'What was billed to customers — the MTR invoice value.',
-    note: 'MTR (Merchant Tax Report, B2B + B2C)\nColumn: Invoice Amount\nFilter: Transaction Type = Shipment\nDated by: Invoice Date (Shipment Date is blank on most B2C rows)\n\nThis is THE BASE of the report — the document actually issued to the customer.' },
-  { key: 'returned', label: 'Returns / refunds', sign: '−', src: 'MTR',
-    what: 'Money given back on those orders.',
-    note: 'MTR\nColumn: Invoice Amount\nFilter: Transaction Type = Refund\n\nRefunds are negative in the MTR and are held positive here, as a deduction.' },
-  { key: 'netBillable', label: 'Net billable', sign: '=', src: 'Derived', strong: true,
+  { key: 'invoiced', label: 'Sales invoiced', sign: '+', src: 'MTR',
+    what: 'Invoice value from the MTR sales report.',
+    note: 'MTR (sales report with GST, B2B + B2C)\nColumn: Invoice Amount\nFilter: Transaction Type = Shipment\nDated by: Shipment Date, else Invoice Date\n\nThis is THE BASE of the report — the tax invoice given to the customer.' },
+  { key: 'returned', label: 'Customer returns', sign: '−', src: 'MTR',
+    what: 'Refunds given on those orders.',
+    note: 'MTR\nColumn: Invoice Amount\nFilter: Transaction Type = Refund\n\nReturns are negative in the MTR and are shown positive here, as a deduction.' },
+  { key: 'netBillable', label: 'Net sales', sign: '=', src: 'Derived', strong: true,
     formula: (c, r) => `${c}${r.invoiced}-${c}${r.returned}`,
-    what: 'Invoiced less returns.',
-    note: 'CALCULATED: Invoiced − Returns.' },
-  { key: 'fees', label: 'Amazon fees', sign: '−', src: 'Settlement',
-    what: 'Commission, closing fee, FBA, storage and the GST on them.',
-    note: 'Settlement\nColumns: selling fees + fba fees + other transaction fees\nFilter: every settlement row for the order\n\nAccumulated signed and the magnitude taken once at the end — a reversed fee is a credit, not another charge.' },
-  { key: 'tdsTcs', label: 'TDS 194-O / TCS', sign: '−', src: 'Settlement',
-    what: 'Withheld at source by Amazon and paid to the government for you.',
-    note: 'Settlement\nColumns: TDS (Section 194-O) + TCS-CGST + TCS-SGST + TCS-IGST\n\nGenuinely withheld, unlike GST — this money never reaches you, it reaches the department against your PAN.' },
-  { key: 'expected', label: 'Due from Amazon', sign: '=', src: 'Derived', strong: true,
-    formula: (c, r) => `${c}${r.netBillable}-${c}${r.fees}-${c}${r.tdsTcs}`,
-    what: 'What Amazon owes on this month’s orders.',
-    note: 'CALCULATED: Net billable − Amazon fees − TDS/TCS.' },
-  { key: 'settled', label: 'Received (to date)', sign: '−', src: 'Settlement',
-    what: 'What has arrived against them, whenever it arrived.',
-    note: 'Settlement\nColumn: total\nFilter: every settlement row for the order, whatever month it landed in\n\nAmazon states the payout per row and the parts foot to it exactly, so it is read rather than rebuilt from eight signed columns.\n\nCOHORT, not cash-in-month: this is what arrived against THIS month’s invoices, even if it arrived later.' },
-  { key: 'closing', label: 'Still outstanding', sign: '=', src: 'Derived', strong: true, final: true,
-    formula: (c, r) => `${c}${r.expected}-${c}${r.settled}`,
-    what: 'Not yet received. A NEGATIVE means more came in than was due.',
-    note: 'CALCULATED: Due from Amazon − Received to date.\n\nA negative figure is a red flag, not a windfall: an order cannot pay more than it was invoiced, so it means a receipt is counted twice or a deduction is overstated.' },
+    what: 'Sales after customer returns.',
+    note: 'CALCULATED: Sales invoiced − customer returns.' },
+  { key: 'fees', label: 'Amazon charges', sign: '−', src: 'Settlement',
+    what: 'Commission, closing fee, FBA and storage.',
+    note: 'Settlement report\nColumns: selling fees + fba fees + other transaction fees\n\nAdded up with their signs, so a reversed charge is a credit and not another charge.' },
+  { key: 'tds', label: 'TDS u/s 194-O', sign: '−', src: 'Settlement',
+    what: 'Deducted by Amazon against our PAN. Claim in the income-tax return.',
+    note: 'Settlement report\nColumn: TDS (Section 194-O)\n\nThis money never reaches us — Amazon pays it to the department against our PAN. Claimed in the income-tax return.' },
+  { key: 'tcs', label: 'TCS u/s 52 (GST)', sign: '−', src: 'Settlement',
+    what: 'Deducted by Amazon. Claim in the GST cash ledger.',
+    note: 'Settlement report\nColumns: TCS-CGST + TCS-SGST + TCS-IGST\n\nCollected at source under section 52 of the GST Act. Claimed in the GST cash ledger.' },
+  { key: 'expected', label: 'Amount due from Amazon', sign: '=', src: 'Derived', strong: true,
+    formula: (c, r) => `${c}${r.netBillable}-${c}${r.fees}-${c}${r.tds}-${c}${r.tcs}`,
+    what: 'What Amazon owes on this month’s sales.',
+    note: 'CALCULATED: Net sales − Amazon charges − TDS − TCS.' },
+  { key: 'received', label: 'Received by the month end', sign: '−', src: 'Settlement',
+    what: 'Payments dated on or before the last day of the month.',
+    note: 'Settlement report\nColumn: total\nFilter: payments dated on or before the month end\n\nTHE MONTH IS CLOSED AT ITS MONTH END, not at today. Money that arrived later belongs to that later month’s statement.' },
+  { key: 'closing', label: 'Closing balance', sign: '=', src: 'Derived', strong: true, final: true,
+    formula: (c, r) => `${c}${r.expected}-${c}${r.received}`,
+    what: 'Still to be received as on the month end. Carried into the next month.',
+    note: 'CALCULATED: Amount due − received by the month end.\n\nA NEGATIVE figure means Amazon paid for goods the customer returned after the month end — an advance held, not a shortfall.' },
+];
+
+/* Only knowable once later months are loaded. Never folded into the closing
+   balance above, because a statement that rewrites itself when a newer file
+   arrives cannot be signed off. */
+const AFTER = [
+  { key: 'receivedLater', label: 'Received later, in a following month', src: 'Settlement',
+    what: 'Payments that arrived after this month had closed.',
+    note: 'The part of the closing balance that has since been received, in a month after this one.' },
+  { key: 'stillOpen', label: 'Still pending today', src: 'Derived',
+    what: 'Not received even after every loaded file.',
+    note: 'CALCULATED: Amount due − everything received to date, across every loaded month.' },
 ];
 
 const MEMO = [
-  { key: 'settledLater', label: 'of which received later', src: 'Settlement',
-    what: 'Part of “Received” that arrived after the month closed — the carry-forward.',
-    note: 'The part of Received that landed in a LATER month than the one that invoiced it.\n\nAmazon settles about every seven days, so the end of every month settles in the month after. This figure is why a cash-in-month view disagrees with this one.' },
-  { key: 'gstMemo', label: '(memo) GST within the receivable', src: 'MTR',
-    what: 'How much of the receivable is GST you will remit. NOT withheld by Amazon.',
-    note: 'MTR · Total Tax Amount.\n\nA MEMO, never a deduction. Amazon collects the full invoice from the buyer and pays the GST across to you; you remit it onward. Treating it as something Amazon kept turns every closing balance negative.' },
+  { key: 'gstMemo', label: '(memo) GST within the amount due', src: 'MTR',
+    what: 'How much of the amount due is GST we will pay to the government.',
+    note: 'MTR · Total Tax Amount.\n\nA MEMO, never a deduction. Amazon collects the full invoice from the buyer and pays the GST to us; we pay it onward to the government. Treating it as something Amazon kept turns every closing balance negative.' },
 ];
 
 /* ══════════════════════════════════════════════════════════════════════════ */
@@ -304,7 +316,7 @@ function buildWorkbook(payload, { brand, months }) {
   }
 
   r += 1;
-  for (const memo of MEMO) {
+  for (const memo of [...AFTER, ...MEMO]) {
     at[memo.key] = r;
     const label = L.getCell(r, 2);
     label.value = memo.label;
@@ -408,7 +420,7 @@ function buildWorkbook(payload, { brand, months }) {
      under a filled header reads as a fault in the sheet */
   S.mergeCells(posHead, 4, posHead, 5);
 
-  for (const line of [...LINES, ...MEMO]) {
+  for (const line of [...LINES, ...AFTER, ...MEMO]) {
     const lab = S.getCell(s, 1);
     lab.value = line.label;
     lab.font = { name: 'Calibri', size: 10, bold: !!line.strong, color: { argb: C.ink } };

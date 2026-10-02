@@ -34,7 +34,7 @@ const { Brand, Agent } = require('../../../models/master');
 const { getBrandConnection } = require('../../../config/database');
 const amazonReports = require('../../../services/amazonReports');
 const { reconcile, monthKey, num } = require('../../../services/processors/amazonThreeWay');
-const { buildLedger } = require('../../../services/processors/amazonReceivablesLedger');
+const { buildLedger, BASIS } = require('../../../services/processors/amazonReceivablesLedger');
 const { auditLedger, drillFor } = require('../../../services/processors/amazonReceivablesAudit');
 const { buildWorkbook, buildDrillWorkbook } = require('../../../services/processors/amazonReceivablesWorkbook');
 
@@ -91,7 +91,13 @@ async function readDir(dir, opts) {
   const files = (await fs.readdir(dir)).filter((f) => /\.(tsv|csv|txt)$/i.test(f)).sort();
   let rows = [];
   for (const f of files) {
-    rows = rows.concat(parseTable(await fs.readFile(path.join(dir, f)), opts));
+    /* Which FILE a row came from is carried on the row itself. A refund for an
+       order invoiced before this window can then be reported as "found in the
+       July file", which is the only way to explain how a March-dated refund is
+       sitting in a July report. */
+    const parsed = parseTable(await fs.readFile(path.join(dir, f)), opts);
+    for (const r of parsed) r.__file = f;
+    rows = rows.concat(parsed);
   }
   return { rows, files };
 }
@@ -140,6 +146,7 @@ async function gather(ctx, months) {
            made Amazon's fees read as zero for every month sourced from the
            ledgers, which silently overstated what Amazon still owed. */
         ledgerRows.push({
+          __src: 'ledger', __file: f,
           order_id: r.order_id, type: r.type, date_time: r.date_time,
           product_sales: r.product_sales, total: r.total,
           selling_fees: r.selling_fees, fba_fees: r.fba_fees,
@@ -162,6 +169,7 @@ async function gather(ctx, months) {
   const perMonth = (rows, get) => rows.reduce((a, r) => {
     const m = monthKey(get(r)); if (m) a[m] = (a[m] || 0) + 1; return a;
   }, {});
+  for (const r of settlement.rows) r.__src = 'upload';
   const upCount = perMonth(settlement.rows, (r) => r['date/time'] || r.date_time);
   const ledCount = perMonth(ledgerRows, (r) => r.date_time);
   const uploadedMonths = Object.keys(upCount)
@@ -190,7 +198,7 @@ const getStatus = async (req, res, next) => {
     const src = await gather(ctx, null);
     const [runs] = await q(ctx.db,
       `SELECT window_months, order_rows, mtr_rows, settlement_rows, built_at, built_ms,
-              payload->'totals' AS totals
+              payload->'totals' AS totals, payload->>'basis' AS basis
          FROM ${RUNS_TABLE} WHERE brand_id = :b ORDER BY built_at DESC`,
       { b: ctx.brand.id }).catch(() => [[]]);
     res.json({
@@ -204,7 +212,7 @@ const getStatus = async (req, res, next) => {
       runs: (runs || []).map((r) => ({
         months: r.window_months, builtAt: r.built_at, builtMs: r.built_ms,
         orderRows: r.order_rows, mtrRows: r.mtr_rows, settlementRows: r.settlement_rows,
-        totals: r.totals,
+        totals: r.totals, basis: r.basis || null,
       })),
     });
   } catch (e) { next(e); }
@@ -283,6 +291,21 @@ const runReco = async (req, res, next) => {
     const months = (req.body && req.body.months) || [];
     if (!months.length) return res.status(400).json({ error: 'months required' });
 
+    /* WHICH DATE BOOKS THE SALE. Companies differ and all three answers are
+       defensible, so this is asked before processing rather than assumed.
+       DELIVERY is refused outright: none of Amazon's three files carries a
+       delivery date, and quietly falling back to another date would give a
+       wrong answer under a right-sounding label. */
+    const basis = String((req.body && req.body.basis) || BASIS.DISPATCH).toLowerCase();
+    if (basis === BASIS.DELIVERY) {
+      return res.status(400).json({
+        error: 'Delivery date is not available in any of the three Amazon files. '
+             + 'Load the Fulfilled Shipments report to use this basis.' });
+    }
+    if (![BASIS.ORDER, BASIS.DISPATCH].includes(basis)) {
+      return res.status(400).json({ error: `basis must be "${BASIS.ORDER}" or "${BASIS.DISPATCH}"` });
+    }
+
     const t0 = Date.now();
     const src = await gather(ctx, months);
     if (!src.orders.length) {
@@ -292,11 +315,12 @@ const runReco = async (req, res, next) => {
        files relate), the LEDGER (the money, by cohort), and the AUDIT (what is
        wrong and what would fix it). The page shows all three because showing
        only the money would hide which file each figure came from. */
-    const three = reconcile(src, months);
-    const ledger = buildLedger(src, months);
+    const three = reconcile(src, months, { basis });
+    const ledger = buildLedger(src, months, { basis });
     const sourceKind = {};
     for (const m of months) sourceKind[m] = src.uploadedMonths.includes(m) ? 'unified' : 'ledger';
-    const audit = auditLedger(ledger, { sources: sourceKind });
+    const audit = auditLedger(ledger, { sources: sourceKind,
+                                        priorPeriodRefunds: ledger.priorPeriodRefunds });
     const drills = {};
     for (const i of audit.issues) if (i.drill) drills[i.id] = drillFor(ledger, i).slice(0, 400);
 
@@ -322,7 +346,7 @@ const runReco = async (req, res, next) => {
                       value: r2(st.reduce((a, r) => a + num(r.product_sales ?? r['product sales']), 0)) } };
     });
 
-    const result = { three, ledger, audit, drills, sources: perSource, sourceKind };
+    const result = { three, ledger, audit, drills, sources: perSource, sourceKind, basis };
     const ms = Date.now() - t0;
     const fp = `${src.orders.length}|${src.mtr.length}|${src.settlement.length}`;
 

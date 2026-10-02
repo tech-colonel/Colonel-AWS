@@ -37,54 +37,77 @@ function auditLedger(ledger, context = {}) {
     if (m.closing.amount < -1) {
       const over = Math.abs(m.closing.amount);
       const pct = m.expected.amount ? (100 * over / m.expected.amount) : 0;
+      /* A month end can legitimately hold more cash than the net receivable:
+         Amazon pays for an order in June and takes the refund back only when the
+         customer returns the goods in July. At 30 June the seller really was
+         holding money it would later give back — an ADVANCE, not a
+         reconciliation failure. The proof is that a later month carries the
+         matching negative, so only call it a blocker when nothing explains it. */
+      const explained = m.receivedLater && m.receivedLater.amount < -1;
       add({
-        key: 'over-collected', month: m.month, severity: 'blocker',
-        title: `${m.month} shows ${money(over)} MORE received than was due`,
+        key: 'over-collected', month: m.month, severity: explained ? 'info' : 'blocker',
+        title: explained
+          ? `${m.month} held ${money(over)} at the month end for orders returned later`
+          : `${m.month} shows ${money(over)} MORE received than was due`,
         amount: r2(-over), count: 0,
-        what: `Due from Amazon was ${money(m.expected.amount)} but ${money(m.settled.amount)} `
-            + `has been received against the same orders — ${pct.toFixed(1)}% more than was billed. `
-            + 'An order cannot pay more than it was invoiced, so something here is counted twice '
-            + 'or a deduction is understated.',
-        why: src[m.month] === 'unified'
-          ? 'This month is reconstructed from Amazon’s unified transaction report rather than the '
-            + 'raw settlement ledgers, because the ledgers for it are past Amazon’s 90-day window. '
-            + 'The unified report merges Amazon’s fee columns, so a fee that belongs to the seller '
-            + 'cannot always be told apart from a pass-through.'
-          : 'Receipts for these orders appear in more than one settlement source, or a fee column is '
-            + 'being read as a cost when it is a pass-through.',
-        howToFix: 'Pick any order on the drill-down whose receipt exceeds its invoice and trace it in '
-                + 'Seller Central → Payments. If the payment is genuinely single, the fault is in a '
-                + 'fee column and we correct the mapping. If it appears twice, the two sources overlap '
-                + 'and we tighten the de-duplication.',
+        what: `Amount due from Amazon on ${m.month} sales was ${money(m.expected.amount)}, but `
+            + `${money(m.received.amount)} had been received by the month end — ${pct.toFixed(1)}% more `
+            + 'than was billed.'
+            + (explained
+              ? ` Amazon took ${money(Math.abs(m.receivedLater.amount))} back in a later month, when the `
+                + 'customers returned the goods.'
+              : ' An order cannot pay more than it was invoiced, so something here is counted twice '
+                + 'or a deduction is understated.'),
+        why: explained
+          ? 'Amazon pays for an order as soon as it ships and deducts the refund only when the goods come '
+            + 'back. If the return happens in a later month, the month end shows cash in hand that will be '
+            + 'given back. In the books this is an advance from customers, not income.'
+          : src[m.month] === 'unified'
+            ? 'This month is rebuilt from Amazon’s unified transaction report rather than the raw '
+              + 'settlement files, because the files for it are past Amazon’s 90-day window. The unified '
+              + 'report merges Amazon’s charge columns, so a charge cannot always be told apart from a '
+              + 'pass-through.'
+            : 'Payments for these orders appear in more than one settlement file, or a charge column is '
+              + 'being read as a cost when it is a pass-through.',
+        howToFix: explained
+          ? 'No action needed. Carry it as an advance received against orders returned later — the next '
+            + 'month’s refund entries clear it.'
+          : 'Open any order in the drill-down where the receipt is more than the invoice and check it in '
+            + 'Seller Central → Payments. If the payment is genuinely single, the fault is in a charge '
+            + 'column. If it appears twice, two settlement files overlap.',
         drill: 'overCollected',
       });
     }
 
     /* ── 2. still outstanding ─────────────────────────────────────────────
        Expected at the tail of a month, alarming when it is old. */
-    /* The residual: due less received. Real money, independent of how many
-       orders have no settlement row. */
-    if (Math.abs(m.closing.amount) > 1) {
+    /* STILL OPEN TODAY, not the month-end closing balance. The closing balance
+       is an accounting fact and needs no chasing — most of it is Amazon's weekly
+       cycle and arrives in the next month. What deserves an issue is what is
+       open AFTER every loaded file has had its say. */
+    const open = m.stillOpen || m.closing;
+    if (Math.abs(open.amount) > 1) {
       const isLatest = m.month === ledger.months[ledger.months.length - 1];
       add({
         key: 'outstanding', month: m.month,
         severity: isLatest ? 'info' : 'warning',
-        title: `${m.month}: ${money(m.closing.amount)} of this month’s invoices not yet received`,
-        amount: m.closing.amount, count: m.unpaidOrders ? m.unpaidOrders.count : m.closing.count,
-        what: `Due from Amazon was ${money(m.expected.amount)} and ${money(m.settled.amount)} has `
-            + `arrived, leaving ${money(m.closing.amount)}. Separately, `
-            + `${m.unpaidOrders ? m.unpaidOrders.count : 0} order(s) have no settlement row at all, `
-            + `worth ${money(m.unpaidOrders ? m.unpaidOrders.amount : 0)} — the shortfall is mostly `
-            + 'part-settlements, not whole orders missing.',
+        title: `${m.month}: ${money(open.amount)} of this month’s sales is still not received`,
+        amount: open.amount, count: open.count,
+        what: `Amount due from Amazon on ${m.month} sales was ${money(m.expected.amount)}. `
+            + `${money(m.received.amount)} came in by the month end, leaving `
+            + `${money(m.closing.amount)} to carry forward. `
+            + `${money(m.receivedLater ? m.receivedLater.amount : 0)} of that has since arrived in a later `
+            + `month, so ${money(open.amount)} is still open. `
+            + `${open.count} order(s) have no payment at all.`,
         why: isLatest
-          ? 'Amazon settles about every seven days, so the end of the most recent month always settles '
-            + 'in the month after. This is the normal tail, not a loss.'
-          : 'A month this old should have settled by now. Either the settlement covering it has not been '
-            + 'loaded, or Amazon is holding the money.',
+          ? 'Amazon pays about every seven days, so sales at the end of the most recent month are '
+            + 'normally received in the following month. This is a timing difference, not a loss.'
+          : 'A month this old should have been paid by now. Either the settlement file covering it has '
+            + 'not been uploaded, or Amazon is holding the money.',
         howToFix: isLatest
-          ? 'Nothing to do. Load the next month’s settlement and these will clear.'
-          : 'Check whether a settlement covering this period is missing from the sources, then look for '
-            + 'the orders in Seller Central → Payments to see if Amazon is withholding them.',
+          ? 'No action needed. Upload the next month’s settlement file and this will clear.'
+          : 'Check whether a settlement file covering this period is missing, then look the orders up in '
+            + 'Seller Central → Payments to see whether Amazon is holding them.',
         drill: 'outstanding',
       });
     }
@@ -114,7 +137,30 @@ function auditLedger(ledger, context = {}) {
     }
   }
 
-  /* ── 4. where each month came from, and what that costs ────────────────── */
+  /* ── 4. refunds for sales made before this report's window ──────────────
+     Amazon never restates a month it has already issued: a return on a May
+     order turns up in the June file carrying its ORIGINAL May invoice date.
+     Those rows belong to a month this report does not hold, so they cannot be
+     set against any cohort here — but they are real money and must not vanish. */
+  const ppr = context.priorPeriodRefunds || [];
+  if (ppr.length) {
+    const amt = r2(ppr.reduce((a, x) => a + x.amount, 0));
+    add({
+      key: 'prior-period-refunds', month: null, severity: 'warning',
+      title: `${ppr.length} refund(s) worth ${money(amt)} belong to sales made before this period`,
+      amount: amt, count: ppr.length,
+      what: `These orders were invoiced before ${ledger.months[0]}, so this report has no sales figure to `
+          + 'set them against. They are sitting in this period’s MTR files carrying their original '
+          + 'invoice dates.',
+      why: 'Amazon adds a return to the CURRENT month’s report with the ORIGINAL invoice date; it never '
+         + 'goes back and amends the month that has already been issued.',
+      howToFix: `Extend the report back to cover those months, or treat the ${money(amt)} as a `
+              + 'prior-period adjustment in the month the file arrived.',
+      drill: 'priorRefunds',
+    });
+  }
+
+  /* ── 5. where each month came from, and what that costs ────────────────── */
   for (const [month, kind] of Object.entries(src)) {
     if (kind !== 'unified') continue;
     add({
@@ -154,10 +200,20 @@ function drillFor(ledger, issue) {
       return rows.filter((r) => r.settled > r.invoiced + 0.01)
         .sort((a, b) => (b.settled - b.invoiced) - (a.settled - a.invoiced));
     case 'outstanding':
-      return rows.filter((r) => r.status === 'Outstanding')
-        .sort((a, b) => b.invoiced - a.invoiced);
+      /* every order of the month whose receipts fall short of what it was due,
+         not just the ones with no payment at all — a part settlement is exactly
+         the case that used to be invisible */
+      return rows.filter((r) => r2(r.invoiced - r.refunded - r.fees - r.tdsTcs - r.settled) > 0.01)
+        .sort((a, b) => (b.invoiced - b.refunded - b.fees - b.tdsTcs - b.settled)
+                      - (a.invoiced - a.refunded - a.fees - a.tdsTcs - a.settled));
     case 'fees':
       return rows.filter((r) => r.fees > 0).sort((a, b) => b.fees - a.fees);
+    case 'priorRefunds':
+      return (ledger.priorPeriodRefunds || []).map((x) => ({
+        orderId: x.orderId, month: x.invoiceMonth || '—', status: 'Refund of an earlier sale',
+        invoiced: 0, refunded: x.amount, fees: 0, tdsTcs: 0, settled: 0,
+        settledMonth: '', foundInFile: x.foundInFile,
+      }));
     default:
       return [];
   }

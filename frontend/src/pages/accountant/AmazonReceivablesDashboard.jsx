@@ -1,43 +1,35 @@
 /* ──────────────────────────────────────────────────────────────────────────────
-   Amazon Receivables — of everything we sold, what have we actually been paid for?
+   Amazon Receivables — how much we sold, how much Amazon paid, what is pending.
 
-   Three files, read as a chain rather than three totals that ought to agree:
+   Built on the Shopify Order Cycle pattern — a report list, a generate wizard,
+   then the report itself — because an accountant works in reports, not in a
+   single page that silently rewrites itself. Everything else is Amazon's.
 
-     order report   every order PLACED      the only one that knows about
-                                            cancellations
-     MTR            what was INVOICED       the base for the receivable, because
-                                            it is the document actually issued
-     settlement     what was PAID           lags: Amazon settles weekly, so the
-                                            end of a month lands in the next one
+   THE FOUR QUESTIONS A MONTH HAS TO ANSWER, and the one the old page missed:
 
-   Then the money, month by month, as a cohort: June means June's INVOICES —
-   what they were billed, what Amazon kept, and what has since arrived against
-   them, whenever it arrived. That is what makes "May's 50,000 turned up in June"
-   a balance rather than a hole in one month and a windfall in the next.
+     1  How much did we sell this month?        the amount due from Amazon
+     2  How much did Amazon credit this month?  ALL of it, not just this month's
+     3  How much of THIS MONTH'S SALES is not received?
+     4  How much of the credit was for older sales?
 
-   THREE THINGS THIS PAGE INSISTS ON.
+   Question 2 has to be the whole credit, including money for earlier months.
+   Showing only the part that belonged to this month left the reader asking
+   where the rest came from.
 
-     The period is stated, never assumed. The report covers whichever months
-     have all three files, and it says so beside the title — a receivables
-     figure with no period on it is not a figure.
+   A MONTH IS CLOSED AT ITS MONTH END. June's statement shows what was
+   outstanding on 30 June. That a July file later shows some of it arriving is
+   July's business — June still closed owing it. A statement that rewrites
+   itself every time a newer file is loaded cannot be signed off.
 
-     One month at a time is the normal question. "What did August bill and what
-     is still owed on it" is what an accountant actually asks; the whole range
-     is the exception, not the default view. Hence the month filter, which
-     drives every panel below it.
-
-     Every figure names its source. Each drill opens with the file, the column
-     and the filter that produced it, because an accountant checking a number
-     needs to know which of the three files to open — and because a figure that
-     cannot be traced is one that has to be taken on trust, which is worth much
-     less than one that can be argued with.
+   EVERY FIGURE NAMES ITS SOURCE, because the first question about any number is
+   which of the three files to open to check it.
    ────────────────────────────────────────────────────────────────────────────── */
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import {
-  RefreshCw, Download, AlertTriangle, AlertCircle, Info, ChevronRight,
-  Package, Receipt, Banknote, X, Loader2, ArrowLeft, CalendarRange,
-  LayoutDashboard, Bot, FileSpreadsheet, Sigma, Clock, FileText,
+  RefreshCw, Download, AlertTriangle, AlertCircle, Info, ChevronRight, ChevronDown,
+  Package, Receipt, Banknote, X, Loader2, ArrowLeft, CalendarRange, Plus,
+  LayoutDashboard, Bot, FileSpreadsheet, Sigma, Clock, FileText, Eye, Trash2, Search,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import api from '../../lib/api';
@@ -50,103 +42,98 @@ const inr = (n, dp = 2) => (n === null || n === undefined || Number.isNaN(n) ? '
       { minimumFractionDigits: dp, maximumFractionDigits: dp }));
 const int = (n) => (n === null || n === undefined ? '—' : Number(n).toLocaleString('en-IN'));
 const MON = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const FULLMON = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August',
+                 'September', 'October', 'November', 'December'];
 const fmtMonth = (m) => {
-  if (!m || !/^\d{4}-\d{2}$/.test(m)) return m || '—';
+  if (!m || !/^\d{4}-\d{2}$/.test(m)) return m === 'EARLIER' ? 'Earlier months' : (m || '—');
   const [y, mo] = m.split('-');
   return `${MON[+mo - 1]} ${y}`;
 };
-/* The period, spelled out. A range of one month is that month, not "Jun – Jun". */
 const rangeLabel = (ms) => (!ms || !ms.length ? '—'
   : ms.length === 1 ? fmtMonth(ms[0]) : `${fmtMonth(ms[0])} – ${fmtMonth(ms[ms.length - 1])}`);
 const pctOf = (a, b) => (!b ? 0 : (100 * a) / b);
-
-/* How old is an unpaid month. Amazon settles weekly, so anything still open
-   beyond about a month has stopped being a timing difference. */
 const monthEnd = (m) => { const [y, mo] = m.split('-').map(Number); return new Date(y, mo, 0); };
 const daysOld = (m) => Math.max(0, Math.floor((Date.now() - monthEnd(m).getTime()) / 86400000));
-const ageBucket = (d) => (d <= 30 ? '0–30 days' : d <= 60 ? '31–60 days'
-  : d <= 90 ? '61–90 days' : 'over 90 days');
+const endLabel = (m) => (/^\d{4}-\d{2}$/.test(m || '')
+  ? `${monthEnd(m).getDate()} ${MON[+m.slice(5) - 1]} ${m.slice(0, 4)}` : '—');
 
-/* The order statuses the ledger assigns. Mirrored from the backend's STATUS,
-   and read from the payload when it is there so the two cannot drift. */
-const FALLBACK_ST = {
-  NOT_AMAZON: 'Not an Amazon sale (MCF)', SETTLED_IN_MONTH: 'Settled in the month',
-  SETTLED_LATER: 'Settled in a later month', RETURNED: 'Returned / refunded',
-  CANCELLED: 'Cancelled', OUTSTANDING: 'Outstanding',
+/* Amazon's own colours, so the sheet and the screen agree about each source. */
+const T = {
+  ink: '#232F3E', amber: '#FF9900', amberText: '#8A5200', blue: '#146EB4',
+  violet: '#7C3AED', green: '#067647', red: '#B42318',
 };
-
-/* ── where every figure comes from ───────────────────────────────────────────
-   An accountant checking a number has to know which of the three files to open
-   and what to filter it by. So each drill, and each step of the chain, carries
-   its own provenance rather than leaving the reader to infer it from the title. */
 const FILES = {
-  order: { label: 'Order report', short: 'Order report', icon: Package, tone: '#7C3AED',
-    how: 'Pulled from Amazon SP-API (all orders by order date). The only file that knows an order was cancelled.' },
-  mtr: { label: 'MTR — Merchant Tax Report (B2B + B2C)', short: 'MTR', icon: Receipt, tone: '#0748EE',
-    how: 'Uploaded from Seller Central. The tax invoice actually issued to the customer, and the base for this report.' },
-  settlement: { label: 'Settlement', short: 'Settlement', icon: Banknote, tone: '#059669',
-    how: 'Amazon’s settlement ledgers, or the unified transaction report where the ledgers have aged past the 90-day window.' },
-  derived: { label: 'Derived', short: 'Derived', icon: Sigma, tone: '#475569',
-    how: 'Arithmetic on the lines above. It has no file of its own — it is the subtraction, not a source.' },
+  order: { label: 'Order report', short: 'Order report', icon: Package, tone: T.violet,
+    how: 'Downloaded from Amazon (all orders by order date). The only file that shows a cancelled order.' },
+  mtr: { label: 'MTR — sales report with GST', short: 'MTR', icon: Receipt, tone: T.blue,
+    how: 'Uploaded from Seller Central. The tax invoice given to the customer, and the base for this report.' },
+  settlement: { label: 'Settlement report', short: 'Settlement', icon: Banknote, tone: T.green,
+    how: 'Payments received from Amazon. For a month older than 90 days, only the unified transaction report works.' },
+  derived: { label: 'Calculated', short: 'Calculated', icon: Sigma, tone: '#475569',
+    how: 'Worked out from the lines above. It has no file of its own.' },
 };
-
 const PROV = {
-  /* the money lines */
   invoiced: { file: 'mtr', column: 'Invoice Amount', filter: 'Transaction Type = Shipment',
-    dated: 'Invoice Date (Shipment Date is blank on most B2C rows, so it is read second)' },
+    dated: 'Shipment Date, else Invoice Date' },
   returned: { file: 'mtr', column: 'Invoice Amount', filter: 'Transaction Type = Refund',
-    note: 'Refunds are negative in the MTR and are held positive here, as a deduction.' },
-  netBillable: { file: 'derived', column: 'Invoiced − Returns' },
+    note: 'Returns are negative in the MTR and are shown positive here, as a deduction.' },
+  netBillable: { file: 'derived', column: 'Sales invoiced − customer returns' },
   fees: { file: 'settlement', column: 'selling fees + fba fees + other transaction fees',
-    filter: 'every settlement row for the order',
-    note: 'Accumulated signed, magnitude taken once at the end — a reversed fee is a credit, not another charge.' },
-  tdsTcs: { file: 'settlement', column: 'TDS (Section 194-O) + TCS-CGST + TCS-SGST + TCS-IGST',
-    note: 'Genuinely withheld by Amazon and paid to the government against your PAN.' },
-  expected: { file: 'derived', column: 'Net billable − Amazon fees − TDS/TCS' },
-  settled: { file: 'settlement', column: 'total',
-    filter: 'every settlement row for the order, whatever month it landed in',
-    note: 'Amazon states the payout per row and the parts foot to it exactly, so it is read rather than rebuilt from eight signed columns.' },
-  closing: { file: 'derived', column: 'Due from Amazon − Received to date' },
+    note: 'Added up with their signs, so a reversed charge is a credit and not another charge.' },
+  tds: { file: 'settlement', column: 'TDS (Section 194-O)',
+    note: 'Deducted by Amazon against our PAN. Claimed in the income-tax return.' },
+  tcs: { file: 'settlement', column: 'TCS-CGST + TCS-SGST + TCS-IGST',
+    note: 'Deducted by Amazon under section 52. Claimed in the GST cash ledger.' },
+  tdsTcs: { file: 'settlement', column: 'TDS 194-O + TCS CGST/SGST/IGST' },
+  expected: { file: 'derived', column: 'Net sales − Amazon charges − TDS − TCS' },
+  received: { file: 'settlement', column: 'total', filter: 'payments dated on or before the month end' },
+  settled: { file: 'settlement', column: 'total', filter: 'every payment for the order, in any month',
+    note: 'Amazon states the payout on each row and the parts add up to it, so it is read and not rebuilt.' },
+  closing: { file: 'derived', column: 'Amount due − received by the month end' },
+  stillOpen: { file: 'derived', column: 'Amount due − everything received to date' },
   gstMemo: { file: 'mtr', column: 'Total Tax Amount',
-    note: 'A memo, never a deduction. Amazon collects the full invoice and passes the GST across to you; you remit it onward.' },
-  /* the chain */
-  placed: { file: 'order', column: 'amazon-order-id', filter: 'every row, folded to one per order',
-    dated: 'purchase-date, converted to IST' },
-  cancelled: { file: 'order', column: 'order-status', filter: 'order-status = Cancelled on every line of the order' },
+    note: 'A memo, never a deduction. Amazon pays this to us with the sale amount and we pay it to the government.' },
+  placed: { file: 'order', column: 'amazon-order-id', filter: 'every row, counted once per order' },
+  cancelled: { file: 'order', column: 'order-status', filter: 'order-status = Cancelled on every line' },
   net: { file: 'derived', column: 'Orders placed − cancelled' },
   chainInvoiced: { file: 'mtr', column: 'Order Id', filter: 'the order has at least one Shipment row' },
-  chainSettled: { file: 'settlement', column: 'order id', filter: 'the order appears in any settlement, in any month' },
-  chainUnsettled: { file: 'derived', column: 'Net orders that appear in no settlement at all' },
-  status: { file: 'derived', column: 'order report status + MTR presence + settlement presence',
-    note: 'Exactly one status applies to each order, so the rows sum to the orders invoiced and nothing can hide between them.' },
+  chainSettled: { file: 'settlement', column: 'order id', filter: 'the order appears in any settlement' },
+  chainUnsettled: { file: 'derived', column: 'Net orders with no payment at all' },
+  status: { file: 'derived', column: 'order status + MTR presence + settlement presence' },
 };
 
-/* The waterfall. `sign` drives the sign column, `strong` marks a subtotal, and
-   `what` is the plain-English note the sheet carries too — the same words in
-   both places so nobody has to reconcile the explanation as well as the number. */
+/* The monthly statement, in the order the money moves. */
 const LINES = [
-  { key: 'invoiced',    label: 'Invoiced (incl GST)', sign: '+', prov: 'invoiced',
-    what: 'What was billed to customers — the MTR invoice value.' },
-  { key: 'returned',    label: 'Returns / refunds', sign: '−', prov: 'returned',
-    what: 'Money given back on those orders.' },
-  { key: 'netBillable', label: 'Net billable', sign: '=', strong: true, prov: 'netBillable',
-    what: 'Invoiced less returns.' },
-  { key: 'fees',        label: 'Amazon fees', sign: '−', prov: 'fees',
-    what: 'Commission, closing fee, FBA, storage and the GST on them.' },
-  { key: 'tdsTcs',      label: 'TDS 194-O / TCS', sign: '−', prov: 'tdsTcs',
-    what: 'Withheld at source by Amazon and paid to the government for you.' },
-  { key: 'expected',    label: 'Due from Amazon', sign: '=', strong: true, prov: 'expected',
-    what: 'What Amazon owes on this month’s orders.' },
-  { key: 'settled',     label: 'Received (to date)', sign: '−', prov: 'settled',
-    what: 'What has arrived against them, whenever it arrived.' },
-  { key: 'closing',     label: 'Still outstanding', sign: '=', strong: true, final: true, prov: 'closing',
-    what: 'Not yet received. A NEGATIVE means more came in than was due.' },
+  { key: 'invoiced', label: 'Sales invoiced', sign: '+', prov: 'invoiced',
+    what: 'Invoice value from the MTR sales report.' },
+  { key: 'returned', label: 'Customer returns', sign: '−', prov: 'returned',
+    what: 'Refunds given on those orders.' },
+  { key: 'netBillable', label: 'Net sales', sign: '=', strong: true, prov: 'netBillable',
+    what: 'Sales after customer returns.' },
+  { key: 'fees', label: 'Amazon charges', sign: '−', prov: 'fees',
+    what: 'Commission, closing fee, FBA and storage.' },
+  { key: 'tds', label: 'TDS u/s 194-O', sign: '−', prov: 'tds',
+    what: 'Deducted by Amazon against our PAN. Claim in the income-tax return.' },
+  { key: 'tcs', label: 'TCS u/s 52 (GST)', sign: '−', prov: 'tcs',
+    what: 'Deducted by Amazon. Claim in the GST cash ledger.' },
+  { key: 'expected', label: 'Amount due from Amazon', sign: '=', strong: true, prov: 'expected',
+    what: 'What Amazon owes on this month’s sales.' },
+  { key: 'received', label: 'Received by the month end', sign: '−', prov: 'received',
+    what: 'Payments dated on or before the last day of the month.' },
+  { key: 'closing', label: 'Closing balance', sign: '=', strong: true, final: true, prov: 'closing',
+    what: 'Still to be received as on the month end. Carried into the next month.' },
+];
+const AFTER = [
+  { key: 'receivedLater', label: 'Received later, in a following month', sign: '−', prov: 'settled',
+    what: 'Only visible because later months are loaded.' },
+  { key: 'stillOpen', label: 'Still pending today', sign: '=', strong: true, prov: 'stillOpen',
+    what: 'Not received even after every loaded file.' },
 ];
 
 const SEV = {
-  blocker: { icon: AlertTriangle, bg: '#FEF2F2', border: '#FCA5A5', fg: '#991B1B', label: 'Blocker' },
-  warning: { icon: AlertCircle,  bg: '#FFFBEB', border: '#FCD34D', fg: '#92400E', label: 'Warning' },
-  info:    { icon: Info,         bg: '#F0F9FF', border: '#93C5FD', fg: '#1E40AF', label: 'For information' },
+  blocker: { icon: AlertTriangle, bg: '#FEF2F2', fg: '#991B1B', label: 'Needs attention' },
+  warning: { icon: AlertCircle, bg: '#FFFBEB', fg: '#92400E', label: 'Warning' },
+  info: { icon: Info, bg: '#F0F9FF', fg: '#1E40AF', label: 'For information' },
 };
 
 /* ════════════════════════════════════════════════════════════════════════ */
@@ -160,11 +147,11 @@ export default function AmazonReceivablesDashboard() {
   const [loading, setLoading] = useState(true);
   const [running, setRunning] = useState(false);
   const [drill, setDrill] = useState(null);
-  /* '' means the whole period. A month key means that month alone. */
-  const [sel, setSel] = useState('');
+  const [view, setView] = useState('list');     // 'list' | 'report'
+  const [wizard, setWizard] = useState(false);
+  const [sel, setSel] = useState('');           // '' = whole period, else one month
+  const [txOpen, setTxOpen] = useState(false);
 
-  /* The route carries only the brand. Find the agent once so the API path is
-     the same shape every other agent uses. */
   useEffect(() => {
     api.get(`/api/brands/${brandId}/agents`)
       .then((r) => {
@@ -193,45 +180,35 @@ export default function AmazonReceivablesDashboard() {
 
   useEffect(() => { if (base) load(); }, [base, load]);
 
-  const run = async () => {
+  const run = async ({ months, basis }) => {
     if (!base) return;
     setRunning(true);
     try {
-      const months = status?.suggestedMonths || ['2026-06', '2026-07', '2026-08'];
-      const r = await api.post(`${base}/run`, { months });
+      const r = await api.post(`${base}/run`, { months, basis });
       setData(r.data);
-      toast.success(`Reconciled ${months.length} months in ${r.data.builtInMs} ms`);
+      setWizard(false);
+      setView('report');
+      setSel('');
+      toast.success(`Report ready — ${months.length} month(s) in ${r.data.builtInMs} ms`);
       load();
     } catch (e) {
-      toast.error(e.response?.data?.error || 'Could not run the reconciliation');
+      toast.error(e.response?.data?.error || 'Could not generate the report');
     } finally { setRunning(false); }
   };
 
-  /* sidebarFor() builds the role's FULL menu — an accountant gets the same
-     eleven items here as on every other agent page, an admin gets the admin
-     menu, a brand executive gets their restricted two. Hand-rolling a short
-     list, which is what the demo page did, silently dropped Statutory
-     Compliance, Colonel AI, Meetings, Tasks and the rest, so this page alone
-     looked like a different product.
-
-     It belongs on EVERY state including loading: a shell that appears only once
-     the data lands flickers the navigation away on each reload. */
-  /* The labels must MATCH the base menu's own ("Dashboard", "Agents"), because
-     sidebarFor merges by label: an unmatched label is appended as an extra
-     item instead of overriding, so passing "All Agents" produced a second
-     agents entry carrying the same testId and React warned about duplicate
-     keys. Matching the label overrides the path with this brand's, which is
-     the whole point of passing them. */
+  /* sidebarFor() builds the role's FULL menu. The labels must MATCH the base
+     menu's own ("Dashboard", "Agents") because it merges by label — an
+     unmatched label is appended as an extra item instead of overriding, which
+     produced a duplicate testId and a React key warning. */
   const sidebarItems = sidebarFor([
     { path: `/brands/${brandId}/dashboard`, label: 'Dashboard', icon: LayoutDashboard, testId: 'nav-dashboard' },
     { path: `/brands/${brandId}/agents`, label: 'Agents', icon: Bot, testId: 'nav-agents' },
   ]);
 
-  const months = data?.ledger?.months || data?.months || [];
-  /* One selection, read by every panel below. Filtering in one place is what
-     stops the chain and the ledger ever describing different periods. */
-  const shown = useMemo(
-    () => (sel && months.includes(sel) ? [sel] : months), [sel, months]);
+  const months = data?.ledger?.months || [];
+  const shown = useMemo(() => (sel && months.includes(sel) ? [sel] : months), [sel, months]);
+  const ST = data?.ledger?.STATUS || {};
+  const openDrill = (d) => setDrill({ months: shown, ...d });
 
   if (loading) {
     return (
@@ -243,337 +220,1047 @@ export default function AmazonReceivablesDashboard() {
     );
   }
 
-  const allLedger = data?.ledger?.perMonth || [];
-  const ledger = allLedger.filter((m) => shown.includes(m.month));
-  const three = data?.three;
-  const audit = data?.audit;
-  const sources = (data?.sources || []).filter((s) => shown.includes(s.month));
-  const ST = data?.ledger?.STATUS || FALLBACK_ST;
-
-  const openDrill = (d) => setDrill({ months: shown, ...d });
-
   return (
     <DashboardLayout sidebarItems={sidebarItems}>
-    <div className="p-6 space-y-5 max-w-[1500px]">
-      <button onClick={() => navigate(`/brands/${brandId}/reco`)}
-              className="flex items-center gap-1.5 text-sm text-slate-500 hover:text-blue-600 group transition-colors">
-        <ArrowLeft className="w-3.5 h-3.5 group-hover:-translate-x-0.5 transition-transform" />
-        Back to Reconciliation
-      </button>
+      <div className="p-6 pb-16 max-w-[1560px]">
+        <button onClick={() => (view === 'report' ? setView('list') : navigate(`/brands/${brandId}/agents`))}
+                className="flex items-center gap-1.5 text-sm text-slate-500 hover:text-blue-600 group transition-colors mb-3">
+          <ArrowLeft className="w-3.5 h-3.5 group-hover:-translate-x-0.5 transition-transform" />
+          {view === 'report' ? 'Back to reports' : 'Back to Agents'}
+        </button>
 
-      {/* ── header ─────────────────────────────────────────────────────── */}
-      <div className="flex items-start justify-between gap-4 flex-wrap">
-        <div className="min-w-0">
-          <div className="text-xs font-semibold uppercase tracking-wider text-slate-400">
-            Order report · MTR · Settlement
-          </div>
-          <div className="flex items-center gap-3 flex-wrap mt-0.5">
-            <h1 className="text-2xl font-bold text-slate-900">Amazon Receivables</h1>
-            {/* THE PERIOD, on the face of the page. A receivables figure with no
-                period against it is not a figure. */}
-            {months.length > 0 && (
-              <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full
-                               bg-slate-900 text-white text-xs font-semibold">
-                <CalendarRange className="h-3.5 w-3.5" />
-                {rangeLabel(months)}
-                <span className="font-normal text-slate-300">
-                  · {months.length} month{months.length > 1 ? 's' : ''}
-                </span>
-              </span>
-            )}
-            {data?.stale && (
-              <span className="px-2 py-1 rounded-full bg-amber-100 text-amber-800 text-xs font-semibold">
-                Sources changed since this run
-              </span>
-            )}
-          </div>
-          <p className="text-sm text-slate-500 mt-1.5 max-w-3xl">
-            Of everything sold, what has actually been paid for. Each month is its own cohort —
-            the orders <strong>invoiced</strong> that month, what Amazon kept, and what has since
-            arrived against them. <strong>The base is the MTR invoice value</strong>, because that
-            is the document actually issued to the customer.
-            {data?.builtAt && <span className="text-slate-400">
-              {' '}Last reconciled {new Date(data.builtAt).toLocaleString('en-IN')}.
-            </span>}
-          </p>
-        </div>
-        <div className="flex gap-2 shrink-0">
-          {data && <ExportButtons data={data} months={months} shown={shown} status={status} base={base} />}
-          <button onClick={load}
-                  className="px-3 py-2 text-sm font-medium rounded-lg border border-slate-200 hover:bg-slate-50 flex items-center gap-2">
-            <RefreshCw className="h-4 w-4" /> Refresh
-          </button>
-          <button onClick={run} disabled={running}
-                  className="px-4 py-2 text-sm font-semibold rounded-lg bg-slate-900 text-white hover:bg-slate-800 flex items-center gap-2 disabled:opacity-50">
-            {running ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
-            {running ? 'Reconciling…' : 'Run reconciliation'}
-          </button>
-        </div>
-      </div>
-
-      {!data && (
-        <>
-          <SourcesPanel status={status} sources={[]} sourceKind={{}} />
-          <div className="rounded-xl border border-slate-200 bg-slate-50 p-8 text-center">
-            <p className="text-slate-600 font-medium">No reconciliation has been run yet.</p>
-            <p className="text-sm text-slate-500 mt-1">
-              Load the three sources, then press <strong>Run reconciliation</strong>.
-            </p>
-          </div>
-        </>
-      )}
-
-      {data && <>
-        {/* ── the period filter, before anything it governs ─────────────── */}
-        <MonthFilter months={months} sel={sel} onSelect={setSel} ledger={allLedger} />
-
-        {/* ── what an accountant opens the page for ─────────────────────── */}
-        <Headline ledger={ledger} shown={shown} onDrill={openDrill} />
-
-        {/* ── how old the unpaid money is ───────────────────────────────── */}
-        <AgeingPanel ledger={ledger} onDrill={openDrill} />
-
-        {/* ── the chain: order → MTR → settlement ───────────────────────── */}
-        {three && <ThreeWayStrip three={three} shown={shown} onDrill={openDrill} />}
-
-        {/* ── issues, before the numbers that depend on them ────────────── */}
-        {audit?.issues?.length > 0 && (
-          <IssuesPanel audit={audit} shown={shown}
-                       onDrill={(i) => openDrill({ kind: 'issue', issue: i })} />
+        {view === 'list' ? (
+          <ReportList status={status} data={data} months={months}
+                      onOpen={() => { setView('report'); setSel(''); }}
+                      onGenerate={() => setWizard(true)} onRefresh={load} />
+        ) : (
+          <ReportView data={data} status={status} months={months} shown={shown} sel={sel}
+                      setSel={setSel} onDrill={openDrill} base={base}
+                      onTx={() => setTxOpen(true)} onRefresh={load} ST={ST} />
         )}
 
-        {/* ── the ledger ────────────────────────────────────────────────── */}
-        <LedgerTable ledger={ledger}
-                     onDrill={(line, month) => setDrill({ kind: 'line', line, months: [month] })} />
-
-        {/* ── closing status ────────────────────────────────────────────── */}
-        <StatusTable ledger={ledger}
-                     onDrill={(st, month) => setDrill({ kind: 'status', status: st, months: [month] })} />
-
-        {/* ── the three files, stated last: this is the evidence, and it
-               belongs where somebody checking a figure will look for it ─── */}
-        <SourcesPanel status={status} sources={sources} sourceKind={data?.sourceKind || {}} />
-      </>}
-
-      {drill && <DrillPanel drill={drill} data={data} ST={ST} base={base}
-                            onClose={() => setDrill(null)} />}
-    </div>
+        {wizard && (
+          <GenerateWizard status={status} running={running}
+                          onClose={() => setWizard(false)} onRun={run} />
+        )}
+        {txOpen && data && (
+          <TransactionData data={data} shown={shown} ST={ST} onClose={() => setTxOpen(false)} />
+        )}
+        {drill && (
+          <DrillPanel drill={drill} data={data} ST={ST} base={base} onClose={() => setDrill(null)} />
+        )}
+      </div>
     </DashboardLayout>
   );
 }
 
-/* ── the period filter ───────────────────────────────────────────────────────
-   "What is still owed on August" is the question an accountant actually asks;
-   the whole range is the exception. Each pill carries the month's own
-   outstanding so the choice is informed before it is made. */
-function MonthFilter({ months, sel, onSelect, ledger }) {
-  const find = (m) => ledger.find((x) => x.month === m);
-  const totalOut = ledger.reduce((a, m) => a + (m.closing?.amount || 0), 0);
-  const Pill = ({ value, label, sub, out }) => {
-    const on = sel === value;
-    return (
-      <button onClick={() => onSelect(value)}
-              className={`px-3.5 py-2 rounded-lg border text-left transition-colors ${
-                on ? 'border-slate-900 bg-slate-900 text-white'
-                   : 'border-slate-200 bg-white hover:border-slate-300 hover:bg-slate-50'}`}>
-        <div className="text-sm font-semibold leading-tight">{label}</div>
-        <div className={`text-[11px] leading-tight mt-0.5 ${on ? 'text-slate-300' : 'text-slate-400'}`}>
-          {sub}
-          {Math.abs(out) > 1 && (
-            <span className={on ? 'text-rose-300 font-semibold' : 'text-rose-600 font-semibold'}>
-              {' '}· ₹{inr(out, 0)} open
-            </span>
-          )}
-        </div>
-      </button>
-    );
-  };
+/* ── the landing page: what has been generated before ────────────────────── */
+function ReportList({ status, data, months, onOpen, onGenerate, onRefresh }) {
+  const runs = status?.runs || [];
+  const open = (data?.ledger?.perMonth || []).reduce((a, m) => a + (m.stillOpen?.amount || 0), 0);
+  const oldest = months.length ? daysOld(months[0]) : 0;
   return (
-    <div className="flex items-center gap-2 flex-wrap">
-      <span className="text-xs font-bold uppercase tracking-wider text-slate-400 mr-1">Period</span>
-      <Pill value="" label={`All · ${rangeLabel(months)}`}
-            sub={`${months.length} month${months.length > 1 ? 's' : ''}`} out={totalOut} />
-      {months.map((m) => (
-        <Pill key={m} value={m} label={fmtMonth(m)}
-              sub={`${int(find(m)?.invoiced?.count ?? 0)} invoices`}
-              out={find(m)?.closing?.amount || 0} />
-      ))}
-    </div>
+    <>
+      <h1 className="text-3xl font-bold text-slate-900 tracking-tight">Amazon Receivables</h1>
+      <p className="text-sm text-slate-500 mt-1.5 max-w-3xl">
+        How much we sold on Amazon, how much Amazon has paid, and how much is still pending.
+        Built from the order report, the MTR sales report and the settlement report.
+      </p>
+
+      <div className="flex items-end justify-between gap-4 mt-7 mb-4 flex-wrap">
+        <div>
+          <div className="text-xl font-bold text-slate-900">Reconciliation Summary</div>
+          <div className="text-sm text-slate-500">Amazon Receivables</div>
+        </div>
+        <div className="flex gap-2">
+          <button onClick={onRefresh}
+                  className="px-3 py-2.5 text-sm font-medium rounded-lg border border-slate-200 hover:bg-slate-50 flex items-center gap-2">
+            <RefreshCw className="h-4 w-4" /> Refresh
+          </button>
+          <button onClick={onGenerate}
+                  className="px-4 py-2.5 text-sm font-semibold rounded-lg text-white hover:opacity-90 flex items-center gap-2"
+                  style={{ background: T.ink }}>
+            <Plus className="h-4 w-4" /> Generate Report
+          </button>
+        </div>
+      </div>
+
+      <div className="flex gap-4 mb-6 flex-wrap">
+        <div className="w-[230px] bg-white border border-slate-200 rounded-xl p-5">
+          <div className="text-[11px] font-bold uppercase tracking-wider text-slate-400">Total reports</div>
+          <div className="text-4xl font-bold text-slate-900 mt-1">{runs.length}</div>
+          <div className="text-xs text-slate-500">Generated</div>
+        </div>
+        <div className="w-[300px] bg-white border border-slate-200 rounded-xl p-5"
+             style={{ borderLeft: `4px solid ${T.amber}` }}>
+          <div className="text-[11px] font-bold uppercase tracking-wider text-slate-400">Pending from Amazon</div>
+          <div className="text-4xl font-bold mt-1" style={{ color: open > 1 ? T.red : T.green }}>
+            ₹{inr(open, 0)}
+          </div>
+          <div className="text-xs text-slate-500">
+            {months.length ? `latest report · oldest month is ${oldest} days old` : 'no report yet'}
+          </div>
+        </div>
+      </div>
+
+      <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
+        <div className="px-5 py-4 border-b border-slate-100 flex items-center justify-between">
+          <div className="flex items-center gap-2.5">
+            <FileText className="h-4 w-4 text-slate-400" />
+            <span className="font-bold text-slate-800">Report History</span>
+            <span className="text-xs font-bold bg-slate-100 rounded-full px-2 py-0.5">{runs.length}</span>
+          </div>
+          <span className="text-xs text-slate-400">Click View to open the report</span>
+        </div>
+        {runs.length === 0 ? (
+          <div className="p-10 text-center">
+            <p className="text-slate-600 font-medium">No report has been generated yet.</p>
+            <p className="text-sm text-slate-500 mt-1">
+              Press <strong>Generate Report</strong> to build one from the three Amazon files.
+            </p>
+          </div>
+        ) : (
+          <table className="w-full text-sm">
+            <thead className="bg-slate-50 text-[10px] uppercase tracking-wider text-slate-400">
+              <tr>
+                <th className="px-5 py-2.5 text-left font-bold">Period</th>
+                <th className="px-4 py-2.5 text-left font-bold">Sales booked on</th>
+                <th className="px-4 py-2.5 text-right font-bold">Rows read</th>
+                <th className="px-4 py-2.5 text-left font-bold">Generated</th>
+                <th className="px-5 py-2.5 text-right font-bold">Actions</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-50">
+              {runs.map((r, i) => (
+                <tr key={`${(r.months || []).join('_')}-${i}`} className="hover:bg-slate-50/60">
+                  <td className="px-5 py-4">
+                    <div className="flex items-center gap-3">
+                      <span className="w-8 h-8 rounded-lg flex items-center justify-center text-xs font-bold"
+                            style={{ background: '#FFF4E0', color: T.amberText }}>A</span>
+                      <div>
+                        <div className="font-semibold text-slate-800">{rangeLabel(r.months || [])}</div>
+                        <div className="text-[11px] text-slate-400">{(r.months || []).length} month(s)</div>
+                      </div>
+                    </div>
+                  </td>
+                  <td className="px-4 py-4">
+                    <span className="text-[11px] font-bold px-2.5 py-1 rounded-full"
+                          style={{ background: '#FFF4E0', color: T.amberText }}>
+                      {r.basis === 'order' ? 'Order date' : 'Dispatch date'}
+                    </span>
+                  </td>
+                  <td className="px-4 py-4 text-right tabular-nums text-slate-600">
+                    {int((r.orderRows || 0) + (r.mtrRows || 0) + (r.settlementRows || 0))}
+                  </td>
+                  <td className="px-4 py-4 text-slate-600">
+                    {r.builtAt ? new Date(r.builtAt).toLocaleString('en-IN') : '—'}
+                  </td>
+                  <td className="px-5 py-4">
+                    <div className="flex gap-2 justify-end">
+                      <button onClick={onOpen}
+                              className="px-4 py-2 text-xs font-semibold rounded-lg text-white flex items-center gap-1.5"
+                              style={{ background: T.ink }}>
+                        <Eye className="h-3.5 w-3.5" /> View
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+    </>
   );
 }
 
-/* ── the five numbers the page exists to give ────────────────────────────────
-   Billed, kept, due, received, still owed — in that order, because that is the
-   order the money moves in, and each one opens the orders behind it. */
-function Headline({ ledger, shown, onDrill }) {
-  const amt = (k) => ledger.reduce((a, m) => a + (m[k]?.amount || 0), 0);
-  const cnt = (k) => ledger.reduce((a, m) => a + (m[k]?.count || 0), 0);
+/* ── the generate wizard, and the question nothing else asks ─────────────── */
+function GenerateWizard({ status, running, onClose, onRun }) {
+  const [step, setStep] = useState(1);
+  const [from, setFrom] = useState('2026-06');
+  const [to, setTo] = useState('2026-08');
+  const [basis, setBasis] = useState('dispatch');
+  const S = status?.sources;
 
-  const netBillable = amt('netBillable');
-  const fees = amt('fees');
-  const tds = amt('tdsTcs');
-  const expected = amt('expected');
-  const settled = amt('settled');
-  const closing = amt('closing');
-  const collected = pctOf(settled, expected);
+  const months = useMemo(() => {
+    const out = []; let [y, m] = from.split('-').map(Number);
+    const [ty, tm] = to.split('-').map(Number);
+    while (y < ty || (y === ty && m <= tm)) {
+      out.push(`${y}-${String(m).padStart(2, '0')}`);
+      m += 1; if (m > 12) { m = 1; y += 1; }
+      if (out.length > 36) break;
+    }
+    return out;
+  }, [from, to]);
 
-  const CARDS = [
-    { key: 'netBillable', label: 'Net billable', value: netBillable, drill: 'netBillable',
-      sub: `${int(cnt('invoiced'))} invoices · ${rangeLabel(shown)}`,
-      note: 'Invoiced to customers, less what was refunded.' },
-    { key: 'kept', label: 'Amazon kept', value: fees + tds, drill: 'fees', tone: 'text-amber-700',
-      sub: `${pctOf(fees + tds, netBillable).toFixed(1)}% of net billable`,
-      note: 'Fees, plus TDS 194-O and TCS withheld at source.' },
-    { key: 'expected', label: 'Due from Amazon', value: expected, drill: 'expected', strong: true,
-      sub: 'Net billable less what Amazon kept',
-      note: 'What Amazon owes on this period’s invoices.' },
-    { key: 'settled', label: 'Received to date', value: settled, drill: 'settled', tone: 'text-emerald-700',
-      sub: `${collected.toFixed(1)}% collected · ${int(cnt('settled'))} orders`,
-      note: 'Arrived against these orders, whenever it arrived.', bar: collected },
-    { key: 'closing', label: 'Still outstanding', value: closing, drill: 'closing', strong: true,
-      tone: closing < -1 ? 'text-rose-700' : closing > 1 ? 'text-rose-600' : 'text-emerald-700',
-      sub: closing < -1 ? 'MORE received than was due — see the issues'
-         : Math.abs(closing) <= 1 ? 'This period is square'
-         : `${int(cnt('unpaidOrders'))} orders with no settlement at all`,
-      note: 'Due from Amazon, less what has been received.' },
+  const years = [2025, 2026, 2027];
+  const pick = (val, set, label) => (
+    <div className="flex-1">
+      <label className="block text-xs font-bold text-slate-700 mb-1.5">{label}</label>
+      <div className="flex gap-2">
+        <select value={val.split('-')[1]} aria-label={`${label} month`}
+                onChange={(e) => set(`${val.split('-')[0]}-${e.target.value}`)}
+                className="flex-1 text-sm px-3 py-2.5 border border-slate-300 rounded-lg bg-white">
+          {FULLMON.map((n, i) => (
+            <option key={n} value={String(i + 1).padStart(2, '0')}>{n}</option>
+          ))}
+        </select>
+        <select value={val.split('-')[0]} aria-label={`${label} year`}
+                onChange={(e) => set(`${e.target.value}-${val.split('-')[1]}`)}
+                className="w-28 text-sm px-3 py-2.5 border border-slate-300 rounded-lg bg-white">
+          {years.map((y) => <option key={y} value={y}>{y}</option>)}
+        </select>
+      </div>
+    </div>
+  );
+
+  const STEPS = ['Period', 'Files', 'Sales basis', 'Generate'];
+  const BASES = [
+    { key: 'order', title: 'Order date', tag: 'Available',
+      what: 'Sale is booked in the month the customer placed the order, even if it was never dispatched.',
+      cols: ['order report · purchase-date', 'MTR · Order Date'], ok: true },
+    { key: 'dispatch', title: 'Dispatch date', tag: 'Available · default',
+      what: 'Sale is booked in the month the goods left the warehouse and the invoice was raised. '
+          + 'The amount becomes receivable from this date.',
+      cols: ['MTR · Shipment Date', 'MTR · Invoice Date (fallback)'], ok: true },
+    { key: 'delivery', title: 'Delivery date', tag: 'Needs one more file',
+      what: 'Sale is booked in the month the customer received the goods. The most conservative option.',
+      cols: ['not in the order report', 'not in the MTR or settlement'], ok: false },
   ];
 
   return (
-    <div className="grid gap-3 grid-cols-2 md:grid-cols-3 xl:grid-cols-5">
-      {CARDS.map((c) => (
-        <button key={c.key} onClick={() => onDrill({ kind: 'line', line: c.drill })}
-                className={`text-left rounded-xl border bg-white p-4 hover:shadow-md hover:border-slate-300
-                            transition-all group ${c.strong ? 'border-slate-300' : 'border-slate-200'}`}>
-          <div className="text-[11px] font-bold uppercase tracking-wider text-slate-400">{c.label}</div>
-          <div className={`mt-1.5 text-xl font-bold tabular-nums ${c.tone || 'text-slate-900'}`}>
-            ₹{inr(c.value)}
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-6" style={{ background: 'rgba(35,47,62,0.55)' }}>
+      <div className="bg-white rounded-2xl w-full max-w-3xl max-h-[90vh] flex flex-col overflow-hidden">
+        <div className="px-7 pt-6">
+          <div className="flex justify-between items-start">
+            <div>
+              <h2 className="text-xl font-bold text-slate-900">Generate Receivables Report</h2>
+              <p className="text-sm text-slate-500 mt-0.5">Amazon Receivables · {status?.brand || ''}</p>
+            </div>
+            <button onClick={onClose} aria-label="Close" className="p-2 rounded-lg hover:bg-slate-100">
+              <X className="h-4 w-4 text-slate-500" />
+            </button>
           </div>
-          {c.bar !== undefined && (
-            <div className="mt-2 h-1.5 rounded-full bg-slate-100 overflow-hidden">
-              <div className="h-full rounded-full bg-emerald-500"
-                   style={{ width: `${Math.max(0, Math.min(100, c.bar))}%` }} />
+          <div className="flex items-center gap-2 mt-5 pb-4 border-b border-slate-200">
+            {STEPS.map((s, i) => (
+              <React.Fragment key={s}>
+                <div className="flex items-center gap-2">
+                  <span className="w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold"
+                        style={step === i + 1 ? { background: T.ink, color: '#fff' }
+                                              : { background: '#EEF0F3', color: '#5B6472' }}>{i + 1}</span>
+                  <span className="text-sm font-semibold whitespace-nowrap"
+                        style={{ color: step === i + 1 ? '#111927' : '#5B6472' }}>{s}</span>
+                </div>
+                {i < STEPS.length - 1 && <span className="flex-1 h-px bg-slate-200" />}
+              </React.Fragment>
+            ))}
+          </div>
+        </div>
+
+        <div className="flex-1 overflow-auto px-7 py-5">
+          {step === 1 && (
+            <>
+              <div className="flex gap-4 mb-5">{pick(from, setFrom, 'From')}{pick(to, setTo, 'To')}</div>
+              <p className="text-sm text-slate-600">
+                {months.length} month(s) selected — <strong>{rangeLabel(months)}</strong>.
+              </p>
+            </>
+          )}
+
+          {step === 2 && (
+            <>
+              <div className="text-[11px] font-bold uppercase tracking-wider text-slate-400 mb-3">The three files</div>
+              {[['orders', 'order', 'API'], ['mtr', 'mtr', 'Upload only'], ['settlement', 'settlement', 'API or upload']]
+                .map(([k, fk, tag]) => {
+                  const f = FILES[fk]; const s = S?.[k]; const Icon = f.icon;
+                  return (
+                    <div key={k} className="border border-slate-200 rounded-xl p-4 mb-3"
+                         style={{ borderLeft: `4px solid ${f.tone}` }}>
+                      <div className="flex items-start justify-between gap-4">
+                        <div>
+                          <div className="flex items-center gap-2">
+                            <Icon className="h-4 w-4" style={{ color: f.tone }} />
+                            <span className="font-bold text-slate-800">{f.label}</span>
+                            <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-slate-100 text-slate-600">
+                              {tag}
+                            </span>
+                          </div>
+                          <p className="text-xs text-slate-500 mt-1.5 max-w-xl">{f.how}</p>
+                        </div>
+                        <span className="text-xs font-bold shrink-0"
+                              style={{ color: s?.rows ? T.green : T.red }}>
+                          {s?.rows ? `${int(s.rows)} rows · ${s.files} file(s)` : 'not loaded'}
+                        </span>
+                      </div>
+                    </div>
+                  );
+                })}
+              <div className="rounded-xl p-4 mt-4" style={{ background: '#FFFBEB', border: '1px solid #FCD34D' }}>
+                <div className="text-xs font-bold mb-1" style={{ color: '#92400E' }}>
+                  Why the MTR cannot be downloaded automatically
+                </div>
+                <p className="text-xs leading-relaxed" style={{ color: '#78350F' }}>
+                  Amazon has not yet approved our Tax Invoicing access. Till then, download the MTR from
+                  Seller Central and upload it. Files already uploaded are listed above.
+                </p>
+              </div>
+            </>
+          )}
+
+          {step === 3 && (
+            <>
+              <div className="rounded-xl p-4 mb-5" style={{ background: '#FFF4E0', border: '1px solid #FFD591' }}>
+                <p className="text-sm leading-relaxed" style={{ color: '#6B3F00' }}>
+                  Suppose 100 orders come in this month, 80 are dispatched and 60 are delivered. Some companies
+                  book sales of <strong>100</strong>, some <strong>80</strong>, some <strong>60</strong>. All three
+                  are correct as per their own accounting policy, so we cannot decide it for you.
+                  Select it once — sales, amount due, ageing and the month of every order follow this choice.
+                </p>
+              </div>
+              {BASES.map((b) => (
+                <label key={b.key}
+                       className={`block mb-3 rounded-xl p-4 border-2 ${b.ok ? 'cursor-pointer' : 'cursor-not-allowed'}`}
+                       style={{ borderColor: basis === b.key ? T.amber : '#E3E6EA',
+                                background: basis === b.key ? '#FFFBF4' : (b.ok ? '#fff' : '#FAFBFC') }}>
+                  <div className="flex items-start gap-3">
+                    <input type="radio" name="basis" checked={basis === b.key} disabled={!b.ok}
+                           onChange={() => b.ok && setBasis(b.key)} className="mt-1 h-4 w-4" />
+                    <div className="flex-1">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="font-bold text-slate-900">{b.title}</span>
+                        <span className="text-[10px] font-bold px-2 py-0.5 rounded-full"
+                              style={b.ok ? { background: '#ECFDF3', color: '#065F46' }
+                                          : { background: '#FEF3F2', color: T.red }}>{b.tag}</span>
+                      </div>
+                      <p className="text-xs text-slate-600 mt-1.5 leading-relaxed">{b.what}</p>
+                      <div className="flex gap-2 mt-2 flex-wrap">
+                        {b.cols.map((c) => (
+                          <span key={c} className="text-[10px] font-mono bg-white border border-slate-200 rounded px-2 py-1">
+                            {c}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                </label>
+              ))}
+              <div className="rounded-xl p-4" style={{ background: '#FEF3F2', border: '1px solid #FCA5A5' }}>
+                <div className="text-xs font-bold mb-1" style={{ color: T.red }}>
+                  Delivery date is not available in any of the three Amazon files
+                </div>
+                <p className="text-xs leading-relaxed" style={{ color: '#7F1D1D' }}>
+                  We checked all of them. Order date and dispatch date are on every row; there is no delivery
+                  column anywhere. For that option we need Amazon’s <strong>Fulfilled Shipments</strong> report.
+                </p>
+              </div>
+            </>
+          )}
+
+          {step === 4 && (
+            <div className="space-y-3">
+              {[['Period', rangeLabel(months)], ['Months', months.join(', ')],
+                ['Sales booked on', basis === 'order' ? 'Order date' : 'Dispatch date'],
+                ['Order report', `${int(S?.orders?.rows || 0)} rows`],
+                ['MTR sales report', `${int(S?.mtr?.rows || 0)} rows`],
+                ['Settlement report', `${int(S?.settlement?.rows || 0)} rows`]].map(([k, v]) => (
+                <div key={k} className="flex justify-between py-2.5 border-b border-slate-100">
+                  <span className="text-sm text-slate-500">{k}</span>
+                  <span className="text-sm font-semibold text-slate-900">{v}</span>
+                </div>
+              ))}
             </div>
           )}
-          <div className="mt-1.5 text-[11px] font-medium text-slate-500">{c.sub}</div>
-          <div className="mt-1 text-[11px] text-slate-400 leading-snug">{c.note}</div>
-          <div className="mt-2 text-[11px] font-semibold text-blue-600 opacity-0 group-hover:opacity-100 transition-opacity">
-            Show the orders →
-          </div>
-        </button>
-      ))}
+        </div>
+
+        <div className="px-7 py-4 border-t border-slate-200 flex justify-between items-center">
+          <button onClick={() => (step > 1 ? setStep(step - 1) : onClose())}
+                  className="px-4 py-2.5 text-sm font-medium rounded-lg border border-slate-300 hover:bg-slate-50">
+            {step > 1 ? '‹ Back' : 'Cancel'}
+          </button>
+          {step < 4 ? (
+            <button onClick={() => setStep(step + 1)}
+                    className="px-6 py-2.5 text-sm font-bold rounded-lg text-white" style={{ background: T.ink }}>
+              Next ›
+            </button>
+          ) : (
+            <button onClick={() => onRun({ months, basis })} disabled={running}
+                    className="px-6 py-2.5 text-sm font-bold rounded-lg text-white flex items-center gap-2 disabled:opacity-50"
+                    style={{ background: T.ink }}>
+              {running && <Loader2 className="h-4 w-4 animate-spin" />}
+              {running ? 'Generating…' : 'Generate report'}
+            </button>
+          )}
+        </div>
+      </div>
     </div>
   );
 }
 
-/* ── how old the unpaid money is ─────────────────────────────────────────────
-   Amazon settles about every seven days, so last month's tail is a timing
-   difference and anything older is a question. The distinction is the whole
-   point of ageing it, and it is not visible from the amounts alone. */
-function AgeingPanel({ ledger, onDrill }) {
-  const open = ledger.filter((m) => Math.abs(m.closing?.amount || 0) > 1);
-  if (!open.length) {
+/* ── the report ─────────────────────────────────────────────────────────── */
+function ReportView({ data, status, months, shown, sel, setSel, onDrill, base, onTx, onRefresh, ST }) {
+  const all = data?.ledger?.perMonth || [];
+  const led = all.filter((m) => shown.includes(m.month));
+  const one = sel && led.length === 1 ? led[0] : null;
+  const basisLabel = data?.basis === 'order' ? 'order date' : 'dispatch date';
+
+  return (
+    <>
+      <div className="flex items-start justify-between gap-4 flex-wrap mb-5">
+        <div>
+          <div className="text-[11px] font-bold uppercase tracking-wider text-slate-400">
+            Order report · MTR · Settlement
+          </div>
+          <div className="flex items-center gap-3 flex-wrap mt-1">
+            <h1 className="text-2xl font-bold text-slate-900 tracking-tight">Receivables Report</h1>
+            <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-white text-xs font-semibold"
+                  style={{ background: T.ink }}>
+              <CalendarRange className="h-3.5 w-3.5" /> {rangeLabel(months)}
+            </span>
+            <span className="text-xs font-bold px-2.5 py-1 rounded-full"
+                  style={{ background: '#FFF4E0', color: T.amberText }}>
+              Sales booked on {basisLabel}
+            </span>
+          </div>
+        </div>
+        <div className="flex gap-2">
+          <button onClick={onTx}
+                  className="px-3 py-2.5 text-sm font-semibold rounded-lg border flex items-center gap-2"
+                  style={{ borderColor: T.amber, color: T.amberText, background: '#FFFBF4' }}>
+            <Search className="h-4 w-4" /> Transaction data
+          </button>
+          <button onClick={onRefresh}
+                  className="px-3 py-2.5 text-sm font-medium rounded-lg border border-slate-200 hover:bg-slate-50 flex items-center gap-2">
+            <RefreshCw className="h-4 w-4" /> Refresh
+          </button>
+          <ExcelButton base={base} shown={shown} />
+        </div>
+      </div>
+
+      {/* period filter */}
+      <div className="flex items-center gap-2 flex-wrap mb-5">
+        <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400 mr-1">Period</span>
+        {[{ v: '', label: `All · ${rangeLabel(months)}`, sub: `${months.length} month(s)` },
+          ...months.map((m) => ({ v: m, label: fmtMonth(m),
+            sub: `${int(all.find((x) => x.month === m)?.invoiced?.count ?? 0)} invoices` }))]
+          .map((p) => {
+            const on = sel === p.v;
+            const openAmt = p.v ? (all.find((x) => x.month === p.v)?.stillOpen?.amount || 0)
+                                : all.reduce((a, m) => a + (m.stillOpen?.amount || 0), 0);
+            return (
+              <button key={p.v || 'all'} onClick={() => setSel(p.v)}
+                      className="px-3.5 py-2 rounded-lg border text-left transition-colors"
+                      style={on ? { background: T.ink, borderColor: T.ink, color: '#fff' }
+                                : { background: '#fff', borderColor: '#E3E6EA', color: '#374151' }}>
+                <div className="text-sm font-semibold leading-tight">{p.label}</div>
+                <div className="text-[11px] leading-tight mt-0.5" style={{ color: on ? '#C3CAD3' : '#94A3B8' }}>
+                  {p.sub}
+                  {Math.abs(openAmt) > 1 && (
+                    <span className="font-semibold" style={{ color: on ? '#FCA5A5' : T.red }}>
+                      {' '}· ₹{inr(openAmt, 0)} pending
+                    </span>
+                  )}
+                </div>
+              </button>
+            );
+          })}
+      </div>
+
+      {one ? <MonthStatement m={one} data={data} onDrill={onDrill} />
+           : <PeriodOverview led={led} data={data} shown={shown} onDrill={onDrill} />}
+
+      <IssuesPanel audit={data?.audit} shown={shown}
+                   onDrill={(i) => onDrill({ kind: 'issue', issue: i })} />
+      <LedgerTable led={led} onDrill={onDrill} />
+      <JourneyAndScenarios data={data} shown={shown} onDrill={onDrill} ST={ST} />
+      <SourcesPanel status={status} sources={(data?.sources || []).filter((s) => shown.includes(s.month))}
+                    sourceKind={data?.sourceKind || {}} />
+    </>
+  );
+}
+
+/* ── one month: the four questions, then the statement ───────────────────── */
+function MonthStatement({ m, data, onDrill }) {
+  const cash = (data?.ledger?.cash || []).find((c) => c.month === m.month)
+            || { total: 0, orders: 0, bySaleMonth: [] };
+  const own = cash.bySaleMonth.find((x) => x.saleMonth === m.month) || { amount: 0, orders: 0 };
+  const older = cash.bySaleMonth.filter((x) => x.saleMonth !== m.month);
+  const olderAmt = older.reduce((a, x) => a + x.amount, 0);
+  const olderOrders = older.reduce((a, x) => a + x.orders, 0);
+  const diff = +(cash.total - own.amount - olderAmt).toFixed(2);
+
+  const cards = [
+    { n: 1, q: 'How much did we sell in this month?', val: m.expected.amount, tone: T.blue, fg: '#111927',
+      sub: `${int(m.invoiced.count)} invoices · amount due from Amazon`,
+      lines: [['Invoice value', inr(m.invoiced.amount)],
+              ['Less returns, charges, TDS, TCS',
+               inr(m.invoiced.amount - m.expected.amount)]],
+      drill: { kind: 'line', line: 'expected' } },
+    { n: 2, q: 'How much did Amazon credit in this month?', val: cash.total, tone: T.green, fg: T.green,
+      sub: `${int(cash.orders)} orders · total money received`,
+      lines: [['For this month’s sales', inr(own.amount)],
+              ['For earlier months’ sales', inr(olderAmt)],
+              ...(Math.abs(diff) > 0.5 ? [['Difference under checking', inr(diff)]] : [])],
+      drill: { kind: 'line', line: 'received' } },
+    /* A NEGATIVE closing is not "minus money still to come" — it means Amazon
+       paid for goods the customer returned after the month end, so the month
+       really did hold cash it would later give back. Flip the question rather
+       than printing a minus sign against the word "pending". */
+    ...(m.closing.amount < 0 ? [{
+      n: 3, q: 'How much was held in excess at the month end?', val: Math.abs(m.closing.amount),
+      tone: T.amber, fg: T.amberText,
+      sub: `advance held on ${endLabel(m.month)}`,
+      lines: [['Amount due', inr(m.expected.amount)],
+              ['Received by the month end', inr(m.received.amount)],
+              ['Returned to Amazon later', inr(Math.abs(m.receivedLater.amount))]],
+      drill: { kind: 'line', line: 'closing' },
+    }] : [{
+      n: 3, q: 'How much of THIS MONTH’S SALES is not received?', val: m.closing.amount,
+      tone: T.red, fg: T.red,
+      sub: `pending as on ${endLabel(m.month)}`,
+      lines: [['Amount due', inr(m.expected.amount)],
+              ['Less received by the month end', inr(m.received.amount)],
+              [m.receivedLater.amount > 0
+                ? `Later: ₹${inr(m.receivedLater.amount, 0)} came in · ₹${inr(m.stillOpen.amount, 0)} open`
+                : 'Nothing has come in since', '']],
+      drill: { kind: 'line', line: 'closing' },
+    }]),
+    { n: 4, q: 'How much of it was old money?', val: olderAmt, tone: T.amber, fg: T.amberText,
+      sub: `${int(olderOrders)} orders · sold in an earlier month`,
+      lines: [['Part of card 2, not card 1', ''], ['No sales invoice in this report', '']],
+      drill: { kind: 'cash', month: m.month } },
+  ];
+
+  return (
+    <>
+      <div className="rounded-xl px-5 py-3.5 mb-5" style={{ background: '#FFF4E0', border: '1px solid #FFD591' }}>
+        <p className="text-sm leading-relaxed" style={{ color: '#6B3F00' }}>
+          <strong>Cut-off:</strong> this statement is closed on <strong>{endLabel(m.month)}</strong>. Anything
+          Amazon paid after that date is not treated as received here, even if the later file is loaded — it
+          belongs to that month’s statement. So this month closes with{' '}
+          <strong>₹{inr(Math.abs(m.closing.amount))}</strong>{' '}
+          {m.closing.amount < 0
+            ? 'held in excess — money received for orders the customers returned later.'
+            : 'still to be received.'}
+        </p>
+      </div>
+
+      <div className="grid gap-3.5 grid-cols-1 md:grid-cols-2 xl:grid-cols-4 mb-5">
+        {cards.map((c) => (
+          <button key={c.n} onClick={() => onDrill({ ...c.drill, months: [m.month] })}
+                  className="text-left bg-white border border-slate-200 rounded-xl p-4 hover:shadow-md hover:border-slate-300 transition-all"
+                  style={{ borderTop: `4px solid ${c.tone}` }}>
+            <div className="flex items-center gap-2">
+              <span className="w-5 h-5 rounded-full text-white text-[11px] font-bold flex items-center justify-center shrink-0"
+                    style={{ background: c.tone }}>{c.n}</span>
+              <span className="text-[12.5px] font-bold text-slate-700 leading-tight">{c.q}</span>
+            </div>
+            <div className="text-[26px] font-bold tracking-tight mt-2.5 tabular-nums" style={{ color: c.fg }}>
+              ₹{inr(c.val)}
+            </div>
+            <div className="text-xs text-slate-500 mt-0.5">{c.sub}</div>
+            <div className="mt-2.5 pt-2 border-t border-slate-100">
+              {c.lines.map(([k, v], i) => (
+                <div key={i} className="flex justify-between gap-2 py-0.5">
+                  <span className="text-[11.5px] text-slate-500">{k}</span>
+                  <span className="text-[11.5px] font-bold text-slate-700 tabular-nums whitespace-nowrap">{v}</span>
+                </div>
+              ))}
+            </div>
+          </button>
+        ))}
+      </div>
+
+      {/* how the four tie together */}
+      <div className="bg-white border border-slate-200 rounded-xl p-5 mb-5">
+        <div className="text-[11px] font-bold uppercase tracking-wider text-slate-400 mb-3">
+          How the four amounts tie together
+        </div>
+        <div className="grid md:grid-cols-2 gap-7">
+          <div>
+            <div className="text-xs font-bold text-slate-800 mb-2">
+              Against {fmtMonth(m.month)} sales — what is still owed
+            </div>
+            {[[`${fmtMonth(m.month)} sales — amount due`, m.expected.amount, 700, '#111927'],
+              ['Less: received by the month end', m.received.amount, 500, T.green],
+              [m.closing.amount < 0
+                ? `Held in excess on ${endLabel(m.month)}`
+                : `Not received as on ${endLabel(m.month)}`,
+               Math.abs(m.closing.amount), 800, m.closing.amount < 0 ? T.amberText : T.red]].map(([k, v, w, fg], i) => (
+              <div key={i} className="flex justify-between gap-3 py-1.5 border-b border-slate-100">
+                <span className="text-[13px]" style={{ fontWeight: w, color: fg }}>{k}</span>
+                <span className="text-[13.5px] tabular-nums" style={{ fontWeight: w, color: fg }}>{inr(v)}</span>
+              </div>
+            ))}
+          </div>
+          <div>
+            <div className="text-xs font-bold text-slate-800 mb-2">
+              Money credited in {fmtMonth(m.month)} — what it was for
+            </div>
+            {[['For this month’s sales', own.amount, 500, '#111927'],
+              ['Add: for earlier months’ sales', olderAmt, 500, T.amberText],
+              ...(Math.abs(diff) > 0.5 ? [['Add: difference under checking', diff, 500, T.red]] : []),
+              ['Total credited by Amazon', cash.total, 800, T.green]].map(([k, v, w, fg], i) => (
+              <div key={i} className="flex justify-between gap-3 py-1.5 border-b border-slate-100">
+                <span className="text-[13px]" style={{ fontWeight: w, color: fg }}>{k}</span>
+                <span className="text-[13.5px] tabular-nums" style={{ fontWeight: w, color: fg }}>{inr(v)}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+        <p className="text-xs text-slate-500 mt-3 leading-relaxed">
+          ₹{inr(own.amount)} appears in both columns. On the left it is the part of this month’s bill that has
+          been settled; on the right it is the part of this month’s bank credit that belonged to this month.
+          Same money, read from the sales side and from the receipts side.
+        </p>
+      </div>
+
+      {/* whose sales was the cash for */}
+      <div className="bg-white border rounded-xl overflow-hidden mb-5" style={{ borderColor: T.amber }}>
+        <div className="px-5 py-3.5 border-b flex items-center justify-between gap-3 flex-wrap"
+             style={{ background: '#FFFBF4', borderColor: '#FFD591' }}>
+          <div>
+            <div className="font-bold text-slate-900">
+              Is the money Amazon credited in {fmtMonth(m.month)} actually {fmtMonth(m.month)}’s?
+            </div>
+            <div className="text-xs text-slate-500 mt-0.5">
+              Every payment dated in {fmtMonth(m.month)}, split by the month the sale was made
+            </div>
+          </div>
+          <span className="text-[11px] font-bold px-3 py-1.5 rounded-full"
+                style={olderAmt > 1 ? { background: '#FEF3F2', color: T.red }
+                                    : { background: '#ECFDF3', color: T.green }}>
+            {olderAmt > 1 ? `${pctOf(olderAmt, cash.total).toFixed(1)}% is older money` : 'All of it is this month’s'}
+          </span>
+        </div>
+        <table className="w-full text-sm">
+          <thead className="bg-slate-50 text-[10px] uppercase tracking-wider text-slate-400">
+            <tr>
+              <th className="px-5 py-2.5 text-left font-bold">Sale month</th>
+              <th className="px-4 py-2.5 text-right font-bold">Orders</th>
+              <th className="px-4 py-2.5 text-right font-bold">Amount</th>
+              <th className="px-4 py-2.5 text-left font-bold w-56">Share</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-slate-50">
+            {cash.bySaleMonth.map((x) => {
+              const share = pctOf(Math.abs(x.amount), Math.abs(cash.total));
+              const isOwn = x.saleMonth === m.month;
+              return (
+                <tr key={x.saleMonth} style={isOwn ? {} : { background: '#FFFBF4' }}>
+                  <td className="px-5 py-3">
+                    <div className="font-semibold text-slate-800">{fmtMonth(x.saleMonth)}</div>
+                    <div className="text-[11px] text-slate-500">
+                      {isOwn ? 'Sold and paid in the same month'
+                             : x.saleMonth === 'EARLIER'
+                               ? 'No sales invoice inside this report — May or before'
+                               : 'Sold earlier, paid now'}
+                    </div>
+                  </td>
+                  <td className="px-4 py-3 text-right tabular-nums text-slate-600">{int(x.orders)}</td>
+                  <td className="px-4 py-3 text-right tabular-nums font-bold"
+                      style={{ color: isOwn ? '#111927' : T.amberText }}>₹{inr(x.amount)}</td>
+                  <td className="px-4 py-3">
+                    <div className="flex items-center gap-2">
+                      <div className="flex-1 h-2 bg-slate-100 rounded-full overflow-hidden">
+                        <div className="h-full rounded-full"
+                             style={{ width: `${Math.min(100, share)}%`, background: isOwn ? T.green : T.amber }} />
+                      </div>
+                      <span className="text-[11px] font-bold text-slate-500 w-11 text-right">{share.toFixed(1)}%</span>
+                    </div>
+                  </td>
+                </tr>
+              );
+            })}
+            <tr style={{ background: T.ink, color: '#fff' }}>
+              <td className="px-5 py-3 font-bold">Total credited in {fmtMonth(m.month)}</td>
+              <td className="px-4 py-3 text-right tabular-nums font-bold">{int(cash.orders)}</td>
+              <td className="px-4 py-3 text-right tabular-nums font-bold">₹{inr(cash.total)}</td>
+              <td />
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </>
+  );
+}
+
+/* ── the whole period: volume, summary, cash cycle ───────────────────────── */
+function PeriodOverview({ led, data, shown, onDrill }) {
+  const t = data?.three?.totals || {};
+  const amt = (k) => led.reduce((a, m) => a + (m[k]?.amount || 0), 0);
+  const cnt = (k) => led.reduce((a, m) => a + (m[k]?.count || 0), 0);
+  const VOL = [
+    { cap: 'Orders placed', v: t.placed, src: 'order', note: 'All orders in the period, counted once each' },
+    { cap: 'Cancelled', v: t.cancelled, src: 'order', note: 'Cancelled before dispatch — no invoice, no payment', fg: T.amberText },
+    { cap: 'Invoiced', v: t.shipped, src: 'mtr', note: 'Invoice raised in the MTR sales report' },
+    { cap: 'Paid by Amazon', v: t.settled, src: 'settlement', note: 'Payment received, in any month', fg: T.green },
+    { cap: 'Not paid yet', v: t.unsettled, src: 'settlement', note: 'No payment received at all', fg: T.red },
+    { cap: 'Not an Amazon sale', v: (led[0]?.byStatus || []).length
+        ? led.reduce((a, m) => a + (m.byStatus.find((b) => /MCF/.test(b.status))?.count || 0), 0) : 0,
+      src: 'order', note: 'Sold on another website, only shipped by Amazon', fg: '#5B6472' },
+  ];
+  const EQ = [
+    { cap: 'Net sales', v: amt('netBillable'), note: 'Sales after customer returns', op: '−' },
+    { cap: 'Amazon charges', v: amt('fees'), note: 'Commission, closing fee, FBA and storage', op: '−', fg: T.amberText, bg: '#FFFBF4' },
+    { cap: 'TDS u/s 194-O', v: amt('tds'), note: 'Against our PAN. Claim in the income-tax return.', op: '−', fg: T.amberText, bg: '#FFFBF4' },
+    { cap: 'TCS u/s 52 (GST)', v: amt('tcs'), note: 'Claim in the GST cash ledger.', op: '=', fg: T.amberText, bg: '#FFFBF4' },
+    { cap: 'Due from Amazon', v: amt('expected'), note: 'Amount due on these invoices', op: '−', bg: '#F7F9FB' },
+    { cap: 'Received to date', v: amt('settled'), note: 'In this month or later', op: '=', fg: T.green, bg: '#F3FBF6' },
+    { cap: 'Still pending', v: amt('stillOpen'), note: 'Not received after every loaded file', op: '', fg: T.red, bg: '#FEF8F8' },
+  ];
+  return (
+    <>
+      <Card title="Order Cycle — Volume" sub="What happened to every order in this period. Click any number to see the orders.">
+        <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-px bg-slate-100">
+          {VOL.map((v) => {
+            const f = FILES[v.src]; const Icon = f.icon;
+            return (
+              <div key={v.cap} className="bg-white p-4">
+                <div className="text-[10.5px] font-bold uppercase tracking-wider text-slate-400">{v.cap}</div>
+                <div className="text-[29px] font-bold tracking-tight mt-1 tabular-nums" style={{ color: v.fg || '#111927' }}>
+                  {int(v.v)}
+                </div>
+                <p className="text-[11.5px] text-slate-500 mt-1.5 leading-snug">{v.note}</p>
+                <div className="flex items-center gap-1 mt-2 text-[10px] font-bold" style={{ color: f.tone }}>
+                  <Icon className="h-3 w-3" /> {f.short}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </Card>
+
+      <Card title="Cash Cycle" sub="How much of the net sales has actually been received">
+        <div className="p-5">
+          <div className="flex items-stretch gap-2.5 flex-wrap">
+            {EQ.map((e) => (
+              <React.Fragment key={e.cap}>
+                <div className="flex-1 min-w-[170px] border border-slate-200 rounded-xl p-4"
+                     style={{ background: e.bg || '#fff' }}>
+                  <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">{e.cap}</div>
+                  <div className="text-[22px] font-bold tracking-tight mt-1 tabular-nums"
+                       style={{ color: e.fg || '#111927' }}>₹{inr(e.v)}</div>
+                  <p className="text-[11px] text-slate-500 mt-1.5 leading-snug">{e.note}</p>
+                </div>
+                {e.op && <div className="flex items-center text-xl font-bold text-slate-300">{e.op}</div>}
+              </React.Fragment>
+            ))}
+          </div>
+          <div className="grid md:grid-cols-2 gap-3 mt-3">
+            <div className="border border-slate-200 rounded-xl p-4 bg-slate-50/50">
+              <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                GST included in the amount due (memo)
+              </div>
+              <div className="text-xl font-bold mt-1 tabular-nums">₹{inr(amt('gstMemo'))}</div>
+              <p className="text-[11px] text-slate-500 mt-1">
+                Amazon pays this to us along with the sale amount. It is not a deduction. We pay it to the government.
+              </p>
+            </div>
+            <div className="border border-slate-200 rounded-xl p-4 bg-slate-50/50">
+              <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                Received after the sale month ended
+              </div>
+              <div className="text-xl font-bold mt-1 tabular-nums">₹{inr(amt('receivedLater'))}</div>
+              <p className="text-[11px] text-slate-500 mt-1">
+                Sales of one month for which payment came in a later month.
+              </p>
+            </div>
+          </div>
+        </div>
+      </Card>
+    </>
+  );
+}
+
+function Card({ title, sub, children, right }) {
+  return (
+    <div className="bg-white border border-slate-200 rounded-xl overflow-hidden mb-5">
+      <div className="px-5 py-3.5 border-b border-slate-100 flex items-center justify-between gap-3 flex-wrap">
+        <div>
+          <h3 className="font-bold text-slate-800">{title}</h3>
+          {sub && <p className="text-xs text-slate-400 mt-0.5">{sub}</p>}
+        </div>
+        {right}
+      </div>
+      {children}
+    </div>
+  );
+}
+
+/* ── what needs attention ────────────────────────────────────────────────── */
+function IssuesPanel({ audit, shown, onDrill }) {
+  if (!audit?.issues?.length) return null;
+  const issues = audit.issues.filter((i) => !i.month || shown.includes(i.month));
+  if (!issues.length) {
     return (
-      <div className="rounded-xl border border-emerald-200 bg-emerald-50 px-5 py-3 flex items-center gap-2">
-        <Sigma className="h-4 w-4 text-emerald-700" />
-        <p className="text-sm text-emerald-800">
-          <strong>Nothing outstanding in this period.</strong> Everything due has been received.
+      <div className="rounded-xl px-5 py-3.5 mb-5" style={{ background: '#ECFDF3', border: '1px solid #6EE7B7' }}>
+        <p className="text-sm" style={{ color: '#047857' }}>
+          <strong>Nothing needs attention in {rangeLabel(shown)}.</strong> {audit.verdict}.
         </p>
       </div>
     );
   }
+  const counts = issues.reduce((a, i) => ({ ...a, [i.severity]: (a[i.severity] || 0) + 1 }), {});
   return (
-    <div className="rounded-xl border border-slate-200 bg-white overflow-hidden">
-      <div className="px-5 py-3 border-b border-slate-100">
-        <h3 className="text-sm font-bold text-slate-800">How old the outstanding money is</h3>
-        <p className="text-xs text-slate-400 mt-0.5">
-          Aged from the end of the month that invoiced it. Amazon settles about every seven days, so the
-          most recent month is a timing difference — anything beyond 30 days is a question to ask.
-        </p>
+    <Card title="What needs attention"
+          sub={`${audit.verdict} · nothing here is a plug — where a figure cannot be explained it says so`}
+          right={
+            <div className="flex gap-2">
+              {['blocker', 'warning', 'info'].map((k) => counts[k] > 0 && (
+                <span key={k} className="px-2.5 py-1 rounded text-xs font-bold"
+                      style={{ background: SEV[k].bg, color: SEV[k].fg }}>
+                  {counts[k]} {SEV[k].label}
+                </span>
+              ))}
+            </div>}>
+      <div className="divide-y divide-slate-100">
+        {issues.map((i) => {
+          const s = SEV[i.severity]; const Icon = s.icon;
+          return (
+            <div key={i.id} className="p-4" style={{ background: s.bg }}>
+              <div className="flex items-start gap-3">
+                <Icon className="h-5 w-5 shrink-0 mt-0.5" style={{ color: s.fg }} />
+                <div className="min-w-0 flex-1">
+                  <div className="font-bold text-slate-900">{i.title}</div>
+                  <dl className="mt-2 grid gap-3 md:grid-cols-3 text-xs">
+                    {[['What it is', i.what], ['Why it happens', i.why], ['What to do', i.howToFix]].map(([k, v]) => (
+                      <div key={k}>
+                        <dt className="font-bold text-slate-500 uppercase tracking-wide">{k}</dt>
+                        <dd className="text-slate-700 mt-0.5 leading-relaxed">{v}</dd>
+                      </div>
+                    ))}
+                  </dl>
+                  {i.drill && (
+                    <button onClick={() => onDrill(i)}
+                            className="mt-3 text-xs font-bold underline underline-offset-2" style={{ color: s.fg }}>
+                      Show the {i.count ? `${int(i.count)} ` : ''}orders behind this →
+                    </button>
+                  )}
+                </div>
+                {i.amount !== 0 && (
+                  <div className="text-lg font-bold tabular-nums shrink-0" style={{ color: s.fg }}>
+                    ₹{inr(i.amount)}
+                  </div>
+                )}
+              </div>
+            </div>
+          );
+        })}
       </div>
-      <table className="w-full text-sm">
-        <thead className="bg-slate-50 text-[10px] uppercase tracking-wider text-slate-400">
-          <tr>
-            <th className="px-5 py-2.5 text-left font-bold">Month invoiced</th>
-            <th className="px-4 py-2.5 text-left font-bold">Age</th>
-            <th className="px-4 py-2.5 text-left font-bold">Bucket</th>
-            <th className="px-4 py-2.5 text-right font-bold">Still outstanding</th>
-            <th className="px-4 py-2.5 text-right font-bold">% of that month collected</th>
-            <th className="px-4 py-2.5 text-left font-bold">Orders with no settlement</th>
-          </tr>
-        </thead>
-        <tbody className="divide-y divide-slate-50">
-          {open.map((m) => {
-            const d = daysOld(m.month);
-            const bucket = ageBucket(d);
-            const old = d > 30;
-            return (
-              <tr key={m.month} className={old ? 'bg-amber-50/50' : ''}>
-                <td className="px-5 py-2.5 font-semibold text-slate-800">{fmtMonth(m.month)}</td>
-                <td className="px-4 py-2.5 text-slate-600 tabular-nums">
-                  <span className="inline-flex items-center gap-1.5">
-                    <Clock className="h-3.5 w-3.5 text-slate-400" /> {d} days
-                  </span>
-                </td>
-                <td className="px-4 py-2.5">
-                  <span className={`px-2 py-0.5 rounded text-xs font-semibold ${
-                    old ? 'bg-amber-100 text-amber-800' : 'bg-sky-100 text-sky-800'}`}>{bucket}</span>
-                </td>
-                <td className="px-4 py-2.5 text-right tabular-nums font-bold text-slate-900">
-                  <button className="hover:underline underline-offset-2"
-                          onClick={() => onDrill({ kind: 'line', line: 'closing', months: [m.month] })}>
-                    ₹{inr(m.closing.amount)}
-                  </button>
-                </td>
-                <td className="px-4 py-2.5 text-right tabular-nums text-slate-600">
-                  {pctOf(m.settled?.amount || 0, m.expected?.amount || 0).toFixed(1)}%
-                </td>
-                <td className="px-4 py-2.5 text-slate-600">
-                  {int(m.unpaidOrders?.count ?? 0)}
-                  <span className="text-slate-400"> · ₹{inr(m.unpaidOrders?.amount ?? 0)} invoiced</span>
-                </td>
-              </tr>
-            );
-          })}
-        </tbody>
-      </table>
-    </div>
+    </Card>
   );
 }
 
-/* ── the three files, with what each contributed ─────────────────────────── */
-function SourcesPanel({ status, sources, sourceKind }) {
-  const S = status?.sources;
-  const CARDS = [
-    { key: 'orders', file: 'order', note: 'Every order placed. The only file that knows about cancellations.' },
-    { key: 'mtr', file: 'mtr', note: 'What was invoiced. THE BASE for this report.' },
-    { key: 'settlement', file: 'settlement', note: 'What Amazon paid. Settles weekly, so it lags.' },
+/* ── the statement, month by month ───────────────────────────────────────── */
+function LedgerTable({ led, onDrill }) {
+  const ms = led.map((m) => m.month);
+  const row = (L, after) => {
+    const vals = led.map((m) => m[L.key]?.amount ?? 0);
+    const total = vals.reduce((a, b) => a + b, 0);
+    const f = FILES[PROV[L.prov].file]; const Icon = f.icon;
+    return (
+      <tr key={L.key} className={L.strong ? 'bg-slate-50/70' : ''}
+          style={after ? { opacity: 0.92 } : {}}>
+        <td className="px-4 py-2.5 text-slate-400 font-mono w-7">{L.sign}</td>
+        <td className="px-2 py-2.5 whitespace-nowrap">
+          <div className={L.strong ? 'font-bold text-slate-900' : 'text-slate-700'}>{L.label}</div>
+        </td>
+        <td className="px-3 py-2.5">
+          <span className="inline-flex items-center gap-1 text-[10px] font-bold whitespace-nowrap" style={{ color: f.tone }}>
+            <Icon className="h-3 w-3" /> {f.short}
+          </span>
+        </td>
+        {led.map((m, i) => (
+          <td key={m.month} className="px-4 py-2.5 text-right tabular-nums">
+            <button onClick={() => onDrill({ kind: 'line', line: L.key, months: [m.month] })}
+                    className={`hover:underline underline-offset-2 ${L.strong ? 'font-bold text-slate-900' : 'text-slate-700'}`}
+                    style={L.final && vals[i] < 0 ? { color: T.amberText } : {}}>
+              {inr(vals[i])}
+            </button>
+          </td>
+        ))}
+        {ms.length > 1 && (
+          <td className={`px-4 py-2.5 text-right tabular-nums border-l border-slate-200 ${L.strong ? 'font-bold' : ''}`}>
+            {inr(total)}
+          </td>
+        )}
+        <td className="px-4 py-2.5 text-xs text-slate-400 max-w-md">{L.what}</td>
+      </tr>
+    );
+  };
+  return (
+    <Card title={`Monthly statement · ${rangeLabel(ms)}`}
+          sub="Each month is closed at its own month end. Click any number to see the orders and the file it came from.">
+      <div className="overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead className="bg-slate-50 text-[10px] uppercase tracking-wider text-slate-400">
+            <tr>
+              <th className="w-7" /><th className="px-2 py-2.5 text-left font-bold">Line</th>
+              <th className="px-3 py-2.5 text-left font-bold">Source</th>
+              {ms.map((m) => <th key={m} className="px-4 py-2.5 text-right font-bold">{fmtMonth(m)}</th>)}
+              {ms.length > 1 && <th className="px-4 py-2.5 text-right font-bold border-l border-slate-200">Total</th>}
+              <th className="px-4 py-2.5 text-left font-bold">What this line is</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-slate-50">
+            {LINES.map((L) => row(L))}
+            <tr className="bg-slate-100/70">
+              <td /><td colSpan={2 + ms.length + (ms.length > 1 ? 1 : 0) + 1}
+                        className="px-2 py-2 text-[11px] font-bold uppercase tracking-wider text-slate-500">
+                Afterwards — only visible because later months are loaded
+              </td>
+            </tr>
+            {AFTER.map((L) => row(L, true))}
+            <tr className="bg-sky-50/40">
+              <td /><td className="px-2 py-2 text-xs italic text-slate-500 whitespace-nowrap">(memo) GST within it</td><td />
+              {led.map((m) => (
+                <td key={m.month} className="px-4 py-2 text-right tabular-nums text-xs text-slate-600">
+                  {inr(m.gstMemo?.amount ?? 0)}
+                </td>
+              ))}
+              {ms.length > 1 && <td className="border-l border-slate-200" />}
+              <td className="px-4 py-2 text-xs text-slate-400">
+                How much of the amount due is GST we will pay to the government. Not withheld by Amazon.
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </Card>
+  );
+}
+
+/* ── order journey and settlement scenarios ──────────────────────────────── */
+function JourneyAndScenarios({ data, shown, onDrill, ST }) {
+  const t = data?.three?.totals || {};
+  const led = (data?.ledger?.perMonth || []).filter((m) => shown.includes(m.month));
+  const statuses = led[0]?.byStatus?.map((b) => b.status) || [];
+  const totalOrders = t.placed || 0;
+  const FUNNEL = [
+    { n: 1, stage: 'Orders placed', rule: 'All orders in the period', src: 'order', v: t.placed, step: 'placed' },
+    { n: 2, stage: 'Cancelled before invoice', rule: 'Cancelled before dispatch', src: 'order', v: t.cancelled, step: 'cancelled' },
+    { n: 3, stage: 'Net orders', rule: 'Orders placed minus cancelled', src: 'derived', v: t.net, step: 'net', strong: true },
+    { n: 4, stage: 'Invoiced (MTR)', rule: 'Invoice raised — the amount becomes due from here', src: 'mtr', v: t.shipped, step: 'invoiced' },
+    { n: 5, stage: 'Paid by Amazon', rule: 'Payment received, in any month', src: 'settlement', v: t.settled, step: 'settled' },
+    { n: 6, stage: 'Not paid yet', rule: 'No payment received at all', src: 'derived', v: t.unsettled, step: 'unsettled', strong: true },
   ];
   return (
-    <div className="rounded-xl border border-slate-200 bg-white overflow-hidden">
-      <div className="px-5 py-3 border-b border-slate-100">
-        <h3 className="text-sm font-bold text-slate-800">The three files this is built from</h3>
-        <p className="text-xs text-slate-400 mt-0.5">
-          They are not meant to be equal — each counts a different moment. Every figure above can be
-          traced back to one of these three, and each drill says which.
-        </p>
-      </div>
+    <>
+      <Card title="Order Journey" sub="What happened to every order, stage by stage. Click a count for the orders.">
+        <table className="w-full text-sm">
+          <thead className="bg-slate-50 text-[10px] uppercase tracking-wider text-slate-400">
+            <tr>
+              <th className="px-5 py-2.5 text-left font-bold w-12">#</th>
+              <th className="px-2 py-2.5 text-left font-bold">Stage</th>
+              <th className="px-4 py-2.5 text-left font-bold">Source</th>
+              <th className="px-4 py-2.5 text-right font-bold">Orders</th>
+              <th className="px-5 py-2.5 text-right font-bold">% of all orders</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-slate-50">
+            {FUNNEL.map((f) => {
+              const F = FILES[f.src]; const Icon = F.icon;
+              return (
+                <tr key={f.n} className={f.strong ? 'bg-slate-50/70' : ''}>
+                  <td className="px-5 py-3">
+                    <span className="text-[11px] font-bold text-slate-500 bg-slate-100 rounded px-2 py-0.5">{f.n}</span>
+                  </td>
+                  <td className="px-2 py-3">
+                    <div className={f.strong ? 'font-bold text-slate-900' : 'text-slate-800'}>{f.stage}</div>
+                    <div className="text-[11px] text-slate-500">{f.rule}</div>
+                  </td>
+                  <td className="px-4 py-3">
+                    <span className="inline-flex items-center gap-1 text-[10px] font-bold" style={{ color: F.tone }}>
+                      <Icon className="h-3 w-3" /> {F.short}
+                    </span>
+                  </td>
+                  <td className="px-4 py-3 text-right tabular-nums">
+                    <button onClick={() => onDrill({ kind: 'chain', step: f.step })}
+                            className="font-bold text-blue-600 hover:underline underline-offset-2">{int(f.v)}</button>
+                  </td>
+                  <td className="px-5 py-3 text-right tabular-nums text-slate-500">
+                    {pctOf(f.v, totalOrders).toFixed(1)}%
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </Card>
+
+      <Card title="Where every order ended up"
+            sub="Every order falls in exactly one row, so the rows add up to the total order count.">
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead className="bg-slate-50 text-[10px] uppercase tracking-wider text-slate-400">
+              <tr>
+                <th className="px-5 py-2.5 text-left font-bold">Status</th>
+                {led.map((m) => <th key={m.month} className="px-4 py-2.5 text-right font-bold">{fmtMonth(m.month)}</th>)}
+                <th className="px-5 py-2.5 text-right font-bold border-l border-slate-200">Total</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-50">
+              {statuses.map((st) => {
+                const cells = led.map((m) => m.byStatus.find((b) => b.status === st) || { count: 0, amount: 0 });
+                const tot = cells.reduce((a, c) => ({ count: a.count + c.count, amount: a.amount + c.amount }),
+                                         { count: 0, amount: 0 });
+                return (
+                  <tr key={st}>
+                    <td className="px-5 py-2.5 text-slate-700">{st}</td>
+                    {led.map((m, i) => (
+                      <td key={m.month} className="px-4 py-2.5 text-right tabular-nums">
+                        <button onClick={() => onDrill({ kind: 'status', status: st, months: [m.month] })}
+                                className="text-slate-700 hover:underline underline-offset-2">
+                          {int(cells[i].count)}
+                          <div className="text-[10px] text-slate-400">₹{inr(cells[i].amount, 0)}</div>
+                        </button>
+                      </td>
+                    ))}
+                    <td className="px-5 py-2.5 text-right tabular-nums font-bold border-l border-slate-200">
+                      {int(tot.count)}
+                      <div className="text-[10px] font-normal text-slate-400">₹{inr(tot.amount, 0)}</div>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+        <div className="px-5 py-3.5 border-t border-slate-100" style={{ background: '#FFFBEB' }}>
+          <div className="text-xs font-bold mb-1" style={{ color: '#92400E' }}>
+            Prepaid and COD split needs one more file
+          </div>
+          <p className="text-xs leading-relaxed" style={{ color: '#78350F' }}>
+            None of the three Amazon files shows whether an order was prepaid or COD. Amazon collects from the
+            customer in both cases and pays us on the same weekly cycle, so from our side both look the same.
+            That split needs Amazon’s <strong>Fulfilled Shipments</strong> report.
+          </p>
+        </div>
+      </Card>
+    </>
+  );
+}
+
+/* ── the three files ─────────────────────────────────────────────────────── */
+function SourcesPanel({ status, sources, sourceKind }) {
+  const S = status?.sources;
+  return (
+    <Card title="The three files this is built from"
+          sub="They are not meant to be equal — each one counts a different moment.">
       <div className="grid md:grid-cols-3 divide-y md:divide-y-0 md:divide-x divide-slate-100">
-        {CARDS.map((c) => {
-          const f = FILES[c.file];
-          const s = S?.[c.key];
-          const Icon = f.icon;
+        {[['orders', 'order'], ['mtr', 'mtr'], ['settlement', 'settlement']].map(([k, fk]) => {
+          const f = FILES[fk]; const s = S?.[k]; const Icon = f.icon;
           return (
-            <div key={c.key} className="p-4">
+            <div key={k} className="p-4">
               <div className="flex items-center gap-2">
                 <Icon className="h-4 w-4" style={{ color: f.tone }} />
-                <span className="text-sm font-semibold text-slate-800">{f.label}</span>
+                <span className="font-semibold text-slate-800 text-sm">{f.label}</span>
               </div>
-              <div className="mt-2 text-2xl font-bold text-slate-900">
+              <div className="text-2xl font-bold text-slate-900 mt-2">
                 {s ? int(s.rows) : '—'} <span className="text-sm font-medium text-slate-400">rows</span>
               </div>
               <div className="text-xs text-slate-500">{s ? `${s.files} file(s)` : 'not loaded'}</div>
-              <p className="text-xs text-slate-400 mt-2 leading-relaxed">{c.note}</p>
-              <p className="text-[11px] text-slate-400 mt-1.5 leading-relaxed italic">{f.how}</p>
+              <p className="text-[11.5px] text-slate-400 mt-2 leading-relaxed">{f.how}</p>
             </div>
           );
         })}
@@ -584,9 +1271,7 @@ function SourcesPanel({ status, sources, sourceKind }) {
             <thead className="bg-slate-50 text-[10px] uppercase tracking-wider text-slate-400">
               <tr>
                 <th className="px-4 py-2 text-left font-bold">What each file holds</th>
-                {sources.map((s) => (
-                  <th key={s.month} className="px-4 py-2 text-right font-bold">{fmtMonth(s.month)}</th>
-                ))}
+                {sources.map((s) => <th key={s.month} className="px-4 py-2 text-right font-bold">{fmtMonth(s.month)}</th>)}
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-50">
@@ -596,21 +1281,18 @@ function SourcesPanel({ status, sources, sourceKind }) {
                   <td className="px-4 py-2 font-medium text-slate-600">{l}</td>
                   {sources.map((s) => (
                     <td key={s.month} className="px-4 py-2 text-right tabular-nums text-slate-800">
-                      {int(s[k].orders)}
-                      <span className="text-slate-400"> · ₹{inr(s[k].value, 0)}</span>
+                      {int(s[k].orders)} <span className="text-slate-400">· ₹{inr(s[k].value, 0)}</span>
                     </td>
                   ))}
                 </tr>
               ))}
-              {/* WHICH settlement source owns each month. It changes what the
-                  fee lines can be trusted to mean, so it is stated, not buried. */}
               <tr className="bg-slate-50/60">
                 <td className="px-4 py-2 font-medium text-slate-600">Settlement came from</td>
                 {sources.map((s) => (
                   <td key={s.month} className="px-4 py-2 text-right text-slate-600">
                     {sourceKind[s.month] === 'unified'
-                      ? <span className="text-amber-700 font-semibold">unified transaction report</span>
-                      : 'retained settlement ledgers'}
+                      ? <span className="font-bold" style={{ color: T.amberText }}>unified transaction report</span>
+                      : 'saved settlement files'}
                   </td>
                 ))}
               </tr>
@@ -618,476 +1300,166 @@ function SourcesPanel({ status, sources, sourceKind }) {
           </table>
         </div>
       )}
-    </div>
+    </Card>
   );
 }
 
-/* ── order → MTR → settlement, as a chain of subtractions ────────────────────
-   Six numbers that nobody could open, until now: each step says which file it
-   came from and lists the orders behind it. */
-function ThreeWayStrip({ three, shown, onDrill }) {
-  /* Per-month when one month is chosen, totals when the whole period is. The
-     chain must describe the same period as everything else on the page. */
-  const t = useMemo(() => {
-    const rows = (three.perMonth || []).filter((m) => shown.includes(m.month));
-    if (!rows.length) return three.totals;
-    return rows.reduce((a, m) => ({
-      placed: a.placed + m.placed, cancelled: a.cancelled + m.cancelled,
-      net: a.net + m.net, shipped: a.shipped + m.shipped,
-      settled: a.settled + m.settled, unsettled: a.unsettled + m.unsettled,
-    }), { placed: 0, cancelled: 0, net: 0, shipped: 0, settled: 0, unsettled: 0 });
-  }, [three, shown]);
-
-  const steps = [
-    { step: 'placed', label: 'Orders placed', value: t.placed, prov: 'placed', tone: 'text-slate-900' },
-    { step: 'cancelled', label: 'less cancelled', value: -t.cancelled, prov: 'cancelled', tone: 'text-amber-700' },
-    { step: 'net', label: 'Net orders', value: t.net, prov: 'net', tone: 'text-slate-900', strong: true },
-    { step: 'invoiced', label: 'Invoiced (MTR)', value: t.shipped, prov: 'chainInvoiced', tone: 'text-slate-900' },
-    { step: 'settled', label: 'Settled', value: t.settled, prov: 'chainSettled', tone: 'text-emerald-700' },
-    { step: 'unsettled', label: 'Still unsettled', value: t.unsettled, prov: 'chainUnsettled', tone: 'text-rose-700', strong: true },
-  ];
-  const drillable = Array.isArray(three.orderRows);
-
+function ExcelButton({ base, shown }) {
+  const [busy, setBusy] = useState(false);
+  const go = async () => {
+    if (!base) return;
+    setBusy(true);
+    try {
+      const r = await api.get(`${base}/export`, { params: { months: shown.join(',') }, responseType: 'blob' });
+      const name = (r.headers['content-disposition'] || '').match(/filename="([^"]+)"/)?.[1]
+        || `Amazon_Receivables_${shown[0]}_to_${shown[shown.length - 1]}.xlsx`;
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(r.data); a.download = name; a.click();
+      URL.revokeObjectURL(a.href);
+      toast.success('Workbook downloaded');
+    } catch { toast.error('Could not build the workbook'); } finally { setBusy(false); }
+  };
   return (
-    <div className="rounded-xl border border-slate-200 bg-white p-4">
-      <div className="flex items-baseline justify-between gap-3 flex-wrap mb-3">
-        <h3 className="text-sm font-bold text-slate-800">
-          The chain — order report → MTR → settlement
-          <span className="font-normal text-slate-400"> · {rangeLabel(shown)}</span>
-        </h3>
-        <p className="text-xs text-slate-400">
-          Counts of ORDERS, not money. Every subtraction names a countable group — nothing here is a
-          balancing figure. {drillable
-            ? 'Click any step for the orders behind it.'
-            : 'Run the reconciliation again to make these steps clickable.'}
-        </p>
-      </div>
-      <div className="flex items-stretch gap-1 flex-wrap">
-        {steps.map((s, i) => {
-          const f = FILES[PROV[s.prov].file];
-          const Icon = f.icon;
-          return (
-            <React.Fragment key={s.step}>
-              <button disabled={!drillable}
-                      onClick={() => onDrill({ kind: 'chain', step: s.step })}
-                      className={`px-3 py-2 rounded-lg text-left transition-colors ${
-                        s.strong ? 'bg-slate-100' : ''} ${
-                        drillable ? 'hover:bg-slate-200/70 cursor-pointer' : 'cursor-default'}`}>
-                <div className={`text-lg font-bold tabular-nums ${s.tone}`}>
-                  {s.value < 0 ? '−' : ''}{int(Math.abs(s.value))}
-                </div>
-                <div className="text-[11px] text-slate-500">{s.label}</div>
-                {/* WHICH FILE SAYS SO. The number is only checkable if you know
-                    where to go and look for it. */}
-                <div className="mt-1 flex items-center gap-1 text-[10px] font-medium"
-                     style={{ color: f.tone }}>
-                  <Icon className="h-3 w-3" /> from {f.short}
-                </div>
-              </button>
-              {i < steps.length - 1 && (
-                <div className="flex items-center"><ChevronRight className="h-4 w-4 text-slate-300" /></div>
-              )}
-            </React.Fragment>
-          );
-        })}
-      </div>
-    </div>
+    <button onClick={go} disabled={busy}
+            className="px-3 py-2.5 text-sm font-semibold rounded-lg border flex items-center gap-2 disabled:opacity-50"
+            style={{ borderColor: '#A7F3D0', background: '#ECFDF3', color: '#047857' }}>
+      {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <FileSpreadsheet className="h-4 w-4" />}
+      {busy ? 'Building…' : 'Excel'}
+    </button>
   );
 }
 
-/* ── what is wrong, and what would fix it ────────────────────────────────── */
-function IssuesPanel({ audit, shown, onDrill }) {
-  const issues = audit.issues.filter((i) => !i.month || shown.includes(i.month));
-  if (!issues.length) {
-    return (
-      <div className="rounded-xl border border-emerald-200 bg-emerald-50 px-5 py-3">
-        <p className="text-sm text-emerald-800">
-          <strong>Nothing needs attention in {rangeLabel(shown)}.</strong> {audit.verdict}.
-        </p>
-      </div>
-    );
-  }
-  const counts = issues.reduce((a, i) => ({ ...a, [i.severity]: (a[i.severity] || 0) + 1 }), {});
-  return (
-    <div className="rounded-xl border border-slate-200 bg-white overflow-hidden">
-      <div className="px-5 py-3 border-b border-slate-100 flex items-center justify-between gap-3 flex-wrap">
-        <div>
-          <h3 className="text-sm font-bold text-slate-800">
-            What needs attention
-            <span className="font-normal text-slate-400"> · {rangeLabel(shown)}</span>
-          </h3>
-          <p className="text-xs text-slate-400 mt-0.5">
-            {audit.verdict} · nothing here is plugged — where a figure cannot be explained it says so.
-          </p>
-        </div>
-        <div className="flex gap-2 text-xs">
-          {['blocker', 'warning', 'info'].map((k) => counts[k] > 0 && (
-            <span key={k} className="px-2 py-1 rounded font-semibold"
-                  style={{ background: SEV[k].bg, color: SEV[k].fg }}>
-              {counts[k]} {SEV[k].label}
-            </span>
-          ))}
-        </div>
-      </div>
-      <div className="divide-y divide-slate-100">
-        {issues.map((i) => {
-          const s = SEV[i.severity]; const Icon = s.icon;
-          return (
-            <div key={i.id} className="p-4" style={{ background: s.bg }}>
-              <div className="flex items-start gap-3">
-                <Icon className="h-5 w-5 shrink-0 mt-0.5" style={{ color: s.fg }} />
-                <div className="min-w-0 flex-1">
-                  <div className="font-semibold text-slate-900">{i.title}</div>
-                  <dl className="mt-2 grid gap-2 md:grid-cols-3 text-xs">
-                    <div><dt className="font-bold text-slate-500 uppercase tracking-wide">What it is</dt>
-                      <dd className="text-slate-700 mt-0.5 leading-relaxed">{i.what}</dd></div>
-                    <div><dt className="font-bold text-slate-500 uppercase tracking-wide">Why it happens</dt>
-                      <dd className="text-slate-700 mt-0.5 leading-relaxed">{i.why}</dd></div>
-                    <div><dt className="font-bold text-slate-500 uppercase tracking-wide">How to resolve it</dt>
-                      <dd className="text-slate-700 mt-0.5 leading-relaxed">{i.howToFix}</dd></div>
-                  </dl>
-                  {i.drill && (
-                    <button onClick={() => onDrill(i)}
-                            className="mt-3 text-xs font-semibold underline underline-offset-2"
-                            style={{ color: s.fg }}>
-                      Show the {i.count ? int(i.count) + ' ' : ''}orders behind this →
-                    </button>
-                  )}
-                </div>
-                {i.amount !== 0 && (
-                  <div className="text-right shrink-0">
-                    <div className="text-lg font-bold tabular-nums" style={{ color: s.fg }}>
-                      ₹{inr(i.amount)}
-                    </div>
-                  </div>
-                )}
-              </div>
-            </div>
-          );
-        })}
-      </div>
-    </div>
-  );
-}
-
-/* ── the money, month by month ───────────────────────────────────────────── */
-function LedgerTable({ ledger, onDrill }) {
-  const months = ledger.map((m) => m.month);
-  return (
-    <div className="rounded-xl border border-slate-200 bg-white overflow-hidden">
-      <div className="px-5 py-3 border-b border-slate-100">
-        <h3 className="text-sm font-bold text-slate-800">
-          Receivables by month
-          <span className="font-normal text-slate-400"> · {rangeLabel(months)}</span>
-        </h3>
-        <p className="text-xs text-slate-400 mt-0.5">
-          Click any figure to see the orders behind it, and which file it came from. GST is a memo, not a
-          deduction — Amazon pays it across to you and you remit it onward.
-        </p>
-      </div>
-      <div className="overflow-x-auto">
-        <table className="w-full text-sm">
-          <thead className="bg-slate-50 text-[10px] uppercase tracking-wider text-slate-400">
-            <tr>
-              <th className="px-4 py-2.5 text-left font-bold w-8" />
-              <th className="px-2 py-2.5 text-left font-bold">Line</th>
-              <th className="px-3 py-2.5 text-left font-bold">Source</th>
-              {months.map((m) => <th key={m} className="px-4 py-2.5 text-right font-bold">{fmtMonth(m)}</th>)}
-              {months.length > 1 && (
-                <th className="px-4 py-2.5 text-right font-bold border-l border-slate-200">Total</th>
-              )}
-              <th className="px-4 py-2.5 text-left font-bold">What this line is</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-slate-50">
-            {LINES.map((L) => {
-              const vals = ledger.map((m) => m[L.key]?.amount ?? 0);
-              const total = vals.reduce((a, b) => a + b, 0);
-              const bad = L.final && vals.some((v) => v < -1);
-              const f = FILES[PROV[L.prov].file];
-              const Icon = f.icon;
-              return (
-                <tr key={L.key} className={L.strong ? 'bg-slate-50/70' : ''}>
-                  <td className="px-4 py-2 text-slate-400 font-mono">{L.sign}</td>
-                  <td className={`px-2 py-2 whitespace-nowrap ${L.strong ? 'font-bold text-slate-900' : 'text-slate-700'}`}>
-                    {L.label}
-                  </td>
-                  <td className="px-3 py-2">
-                    <span className="inline-flex items-center gap-1 text-[10px] font-semibold whitespace-nowrap"
-                          style={{ color: f.tone }}>
-                      <Icon className="h-3 w-3" /> {f.short}
-                    </span>
-                  </td>
-                  {ledger.map((m, i) => (
-                    <td key={m.month} className="px-4 py-2 text-right tabular-nums">
-                      <button onClick={() => onDrill(L.key, m.month)}
-                              className={`hover:underline underline-offset-2 ${
-                                vals[i] < -1 && L.final ? 'text-rose-600 font-bold'
-                                : L.strong ? 'font-semibold text-slate-900' : 'text-slate-700'}`}>
-                        {inr(vals[i])}
-                      </button>
-                    </td>
-                  ))}
-                  {months.length > 1 && (
-                    <td className={`px-4 py-2 text-right tabular-nums border-l border-slate-200 ${
-                          L.strong ? 'font-bold' : ''} ${bad ? 'text-rose-600' : 'text-slate-900'}`}>
-                      {inr(total)}
-                    </td>
-                  )}
-                  <td className="px-4 py-2 text-xs text-slate-400 max-w-md">{L.what}</td>
-                </tr>
-              );
-            })}
-            <tr className="bg-sky-50/40">
-              <td /><td className="px-2 py-2 text-xs text-slate-500 italic whitespace-nowrap">of which received later</td>
-              <td />
-              {ledger.map((m) => (
-                <td key={m.month} className="px-4 py-2 text-right tabular-nums text-xs text-slate-600">
-                  {inr(m.settledLater?.amount ?? 0)}
-                </td>
-              ))}
-              {months.length > 1 && <td className="border-l border-slate-200" />}
-              <td className="px-4 py-2 text-xs text-slate-400">
-                Part of “Received” that arrived after the month closed — the carry-forward.
-              </td>
-            </tr>
-            <tr className="bg-sky-50/40">
-              <td /><td className="px-2 py-2 text-xs text-slate-500 italic whitespace-nowrap">(memo) GST within it</td>
-              <td />
-              {ledger.map((m) => (
-                <td key={m.month} className="px-4 py-2 text-right tabular-nums text-xs text-slate-600">
-                  {inr(m.gstMemo?.amount ?? 0)}
-                </td>
-              ))}
-              {months.length > 1 && <td className="border-l border-slate-200" />}
-              <td className="px-4 py-2 text-xs text-slate-400">
-                How much of the receivable is GST you will remit. NOT withheld by Amazon.
-              </td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-    </div>
-  );
-}
-
-/* ── every order lands in exactly one bucket ─────────────────────────────── */
-function StatusTable({ ledger, onDrill }) {
-  const months = ledger.map((m) => m.month);
-  const statuses = ledger[0]?.byStatus?.map((b) => b.status) || [];
-  return (
-    <div className="rounded-xl border border-slate-200 bg-white overflow-hidden">
-      <div className="px-5 py-3 border-b border-slate-100">
-        <h3 className="text-sm font-bold text-slate-800">
-          Where every order ended up
-          <span className="font-normal text-slate-400"> · {rangeLabel(months)}</span>
-        </h3>
-        <p className="text-xs text-slate-400 mt-0.5">
-          Each order is in exactly one row, so these sum to the orders invoiced — nothing can hide between
-          them. The count is above; the invoice value is below it.
-        </p>
-      </div>
-      <div className="overflow-x-auto">
-        <table className="w-full text-sm">
-          <thead className="bg-slate-50 text-[10px] uppercase tracking-wider text-slate-400">
-            <tr>
-              <th className="px-5 py-2.5 text-left font-bold">Status</th>
-              {months.map((m) => <th key={m} className="px-4 py-2.5 text-right font-bold">{fmtMonth(m)}</th>)}
-              {months.length > 1 && (
-                <th className="px-4 py-2.5 text-right font-bold border-l border-slate-200">Total</th>
-              )}
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-slate-50">
-            {statuses.map((st) => {
-              const cells = ledger.map((m) => m.byStatus.find((b) => b.status === st)
-                                            || { count: 0, amount: 0 });
-              const tot = cells.reduce((a, c) => ({ count: a.count + c.count, amount: a.amount + c.amount }),
-                                       { count: 0, amount: 0 });
-              return (
-                <tr key={st}>
-                  <td className="px-5 py-2 text-slate-700">{st}</td>
-                  {ledger.map((m, i) => (
-                    <td key={m.month} className="px-4 py-2 text-right tabular-nums">
-                      <button onClick={() => onDrill(st, m.month)}
-                              className="text-slate-700 hover:underline underline-offset-2">
-                        {int(cells[i].count)}
-                        <div className="text-[10px] text-slate-400">₹{inr(cells[i].amount, 0)}</div>
-                      </button>
-                    </td>
-                  ))}
-                  {months.length > 1 && (
-                    <td className="px-4 py-2 text-right tabular-nums font-semibold border-l border-slate-200">
-                      {int(tot.count)}
-                      <div className="text-[10px] font-normal text-slate-400">₹{inr(tot.amount, 0)}</div>
-                    </td>
-                  )}
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-      </div>
-    </div>
-  );
-}
-
-/* ── which rows sit behind a given figure ────────────────────────────────────
-   One place decides this, because the drill and the export must never disagree
-   about what they are showing. */
+/* ── which rows sit behind a figure ───────────────────────────────────────── */
 function drillRows(drill, data, ST) {
   const all = data?.ledger?.rows || [];
   const ms = drill.months || [];
   const inSel = (r) => !ms.length || ms.includes(r.month);
   const billable = (r) => r.status !== ST.CANCELLED && r.status !== ST.NOT_AMAZON;
+  const due = (r) => +(r.invoiced - r.refunded - r.fees - r.tds - r.tcs).toFixed(2);
+  const recdBy = (r, m) => Object.entries(r.settledBy || {})
+    .reduce((a, [cm, v]) => a + (cm && cm <= m ? v : 0), 0);
 
   if (drill.kind === 'issue') {
     return { kind: 'ledger', rows: data?.drills?.[drill.issue.id] || [],
              prov: PROV[drill.issue.drill === 'fees' ? 'fees'
-                      : drill.issue.drill === 'overCollected' ? 'settled' : 'closing'] };
+                      : drill.issue.drill === 'overCollected' ? 'received'
+                      : drill.issue.drill === 'priorRefunds' ? 'returned' : 'closing'] };
   }
   if (drill.kind === 'status') {
     return { kind: 'ledger', prov: PROV.status,
              rows: all.filter((r) => inSel(r) && r.status === drill.status) };
   }
+  if (drill.kind === 'cash') {
+    /* money credited in this month that was NOT for this month's sales */
+    const m = drill.month;
+    return { kind: 'ledger', prov: PROV.received,
+             rows: all.filter((r) => r.month !== m && (r.settledBy || {})[m]) };
+  }
   if (drill.kind === 'chain') {
     const rows = (data?.three?.orderRows || []).filter(inSel);
-    const f = {
-      placed: () => rows,
-      cancelled: () => rows.filter((r) => r.cancelled),
+    const pick = {
+      placed: () => rows, cancelled: () => rows.filter((r) => r.cancelled),
       net: () => rows.filter((r) => !r.cancelled),
       invoiced: () => rows.filter((r) => !r.cancelled && r.invoiced),
       settled: () => rows.filter((r) => !r.cancelled && r.settled),
       unsettled: () => rows.filter((r) => !r.cancelled && !r.settled),
     }[drill.step] || (() => rows);
-    const provKey = { placed: 'placed', cancelled: 'cancelled', net: 'net',
-                      invoiced: 'chainInvoiced', settled: 'chainSettled',
-                      unsettled: 'chainUnsettled' }[drill.step] || 'placed';
-    return { kind: 'chain', rows: f(), prov: PROV[provKey] };
+    const pk = { placed: 'placed', cancelled: 'cancelled', net: 'net', invoiced: 'chainInvoiced',
+                 settled: 'chainSettled', unsettled: 'chainUnsettled' }[drill.step] || 'placed';
+    return { kind: 'chain', rows: pick(), prov: PROV[pk] };
   }
-  /* a ledger line */
-  const mine = all.filter(inSel);
+  const mine = all.filter(inSel).filter(billable);
+  const m0 = ms[0];
   const pick = {
-    returned: () => mine.filter((r) => billable(r) && r.refunded > 0),
-    fees: () => mine.filter((r) => billable(r) && r.fees > 0),
-    tdsTcs: () => mine.filter((r) => billable(r) && r.tdsTcs > 0),
-    settled: () => mine.filter((r) => billable(r) && r.settled !== 0),
-    closing: () => mine.filter((r) => r.status === ST.OUTSTANDING),
+    returned: () => mine.filter((r) => r.refunded > 0),
+    fees: () => mine.filter((r) => r.fees > 0),
+    tds: () => mine.filter((r) => r.tds > 0),
+    tcs: () => mine.filter((r) => r.tcs > 0),
+    received: () => mine.filter((r) => recdBy(r, m0) !== 0),
+    receivedLater: () => mine.filter((r) => r.settled - recdBy(r, m0) !== 0),
+    /* the closing balance: every order not fully paid by the month end — a part
+       settlement belongs here just as much as an order with no payment at all */
+    closing: () => mine.filter((r) => Math.abs(due(r) - recdBy(r, m0)) > 0.01),
+    stillOpen: () => mine.filter((r) => Math.abs(due(r) - r.settled) > 0.01),
   }[drill.line];
-  return { kind: 'ledger', rows: pick ? pick() : mine.filter(billable),
-           prov: PROV[drill.line] || PROV.invoiced };
+  return { kind: 'ledger', rows: pick ? pick() : mine, prov: PROV[drill.line] || PROV.invoiced };
 }
 
 const LEDGER_COLS = [
-  { key: 'orderId', label: 'Order ID', mono: true },
-  { key: 'month', label: 'Month', fmt: fmtMonth },
+  { key: 'orderId', label: 'Order ID', mono: true, w: 22 },
+  { key: 'month', label: 'Sale month', fmt: fmtMonth },
   { key: 'status', label: 'Status' },
   { key: 'invoiced', label: 'Invoiced', num: true },
   { key: 'refunded', label: 'Returned', num: true },
-  { key: 'fees', label: 'Fees', num: true },
-  { key: 'tdsTcs', label: 'TDS/TCS', num: true },
+  { key: 'fees', label: 'Amazon charges', num: true },
+  { key: 'tds', label: 'TDS', num: true },
+  { key: 'tcs', label: 'TCS', num: true },
+  { key: 'netDue', label: 'Net amount due', num: true, calc: (r) => +(r.invoiced - r.refunded - r.fees - r.tds - r.tcs).toFixed(2) },
   { key: 'settled', label: 'Received', num: true },
-  { key: 'settledMonth', label: 'Settled in', fmt: (v) => (v ? fmtMonth(v) : '—') },
+  { key: 'diff', label: 'Difference', num: true, calc: (r) => +(r.invoiced - r.refunded - r.fees - r.tds - r.tcs - r.settled).toFixed(2) },
+  { key: 'settledMonth', label: 'Payment month', fmt: (v) => (v ? fmtMonth(v) : '—') },
 ];
 const CHAIN_COLS = [
-  { key: 'orderId', label: 'Order ID', mono: true },
-  { key: 'month', label: 'Month placed', fmt: fmtMonth },
+  { key: 'orderId', label: 'Order ID', mono: true, w: 22 },
+  { key: 'month', label: 'Sale month', fmt: fmtMonth },
   { key: 'status', label: 'Order status' },
-  { key: 'invoiced', label: 'In MTR?', bool: true },
-  { key: 'settled', label: 'Settled?', bool: true },
+  { key: 'invoiced', label: 'Invoiced?', bool: true },
+  { key: 'settled', label: 'Paid?', bool: true },
   { key: 'value', label: 'Order value', num: true },
-  { key: 'lines', label: 'Lines', num: true, dp: 0 },
   { key: 'shipState', label: 'Ship state' },
 ];
 
-/* ── the orders behind whatever was clicked ──────────────────────────────── */
 function DrillPanel({ drill, data, ST, base, onClose }) {
   const [busy, setBusy] = useState(false);
   const { kind, rows, prov } = useMemo(() => drillRows(drill, data, ST), [drill, data, ST]);
   const cols = kind === 'chain' ? CHAIN_COLS : LEDGER_COLS;
-  const f = FILES[prov.file];
-  const FIcon = f.icon;
-
+  const f = FILES[prov.file]; const FIcon = f.icon;
   const period = rangeLabel(drill.months || []);
   const title = drill.kind === 'issue' ? drill.issue.title
     : drill.kind === 'status' ? `${period} · ${drill.status}`
+    : drill.kind === 'cash' ? `${period} · credited for earlier months’ sales`
     : drill.kind === 'chain' ? `${period} · ${{
-        placed: 'Orders placed', cancelled: 'Orders cancelled', net: 'Net orders',
-        invoiced: 'Invoiced (in the MTR)', settled: 'Settled', unsettled: 'Still unsettled',
+        placed: 'Orders placed', cancelled: 'Cancelled', net: 'Net orders',
+        invoiced: 'Invoiced', settled: 'Paid by Amazon', unsettled: 'Not paid yet',
       }[drill.step] || drill.step}`
-    : `${period} · ${LINES.find((l) => l.key === drill.line)?.label || drill.line}`;
+    : `${period} · ${[...LINES, ...AFTER].find((l) => l.key === drill.line)?.label || drill.line}`;
 
-  const totals = useMemo(() => cols.filter((c) => c.num).reduce((a, c) => ({
-    ...a, [c.key]: rows.reduce((s, r) => s + (Number(r[c.key]) || 0), 0),
-  }), {}), [rows, cols]);
-
+  const val = (r, c) => (c.calc ? c.calc(r) : r[c.key]);
   const cell = (r, c) => {
-    const v = r[c.key];
+    const v = val(r, c);
     if (c.bool) return v ? 'Yes' : 'No';
-    if (c.num) return v ? inr(v, c.dp === 0 ? 0 : 2) : '—';
+    if (c.num) return v ? inr(v) : '—';
     if (c.fmt) return c.fmt(v);
     return v === '' || v === undefined || v === null ? '—' : v;
   };
+  const totals = useMemo(() => cols.filter((c) => c.num).reduce((a, c) => ({
+    ...a, [c.key]: rows.reduce((s, r) => s + (Number(val(r, c)) || 0), 0) }), {}), [rows, cols]);
+  const stem = `amazon-receivables-${(drill.months || []).join('_') || 'all'}-${drill.kind}`;
 
-  const fileStem = `amazon-receivables-${(drill.months || []).join('_') || 'all'}-${drill.kind}`;
-
-  const csv = () => {
-    const q = (v) => `"${String(v === undefined || v === null ? '' : v).replace(/"/g, '""')}"`;
-    const head = cols.map((c) => c.label);
-    const body = rows.map((r) => cols.map((c) => q(c.bool ? (r[c.key] ? 'Yes' : 'No') : r[c.key])).join(','));
-    const meta = [
-      `"Amazon Receivables — ${title}"`,
-      `"Source: ${f.label}${prov.column ? ' · column: ' + prov.column : ''}${prov.filter ? ' · filter: ' + prov.filter : ''}"`,
-      `"${int(rows.length)} orders"`, '',
-    ];
-    const blob = new Blob([[...meta, head.map(q).join(','), ...body].join('\n')],
-                          { type: 'text/csv;charset=utf-8' });
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = `${fileStem}.csv`;
-    a.click(); URL.revokeObjectURL(a.href);
-  };
-
-  /* Excel as well as CSV, because this is handed to an accountant who will
-     filter, total and annotate it — and because a CSV of order ids loses them
-     to scientific notation the moment it is double-clicked.
-
-     The rows are derived here and FORMATTED on the backend, by the same hand
-     that builds the full workbook. Doing it here would mean SheetJS, which
-     discards every style, and a second cheaper-looking file escaping by a
-     different door. */
   const excel = async () => {
     if (!base) return;
     setBusy(true);
     try {
       const r = await api.post(`${base}/export/drill`, {
-        title, period, filename: fileStem,
-        provenance: { file: f.short, column: prov.column, filter: prov.filter,
-                      dated: prov.dated, note: prov.note || f.how },
-        columns: cols.map((c) => ({
-          key: c.key, label: c.label, mono: !!c.mono,
-          money: !!c.num && c.dp !== 0, count: c.dp === 0,
-          width: c.key === 'orderId' ? 22 : Math.max(12, c.label.length + 6),
-        })),
+        title, period, filename: stem,
+        provenance: { file: f.short, column: prov.column, filter: prov.filter, dated: prov.dated,
+                      note: prov.note || f.how },
+        columns: cols.map((c) => ({ key: c.key, label: c.label, mono: !!c.mono, money: !!c.num,
+                                    width: c.w || Math.max(12, c.label.length + 6) })),
         rows: rows.map((row) => cols.reduce((a, c) => ({
-          ...a, [c.key]: c.bool ? (row[c.key] ? 'Yes' : 'No')
-            : c.num ? Number(row[c.key] || 0)
-            : c.fmt ? c.fmt(row[c.key]) : row[c.key],
-        }), {})),
+          ...a, [c.key]: c.bool ? (val(row, c) ? 'Yes' : 'No')
+            : c.num ? Number(val(row, c) || 0)
+            : c.fmt ? c.fmt(val(row, c)) : val(row, c) }), {})),
       }, { responseType: 'blob' });
       const a = document.createElement('a');
-      a.href = URL.createObjectURL(r.data);
-      a.download = `${fileStem}.xlsx`;
-      a.click(); URL.revokeObjectURL(a.href);
-    } catch (e) {
-      toast.error('Could not build the sheet');
-    } finally { setBusy(false); }
+      a.href = URL.createObjectURL(r.data); a.download = `${stem}.xlsx`; a.click();
+      URL.revokeObjectURL(a.href);
+    } catch { toast.error('Could not build the sheet'); } finally { setBusy(false); }
   };
 
   return (
     <div className="fixed inset-0 z-50 flex justify-end bg-black/20" onClick={onClose}>
-      <div className="w-full max-w-5xl bg-white h-full overflow-auto shadow-2xl"
-           onClick={(e) => e.stopPropagation()}>
+      <div className="w-full max-w-6xl bg-white h-full overflow-auto shadow-2xl" onClick={(e) => e.stopPropagation()}>
         <div className="sticky top-0 z-10 bg-white border-b border-slate-200">
           <div className="px-5 py-3 flex items-start justify-between gap-3">
             <div className="min-w-0">
@@ -1096,81 +1468,65 @@ function DrillPanel({ drill, data, ST, base, onClose }) {
             </div>
             <div className="flex gap-2 shrink-0">
               <button onClick={excel} disabled={busy}
-                      className="px-3 py-1.5 text-xs font-semibold rounded-lg border border-emerald-200 bg-emerald-50 text-emerald-800 hover:bg-emerald-100 flex items-center gap-1.5 disabled:opacity-50">
-                {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                      : <FileSpreadsheet className="h-3.5 w-3.5" />}
+                      className="px-3 py-1.5 text-xs font-bold rounded-lg border flex items-center gap-1.5 disabled:opacity-50"
+                      style={{ borderColor: '#A7F3D0', background: '#ECFDF3', color: '#047857' }}>
+                {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <FileSpreadsheet className="h-3.5 w-3.5" />}
                 {busy ? 'Building…' : 'Excel'}
               </button>
-              <button onClick={csv}
-                      className="px-3 py-1.5 text-xs font-semibold rounded-lg border border-slate-200 hover:bg-slate-50 flex items-center gap-1.5">
-                <FileText className="h-3.5 w-3.5" /> CSV
-              </button>
-              <button onClick={onClose} className="p-1.5 rounded-lg hover:bg-slate-100">
+              <button onClick={onClose} aria-label="Close" className="p-1.5 rounded-lg hover:bg-slate-100">
                 <X className="h-4 w-4 text-slate-500" />
               </button>
             </div>
           </div>
-          {/* WHERE THIS COMES FROM — the first thing on the panel, because the
-              first question about any figure is which file to open to check it. */}
-          <div className="px-5 py-2.5 bg-slate-50 border-t border-slate-100">
-            <div className="flex items-start gap-2">
-              <FIcon className="h-4 w-4 mt-0.5 shrink-0" style={{ color: f.tone }} />
-              <div className="text-xs text-slate-600 leading-relaxed">
-                <span className="font-bold text-slate-800">Where this comes from:</span>{' '}
-                <span className="font-semibold" style={{ color: f.tone }}>{f.label}</span>
-                {prov.column && <> · column <code className="px-1 bg-white border border-slate-200 rounded">{prov.column}</code></>}
-                {prov.filter && <> · filter <code className="px-1 bg-white border border-slate-200 rounded">{prov.filter}</code></>}
-                {prov.dated && <> · dated by {prov.dated}</>}
-                <div className="text-slate-500 mt-0.5">{prov.note || f.how}</div>
-              </div>
+          <div className="px-5 py-2.5 bg-slate-50 border-t border-slate-100 flex items-start gap-2">
+            <FIcon className="h-4 w-4 mt-0.5 shrink-0" style={{ color: f.tone }} />
+            <div className="text-xs text-slate-600 leading-relaxed">
+              <span className="font-bold text-slate-800">Where this comes from:</span>{' '}
+              <span className="font-bold" style={{ color: f.tone }}>{f.label}</span>
+              {prov.column && <> · column <code className="px-1 bg-white border border-slate-200 rounded">{prov.column}</code></>}
+              {prov.filter && <> · filter <code className="px-1 bg-white border border-slate-200 rounded">{prov.filter}</code></>}
+              {prov.dated && <> · dated by {prov.dated}</>}
+              <div className="text-slate-500 mt-0.5">{prov.note || f.how}</div>
             </div>
           </div>
         </div>
-
         {rows.length === 0 ? (
           <p className="p-6 text-sm text-slate-500">
-            No orders in this group for {period}. That is an answer, not an error — the figure above is
-            zero for the same reason.
+            No orders in this group for {period}. That is an answer, not an error — the figure above is nil
+            for the same reason.
           </p>
         ) : (
           <table className="w-full text-xs">
             <thead className="bg-slate-50 text-[10px] uppercase tracking-wider text-slate-400">
-              <tr>
-                {cols.map((c) => (
-                  <th key={c.key} className={`px-3 py-2 font-bold ${c.num ? 'text-right' : 'text-left'}`}>
-                    {c.label}
-                  </th>
-                ))}
-              </tr>
+              <tr>{cols.map((c) => (
+                <th key={c.key} className={`px-3 py-2 font-bold ${c.num ? 'text-right' : 'text-left'}`}>{c.label}</th>
+              ))}</tr>
             </thead>
             <tbody className="divide-y divide-slate-50">
-              {rows.slice(0, 500).map((r) => (
-                <tr key={r.orderId} className="hover:bg-slate-50">
+              {rows.slice(0, 500).map((r, i) => (
+                <tr key={`${r.orderId}-${i}`} className="hover:bg-slate-50">
                   {cols.map((c) => (
                     <td key={c.key}
-                        className={`px-3 py-1.5 ${c.num ? 'text-right tabular-nums' : ''} ${
-                          c.mono ? 'font-mono text-slate-700' : 'text-slate-600'}`}>
+                        className={`px-3 py-1.5 ${c.num ? 'text-right tabular-nums' : ''} ${c.mono ? 'font-mono text-slate-700' : 'text-slate-600'}`}>
                       {cell(r, c)}
                     </td>
                   ))}
                 </tr>
               ))}
             </tbody>
-            <tfoot className="bg-slate-50 border-t border-slate-200 font-semibold text-slate-800">
-              <tr>
-                {cols.map((c, i) => (
-                  <td key={c.key} className={`px-3 py-2 ${c.num ? 'text-right tabular-nums' : ''}`}>
-                    {i === 0 ? `${int(rows.length)} orders` : c.num ? inr(totals[c.key], c.dp === 0 ? 0 : 2) : ''}
-                  </td>
-                ))}
-              </tr>
+            <tfoot className="border-t border-slate-200 font-bold text-slate-800" style={{ background: '#F1F5F9' }}>
+              <tr>{cols.map((c, i) => (
+                <td key={c.key} className={`px-3 py-2 ${c.num ? 'text-right tabular-nums' : ''}`}>
+                  {i === 0 ? `${int(rows.length)} orders` : c.num ? inr(totals[c.key]) : ''}
+                </td>
+              ))}</tr>
             </tfoot>
           </table>
         )}
         {rows.length > 500 && (
           <p className="p-4 text-xs text-slate-400">
-            Showing the first 500 of {int(rows.length)} — the totals above cover all of them. Download the
-            Excel or CSV for the full list.
+            Showing the first 500 of {int(rows.length)} — the totals above cover all of them.
+            Download the Excel for the full list.
           </p>
         )}
       </div>
@@ -1178,73 +1534,139 @@ function DrillPanel({ drill, data, ST, base, onClose }) {
   );
 }
 
-/* ── the whole report, as a workbook ─────────────────────────────────────────
-   The workbook is built on the BACKEND and downloaded, not assembled here.
-   The only spreadsheet library on the frontend is SheetJS's community build,
-   which accepts a style on every cell and then silently discards all of them
-   on write — the first version of this export went out as a grid of
-   unformatted numbers with no currency, no subtotals and not one live formula.
-   ExcelJS, which keeps its formatting, is a backend dependency, so the file is
-   built where the library that can format it lives.
+/* ── every order, end to end ─────────────────────────────────────────────── */
+function TransactionData({ data, shown, ST, onClose }) {
+  const [tab, setTab] = useState('all');
+  const [q, setQ] = useState('');
+  const [open, setOpen] = useState(null);
+  const all = (data?.ledger?.rows || []).filter((r) => shown.includes(r.month));
+  const due = (r) => +(r.invoiced - r.refunded - r.fees - r.tds - r.tcs).toFixed(2);
+  const TABS = [
+    { k: 'all', label: 'All orders', f: () => all },
+    { k: 'inmonth', label: 'Paid in the month', f: () => all.filter((r) => r.status === ST.SETTLED_IN_MONTH) },
+    { k: 'later', label: 'Paid later', f: () => all.filter((r) => r.status === ST.SETTLED_LATER) },
+    { k: 'open', label: 'Not paid', f: () => all.filter((r) => Math.abs(due(r) - r.settled) > 0.01) },
+    { k: 'ret', label: 'Returned', f: () => all.filter((r) => r.status === ST.RETURNED) },
+  ];
+  const rows = (TABS.find((t) => t.k === tab) || TABS[0]).f()
+    .filter((r) => !q || r.orderId.toLowerCase().includes(q.toLowerCase()));
 
-   The CSV stays here: it has no formatting to lose. */
-function ExportButtons({ data, months, shown, status, base }) {
-  const [busy, setBusy] = useState(false);
-
-  const excel = async () => {
-    if (!base) return;
-    setBusy(true);
-    try {
-      const r = await api.get(`${base}/export`, {
-        params: { months: shown.join(',') }, responseType: 'blob',
-      });
-      const name = (r.headers['content-disposition'] || '').match(/filename="([^"]+)"/)?.[1]
-        || `Amazon_Receivables_${shown[0]}_to_${shown[shown.length - 1]}.xlsx`;
-      const a = document.createElement('a');
-      a.href = URL.createObjectURL(r.data);
-      a.download = name;
-      a.click(); URL.revokeObjectURL(a.href);
-      toast.success(`Workbook for ${rangeLabel(shown)} downloaded`);
-    } catch (e) {
-      toast.error('Could not build the workbook');
-    } finally { setBusy(false); }
-  };
-
-  const csv = () => {
-    const ms = shown;
-    const led = (data.ledger?.perMonth || []).filter((m) => ms.includes(m.month));
-    const q = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
-    const lines = [
-      [`Amazon Receivables — ${rangeLabel(ms)}`],
-      ['The base is the MTR invoice value. GST is a memo, not a deduction.'],
-      [],
-      ['Line', 'Source', ...ms.map(fmtMonth), 'Total'],
-      ...LINES.map((L) => {
-        const v = led.map((m) => m[L.key]?.amount ?? 0);
-        return [L.label, FILES[PROV[L.prov].file].short, ...v, v.reduce((a, b) => a + b, 0)];
-      }),
-    ].map((r) => r.map(q).join(','));
-    const blob = new Blob([lines.join('\n')], { type: 'text/csv;charset=utf-8' });
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = `amazon-receivables-${ms[0]}-to-${ms[ms.length - 1]}.csv`;
-    a.click(); URL.revokeObjectURL(a.href);
-  };
-
-  const partial = shown.length !== months.length;
   return (
-    <div className="flex gap-2">
-      <button onClick={excel} disabled={busy}
-              title={`Formatted workbook for ${rangeLabel(shown)} — cover, ledger with live formulas, chain, issues and order detail`}
-              className="px-3 py-2 text-sm font-semibold rounded-lg border border-emerald-200 bg-emerald-50 text-emerald-800 hover:bg-emerald-100 flex items-center gap-2 disabled:opacity-50">
-        {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <FileSpreadsheet className="h-4 w-4" />}
-        {busy ? 'Building…' : 'Excel'}
-        {partial && !busy && <span className="text-[10px] font-medium">({rangeLabel(shown)})</span>}
-      </button>
-      <button onClick={csv} title="The waterfall only, as a CSV"
-              className="px-3 py-2 text-sm font-medium rounded-lg border border-slate-200 hover:bg-slate-50 flex items-center gap-2">
-        <Download className="h-4 w-4" /> CSV
-      </button>
+    <div className="fixed inset-0 z-50 bg-white overflow-auto">
+      <div className="sticky top-0 bg-white border-b border-slate-200 px-6 py-4 z-10">
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <h2 className="text-xl font-bold text-slate-900">Transaction Data</h2>
+            <p className="text-sm text-slate-500 mt-0.5">
+              Order-wise details for {rangeLabel(shown)}. Click any row to see that order in each file.
+            </p>
+          </div>
+          <div className="flex gap-2 items-center">
+            <input type="search" value={q} onChange={(e) => setQ(e.target.value)}
+                   aria-label="Search order ID" placeholder="Search order ID…"
+                   className="text-sm px-3 py-2 border border-slate-300 rounded-lg w-56" />
+            <button onClick={onClose} aria-label="Close" className="p-2 rounded-lg hover:bg-slate-100">
+              <X className="h-5 w-5 text-slate-500" />
+            </button>
+          </div>
+        </div>
+        <div className="flex gap-6 mt-4 border-b border-slate-200 -mb-4">
+          {TABS.map((t) => (
+            <button key={t.k} onClick={() => setTab(t.k)}
+                    className="pb-3 text-sm font-bold border-b-[3px]"
+                    style={tab === t.k ? { borderColor: T.amber, color: '#111927' }
+                                       : { borderColor: 'transparent', color: '#5B6472' }}>
+              {t.label} <span className="text-xs font-bold text-slate-500 bg-slate-100 rounded-full px-2 py-0.5 ml-1">
+                {int(t.f().length)}</span>
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <table className="w-full text-xs">
+        <thead className="bg-slate-50 text-[10px] uppercase tracking-wider text-slate-400">
+          <tr>
+            <th className="w-8" />
+            {['Order ID', 'Sale month', 'Invoiced', 'Returned', 'Amazon charges', 'TDS', 'TCS',
+              'Net amount due', 'Received', 'Difference', 'Payment month', 'Status'].map((h, i) => (
+              <th key={h} className={`px-3 py-2.5 font-bold ${i >= 2 && i <= 9 ? 'text-right' : 'text-left'}`}>{h}</th>
+            ))}
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-slate-50">
+          {rows.slice(0, 400).map((r, i) => {
+            const d = +(due(r) - r.settled).toFixed(2);
+            const isOpen = open === r.orderId;
+            return (
+              <React.Fragment key={`${r.orderId}-${i}`}>
+                <tr className="hover:bg-slate-50 cursor-pointer" onClick={() => setOpen(isOpen ? null : r.orderId)}>
+                  <td className="pl-3 text-slate-400">
+                    {isOpen ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
+                  </td>
+                  <td className="px-3 py-2 font-mono font-semibold text-slate-800">{r.orderId}</td>
+                  <td className="px-3 py-2 text-slate-600">{fmtMonth(r.month)}</td>
+                  <td className="px-3 py-2 text-right tabular-nums">{inr(r.invoiced)}</td>
+                  <td className="px-3 py-2 text-right tabular-nums text-slate-500">{r.refunded ? inr(r.refunded) : '—'}</td>
+                  <td className="px-3 py-2 text-right tabular-nums text-slate-500">{r.fees ? inr(r.fees) : '—'}</td>
+                  <td className="px-3 py-2 text-right tabular-nums text-slate-500">{r.tds ? inr(r.tds) : '—'}</td>
+                  <td className="px-3 py-2 text-right tabular-nums text-slate-500">{r.tcs ? inr(r.tcs) : '—'}</td>
+                  <td className="px-3 py-2 text-right tabular-nums font-bold">{inr(due(r))}</td>
+                  <td className="px-3 py-2 text-right tabular-nums" style={{ color: T.green }}>{inr(r.settled)}</td>
+                  <td className="px-3 py-2 text-right tabular-nums">
+                    <span className="px-2 py-0.5 rounded-full font-bold"
+                          style={Math.abs(d) < 0.01 ? { background: '#ECFDF3', color: T.green }
+                                                    : { background: '#FFFBEB', color: '#92400E' }}>
+                      {Math.abs(d) < 0.01 ? '₹0' : inr(d)}
+                    </span>
+                  </td>
+                  <td className="px-3 py-2 text-slate-600">{r.settledMonth ? fmtMonth(r.settledMonth) : '—'}</td>
+                  <td className="px-3 py-2 text-slate-600">{r.status}</td>
+                </tr>
+                {isOpen && (
+                  <tr style={{ background: '#FAFBFC' }}>
+                    <td colSpan={13} className="px-10 py-4">
+                      <div className="grid md:grid-cols-4 gap-3">
+                        {[
+                          { f: 'order', rows: [['Sale month', fmtMonth(r.month)], ['Order status', r.status]] },
+                          { f: 'mtr', rows: [['Invoice value', `₹${inr(r.invoiced)}`], ['Returns', r.refunded ? `₹${inr(r.refunded)}` : 'none'],
+                                             ['GST within it', `₹${inr(r.gst)}`]] },
+                          { f: 'settlement', rows: [['Received', `₹${inr(r.settled)}`],
+                                                    ['Payment month', r.settledMonth ? fmtMonth(r.settledMonth) : 'no payment yet'],
+                                                    ...Object.entries(r.settledBy || {}).map(([m, v]) => [`Paid in ${fmtMonth(m)}`, `₹${inr(v)}`])] },
+                          { f: 'derived', rows: [['Amazon charges', `₹${inr(r.fees)}`], ['TDS u/s 194-O', `₹${inr(r.tds)}`],
+                                                 ['TCS u/s 52', `₹${inr(r.tcs)}`], ['Net amount due', `₹${inr(due(r))}`],
+                                                 ['Difference', `₹${inr(d)}`]] },
+                        ].map(({ f, rows: kv }) => {
+                          const F = FILES[f];
+                          return (
+                            <div key={f} className="bg-white border border-slate-200 rounded-xl overflow-hidden"
+                                 style={{ borderTop: `3px solid ${F.tone}` }}>
+                              <div className="px-3.5 py-2 border-b border-slate-100 text-[11px] font-bold"
+                                   style={{ color: F.tone }}>{F.label}</div>
+                              <div className="px-3.5 py-2">
+                                {kv.length === 0 ? <div className="py-1.5 text-slate-400">no record found</div>
+                                  : kv.map(([k, v]) => (
+                                    <div key={k} className="flex justify-between gap-3 py-1.5 border-b border-slate-50">
+                                      <span className="text-slate-500">{k}</span>
+                                      <span className="font-semibold tabular-nums text-right">{v}</span>
+                                    </div>
+                                  ))}
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </td>
+                  </tr>
+                )}
+              </React.Fragment>
+            );
+          })}
+        </tbody>
+      </table>
+      {rows.length > 400 && (
+        <p className="p-4 text-xs text-slate-400">Showing the first 400 of {int(rows.length)}.</p>
+      )}
     </div>
   );
 }

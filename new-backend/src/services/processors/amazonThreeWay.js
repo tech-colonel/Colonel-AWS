@@ -133,11 +133,16 @@ function foldMtr(rows) {
     if (!id) continue;
     const txn = String(r['Transaction Type'] || r['txn'] || '').trim();
     let m = byOrder.get(id);
-    if (!m) { m = { id, txns: new Set(), value: 0, shipped: false }; byOrder.set(id, m); }
+    if (!m) { m = { id, txns: new Set(), value: 0, shipped: false, invMonth: '', shipMonth: '' }; byOrder.set(id, m); }
     m.txns.add(txn);
     if (txn === 'Shipment') {
       m.shipped = true;
       m.value += num(r['Invoice Amount'] ?? r['amount']);
+      /* both dates, because the SALES BASIS decides which one books the sale and
+         the chain has to describe the same months the ledger does — otherwise
+         the two halves of one report count different populations */
+      m.invMonth = m.invMonth || monthKey(r['Invoice Date'] || r.file_month);
+      m.shipMonth = m.shipMonth || monthKey(r['Shipment Date'] || r['Invoice Date'] || r.file_month);
     }
   }
   for (const m of byOrder.values()) m.value = r2(m.value);
@@ -172,11 +177,25 @@ function foldSettlement(rows) {
  *
  * @param {object} src  { orders, mtr, settlement } — arrays of raw rows
  * @param {string[]} months  e.g. ['2026-06','2026-07','2026-08']
+ * @param {object} opts  { basis } — 'order' or 'dispatch'; must match the ledger
  */
-function reconcile(src, months) {
+function reconcile(src, months, opts = {}) {
+  const basis = opts.basis || 'dispatch';
   const O = foldOrders(src.orders || []);
   const M = foldMtr(src.mtr || []);
   const S = foldSettlement(src.settlement || []);
+
+  /* The chain must sit in the same months as the ledger. On an ORDER basis that
+     is the purchase date the order report carries; on a DISPATCH basis it is the
+     MTR's shipment date, falling back to the purchase date for an order that
+     never shipped — which is exactly the group a dispatch basis is meant to
+     push into a later month. */
+  for (const o of O.values()) {
+    const m = M.get(o.id);
+    o.placedMonth = o.month;
+    o.month = basis === 'order' ? o.month
+      : (m && (m.shipMonth || m.invMonth)) || o.month;
+  }
 
   const inWindow = (m) => months.includes(m);
   const shipped = new Set([...M.values()].filter((m) => m.shipped).map((m) => m.id));
