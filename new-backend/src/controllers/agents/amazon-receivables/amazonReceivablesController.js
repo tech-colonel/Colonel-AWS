@@ -36,6 +36,7 @@ const amazonReports = require('../../../services/amazonReports');
 const { reconcile, monthKey, num } = require('../../../services/processors/amazonThreeWay');
 const { buildLedger } = require('../../../services/processors/amazonReceivablesLedger');
 const { auditLedger, drillFor } = require('../../../services/processors/amazonReceivablesAudit');
+const { buildWorkbook, buildDrillWorkbook } = require('../../../services/processors/amazonReceivablesWorkbook');
 
 const OUTPUT_DIR = path.join(__dirname, '../../../../outputs');
 const UPLOAD_ROOT = path.join(OUTPUT_DIR, 'amazon-receivables');
@@ -364,6 +365,67 @@ const getRun = async (req, res, next) => {
   } catch (e) { next(e); }
 };
 
+/** The stored run as a formatted workbook.
+ *
+ * Built HERE rather than in the browser for one reason: the frontend's only
+ * spreadsheet library is SheetJS's community build, which silently discards
+ * every style it is given. The first version of this export went out as a grid
+ * of unformatted numbers with no currency, no subtotals and not one live
+ * formula — a data dump, and the one artefact that leaves this system and goes
+ * to a client. ExcelJS is a backend dependency, so the workbook is built where
+ * the library that can format it actually lives.
+ */
+const exportWorkbook = async (req, res, next) => {
+  try {
+    const ctx = await resolve(req, res); if (!ctx) return;
+    const asked = String(req.query.months || '').split(',').map((s) => s.trim()).filter(Boolean);
+    const [stored] = await q(ctx.db,
+      `SELECT payload, window_months FROM ${RUNS_TABLE}
+        WHERE brand_id = :b ORDER BY built_at DESC LIMIT 1`, { b: ctx.brand.id });
+    if (!stored || !stored.length) {
+      return res.status(404).json({ error: 'No reconciliation has been run yet.' });
+    }
+    const all = stored[0].window_months || [];
+    /* The caller may be looking at one month of a three-month run. Honour that,
+       but never invent a month the run does not hold. */
+    const months = asked.length ? all.filter((m) => asked.includes(m)) : all;
+    if (!months.length) return res.status(400).json({ error: 'None of those months are in the stored run.' });
+
+    const wb = buildWorkbook(stored[0].payload, { brand: ctx.brand.name, months });
+    const name = `Amazon_Receivables_${ctx.brand.name.replace(/[^A-Za-z0-9]/g, '')}_`
+               + `${months[0]}_to_${months[months.length - 1]}.xlsx`;
+    res.setHeader('Content-Type',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename="${name}"`);
+    await wb.xlsx.write(res);
+    res.end();
+  } catch (e) { console.error('Amazon receivables export error:', e); next(e); }
+};
+
+/** One drilled group, formatted by the same hand as the full workbook.
+ *  The page knows which rows sit behind a figure; only the backend can format
+ *  them, so it sends the rows and gets the styled sheet back. */
+const exportDrill = async (req, res, next) => {
+  try {
+    const ctx = await resolve(req, res); if (!ctx) return;
+    const b = req.body || {};
+    const rows = Array.isArray(b.rows) ? b.rows.slice(0, 20000) : [];
+    if (!Array.isArray(b.columns) || !b.columns.length) {
+      return res.status(400).json({ error: 'columns required' });
+    }
+    const wb = buildDrillWorkbook({
+      title: b.title, period: b.period, brand: ctx.brand.name,
+      provenance: b.provenance || {}, columns: b.columns, rows,
+    });
+    const name = `${String(b.filename || 'amazon-receivables').replace(/[^A-Za-z0-9_-]/g, '_')}.xlsx`;
+    res.setHeader('Content-Type',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename="${name}"`);
+    await wb.xlsx.write(res);
+    res.end();
+  } catch (e) { console.error('Amazon receivables drill export error:', e); next(e); }
+};
+
 /** Remove a stored run. The source files stay. */
 const deleteRun = async (req, res, next) => {
   try {
@@ -377,4 +439,5 @@ const deleteRun = async (req, res, next) => {
   } catch (e) { next(e); }
 };
 
-module.exports = { getStatus, uploadSources, fetchOrders, runReco, getRun, deleteRun, parseTable };
+module.exports = { getStatus, uploadSources, fetchOrders, runReco, getRun, deleteRun,
+                   exportWorkbook, exportDrill, parseTable };

@@ -26,4 +26,9 @@ router.post(`${base}/run`, authenticateToken, c.runReco);
 router.get(`${base}/run`, authenticateToken, c.getRun);
 router.delete(`${base}/run`, authenticateToken, c.deleteRun);
 
+/* the report as a formatted workbook — built on the backend, where the only
+   spreadsheet library that keeps its styling lives */
+router.get(`${base}/export`, authenticateToken, c.exportWorkbook);
+router.post(`${base}/export/drill`, authenticateToken, c.exportDrill);
+
 module.exports = router;

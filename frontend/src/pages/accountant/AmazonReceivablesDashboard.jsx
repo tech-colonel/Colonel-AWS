@@ -39,7 +39,6 @@ import {
   Package, Receipt, Banknote, X, Loader2, ArrowLeft, CalendarRange,
   LayoutDashboard, Bot, FileSpreadsheet, Sigma, Clock, FileText,
 } from 'lucide-react';
-import * as XLSX from 'xlsx';
 import { toast } from 'sonner';
 import api from '../../lib/api';
 import DashboardLayout from '../../components/layout/DashboardLayout';
@@ -299,7 +298,7 @@ export default function AmazonReceivablesDashboard() {
           </p>
         </div>
         <div className="flex gap-2 shrink-0">
-          {data && <ExportButtons data={data} months={months} shown={shown} status={status} />}
+          {data && <ExportButtons data={data} months={months} shown={shown} status={status} base={base} />}
           <button onClick={load}
                   className="px-3 py-2 text-sm font-medium rounded-lg border border-slate-200 hover:bg-slate-50 flex items-center gap-2">
             <RefreshCw className="h-4 w-4" /> Refresh
@@ -356,7 +355,8 @@ export default function AmazonReceivablesDashboard() {
         <SourcesPanel status={status} sources={sources} sourceKind={data?.sourceKind || {}} />
       </>}
 
-      {drill && <DrillPanel drill={drill} data={data} ST={ST} onClose={() => setDrill(null)} />}
+      {drill && <DrillPanel drill={drill} data={data} ST={ST} base={base}
+                            onClose={() => setDrill(null)} />}
     </div>
     </DashboardLayout>
   );
@@ -1001,7 +1001,8 @@ const CHAIN_COLS = [
 ];
 
 /* ── the orders behind whatever was clicked ──────────────────────────────── */
-function DrillPanel({ drill, data, ST, onClose }) {
+function DrillPanel({ drill, data, ST, base, onClose }) {
+  const [busy, setBusy] = useState(false);
   const { kind, rows, prov } = useMemo(() => drillRows(drill, data, ST), [drill, data, ST]);
   const cols = kind === 'chain' ? CHAIN_COLS : LEDGER_COLS;
   const f = FILES[prov.file];
@@ -1047,32 +1048,40 @@ function DrillPanel({ drill, data, ST, onClose }) {
     a.click(); URL.revokeObjectURL(a.href);
   };
 
-  /* Excel rather than only CSV, because this is handed to an accountant who
-     will filter, total and annotate it — and because a CSV of order ids loses
-     them to scientific notation the moment it is double-clicked. The
-     provenance travels with the sheet; a column of numbers with no stated source is
-     exactly what this report is trying to stop producing. */
-  const excel = () => {
-    const wb = XLSX.utils.book_new();
-    const aoa = [
-      ['Amazon Receivables', title],
-      ['Period', period],
-      ['Source file', f.label],
-      ['Column', prov.column || '—'],
-      ['Filter', prov.filter || 'all rows in the period'],
-      ['Dated by', prov.dated || '—'],
-      ['Note', prov.note || f.how],
-      ['Orders', rows.length],
-      ['Generated', new Date().toLocaleString('en-IN')],
-      [],
-      cols.map((c) => c.label),
-      ...rows.map((r) => cols.map((c) => (c.bool ? (r[c.key] ? 'Yes' : 'No')
-        : c.num ? Number(r[c.key] || 0) : r[c.key] ?? ''))),
-    ];
-    const ws = XLSX.utils.aoa_to_sheet(aoa);
-    ws['!cols'] = cols.map((c) => ({ wch: c.key === 'orderId' ? 22 : c.label.length + 8 }));
-    XLSX.utils.book_append_sheet(wb, ws, 'Orders');
-    XLSX.writeFile(wb, `${fileStem}.xlsx`);
+  /* Excel as well as CSV, because this is handed to an accountant who will
+     filter, total and annotate it — and because a CSV of order ids loses them
+     to scientific notation the moment it is double-clicked.
+
+     The rows are derived here and FORMATTED on the backend, by the same hand
+     that builds the full workbook. Doing it here would mean SheetJS, which
+     discards every style, and a second cheaper-looking file escaping by a
+     different door. */
+  const excel = async () => {
+    if (!base) return;
+    setBusy(true);
+    try {
+      const r = await api.post(`${base}/export/drill`, {
+        title, period, filename: fileStem,
+        provenance: { file: f.short, column: prov.column, filter: prov.filter,
+                      dated: prov.dated, note: prov.note || f.how },
+        columns: cols.map((c) => ({
+          key: c.key, label: c.label, mono: !!c.mono,
+          money: !!c.num && c.dp !== 0, count: c.dp === 0,
+          width: c.key === 'orderId' ? 22 : Math.max(12, c.label.length + 6),
+        })),
+        rows: rows.map((row) => cols.reduce((a, c) => ({
+          ...a, [c.key]: c.bool ? (row[c.key] ? 'Yes' : 'No')
+            : c.num ? Number(row[c.key] || 0)
+            : c.fmt ? c.fmt(row[c.key]) : row[c.key],
+        }), {})),
+      }, { responseType: 'blob' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(r.data);
+      a.download = `${fileStem}.xlsx`;
+      a.click(); URL.revokeObjectURL(a.href);
+    } catch (e) {
+      toast.error('Could not build the sheet');
+    } finally { setBusy(false); }
   };
 
   return (
@@ -1086,9 +1095,11 @@ function DrillPanel({ drill, data, ST, onClose }) {
               <p className="text-xs text-slate-400">{int(rows.length)} orders · {period}</p>
             </div>
             <div className="flex gap-2 shrink-0">
-              <button onClick={excel}
-                      className="px-3 py-1.5 text-xs font-semibold rounded-lg border border-emerald-200 bg-emerald-50 text-emerald-800 hover:bg-emerald-100 flex items-center gap-1.5">
-                <FileSpreadsheet className="h-3.5 w-3.5" /> Excel
+              <button onClick={excel} disabled={busy}
+                      className="px-3 py-1.5 text-xs font-semibold rounded-lg border border-emerald-200 bg-emerald-50 text-emerald-800 hover:bg-emerald-100 flex items-center gap-1.5 disabled:opacity-50">
+                {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      : <FileSpreadsheet className="h-3.5 w-3.5" />}
+                {busy ? 'Building…' : 'Excel'}
               </button>
               <button onClick={csv}
                       className="px-3 py-1.5 text-xs font-semibold rounded-lg border border-slate-200 hover:bg-slate-50 flex items-center gap-1.5">
@@ -1168,135 +1179,35 @@ function DrillPanel({ drill, data, ST, onClose }) {
 }
 
 /* ── the whole report, as a workbook ─────────────────────────────────────────
-   One file an accountant can send on: the summary, the waterfall, the chain,
-   where every order ended up, what needs attention, and the order-level detail
-   all three were built from. Each sheet states which file its figures came
-   from, because the workbook outlives the page it was downloaded from. */
-function ExportButtons({ data, months, shown, status }) {
-  const build = (scope) => {
-    const ms = scope === 'shown' ? shown : months;
-    const led = (data.ledger?.perMonth || []).filter((m) => ms.includes(m.month));
-    const rows = (data.ledger?.rows || []).filter((r) => ms.includes(r.month));
-    const chain = (data.three?.orderRows || []).filter((r) => ms.includes(r.month));
-    const three = (data.three?.perMonth || []).filter((m) => ms.includes(m.month));
-    const issues = (data.audit?.issues || []).filter((i) => !i.month || ms.includes(i.month));
-    const srcKind = data.sourceKind || {};
-    const amt = (k) => led.reduce((a, m) => a + (m[k]?.amount || 0), 0);
+   The workbook is built on the BACKEND and downloaded, not assembled here.
+   The only spreadsheet library on the frontend is SheetJS's community build,
+   which accepts a style on every cell and then silently discards all of them
+   on write — the first version of this export went out as a grid of
+   unformatted numbers with no currency, no subtotals and not one live formula.
+   ExcelJS, which keeps its formatting, is a backend dependency, so the file is
+   built where the library that can format it lives.
 
-    const wb = XLSX.utils.book_new();
-    const add = (name, aoa, widths) => {
-      const ws = XLSX.utils.aoa_to_sheet(aoa);
-      if (widths) ws['!cols'] = widths.map((w) => ({ wch: w }));
-      XLSX.utils.book_append_sheet(wb, ws, name);
-    };
+   The CSV stays here: it has no formatting to lose. */
+function ExportButtons({ data, months, shown, status, base }) {
+  const [busy, setBusy] = useState(false);
 
-    add('Summary', [
-      ['Amazon Receivables'],
-      ['Brand', status?.brand || '—'],
-      ['Period', rangeLabel(ms)],
-      ['Months', ms.join(', ')],
-      ['Generated', new Date().toLocaleString('en-IN')],
-      ['Last reconciled', data.builtAt ? new Date(data.builtAt).toLocaleString('en-IN') : '—'],
-      [],
-      ['THE BASE IS THE MTR INVOICE VALUE — the document actually issued to the customer.'],
-      ['The order report is higher (it still carries orders that never shipped); the settlement is lower'],
-      ['(Amazon’s own figure, net of refunds and excluding GST). Neither is the right thing to hold a'],
-      ['seller’s receivable against.'],
-      [],
-      ['GST is NOT a deduction. Amazon collects the full invoice and pays the GST across to you; you'],
-      ['remit it onward. It is carried as a memo line, never as something Amazon kept.'],
-      [],
-      ['Figure', 'Amount', 'Source'],
-      ['Invoiced (incl GST)', amt('invoiced'), 'MTR · Invoice Amount · Transaction Type = Shipment'],
-      ['Returns / refunds', amt('returned'), 'MTR · Transaction Type = Refund'],
-      ['Net billable', amt('netBillable'), 'Derived'],
-      ['Amazon fees', amt('fees'), 'Settlement · selling + fba + other transaction fees'],
-      ['TDS 194-O / TCS', amt('tdsTcs'), 'Settlement · TDS/TCS columns'],
-      ['Due from Amazon', amt('expected'), 'Derived'],
-      ['Received to date', amt('settled'), 'Settlement · total'],
-      ['Still outstanding', amt('closing'), 'Derived'],
-      ['(memo) GST within the receivable', amt('gstMemo'), 'MTR · Total Tax Amount'],
-      [],
-      ['Month', 'Settlement source', 'Days since month end', 'Still outstanding'],
-      ...led.map((m) => [m.month,
-        srcKind[m.month] === 'unified' ? 'unified transaction report' : 'retained settlement ledgers',
-        daysOld(m.month), m.closing?.amount || 0]),
-    ], [46, 20, 60]);
-
-    add('Ledger', [
-      ['Receivables by month — the base is the MTR invoice value'],
-      [],
-      ['Line', 'Source', ...ms.map(fmtMonth), 'Total', 'What this line is'],
-      ...LINES.map((L) => {
-        const v = led.map((m) => m[L.key]?.amount ?? 0);
-        return [L.label, FILES[PROV[L.prov].file].short, ...v,
-                v.reduce((a, b) => a + b, 0), L.what];
-      }),
-      ['of which received later', 'Settlement', ...led.map((m) => m.settledLater?.amount ?? 0),
-        led.reduce((a, m) => a + (m.settledLater?.amount || 0), 0),
-        'Part of Received that arrived after the month closed — the carry-forward.'],
-      ['(memo) GST within it', 'MTR', ...led.map((m) => m.gstMemo?.amount ?? 0),
-        led.reduce((a, m) => a + (m.gstMemo?.amount || 0), 0),
-        'How much of the receivable is GST you will remit. NOT withheld by Amazon.'],
-      [],
-      ['Orders per line (count)'],
-      ['Line', '', ...ms.map(fmtMonth)],
-      ...LINES.map((L) => [L.label, '', ...led.map((m) => m[L.key]?.count ?? 0)]),
-    ], [26, 12, ...ms.map(() => 16), 16, 70]);
-
-    add('Chain', [
-      ['The chain — order report → MTR → settlement. Counts of ORDERS, not money.'],
-      ['Every subtraction names a countable group. Nothing here is a balancing figure.'],
-      [],
-      ['Month', 'Orders placed', 'Cancelled', 'Net orders', 'Invoiced (MTR)', 'Settled', 'Unsettled',
-       'Net value', 'Unsettled value'],
-      ...three.map((m) => [m.month, m.placed, m.cancelled, m.net, m.shipped, m.settled, m.unsettled,
-                           m.valueNet, m.valueUnsettled]),
-      [],
-      ['Source', 'Order report', 'Order report', 'Derived', 'MTR', 'Settlement', 'Derived'],
-    ], [12, 14, 12, 12, 16, 12, 12, 16, 16]);
-
-    add('Where orders ended up', [
-      ['Each order is in exactly one row, so these sum to the orders invoiced.'],
-      [],
-      ['Status', ...ms.flatMap((m) => [`${fmtMonth(m)} orders`, `${fmtMonth(m)} value`])],
-      ...(led[0]?.byStatus || []).map((b) => [b.status,
-        ...led.flatMap((m) => {
-          const g = m.byStatus.find((x) => x.status === b.status) || { count: 0, amount: 0 };
-          return [g.count, g.amount];
-        })]),
-    ], [30, ...ms.flatMap(() => [16, 16])]);
-
-    add('What needs attention', [
-      ['Nothing here is plugged — where a figure cannot be explained it says so.'],
-      [],
-      ['Month', 'Severity', 'Issue', 'Amount', 'What it is', 'Why it happens', 'How to resolve it'],
-      ...issues.map((i) => [i.month || '', i.severity, i.title, i.amount, i.what, i.why, i.howToFix]),
-    ], [12, 10, 60, 14, 70, 70, 70]);
-
-    add('Orders', [
-      ['Order-level detail behind the ledger. Invoiced from the MTR, fees/TDS/received from the settlement.'],
-      [],
-      ['Order ID', 'Month invoiced', 'Status', 'Invoiced', 'Returned', 'GST within', 'Fees', 'TDS/TCS',
-       'Received', 'Settled in'],
-      ...rows.map((r) => [r.orderId, r.month, r.status, r.invoiced, r.refunded, r.gst, r.fees,
-                          r.tdsTcs, r.settled, r.settledMonth || '']),
-    ], [22, 14, 24, 14, 12, 12, 12, 12, 14, 12]);
-
-    if (chain.length) {
-      add('Chain orders', [
-        ['Every order the chain counts, with the flag each file contributed.'],
-        [],
-        ['Order ID', 'Month placed', 'Order status', 'Cancelled', 'In MTR', 'Settled', 'Order value',
-         'Lines', 'Ship state'],
-        ...chain.map((r) => [r.orderId, r.month, r.status, r.cancelled ? 'Yes' : 'No',
-                             r.invoiced ? 'Yes' : 'No', r.settled ? 'Yes' : 'No', r.value, r.lines,
-                             r.shipState || '']),
-      ], [22, 14, 24, 11, 9, 9, 14, 8, 12]);
-    }
-
-    XLSX.writeFile(wb, `Amazon_Receivables_${ms[0]}_to_${ms[ms.length - 1]}.xlsx`);
-    toast.success(`Workbook for ${rangeLabel(ms)} downloaded`);
+  const excel = async () => {
+    if (!base) return;
+    setBusy(true);
+    try {
+      const r = await api.get(`${base}/export`, {
+        params: { months: shown.join(',') }, responseType: 'blob',
+      });
+      const name = (r.headers['content-disposition'] || '').match(/filename="([^"]+)"/)?.[1]
+        || `Amazon_Receivables_${shown[0]}_to_${shown[shown.length - 1]}.xlsx`;
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(r.data);
+      a.download = name;
+      a.click(); URL.revokeObjectURL(a.href);
+      toast.success(`Workbook for ${rangeLabel(shown)} downloaded`);
+    } catch (e) {
+      toast.error('Could not build the workbook');
+    } finally { setBusy(false); }
   };
 
   const csv = () => {
@@ -1323,11 +1234,12 @@ function ExportButtons({ data, months, shown, status }) {
   const partial = shown.length !== months.length;
   return (
     <div className="flex gap-2">
-      <button onClick={() => build('shown')}
-              title={`Full workbook for ${rangeLabel(shown)} — summary, ledger, chain, issues and order detail`}
-              className="px-3 py-2 text-sm font-semibold rounded-lg border border-emerald-200 bg-emerald-50 text-emerald-800 hover:bg-emerald-100 flex items-center gap-2">
-        <FileSpreadsheet className="h-4 w-4" /> Excel
-        {partial && <span className="text-[10px] font-medium">({rangeLabel(shown)})</span>}
+      <button onClick={excel} disabled={busy}
+              title={`Formatted workbook for ${rangeLabel(shown)} — cover, ledger with live formulas, chain, issues and order detail`}
+              className="px-3 py-2 text-sm font-semibold rounded-lg border border-emerald-200 bg-emerald-50 text-emerald-800 hover:bg-emerald-100 flex items-center gap-2 disabled:opacity-50">
+        {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <FileSpreadsheet className="h-4 w-4" />}
+        {busy ? 'Building…' : 'Excel'}
+        {partial && !busy && <span className="text-[10px] font-medium">({rangeLabel(shown)})</span>}
       </button>
       <button onClick={csv} title="The waterfall only, as a CSV"
               className="px-3 py-2 text-sm font-medium rounded-lg border border-slate-200 hover:bg-slate-50 flex items-center gap-2">
