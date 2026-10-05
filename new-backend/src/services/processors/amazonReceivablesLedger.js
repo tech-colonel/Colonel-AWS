@@ -50,7 +50,7 @@
    A figure nobody can drill into is a figure nobody can defend.
    ────────────────────────────────────────────────────────────────────────────── */
 
-const { monthKey, num, r2 } = require('./amazonThreeWay');
+const { monthKey, num, r2, isoDay } = require('./amazonThreeWay');
 
 /* The closing state of an order. Exactly one applies, so the buckets sum to the
    order count and nothing can be counted twice or lost between them. */
@@ -84,7 +84,8 @@ function foldInvoiced(mtrRows) {
     const amt = num(r['Invoice Amount'] ?? r.amount);
     let o = byOrder.get(id);
     if (!o) {
-      o = { id, invMonth: '', shipMonth: '', invoiced: 0, refunded: 0, gst: 0,
+      o = { id, invMonth: '', shipMonth: '', invDate: '', shipDate: '', refundDate: '',
+            invoiced: 0, refunded: 0, gst: 0,
             shipped: false, refundMonth: '', refundFile: '' };
       byOrder.set(id, o);
     }
@@ -96,6 +97,11 @@ function foldInvoiced(mtrRows) {
          is populated on all 2,037 shipment rows — what was blank was the parsed
          month, before DD-MM-YYYY was handled. */
       o.invMonth = o.invMonth || monthKey(r['Invoice Date'] || r.file_month);
+      /* the DAY, not just the month. An accountant checking a credit note
+         against a filed return needs the date on it, and "Jun 2026" does not
+         settle whether a 30-June sale belongs to June or July. */
+      o.invDate = o.invDate || isoDay(r['Invoice Date']);
+      o.shipDate = o.shipDate || isoDay(r['Shipment Date']);
       o.shipMonth = o.shipMonth || monthKey(r['Shipment Date'] || r['Invoice Date'] || r.file_month);
       /* The MTR states the tax both ways: one total, and split across the
          heads. Prefer the stated total — it is what the invoice shows — and
@@ -126,6 +132,7 @@ function foldInvoiced(mtrRows) {
         || monthKey(r.file_month)
         || monthKey(r['Invoice Date']);
       o.creditNote = o.creditNote || String(r['Credit Note No'] ?? r['credit_note_no'] ?? '').trim();
+      o.refundDate = o.refundDate || isoDay(r['Credit Note Date'] ?? r['credit_note_date']);
       o.refundFile = o.refundFile || String(r.__file || '');
     }
   }
@@ -216,7 +223,8 @@ function foldPlaced(orderRows) {
     const id = String(r['amazon-order-id'] || '').trim();
     if (!id) continue;
     let o = byOrder.get(id);
-    if (!o) o = { id, month: monthKey(r['purchase-date']), statuses: new Set(),
+    if (!o) o = { id, month: monthKey(r['purchase-date']), date: isoDay(r['purchase-date']),
+                  statuses: new Set(),
                   charged: 0, channel: '' }, byOrder.set(id, o);
     o.statuses.add(String(r['order-status'] || '').trim());
     o.channel = o.channel || String(r['sales-channel'] || '').trim();
@@ -300,6 +308,8 @@ function buildLedger(src, months, opts = {}) {
       /* the month the CREDIT NOTE was raised — which month the return belongs
          to. Not the sale's month. See the returns block below. */
       refundMonth: i.refundMonth || '', creditNote: i.creditNote || '',
+      saleDate: i.invDate || i.shipDate || p.date || '',
+      refundDate: i.refundDate || '',
       fees: s ? s.fees : 0,
       tds: s ? s.tds : 0, tcs: s ? s.tcs : 0, tdsTcs: s ? s.tdsTcs : 0,
       settled,

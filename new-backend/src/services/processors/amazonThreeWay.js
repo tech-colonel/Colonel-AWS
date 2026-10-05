@@ -47,6 +47,34 @@ const IST_MS = 5.5 * 60 * 60 * 1000;
 const MONTH_NAMES = { jan: '01', feb: '02', mar: '03', apr: '04', may: '05', jun: '06',
                       jul: '07', aug: '08', sep: '09', oct: '10', nov: '11', dec: '12' };
 
+/* The same parsing as monthKey, but keeping the DAY. Four date formats appear
+   across the MTR — ISO, DD-MM-YYYY, DD-MM-YY and M/D/YYYY — so the day cannot
+   be sliced off a string; it has to be parsed the same way the month is.
+   Returns YYYY-MM-DD, in IST, or '' when nothing parses. */
+function isoDay(value) {
+  if (value == null || value === '') return '';
+  const mk = monthKey(value);
+  if (!mk) return '';
+  const s = String(value).trim();
+  let d = null;
+  let m = s.match(/^(\d{4})-(\d{2})-(\d{2})[T ]?(\d{2})?:?(\d{2})?/);
+  if (m) d = new Date(Date.UTC(+m[1], +m[2] - 1, +m[3], +(m[4] || 0), +(m[5] || 0)));
+  if (!d) { m = s.match(/^(\d{2})-(\d{2})-(\d{4})[ T]?(\d{1,2})?:?(\d{2})?/);
+            if (m) d = new Date(Date.UTC(+m[3], +m[2] - 1, +m[1], +(m[4] || 0), +(m[5] || 0))); }
+  if (!d) { m = s.match(/^(\d{2})-(\d{2})-(\d{2})(?!\d)[ T]?(\d{1,2})?:?(\d{2})?/);
+            if (m) d = new Date(Date.UTC(2000 + +m[3], +m[2] - 1, +m[1], +(m[4] || 0), +(m[5] || 0))); }
+  if (!d) { m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})[ T]?(\d{1,2})?:?(\d{2})?/);
+            if (m && +m[1] >= 1 && +m[1] <= 12) {
+              d = new Date(Date.UTC(+m[3], +m[1] - 1, +m[2], +(m[4] || 0), +(m[5] || 0))); } }
+  if (!d || Number.isNaN(d.getTime())) return '';
+  /* ISO strings already carry a zone; the bare local formats are IST wall time.
+     Only shift the ones monthKey shifts, so the day and the month never
+     disagree with each other. */
+  const iso = /^\d{4}-\d{2}-\d{2}[T ]/.test(s);
+  const i = iso ? new Date(d.getTime() + IST_MS) : d;
+  return `${i.getUTCFullYear()}-${String(i.getUTCMonth() + 1).padStart(2, '0')}-${String(i.getUTCDate()).padStart(2, '0')}`;
+}
+
 function monthKey(value) {
   if (value == null || value === '') return '';
   /* The pivot hands back a real Date; the files hand back strings. Stringifying
@@ -316,4 +344,4 @@ function reconcile(src, months, opts = {}) {
   };
 }
 
-module.exports = { reconcile, foldOrders, foldMtr, foldSettlement, monthKey, num, r2 };
+module.exports = { isoDay, reconcile, foldOrders, foldMtr, foldSettlement, monthKey, num, r2 };

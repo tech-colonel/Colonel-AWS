@@ -770,11 +770,15 @@ function buildWorkbook(payload, { brand, months }) {
     `${brand}   ·   ${period}   ·   invoiced from the MTR, fees / TDS / received from the settlement`,
     [
       { label: 'Order ID', width: 22, mono: true, get: (r) => r.orderId },
+      { label: 'Sale date', width: 13, get: (r) => r.saleDate || '—',
+        note: 'The invoice date from the MTR, falling back to the order date.' },
       { label: 'Month invoiced', width: 15, get: (r) => fmtMonth(r.month),
         note: 'The month the MTR INVOICED it — that is when it became a receivable — falling back to the month it was placed where the MTR carries no date.' },
       { label: 'Status', width: 24, get: (r) => r.status },
       { label: 'Invoiced', width: 14, money: true, get: (r) => r.invoiced },
       { label: 'Returned', width: 13, money: true, get: (r) => r.refunded },
+      { label: 'Return date', width: 13, get: (r) => r.refundDate || '—',
+        note: 'The date on Amazon\u2019s credit note.' },
       { label: 'Returned in', width: 13, get: (r) => (r.refundMonth ? fmtMonth(r.refundMonth) : '—'),
         note: 'The month the CREDIT NOTE was raised, which is the month the return belongs to — not '
             + 'the month of the sale. An order sold on 30 April and returned in May is a May credit '

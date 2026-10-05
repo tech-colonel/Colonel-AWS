@@ -54,6 +54,14 @@ const rangeLabel = (ms) => (!ms || !ms.length ? '—'
 const pctOf = (a, b) => (!b ? 0 : (100 * a) / b);
 const monthEnd = (m) => { const [y, mo] = m.split('-').map(Number); return new Date(y, mo, 0); };
 const daysOld = (m) => Math.max(0, Math.floor((Date.now() - monthEnd(m).getTime()) / 86400000));
+/* "18 Jun 2026" — the day matters: an accountant matching a credit note to a
+   filed return needs the date on the document, and "Jun 2026" does not settle
+   whether a 30-June sale belongs to June or July. */
+const fmtDay = (d) => {
+  if (!d || !/^\d{4}-\d{2}-\d{2}/.test(d)) return '—';
+  const [y, m, dd] = d.slice(0, 10).split('-');
+  return `${+dd} ${MON[+m - 1]} ${y}`;
+};
 const endLabel = (m) => (/^\d{4}-\d{2}$/.test(m || '')
   ? `${monthEnd(m).getDate()} ${MON[+m.slice(5) - 1]} ${m.slice(0, 4)}` : '—');
 
@@ -2288,8 +2296,8 @@ const LEDGER_COLS = [
   { key: 'status', label: 'Status', calc: (r) => statusText(r) },
   { key: 'invoiced', label: 'Invoiced', num: true },
   { key: 'refunded', label: 'Returned', num: true },
-  { key: 'refundMonth', label: 'Return month',
-    fmt: (v) => (v ? fmtMonth(v) : '—') },
+  { key: 'refundMonth', label: 'Return month', fmt: (v) => (v ? fmtMonth(v) : '—') },
+  { key: 'refundDate', label: 'Return date', fmt: fmtDay },
   { key: 'fees', label: 'Amazon charges', num: true },
   { key: 'tds', label: 'TDS', num: true },
   { key: 'tcs', label: 'TCS', num: true },
@@ -2535,11 +2543,19 @@ function TransactionData({ data, shown, ST, onClose }) {
                     {isOpen ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
                   </td>
                   <td className="px-3 py-2 font-mono font-semibold text-slate-800">{r.orderId}</td>
-                  <td className="px-3 py-2 text-slate-600">{fmtMonth(r.month)}</td>
+                  <td className="px-3 py-2 text-slate-600">
+                    {fmtMonth(r.month)}
+                    {r.saleDate && <span className="block text-[10px] text-slate-400">{fmtDay(r.saleDate)}</span>}
+                  </td>
                   <td className="px-3 py-2 text-right tabular-nums">{inr(r.invoiced)}</td>
                   <td className="px-3 py-2 text-right tabular-nums text-slate-500">{r.refunded ? inr(r.refunded) : '—'}</td>
                   <td className="px-3 py-2 text-slate-600">
-                    {r.refunded ? (r.refundMonth ? fmtMonth(r.refundMonth) : '—') : '—'}
+                    {r.refunded && r.refundMonth ? (
+                      <>
+                        {fmtMonth(r.refundMonth)}
+                        {r.refundDate && <span className="block text-[10px] text-slate-400">{fmtDay(r.refundDate)}</span>}
+                      </>
+                    ) : '—'}
                   </td>
                   <td className="px-3 py-2 text-right tabular-nums text-slate-500">{r.fees ? inr(r.fees) : '—'}</td>
                   <td className="px-3 py-2 text-right tabular-nums text-slate-500">{r.tds ? inr(r.tds) : '—'}</td>
@@ -2563,11 +2579,14 @@ function TransactionData({ data, shown, ST, onClose }) {
                     <td colSpan={14} className="px-10 py-4">
                       <div className="grid md:grid-cols-4 gap-3">
                         {[
-                          { f: 'order', rows: [['Sale month', fmtMonth(r.month)], ['Order status', r.status]] },
+                          { f: 'order', rows: [['Sale month', fmtMonth(r.month)],
+                                               ['Sale date', fmtDay(r.saleDate)],
+                                               ['Order status', r.status]] },
                           { f: 'mtr', rows: [['Invoice value', `₹${inr(r.invoiced)}`],
                                              ['Returns', r.refunded ? `₹${inr(r.refunded)}` : 'none'],
                                              ...(r.refunded ? [['Returned in',
-                                               r.refundMonth ? fmtMonth(r.refundMonth) : 'month not stated']] : []),
+                                               r.refundMonth ? fmtMonth(r.refundMonth) : 'month not stated'],
+                                               ['Return date', fmtDay(r.refundDate)]] : []),
                                              ...(r.creditNote ? [['Credit note', r.creditNote]] : []),
                                              ['GST within it', `₹${inr(r.gst)}`]] },
                           { f: 'settlement', rows: [['Received', `₹${inr(r.settled)}`],
