@@ -86,7 +86,14 @@ function auditLedger(ledger, context = {}) {
        cycle and arrives in the next month. What deserves an issue is what is
        open AFTER every loaded file has had its say. */
     const open = m.stillOpen || m.closing;
-    if (Math.abs(open.amount) > 1) {
+    /* ONLY a positive balance is "not received". A negative one means Amazon
+       has paid MORE than this month's sales ultimately bill — money held in
+       excess against returns still to come back — and that is already reported
+       as over-collected just above. Testing abs() here raised a warning saying
+       "-4,757.87 of this month's sales is still not received", which is not a
+       thing that can be chased and is the same minus-against-pending mistake
+       the UI was corrected for. */
+    if (open.amount > 1) {
       const isLatest = m.month === ledger.months[ledger.months.length - 1];
       add({
         key: 'outstanding', month: m.month,

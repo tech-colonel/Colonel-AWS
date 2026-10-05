@@ -655,7 +655,7 @@ function ReportView({ data, status, months, shown, sel, setSel, onDrill, base, o
       {one ? <MonthStatement m={one} data={data} onDrill={onDrill} />
            : <PeriodOverview led={led} data={data} shown={shown} onDrill={onDrill} />}
 
-      <IssuesPanel audit={data?.audit} shown={shown}
+      <IssuesPanel audit={data?.audit} shown={shown} data={data} brand={status?.brand}
                    onDrill={(i) => onDrill({ kind: 'issue', issue: i })} />
       <LedgerTable led={led} onDrill={onDrill} />
       <JourneyAndScenarios data={data} shown={shown} onDrill={onDrill} ST={ST} />
@@ -1356,7 +1356,70 @@ function Card({ title, sub, children, right }) {
 }
 
 /* ── what needs attention ────────────────────────────────────────────────── */
-function IssuesPanel({ audit, shown, onDrill }) {
+/* ── what needs attention, as tickets you can actually raise ──────────────
+   The point of finding a discrepancy is to get the money back, and that means
+   an email to Amazon Seller Support. Thirty-one findings printed open at full
+   length is a wall nobody reads; what an accountant wants is a short list of
+   claims, each one openable into the explanation, the evidence and a ready
+   message. Same shape as the Marketplace Ticket Generator, so the two agents
+   read alike. */
+const TICKET = {
+  outstanding: {
+    label: 'Payment not received',
+    subject: (i) => `Settlement not received for ${i.month} — ₹${inr(Math.abs(i.amount), 0)}`,
+    body: (i, brand, orders) =>
+      `Hi Amazon Seller Support,\n\n`
+      + `Our ${i.month} sales were invoiced but ₹${inr(Math.abs(i.amount), 0)} has still not been `
+      + `settled to us.\n\n`
+      + `Amount due on ${i.month} sales : ${i.expectedStr || '—'}\n`
+      + `Received to date              : ${i.receivedStr || '—'}\n`
+      + `Still outstanding             : ₹${inr(Math.abs(i.amount), 0)}\n`
+      + `Orders with no payment at all : ${i.count || 0}\n\n`
+      + `Please confirm, within 5 business days:\n`
+      + `1. The settlement IDs covering these orders, or\n`
+      + `2. Why payment is being withheld, order by order.\n\n`
+      + (orders.length
+          ? `Affected order IDs (first ${Math.min(orders.length, 20)} of ${orders.length}):\n`
+            + orders.slice(0, 20).join('\n') + '\n\n'
+          : '')
+      + `Full order-level evidence is attached.\n\nBrand: ${brand}`,
+  },
+  'over-collected': {
+    label: 'Paid more than billed',
+    subject: (i) => `Excess received for ${i.month} — ₹${inr(Math.abs(i.amount), 0)}`,
+    body: (i, brand) =>
+      `Hi Amazon Seller Support,\n\n`
+      + `For ${i.month} we received ₹${inr(Math.abs(i.amount), 0)} more than the amount billed on that `
+      + `month's invoices.\n\n`
+      + `This is usually payment made on dispatch for orders the customer returned afterwards, `
+      + `recovered in a later settlement. Please confirm which settlement recovers it, so we do not `
+      + `treat it as income.\n\nBrand: ${brand}`,
+  },
+  'prior-period-refunds': {
+    label: 'Refunds against closed months',
+    subject: (i) => `Credit notes against periods already filed — ₹${inr(Math.abs(i.amount), 0)}`,
+    body: (i, brand) =>
+      `Hi Amazon Seller Support,\n\n`
+      + `Your MTR carries refunds totalling ₹${inr(Math.abs(i.amount), 0)} against orders invoiced `
+      + `before the period we are reconciling.\n\n`
+      + `We need the credit note number and credit note date for each, so they are reported in the `
+      + `correct GST period.\n\nBrand: ${brand}`,
+  },
+  'source-unified': {
+    label: 'Rebuilt from the unified report',
+    subject: (i) => `Settlement report unavailable for ${i.month}`,
+    body: (i, brand) =>
+      `Hi Amazon Seller Support,\n\n`
+      + `The settlement reports for ${i.month} are past the 90-day window and can no longer be `
+      + `retrieved through SP-API, so that month has been rebuilt from the unified transaction report, `
+      + `which merges the fee columns.\n\n`
+      + `Please confirm the fee-level breakdown for ${i.month}.\n\nBrand: ${brand}`,
+  },
+};
+
+function IssuesPanel({ audit, shown, onDrill, data, brand }) {
+  const [open, setOpen] = useState(null);
+  const [copied, setCopied] = useState(null);
   if (!audit?.issues?.length) return null;
   const issues = audit.issues.filter((i) => !i.month || shown.includes(i.month));
   if (!issues.length) {
@@ -1368,49 +1431,153 @@ function IssuesPanel({ audit, shown, onDrill }) {
       </div>
     );
   }
-  const counts = issues.reduce((a, i) => ({ ...a, [i.severity]: (a[i.severity] || 0) + 1 }), {});
+  const rank = { blocker: 0, warning: 1, info: 2 };
+  const sorted = issues.slice().sort((a, b) =>
+    (rank[a.severity] - rank[b.severity]) || (Math.abs(b.amount || 0) - Math.abs(a.amount || 0)));
+
+  const actionable = issues.filter((i) => i.severity !== 'info');
+  /* only money we would actually ASK Amazon for — an over-collection is money
+     we are holding, not money to claim, so it must not inflate the headline */
+  const claimable = issues
+    .filter((i) => i.key === 'outstanding' && (i.amount || 0) > 0)
+    .reduce((a, i) => a + i.amount, 0);
+
+  const ordersFor = (i) => {
+    const rows = (data?.drills || {})[i.id] || [];
+    return rows.map((r) => r.orderId).filter(Boolean);
+  };
+  const ticketFor = (i) => {
+    const t = TICKET[i.key];
+    if (!t) return null;
+    const orders = ordersFor(i);
+    const enriched = { ...i,
+      /* [\d,.]+ greedily eats the sentence's full stop, printing
+         "₹1,64,785.69." — anchor the decimals so it cannot. */
+      expectedStr: (i.what || '').match(/was ([\d,]+(?:\.\d{2})?)/)
+        ? `₹${(i.what.match(/was ([\d,]+(?:\.\d{2})?)/))[1]}` : '',
+      receivedStr: (i.what || '').match(/([\d,]+(?:\.\d{2})?) came in/)
+        ? `₹${(i.what.match(/([\d,]+(?:\.\d{2})?) came in/))[1]}` : '' };
+    return { subject: t.subject(enriched), body: t.body(enriched, brand || 'our account', orders), orders };
+  };
+  const copy = (i, text) => {
+    try {
+      navigator.clipboard.writeText(text);
+      setCopied(i.id); setTimeout(() => setCopied(null), 1800);
+    } catch { /* clipboard blocked — the text is on screen to select */ }
+  };
+
+  const KPIS = [
+    ['Issues found', int(issues.length), '#111927'],
+    ['Need action', int(actionable.length), actionable.length ? T.red : '#111927'],
+    ['To claim from Amazon', `₹${inr(claimable, 0)}`, claimable > 0 ? T.green : '#94A3B8'],
+    ['Period', rangeLabel(shown), '#111927'],
+  ];
+
   return (
     <Card title="What needs attention"
-          sub={`${audit.verdict} · nothing here is a plug — where a figure cannot be explained it says so`}
-          right={
-            <div className="flex gap-2">
-              {['blocker', 'warning', 'info'].map((k) => counts[k] > 0 && (
-                <span key={k} className="px-2.5 py-1 rounded text-xs font-bold"
-                      style={{ background: SEV[k].bg, color: SEV[k].fg }}>
-                  {counts[k]} {SEV[k].label}
-                </span>
-              ))}
-            </div>}>
-      <div className="divide-y divide-slate-100">
-        {issues.map((i) => {
-          const s = SEV[i.severity]; const Icon = s.icon;
+          sub={`${audit.verdict} · open a line to see the explanation and a ready message for Amazon`}>
+      <div className="grid gap-3 grid-cols-2 xl:grid-cols-4 p-4 pb-0">
+        {KPIS.map(([k, v, c]) => (
+          <div key={k} className="rounded-lg px-3.5 py-2.5" style={{ background: '#F8FAFC' }}>
+            <div className="text-[10.5px] uppercase tracking-wide font-bold text-slate-500">{k}</div>
+            <div className="text-lg font-bold tabular-nums mt-0.5" style={{ color: c }}>{v}</div>
+          </div>
+        ))}
+      </div>
+
+      <div className="p-4 space-y-2">
+        {sorted.map((i) => {
+          const s = SEV[i.severity];
+          const isOpen = open === i.id;
+          const t = isOpen ? ticketFor(i) : null;
           return (
-            <div key={i.id} className="p-4" style={{ background: s.bg }}>
-              <div className="flex items-start gap-3">
-                <Icon className="h-5 w-5 shrink-0 mt-0.5" style={{ color: s.fg }} />
-                <div className="min-w-0 flex-1">
-                  <div className="font-bold text-slate-900">{i.title}</div>
-                  <dl className="mt-2 grid gap-3 md:grid-cols-3 text-xs">
-                    {[['What it is', i.what], ['Why it happens', i.why], ['What to do', i.howToFix]].map(([k, v]) => (
-                      <div key={k}>
-                        <dt className="font-bold text-slate-500 uppercase tracking-wide">{k}</dt>
-                        <dd className="text-slate-700 mt-0.5 leading-relaxed">{v}</dd>
+            <div key={i.id} className="border rounded-xl overflow-hidden"
+                 style={{ borderColor: isOpen ? s.fg + '55' : '#E3E6EA' }}>
+              <button onClick={() => setOpen(isOpen ? null : i.id)}
+                      className="w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-slate-50 transition-colors">
+                <span className="text-[10px] font-bold px-2 py-1 rounded uppercase tracking-wide shrink-0"
+                      style={{ background: s.bg, color: s.fg }}>
+                  {TICKET[i.key]?.label || s.label}
+                </span>
+                <span className="font-semibold text-slate-800 text-sm flex-1 min-w-0 truncate">{i.title}</span>
+                {Math.abs(i.amount || 0) > 1 && (
+                  <span className="font-bold tabular-nums shrink-0"
+                        style={{ color: i.key === 'outstanding' && i.amount > 0 ? T.green : '#64748B' }}>
+                    ₹{inr(Math.abs(i.amount), 0)}
+                  </span>
+                )}
+                <ChevronDown className="h-4 w-4 shrink-0 text-slate-400 transition-transform"
+                             style={{ transform: isOpen ? 'rotate(180deg)' : 'none' }} />
+              </button>
+
+              {isOpen && (
+                <div className="px-4 pb-4 pt-1 border-t" style={{ borderColor: '#EEF1F4' }}>
+                  <p className="text-sm text-slate-700 leading-relaxed mt-3">{i.what}</p>
+                  <p className="text-sm text-slate-500 leading-relaxed mt-2">{i.why}</p>
+
+                  <div className="grid gap-3 grid-cols-2 lg:grid-cols-4 mt-3.5">
+                    {[['Month', i.month || '—'], ['Amount', `₹${inr(Math.abs(i.amount || 0))}`],
+                      ['Orders with no payment', int(i.count || 0)],
+                      ['Severity', s.label]].map(([k, v]) => (
+                      <div key={k} className="rounded-lg px-3 py-2" style={{ background: '#F8FAFC' }}>
+                        <div className="text-[10px] uppercase tracking-wide font-bold text-slate-500">{k}</div>
+                        <div className="text-sm font-bold text-slate-800 tabular-nums mt-0.5">{v}</div>
                       </div>
                     ))}
-                  </dl>
-                  {i.drill && (
-                    <button onClick={() => onDrill(i)}
-                            className="mt-3 text-xs font-bold underline underline-offset-2" style={{ color: s.fg }}>
-                      Show the {i.count ? `${int(i.count)} ` : ''}orders behind this →
-                    </button>
+                  </div>
+
+                  {t && t.orders.length > 0 && (
+                    <div className="mt-3.5">
+                      <div className="text-[10.5px] uppercase tracking-wide font-bold text-slate-500 mb-1.5">
+                        Affected orders ({int(t.orders.length)} total)
+                      </div>
+                      <div className="flex flex-wrap gap-1.5 max-h-28 overflow-y-auto">
+                        {t.orders.slice(0, 60).map((o) => (
+                          <span key={o} className="text-[11px] font-mono px-2 py-0.5 rounded"
+                                style={{ background: '#F1F5F9', color: '#475569' }}>{o}</span>
+                        ))}
+                        {t.orders.length > 60 && (
+                          <span className="text-[11px] text-slate-400 px-1 py-0.5">
+                            +{int(t.orders.length - 60)} more
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  )}
+
+                  <div className="mt-3.5 text-[11px] text-slate-600 leading-relaxed rounded-lg px-3.5 py-2.5"
+                       style={{ background: '#FFFBEB', border: '1px solid #FDE68A' }}>
+                    <strong>What to do:</strong> {i.howToFix}
+                  </div>
+
+                  {t && (
+                    <div className="mt-3.5">
+                      <div className="text-[10.5px] uppercase tracking-wide font-bold mb-1.5"
+                           style={{ color: T.blue }}>Message to Amazon Seller Support</div>
+                      <pre className="text-[11.5px] leading-relaxed whitespace-pre-wrap font-mono rounded-lg px-3.5 py-3 text-slate-700 max-h-56 overflow-y-auto"
+                           style={{ background: '#F8FAFC', border: '1px solid #E3E6EA' }}>
+{`Subject: ${t.subject}\n\n${t.body}`}
+                      </pre>
+                      <div className="flex gap-2 mt-2.5">
+                        <button onClick={() => copy(i, `Subject: ${t.subject}\n\n${t.body}`)}
+                                className="text-xs font-bold px-3.5 py-2 rounded-lg border transition-colors"
+                                style={copied === i.id
+                                  ? { background: '#ECFDF3', borderColor: '#6EE7B7', color: '#047857' }
+                                  : { background: '#fff', borderColor: '#E3E6EA', color: '#374151' }}>
+                          {copied === i.id ? 'Copied' : 'Copy message'}
+                        </button>
+                        {i.drill && (
+                          <button onClick={() => onDrill(i)}
+                                  className="text-xs font-bold px-3.5 py-2 rounded-lg text-white transition-colors"
+                                  style={{ background: T.ink }}>
+                            Show the orders behind this
+                          </button>
+                        )}
+                      </div>
+                    </div>
                   )}
                 </div>
-                {i.amount !== 0 && (
-                  <div className="text-lg font-bold tabular-nums shrink-0" style={{ color: s.fg }}>
-                    ₹{inr(i.amount)}
-                  </div>
-                )}
-              </div>
+              )}
             </div>
           );
         })}
@@ -1419,7 +1586,6 @@ function IssuesPanel({ audit, shown, onDrill }) {
   );
 }
 
-/* ── the statement, month by month ───────────────────────────────────────── */
 function LedgerTable({ led, onDrill }) {
   const ms = led.map((m) => m.month);
   const row = (L, after) => {
