@@ -189,20 +189,33 @@ function foldSettled(settlementRows) {
        "amount due" and made every month close with a NEGATIVE amount still
        pending — money we really have, against a bill that was already settled
        or cancelled. Kept apart so the pending figure means what it says. */
-    const ty = String(r.type || '').trim().toLowerCase();
-    if (ty && ty !== 'order' && ty !== 'refund' && ty !== 'transfer') {
-      o.credits += num(r.total ?? r['total']);
-    }
     /* What Amazon actually paid for this row. The settlement states it, and the
        parts foot to it exactly, so use it rather than re-deriving: product
        sales are ex-GST and rebuilding the payout by hand invites a sign error
        on every one of eight columns. */
     const total = num(r.total ?? r['total']);
-    o.payout += total;
-    /* WHEN each rupee moved, so a month can be closed at its own month end
-       rather than at today. Without this the ledger could only say "paid", not
-       "paid by 30 June". */
-    if (cashMonth) o.byMonth[cashMonth] = r2((o.byMonth[cashMonth] || 0) + total);
+    /* But a Reimbursement, an Adjustment or a Fee Refund is NOT payment against
+       an invoice — it compensates for goods lost on the way back, corrects an
+       earlier settlement, or returns a fee. Counting it as settlement of a sale
+       pushed "received" above "amount due" and closed almost every month with a
+       negative amount still pending. It is held apart so the receivable
+       arithmetic only ever nets cash that actually settles an invoice; the
+       credit is still reported, on its own line. */
+    const ty = String(r.type || '').trim().toLowerCase();
+    const isCredit = ty && ty !== 'order' && ty !== 'refund' && ty !== 'transfer';
+    if (isCredit) {
+      o.credits += total;
+    } else {
+      o.payout += total;
+      /* WHEN each rupee moved, so a month can be closed at its own month end
+         rather than at today. Without this the ledger could only say "paid",
+         not "paid by 30 June". */
+      if (cashMonth) o.byMonth[cashMonth] = r2((o.byMonth[cashMonth] || 0) + total);
+    }
+    if (isCredit && cashMonth) {
+      o.creditsBy = o.creditsBy || {};
+      o.creditsBy[cashMonth] = r2((o.creditsBy[cashMonth] || 0) + total);
+    }
     /* Amazon's deductions arrive NEGATIVE, and a reversed fee arrives positive.
        Accumulate them signed and take the magnitude once at the end — taking
        abs() per row turns every credit into another charge, which inflated
@@ -329,6 +342,7 @@ function buildLedger(src, months, opts = {}) {
       settled,
       /* what of that was NOT payment against an invoice */
       credits: s ? s.credits : 0,
+      creditsBy: s ? (s.creditsBy || {}) : {},
       settledMonth: s ? s.month : '',
       settledBy: s ? s.byMonth : {},
       charged: p.charged,

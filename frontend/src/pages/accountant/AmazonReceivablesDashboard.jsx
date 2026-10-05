@@ -133,12 +133,15 @@ const LINES = [
 ];
 /* Two reasons the cash never ties to the billing order for order, both shown
    rather than left to be discovered as a negative pending figure. */
+/* Outside the receivable arithmetic on purpose. This money is in the bank but
+   it settles no invoice, so it is a memo beside the statement rather than a
+   line inside it — exactly like the GST memo. */
 const EXTRA = [
-  { key: 'creditsNotAgainstInvoice', label: 'Reimbursements and other credits', sign: '+',
+  { key: 'creditsNotAgainstInvoice', label: 'Reimbursements and other credits', sign: '', memo: true,
     prov: 'received',
     note: 'Money Amazon paid that is NOT payment for an invoice — compensation for goods lost or '
-        + 'damaged on the way back, settlement adjustments, fee refunds. Real money, but it settles '
-        + 'no sale, so it makes a month look over-collected.' },
+        + 'damaged on the way back, settlement adjustments, fee refunds. Real money, already in the '
+        + 'bank, but it settles no sale, so it is not netted against what is still owed.' },
 ];
 const AFTER = [
   { key: 'receivedLater', label: 'Received later, in a following month', sign: '−', prov: 'settled',
@@ -243,7 +246,10 @@ export default function AmazonReceivablesDashboard() {
 
   return (
     <DashboardLayout sidebarItems={sidebarItems}>
-      <div className="p-6 pb-16 max-w-[1560px]">
+      {/* the cash cycle is seven cards in a row and the month table is 17
+          columns wide; capping at 1560 left a dead gutter on the right and
+          wrapped both. Let it use the screen, with a sane ceiling. */}
+      <div className="p-6 pb-16 max-w-[2100px]">
         <button onClick={() => (view === 'report' ? setView('list') : navigate(`/brands/${brandId}/agents`))}
                 className="flex items-center gap-1.5 text-sm text-slate-500 hover:text-blue-600 group transition-colors mb-3">
           <ArrowLeft className="w-3.5 h-3.5 group-hover:-translate-x-0.5 transition-transform" />
@@ -1637,6 +1643,16 @@ function PeriodOverview({ led, data, shown, onDrill, ST }) {
      close having been paid MORE than it billed — which reads as a negative
      amount still pending and looks like an error. Named here instead. */
   const credits = amt('creditsNotAgainstInvoice');
+  /* Sits between "Received to date" and "Still pending" with NO operator: it is
+     part of the money that arrived, but it settles no invoice, so it must not
+     read as a term in the subtraction that produces the pending figure. */
+  if (Math.abs(credits) > 1) {
+    EQ.splice(6, 0, {
+      cap: 'Of which: not against an invoice', v: credits, op: '',
+      note: 'Reimbursements, adjustments, fee refunds — in the bank, but they settle no sale',
+      fg: '#92400E', bg: '#FFFBEB', line: 'creditsNotAgainstInvoice', aside: true,
+    });
+  }
   return (
     <>
       <Card title="Order Cycle — Volume" sub="What happened to every order in this period. Click any number to see the orders.">
@@ -1669,44 +1685,45 @@ function PeriodOverview({ led, data, shown, onDrill, ST }) {
               <React.Fragment key={e.cap}>
                 <button onClick={() => e.line && onDrill({ kind: 'line', line: e.line, months: shown })}
                         disabled={!e.line}
-                        className={`flex-1 min-w-[170px] border border-slate-200 rounded-xl p-4 text-left transition-all ${e.line ? 'hover:shadow-md hover:border-slate-300 cursor-pointer' : ''}`}
-                        style={{ background: e.bg || '#fff' }}>
+                        className={`flex-1 min-w-[170px] rounded-xl p-4 text-left transition-all ${e.line ? 'hover:shadow-md cursor-pointer' : ''}`}
+                        style={{ background: e.bg || '#fff',
+                                 border: e.aside ? '1px dashed #FDE68A' : '1px solid #E2E8F0' }}>
                   <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">{e.cap}</div>
                   <div className="text-[22px] font-bold tracking-tight mt-1 tabular-nums"
                        style={{ color: e.fg || '#111927' }}>₹{inr(e.v)}</div>
                   <p className="text-[11px] text-slate-500 mt-1.5 leading-snug">{e.note}</p>
                 </button>
-                {e.op && <div className="flex items-center text-xl font-bold text-slate-300">{e.op}</div>}
+                {e.op
+                  ? <div className="flex items-center text-xl font-bold text-slate-300">{e.op}</div>
+                  : e.aside
+                    ? <div className="flex items-center text-xs font-bold text-amber-300">↳</div>
+                    : null}
               </React.Fragment>
             ))}
           </div>
           {Math.abs(credits) > 1 && (
-            <div className="mt-3 rounded-xl px-4 py-3"
+            <div className="mt-3 rounded-xl px-4 py-2.5"
                  style={{ background: '#FFFBEB', border: '1px solid #FDE68A' }}>
               <div className="flex items-start justify-between gap-4 flex-wrap">
                 <div className="min-w-0">
                   <div className="text-[10px] font-bold uppercase tracking-wider" style={{ color: '#92400E' }}>
-                    Of which: reimbursements and other credits
+                    Why that card is not part of the subtraction
                   </div>
                   <p className="text-[12px] leading-relaxed mt-1" style={{ color: '#78350F' }}>
                     Money Amazon paid that is <strong>not payment for an invoice</strong> — compensation
                     for goods lost or damaged on the way back, settlement adjustments, fee refunds. It
-                    is real money and it is correctly in the bank, but it settles no sale. It is why a
-                    month can show a <strong>negative</strong> amount still pending: Amazon paid more
-                    than that month billed.
-                    {amt('stillOpen') < 0 && (
-                      <> Excluding it, the period is <strong>₹{inr(amt('stillOpen') + credits, 0)}</strong>{' '}
-                      {amt('stillOpen') + credits >= 0 ? 'still to be received' : 'over-collected'}.</>
-                    )}
+                    is real money and it is already in the bank, but it settles no sale — so it is
+                    <strong> not</strong> netted against what Amazon still owes. Counting it as
+                    settlement is what used to close almost every month with a negative amount
+                    pending, as though Amazon overpaid every single month.
+                    {' '}<strong>Still pending above is ₹{inr(amt('stillOpen'), 0)}</strong>, which is
+                    what is genuinely unpaid on these invoices; this ₹{inr(credits, 0)} is separate
+                    income.
                   </p>
                 </div>
                 <button onClick={() => onDrill({ kind: 'line', line: 'creditsNotAgainstInvoice', months: shown })}
-                        className="text-right shrink-0">
-                  <div className="text-[22px] font-bold tabular-nums" style={{ color: '#92400E' }}>
-                    ₹{inr(credits)}
-                  </div>
-                  <div className="text-[10px] font-bold" style={{ color: '#92400E' }}>see the orders</div>
-                </button>
+                        className="text-[11px] font-bold shrink-0 underline underline-offset-2"
+                        style={{ color: '#92400E' }}>see the orders</button>
               </div>
             </div>
           )}
@@ -2052,8 +2069,11 @@ function LedgerTable({ led, onDrill }) {
                 Afterwards — only visible because later months are loaded
               </td>
             </tr>
-            {EXTRA.map((L) => row(L, true))}
             {AFTER.map((L) => row(L, true))}
+            <tr><td colSpan={99} className="px-5 pt-4 pb-1 text-[10px] font-bold uppercase tracking-wider text-slate-400">
+              Also received — not against any invoice
+            </td></tr>
+            {EXTRA.map((L) => row(L, true))}
             <tr className="bg-sky-50/40">
               <td /><td className="px-2 py-2 text-xs italic text-slate-500 whitespace-nowrap">(memo) GST within it</td><td />
               {led.map((m) => (
