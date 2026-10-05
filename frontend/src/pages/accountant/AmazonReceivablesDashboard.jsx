@@ -2132,6 +2132,19 @@ function SourcesPanel({ status, sources, sourceKind }) {
   return (
     <Card title="The three files this is built from"
           sub="They are not meant to be equal — each one counts a different moment.">
+      {/* The order report is named by UTC but every month here is IST, which is
+          what the GST return runs on. Measured on June 2025: 7 orders placed on
+          30 June after 18:30 UTC are 1 July in IST, so they sit in July and the
+          June file appears to be 7 short. Saying so here stops someone counting
+          the file and concluding the report has lost orders. */}
+      <div className="px-4 pt-3 pb-1">
+        <p className="text-[11.5px] text-slate-500 leading-relaxed">
+          <strong className="text-slate-600">Months are Indian time (IST).</strong> Amazon names the
+          order report by UTC, so an order placed late on the 30th sits in the next month here — that
+          is the month its GST belongs to. A month can therefore hold a few orders more or fewer than
+          the file of the same name.
+        </p>
+      </div>
       <div className="grid md:grid-cols-3 divide-y md:divide-y-0 md:divide-x divide-slate-100">
         {[['orders', 'order'], ['mtr', 'mtr'], ['settlement', 'settlement']].map(([k, fk]) => {
           const f = FILES[fk]; const s = S?.[k]; const Icon = f.icon;
