@@ -34,6 +34,7 @@ const { Brand, Agent } = require('../../../models/master');
 const { getBrandConnection } = require('../../../config/database');
 const amazonReports = require('../../../services/amazonReports');
 const { reconcile, monthKey, num } = require('../../../services/processors/amazonThreeWay');
+const orderVsMtr = require('../../../services/processors/amazonOrderVsMtr');
 const { buildLedger, BASIS } = require('../../../services/processors/amazonReceivablesLedger');
 const { auditLedger, drillFor } = require('../../../services/processors/amazonReceivablesAudit');
 const { buildWorkbook, buildDrillWorkbook } = require('../../../services/processors/amazonReceivablesWorkbook');
@@ -366,6 +367,12 @@ const runReco = async (req, res, next) => {
       basisCompare = null;
     }
 
+    /* Order report vs MTR — why the two files differ, and by how much. Needs
+       no settlement leg, so it survives a brand with no settlement data. */
+    let invoicing = null;
+    try { invoicing = orderVsMtr.build(src, months, { basis }); }
+    catch (e) { invoicing = null; }
+
     const sourceKind = {};
     for (const m of months) sourceKind[m] = src.uploadedMonths.includes(m) ? 'unified' : 'ledger';
     const audit = auditLedger(ledger, { sources: sourceKind,
@@ -395,7 +402,7 @@ const runReco = async (req, res, next) => {
                       value: r2(st.reduce((a, r) => a + num(r.product_sales ?? r['product sales']), 0)) } };
     });
 
-    const result = { three, ledger, audit, drills, sources: perSource, sourceKind, basis, basisCompare };
+    const result = { three, ledger, audit, drills, sources: perSource, sourceKind, basis, basisCompare, invoicing };
     const ms = Date.now() - t0;
     const fp = `${src.orders.length}|${src.mtr.length}|${src.settlement.length}`;
 

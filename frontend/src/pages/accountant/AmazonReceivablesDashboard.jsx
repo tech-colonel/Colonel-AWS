@@ -602,6 +602,10 @@ function GenerateWizard({ status, running, onClose, onRun }) {
 
 /* ── the report ─────────────────────────────────────────────────────────── */
 function ReportView({ data, status, months, shown, sel, setSel, onDrill, base, onTx, onRefresh, ST }) {
+  /* two layers over the same three files: what Amazon owes us, and whether
+     every order we shipped was actually invoiced. Different questions, same
+     upload — which is why this is a tab and not a second agent. */
+  const [layer, setLayer] = useState('receivables');
   const all = data?.ledger?.perMonth || [];
   const led = all.filter((m) => shown.includes(m.month));
   /* one month selected -> its statement; any wider range -> the overview */
@@ -648,8 +652,25 @@ function ReportView({ data, status, months, shown, sel, setSel, onDrill, base, o
           year selects, clamped to the months the report actually covers, and
           nothing re-reads until Search is pressed. From === To is a single
           month and opens that month's statement. */}
+      <div className="flex items-center gap-1.5 mb-4 border-b border-slate-200">
+        {[['receivables', 'Receivables', 'what Amazon owes us'],
+          ['invoicing', 'Order vs Invoice', 'was everything invoiced']].map(([k, label, sub]) => (
+          <button key={k} onClick={() => setLayer(k)}
+                  className="px-4 py-2.5 text-sm font-semibold -mb-px border-b-2 transition-colors text-left"
+                  style={layer === k
+                    ? { borderColor: T.ink, color: T.ink }
+                    : { borderColor: 'transparent', color: '#94A3B8' }}>
+            {label}
+            <span className="ml-1.5 text-[11px] font-medium opacity-70">{sub}</span>
+          </button>
+        ))}
+      </div>
+
       <RangeBar months={months} sel={sel} setSel={setSel} all={all} />
 
+      {layer === 'invoicing'
+        ? <InvoicingView inv={data?.invoicing} shown={shown} onDrill={onDrill} />
+        : <>
       <BasisCompare cmp={data?.basisCompare} shown={shown} onDrill={onDrill} />
 
       {one ? <MonthStatement m={one} data={data} onDrill={onDrill} />
@@ -661,6 +682,7 @@ function ReportView({ data, status, months, shown, sel, setSel, onDrill, base, o
       <JourneyAndScenarios data={data} shown={shown} onDrill={onDrill} ST={ST} />
       <SourcesPanel status={status} sources={(data?.sources || []).filter((s) => shown.includes(s.month))}
                     sourceKind={data?.sourceKind || {}} />
+        </>}
     </>
   );
 }
@@ -749,6 +771,224 @@ function BasisCompare({ cmp, shown, onDrill }) {
         </div>
       )}
     </div>
+  );
+}
+
+/* ── ORDER REPORT vs MTR ──────────────────────────────────────────────────
+   Everyone knows the two files disagree; almost nobody can say why, so the gap
+   gets written off as "Amazon's data is messy" and a real missing invoice hides
+   inside it. Every line of the difference is explained by columns already in
+   the files. This view names each one, in the order a reader meets them, and
+   every number opens the orders behind it. */
+function InvoicingView({ inv, shown, onDrill }) {
+  const [open, setOpen] = useState('matched');
+  if (!inv) {
+    return (
+      <div className="rounded-xl px-5 py-4" style={{ background: '#F8FAFC', border: '1px solid #E3E6EA' }}>
+        <p className="text-sm text-slate-500">
+          This comparison needs both the order report and the MTR. Generate the report again once both
+          are loaded.
+        </p>
+      </div>
+    );
+  }
+  const t = inv.invoiceTiming || {};
+  const r = inv.revenue || {};
+  const inSel = (m) => !m || shown.includes(m);
+  const rowsFor = (k) => (inv.rows || []).filter((x) => x.bucket === k && inSel(x.month));
+  const nOf = (k) => rowsFor(k).length;
+
+  const KPI = [
+    ['Orders placed', int(inv.orders), '#111927', 'every order line in the order report'],
+    ['Tax invoices raised', int(inv.matched), T.green, 'orders that reached the MTR'],
+    ['Match rate', `${inv.matchRate}%`, T.blue, 'the rest is explained below'],
+    ['Needs checking', int(nOf('shippedNoInvoice') + nOf('mtrOnly')), 
+      (nOf('shippedNoInvoice') + nOf('mtrOnly')) ? T.red : '#94A3B8', 'only these two buckets'],
+  ];
+
+  return (
+    <>
+      {/* the one fact that explains everything below it */}
+      <div className="rounded-xl px-5 py-4 mb-5" style={{ background: '#EFF6FF', border: '1px solid #BFDBFE' }}>
+        <div className="text-sm font-bold mb-1.5" style={{ color: '#1E3A8A' }}>
+          When does Amazon raise the invoice?
+        </div>
+        <p className="text-[13px] leading-relaxed" style={{ color: '#1E40AF' }}>
+          Measured on {int(t.sample || 0)} invoices in these files: Amazon raises the tax invoice a
+          median of <strong>{t.medianOrderToInvoiceHrs} hours</strong> after the order
+          ({t.pctInvoicedWithin24h}% inside 24 hours), and the goods leave the warehouse a median of{' '}
+          <strong>{t.medianInvoiceToShipHrs} hours</strong> later —{' '}
+          <strong>{t.pctInvoicedBeforeShipping}% are invoiced BEFORE they ship.</strong>
+        </p>
+        <p className="text-[13px] leading-relaxed mt-2" style={{ color: '#1E40AF' }}>
+          So the invoice belongs to <strong>order confirmation, not dispatch</strong>. That is the whole
+          reason the two files differ: an order cancelled inside that first half hour never got an
+          invoice and is absent from the MTR. Cancel any later and the invoice already exists, so it
+          stays in the MTR with a <strong>Cancel</strong> row reversing it.
+        </p>
+      </div>
+
+      <div className="grid gap-3.5 grid-cols-2 xl:grid-cols-4 mb-5">
+        {KPI.map(([k, v, c, sub]) => (
+          <div key={k} className="bg-white border border-slate-200 rounded-xl p-4">
+            <div className="text-[12px] font-bold text-slate-600">{k}</div>
+            <div className="text-[26px] font-bold tracking-tight mt-1 tabular-nums" style={{ color: c }}>{v}</div>
+            <div className="text-[11px] text-slate-500 mt-0.5">{sub}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* sales counted both ways */}
+      <Card title="The same sales, counted two ways"
+            sub="what customers ordered, against what you actually invoiced">
+        <div className="p-4 grid gap-4 lg:grid-cols-2">
+          <div className="rounded-xl overflow-hidden border border-slate-200">
+            <div className="px-4 py-2 text-[11px] uppercase tracking-wide font-bold"
+                 style={{ background: '#F8FAFC', color: '#475569' }}>At order level</div>
+            {[['Everything customers ordered', r.allOrderValue],
+              ['Less: cancelled', -(r.cancelledValue || 0)],
+              ['Should have been invoiced', r.orderLevel, true]].map(([k, v, strong], i) => (
+              <div key={i} className="flex justify-between px-4 py-2 border-t border-slate-100"
+                   style={strong ? { background: '#F8FAFC' } : {}}>
+                <span className={`text-[13px] ${strong ? 'font-bold text-slate-800' : 'text-slate-600'}`}>{k}</span>
+                <span className={`text-[13px] tabular-nums ${strong ? 'font-bold' : ''} text-slate-800`}>
+                  ₹{inr(Math.abs(v || 0))}
+                </span>
+              </div>
+            ))}
+          </div>
+          <div className="rounded-xl overflow-hidden border border-slate-200">
+            <div className="px-4 py-2 text-[11px] uppercase tracking-wide font-bold"
+                 style={{ background: '#F8FAFC', color: '#475569' }}>At MTR (invoice) level</div>
+            {[['Invoiced', r.invoicedValue],
+              ['Less: returns credited', -(r.refundedValue || 0)],
+              ['Net invoiced', r.netBilled, true]].map(([k, v, strong], i) => (
+              <div key={i} className="flex justify-between px-4 py-2 border-t border-slate-100"
+                   style={strong ? { background: '#F8FAFC' } : {}}>
+                <span className={`text-[13px] ${strong ? 'font-bold text-slate-800' : 'text-slate-600'}`}>{k}</span>
+                <span className={`text-[13px] tabular-nums ${strong ? 'font-bold' : ''} text-slate-800`}>
+                  ₹{inr(Math.abs(v || 0))}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+        <div className="px-4 pb-4">
+          <div className="rounded-lg px-4 py-3 text-[12.5px] leading-relaxed"
+               style={{ background: '#FFFBEB', border: '1px solid #FDE68A', color: '#78350F' }}>
+            <strong>Order level ₹{inr(r.orderLevel, 0)}</strong> against{' '}
+            <strong>invoiced ₹{inr(r.invoicedValue, 0)}</strong> — a difference of{' '}
+            <strong>₹{inr(Math.abs(r.gap || 0), 0)}</strong>
+            {r.orderLevel ? ` (${Math.abs(100 * (r.gap || 0) / r.orderLevel).toFixed(2)}%)` : ''}.
+            {' '}₹{inr(Math.abs(r.explainedByMtrOnly || 0), 0)} of it is invoices whose order was placed
+            before this period began. The remaining{' '}
+            <strong>₹{inr(Math.abs(r.unexplained || 0), 0)}</strong> is not yet explained — most likely
+            shipping or gift-wrap carried in the MTR&rsquo;s invoice amount but not in the order
+            report&rsquo;s item price. It is shown rather than absorbed.
+          </div>
+        </div>
+      </Card>
+
+      {/* every bucket, with its reason */}
+      <Card title="Where the difference comes from"
+            sub="every order is in exactly one bucket — open a bucket to read why and see the orders">
+        <div className="p-4 space-y-2">
+          {(inv.buckets || []).map((b) => {
+            const n = nOf(b.key);
+            if (!n) return null;
+            const isOpen = open === b.key;
+            const rows = isOpen ? rowsFor(b.key) : [];
+            return (
+              <div key={b.key} className="border rounded-xl overflow-hidden"
+                   style={{ borderColor: isOpen ? (b.expected ? '#CBD5E1' : '#FCA5A5') : '#E3E6EA' }}>
+                <button onClick={() => setOpen(isOpen ? null : b.key)}
+                        className="w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-slate-50 transition-colors">
+                  <span className="text-[10px] font-bold px-2 py-1 rounded uppercase tracking-wide shrink-0"
+                        style={b.expected ? { background: '#F1F5F9', color: '#475569' }
+                                          : { background: '#FEF2F2', color: T.red }}>
+                    {b.expected ? 'Expected' : 'Check'}
+                  </span>
+                  <span className="font-semibold text-slate-800 text-sm flex-1 min-w-0">{b.label}</span>
+                  <span className="text-sm font-bold tabular-nums shrink-0 text-slate-700">{int(n)}</span>
+                  <ChevronDown className="h-4 w-4 shrink-0 text-slate-400 transition-transform"
+                               style={{ transform: isOpen ? 'rotate(180deg)' : 'none' }} />
+                </button>
+                {isOpen && (
+                  <div className="px-4 pb-4 border-t" style={{ borderColor: '#EEF1F4' }}>
+                    <p className="text-[13px] text-slate-700 leading-relaxed mt-3">{b.meaning}</p>
+                    {b.key === 'shippedNoInvoice' && b.atPeriodEdge > 0 && (
+                      <p className="text-[12px] mt-2 rounded-lg px-3 py-2"
+                         style={{ background: '#FFFBEB', border: '1px solid #FDE68A', color: '#78350F' }}>
+                        {int(b.atPeriodEdge)} of these shipped in the last month of the report, so their
+                        invoice is in the next month&rsquo;s MTR — a timing difference, not a missing
+                        invoice. The other {int(n - b.atPeriodEdge)} are worth checking.
+                      </p>
+                    )}
+                    <div className="mt-3 overflow-x-auto" style={{ maxHeight: 340 }}>
+                      <table className="w-full text-sm">
+                        <thead className="sticky top-0" style={{ background: '#F8FAFC' }}>
+                          <tr className="text-[11px] uppercase tracking-wide text-slate-500">
+                            <th className="px-3 py-2 text-left font-semibold">Order</th>
+                            <th className="px-3 py-2 text-left font-semibold">Month</th>
+                            <th className="px-3 py-2 text-left font-semibold">Status</th>
+                            <th className="px-3 py-2 text-right font-semibold">Qty</th>
+                            <th className="px-3 py-2 text-right font-semibold">Order value</th>
+                            <th className="px-3 py-2 text-right font-semibold">Invoiced</th>
+                            <th className="px-3 py-2 text-left font-semibold">Why it is here</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {rows.slice(0, 300).map((x, i) => (
+                            <tr key={x.orderId + i} className="border-t border-slate-100 hover:bg-slate-50">
+                              <td className="px-3 py-1.5 font-mono text-[11.5px] text-slate-700">{x.orderId}</td>
+                              <td className="px-3 py-1.5 text-[12px] text-slate-600">
+                                {x.month ? fmtMonth(x.month) : '—'}
+                              </td>
+                              <td className="px-3 py-1.5 text-[12px] text-slate-600">{x.status}</td>
+                              <td className="px-3 py-1.5 text-right tabular-nums text-[12px] text-slate-700">
+                                {x.qty === null ? '—' : int(x.qty)}
+                              </td>
+                              <td className="px-3 py-1.5 text-right tabular-nums text-[12px] text-slate-700">
+                                {x.orderValue ? `₹${inr(x.orderValue)}` : '—'}
+                              </td>
+                              <td className="px-3 py-1.5 text-right tabular-nums text-[12px] font-semibold text-slate-800">
+                                {x.invoicedValue ? `₹${inr(x.invoicedValue)}` : '—'}
+                              </td>
+                              <td className="px-3 py-1.5 text-[11.5px] text-slate-500">{x.why}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                      {rows.length > 300 && (
+                        <div className="px-3 py-2 text-[11.5px] text-slate-400">
+                          showing the first 300 of {int(rows.length)}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      </Card>
+
+      {/* what only the MTR can tell you about cancellation */}
+      <Card title="What the MTR says about cancellations"
+            sub="the order report says only “Cancelled” — the MTR says what happened to the invoice">
+        <div className="p-4 space-y-2">
+          {(inv.cancellation || []).map((c) => (
+            <div key={c.key} className="rounded-xl border border-slate-200 px-4 py-3">
+              <div className="flex items-center justify-between gap-3">
+                <span className="font-semibold text-slate-800 text-sm">{c.label}</span>
+                <span className="text-sm font-bold tabular-nums text-slate-700">{int(c.count)}</span>
+              </div>
+              <p className="text-[12.5px] text-slate-500 leading-relaxed mt-1">{c.meaning}</p>
+            </div>
+          ))}
+        </div>
+      </Card>
+    </>
   );
 }
 
