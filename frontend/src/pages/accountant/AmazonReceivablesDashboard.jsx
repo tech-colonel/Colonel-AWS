@@ -707,6 +707,8 @@ function MonthStatement({ m, data, onDrill }) {
     later: (m.returnedLater && m.returnedLater.amount) || 0,
   };
 
+  const [tab, setTab] = useState('statement');
+
   const cards = [
     { n: 1, q: 'How much did we sell in this month?', val: m.expected.amount, tone: T.blue, fg: '#111927',
       sub: `${int(m.invoiced.count)} invoices · amount due from Amazon`,
@@ -747,27 +749,36 @@ function MonthStatement({ m, data, onDrill }) {
       sub: `${int(olderOrders)} orders · sold in an earlier month`,
       lines: [['Part of card 2, not card 1', ''], ['No sales invoice in this report', '']],
       drill: { kind: 'cash', month: m.month } },
-    /* RETURNS, read the same way as the money: a credit note belongs to the
-       month it was RAISED, not the month the goods were sold. A 30-April sale
-       returned in May is a MAY credit note — April's GST is filed and is not
-       reopened. So this month's returns are split into the part that is this
-       month's own sales coming back and the part that belongs to an earlier
-       month, exactly as card 2 splits the cash. */
-    { n: 5, q: 'How much came back as returns in this month?', val: ret.total,
-      tone: T.violet, fg: T.violet,
-      sub: ret.count
-        ? `${int(ret.count)} credit note${ret.count === 1 ? '' : 's'} raised in ${fmtMonth(m.month)}`
-        : 'no credit notes raised in this month',
-      lines: [['Returns of this month’s sales', inr(ret.own)],
-              ['Returns of earlier months’ sales', inr(ret.earlier)],
-              ...(ret.later > 0
-                ? [[`Sold this month, returned later: ₹${inr(ret.later, 0)}`, '']]
-                : [])],
-      drill: { kind: 'returns', month: m.month } },
+  ];
+
+  /* Returns get their own view, not a fifth card. A credit note is a different
+     document from a sale and the accountant reads it on its own terms — how
+     much came back, whose sales it was, and which orders — so it is a tab with
+     its own KPIs rather than a number squeezed beside the receivable. */
+  const TABS = [
+    ['statement', 'Statement', m.invoiced.count ? `${int(m.invoiced.count)} invoices` : ''],
+    ['returns', 'Returns', ret.count ? `${int(ret.count)} credit notes` : 'none'],
   ];
 
   return (
     <>
+      <div className="flex items-center gap-1.5 mb-4 border-b border-slate-200">
+        {TABS.map(([k, label, sub]) => (
+          <button key={k} onClick={() => setTab(k)}
+                  className="px-4 py-2.5 text-sm font-semibold -mb-px border-b-2 transition-colors"
+                  style={tab === k
+                    ? { borderColor: k === 'returns' ? T.violet : T.ink,
+                        color: k === 'returns' ? T.violet : T.ink }
+                    : { borderColor: 'transparent', color: '#94A3B8' }}>
+            {label}
+            {sub && <span className="ml-1.5 text-[11px] font-medium opacity-70">{sub}</span>}
+          </button>
+        ))}
+      </div>
+
+      {tab === 'returns'
+        ? <ReturnsView m={m} data={data} ret={ret} onDrill={onDrill} />
+        : <>
       <div className="rounded-xl px-5 py-3.5 mb-5" style={{ background: '#FFF4E0', border: '1px solid #FFD591' }}>
         <p className="text-sm leading-relaxed" style={{ color: '#6B3F00' }}>
           <strong>Cut-off:</strong> this statement is closed on <strong>{endLabel(m.month)}</strong>. Anything
@@ -780,9 +791,7 @@ function MonthStatement({ m, data, onDrill }) {
         </p>
       </div>
 
-      {/* five questions now — sales, cash in, what is still owed, how much of
-          the cash was old, and what came back as returns */}
-      <div className="grid gap-3.5 grid-cols-1 md:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-5 mb-5">
+      <div className="grid gap-3.5 grid-cols-1 md:grid-cols-2 xl:grid-cols-4 mb-5">
         {cards.map((c) => (
           <button key={c.n} onClick={() => onDrill({ ...c.drill, months: [m.month] })}
                   className="text-left bg-white border border-slate-200 rounded-xl p-4 hover:shadow-md hover:border-slate-300 transition-all"
@@ -811,7 +820,7 @@ function MonthStatement({ m, data, onDrill }) {
       {/* how the four tie together */}
       <div className="bg-white border border-slate-200 rounded-xl p-5 mb-5">
         <div className="text-[11px] font-bold uppercase tracking-wider text-slate-400 mb-3">
-          How the amounts tie together
+          How the four amounts tie together
         </div>
         <div className="grid md:grid-cols-2 gap-7">
           <div>
@@ -917,6 +926,146 @@ function MonthStatement({ m, data, onDrill }) {
             </tr>
           </tbody>
         </table>
+      </div>
+        </>}
+    </>
+  );
+}
+
+/* ── RETURNS, on their own terms ──────────────────────────────────────────
+   A credit note is not a smaller sale, it is its own document, and it belongs
+   to the month it was RAISED — an order sold on 30 April and returned in May
+   is a MAY credit note, because April's GST is filed and is not reopened.
+   So this view answers the return questions only: how much came back, whose
+   sales it was, how fast it came back, and which orders — down to the credit
+   note number and the ledger row behind it. */
+function ReturnsView({ m, data, ret, onDrill }) {
+  const rows = (data?.ledger?.rows || [])
+    .filter((r) => r.refunded > 0 && r.refundMonth === m.month);
+  const prior = (data?.ledger?.priorPeriodRefunds || [])
+    .filter((p) => p.refundMonth === m.month);
+
+  const invoiced = m.invoiced.amount || 0;
+  const rate = invoiced ? (100 * ret.own) / invoiced : 0;
+
+  const kpis = [
+    { q: 'How much came back in this month?', val: ret.total, tone: T.violet, fg: T.violet,
+      sub: `${int(ret.count)} credit note${ret.count === 1 ? '' : 's'} raised in ${fmtMonth(m.month)}`,
+      lines: [['Of this month’s sales', inr(ret.own)],
+              ['Of earlier months’ sales', inr(ret.earlier)]] },
+    { q: 'How much of THIS MONTH’S sales came back?', val: ret.own, tone: T.blue, fg: '#111927',
+      sub: `${rate.toFixed(1)}% of ₹${inr(invoiced, 0)} invoiced this month`,
+      lines: [['Invoiced this month', inr(invoiced)],
+              ['Returned, credited this month', inr(ret.own)]] },
+    { q: 'How much belonged to earlier months?', val: ret.earlier, tone: T.amber, fg: T.amberText,
+      sub: 'sold before this month, credited now',
+      lines: [['Sold in an earlier month', inr(ret.earlier)],
+              ['Their sales month is already closed', '']] },
+    { q: 'Sold this month, returned later?', val: ret.later, tone: T.red, fg: T.red,
+      sub: ret.later > 0 ? 'credited after the month end' : 'nothing has come back since',
+      lines: [['Not deducted from this month', ''],
+              ['It is the later month’s credit note', '']] },
+  ];
+
+  const all = [
+    ...rows.map((r) => ({ orderId: r.orderId, amount: r.refunded, saleMonth: r.month,
+                          cn: r.creditNote || '', own: r.month === m.month, row: r })),
+    ...prior.map((p) => ({ orderId: p.orderId, amount: p.amount, saleMonth: p.invoiceMonth || '—',
+                           cn: '', own: false, row: null })),
+  ].sort((a, b) => b.amount - a.amount);
+
+  return (
+    <>
+      <div className="rounded-xl px-5 py-3.5 mb-5" style={{ background: '#F5F0FF', border: '1px solid #DDD0FF' }}>
+        <p className="text-sm leading-relaxed" style={{ color: '#4C1D95' }}>
+          <strong>How returns are dated:</strong> a return belongs to the month its <strong>credit
+          note</strong> was raised, not the month the goods were sold. An order sold on 30 April and
+          returned in May is a <strong>May</strong> credit note — April’s GST is already filed and is
+          never reopened. So the {int(ret.count)} credit {ret.count === 1 ? 'note' : 'notes'} below
+          {ret.count === 1 ? ' reduces ' : ' reduce '}<strong>{fmtMonth(m.month)}</strong>, whichever
+          month the goods were sold in.
+        </p>
+      </div>
+
+      <div className="grid gap-3.5 grid-cols-1 md:grid-cols-2 xl:grid-cols-4 mb-5">
+        {kpis.map((c, i) => (
+          <button key={i} onClick={() => onDrill({ kind: 'returns', month: m.month, months: [m.month] })}
+                  className="text-left bg-white border border-slate-200 rounded-xl p-4 hover:shadow-md hover:border-slate-300 transition-all"
+                  style={{ borderTop: `4px solid ${c.tone}` }}>
+            <div className="text-[12.5px] font-bold text-slate-700 leading-tight min-h-[2.4em]">{c.q}</div>
+            <div className="text-[26px] font-bold tracking-tight mt-1.5 tabular-nums" style={{ color: c.fg }}>
+              ₹{inr(c.val)}
+            </div>
+            <div className="text-xs text-slate-500 mt-0.5">{c.sub}</div>
+            <div className="mt-2.5 pt-2 border-t border-slate-100">
+              {c.lines.map(([k, v], j) => (
+                <div key={j} className="flex justify-between gap-2 py-0.5">
+                  <span className="text-[11.5px] text-slate-500">{k}</span>
+                  <span className="text-[11.5px] font-bold text-slate-700 tabular-nums whitespace-nowrap">{v}</span>
+                </div>
+              ))}
+            </div>
+          </button>
+        ))}
+      </div>
+
+      <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
+        <div className="px-5 py-3 border-b border-slate-100 flex items-center justify-between">
+          <div>
+            <div className="text-sm font-bold text-slate-800">
+              Every credit note raised in {fmtMonth(m.month)}
+            </div>
+            <div className="text-[11.5px] text-slate-500 mt-0.5">
+              From the MTR sales report · Transaction Type = Refund · dated by Credit Note Date
+            </div>
+          </div>
+          <div className="text-right">
+            <div className="text-[11px] text-slate-500">Total</div>
+            <div className="text-base font-bold tabular-nums" style={{ color: T.violet }}>₹{inr(ret.total)}</div>
+          </div>
+        </div>
+        {all.length === 0 ? (
+          <div className="px-5 py-8 text-center text-sm text-slate-500">
+            No credit notes were raised in {fmtMonth(m.month)}.
+          </div>
+        ) : (
+          <div className="overflow-x-auto" style={{ maxHeight: 520 }}>
+            <table className="w-full text-sm">
+              <thead className="sticky top-0" style={{ background: '#F8FAFC' }}>
+                <tr className="text-[11px] uppercase tracking-wide text-slate-500">
+                  <th className="px-5 py-2.5 text-left font-semibold">Order</th>
+                  <th className="px-4 py-2.5 text-left font-semibold">Credit note</th>
+                  <th className="px-4 py-2.5 text-left font-semibold">Sold in</th>
+                  <th className="px-4 py-2.5 text-left font-semibold">Whose sales</th>
+                  <th className="px-4 py-2.5 text-right font-semibold">Amount</th>
+                </tr>
+              </thead>
+              <tbody>
+                {all.map((x, i) => (
+                  <tr key={x.orderId + i} className="border-t border-slate-100 hover:bg-slate-50 cursor-pointer"
+                      onClick={() => onDrill({ kind: 'returns', month: m.month, months: [m.month],
+                                               focusOrder: x.orderId })}>
+                    <td className="px-5 py-2 font-mono text-[12px] text-slate-700">{x.orderId}</td>
+                    <td className="px-4 py-2 text-[12px] text-slate-600">{x.cn || '—'}</td>
+                    <td className="px-4 py-2 text-[12px] text-slate-600">
+                      {x.saleMonth && x.saleMonth !== '—' ? fmtMonth(x.saleMonth) : '—'}
+                    </td>
+                    <td className="px-4 py-2">
+                      <span className="text-[11px] font-semibold px-2 py-0.5 rounded-full"
+                            style={x.own ? { background: '#DBEAFE', color: '#1E40AF' }
+                                         : { background: '#FEF3C7', color: T.amberText }}>
+                        {x.own ? 'this month' : 'earlier month'}
+                      </span>
+                    </td>
+                    <td className="px-4 py-2 text-right tabular-nums font-semibold text-slate-800">
+                      ₹{inr(x.amount)}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </div>
     </>
   );
