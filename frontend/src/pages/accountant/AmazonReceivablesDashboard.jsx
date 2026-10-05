@@ -650,6 +650,8 @@ function ReportView({ data, status, months, shown, sel, setSel, onDrill, base, o
           month and opens that month's statement. */}
       <RangeBar months={months} sel={sel} setSel={setSel} all={all} />
 
+      <BasisCompare cmp={data?.basisCompare} shown={shown} onDrill={onDrill} />
+
       {one ? <MonthStatement m={one} data={data} onDrill={onDrill} />
            : <PeriodOverview led={led} data={data} shown={shown} onDrill={onDrill} />}
 
@@ -660,6 +662,93 @@ function ReportView({ data, status, months, shown, sel, setSel, onDrill, base, o
       <SourcesPanel status={status} sources={(data?.sources || []).filter((s) => shown.includes(s.month))}
                     sourceKind={data?.sourceKind || {}} />
     </>
+  );
+}
+
+/* ── order date vs dispatch date, side by side ────────────────────────────
+   The basis is a policy the brand sets once, and the screen used to say only
+   WHICH one was used, never what it cost. Both are computed on every run, so
+   the accountant can see the month that moves most and defend the choice —
+   or explain to a client why a month differs from last year's workpaper. */
+function BasisCompare({ cmp, shown, onDrill }) {
+  const [open, setOpen] = useState(false);
+  if (!cmp || !cmp.months || !cmp.months.length) return null;
+  const NAME = { order: 'Order date', dispatch: 'Dispatch date', delivery: 'Delivery date' };
+  const rows = cmp.months.filter((x) => shown.includes(x.month));
+  if (!rows.length) return null;
+  const tot = rows.reduce((a, x) => a + x.thisBasis, 0);
+  const oth = rows.reduce((a, x) => a + x.otherBasisAmt, 0);
+  const diff = +(tot - oth).toFixed(2);
+  const big = rows.slice().sort((a, b) => Math.abs(b.diff) - Math.abs(a.diff))[0];
+
+  return (
+    <div className="bg-white border border-slate-200 rounded-xl overflow-hidden mb-5">
+      <button onClick={() => setOpen((o) => !o)}
+              className="w-full px-5 py-3.5 flex items-center justify-between hover:bg-slate-50 transition-colors text-left">
+        <div>
+          <div className="text-sm font-bold text-slate-800">
+            If sales were booked on {NAME[cmp.otherBasis]?.toLowerCase()} instead
+          </div>
+          <div className="text-[11.5px] text-slate-500 mt-0.5">
+            {rangeLabel(shown)} · {Math.abs(diff) < 1
+              ? 'the period total would be the same'
+              : `the period total would move by ₹${inr(Math.abs(diff), 0)}`}
+            {big && Math.abs(big.diff) > 1
+              && ` · biggest single month ${fmtMonth(big.month)} ₹${inr(Math.abs(big.diff), 0)}`}
+          </div>
+        </div>
+        <span className="text-[11px] font-bold px-2.5 py-1 rounded-full"
+              style={{ background: '#F1F5F9', color: '#475569' }}>
+          {open ? 'Hide' : 'Compare'}
+        </span>
+      </button>
+
+      {open && (
+        <div className="border-t border-slate-100 overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead style={{ background: '#F8FAFC' }}>
+              <tr className="text-[11px] uppercase tracking-wide text-slate-500">
+                <th className="px-5 py-2.5 text-left font-semibold">Month</th>
+                <th className="px-4 py-2.5 text-right font-semibold">
+                  {NAME[cmp.basis]} <span className="normal-case font-normal">(in use)</span>
+                </th>
+                <th className="px-4 py-2.5 text-right font-semibold">{NAME[cmp.otherBasis]}</th>
+                <th className="px-4 py-2.5 text-right font-semibold">Difference</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((x) => (
+                <tr key={x.month} className="border-t border-slate-100 hover:bg-slate-50 cursor-pointer"
+                    onClick={() => onDrill({ kind: 'line', line: 'expected', months: [x.month] })}>
+                  <td className="px-5 py-2 font-semibold text-slate-700">{fmtMonth(x.month)}</td>
+                  <td className="px-4 py-2 text-right tabular-nums font-semibold text-slate-800">
+                    ₹{inr(x.thisBasis)}
+                  </td>
+                  <td className="px-4 py-2 text-right tabular-nums text-slate-500">₹{inr(x.otherBasisAmt)}</td>
+                  <td className="px-4 py-2 text-right tabular-nums font-bold"
+                      style={{ color: Math.abs(x.diff) < 1 ? '#94A3B8' : x.diff > 0 ? T.green : T.red }}>
+                    {Math.abs(x.diff) < 1 ? '—' : `${x.diff > 0 ? '+' : '−'}₹${inr(Math.abs(x.diff))}`}
+                  </td>
+                </tr>
+              ))}
+              <tr style={{ background: T.ink, color: '#fff' }}>
+                <td className="px-5 py-3 font-bold">{rangeLabel(shown)}</td>
+                <td className="px-4 py-3 text-right tabular-nums font-bold">₹{inr(tot)}</td>
+                <td className="px-4 py-3 text-right tabular-nums font-bold">₹{inr(oth)}</td>
+                <td className="px-4 py-3 text-right tabular-nums font-bold">
+                  {Math.abs(diff) < 1 ? '—' : `${diff > 0 ? '+' : '−'}₹${inr(Math.abs(diff))}`}
+                </td>
+              </tr>
+            </tbody>
+          </table>
+          <p className="px-5 py-3 text-[11.5px] text-slate-500 leading-relaxed">
+            The basis moves orders <strong>between</strong> months — it does not create or destroy sales.
+            That is why single months swing while the period total barely moves. It matters for any one
+            month&rsquo;s GST, and very little across a full year. Click a month to see the orders behind it.
+          </p>
+        </div>
+      )}
+    </div>
   );
 }
 

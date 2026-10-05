@@ -326,6 +326,46 @@ const runReco = async (req, res, next) => {
        only the money would hide which file each figure came from. */
     const three = reconcile(src, months, { basis });
     const ledger = buildLedger(src, months, { basis });
+
+    /* ── what the OTHER basis would have said ──────────────────────────────
+       Choosing order date over dispatch date is a policy decision the brand
+       makes once, and until now the screen only said which one was used — never
+       what it cost. On this data a single month moves by up to Rs 29,000 while
+       the 17-month total moves by Rs 4,283, because the basis shifts orders
+       across month boundaries rather than creating or destroying sales. That is
+       exactly the thing an accountant needs to see to defend the choice, and to
+       explain why one month looks different from last year's workpaper.
+       The ledger builds in well under a second, so the other basis is computed
+       alongside rather than making the user generate a second report. */
+    const otherBasis = basis === BASIS.ORDER ? BASIS.DISPATCH : BASIS.ORDER;
+    let basisCompare = null;
+    try {
+      const alt = buildLedger(src, months, { basis: otherBasis });
+      const byMonth = new Map(alt.perMonth.map((x) => [x.month, x]));
+      const amt = (v) => (v && typeof v === 'object' ? (v.amount || 0) : (v || 0));
+      basisCompare = {
+        basis, otherBasis,
+        months: ledger.perMonth.map((x) => {
+          const o = byMonth.get(x.month);
+          const mine = amt(x.expected), theirs = o ? amt(o.expected) : 0;
+          return {
+            month: x.month,
+            thisBasis: r2(mine), otherBasisAmt: r2(theirs), diff: r2(mine - theirs),
+            invoicedThis: r2(amt(x.invoiced)),
+            invoicedOther: o ? r2(amt(o.invoiced)) : 0,
+          };
+        }),
+      };
+      basisCompare.totalThis = r2(basisCompare.months.reduce((a, x) => a + x.thisBasis, 0));
+      basisCompare.totalOther = r2(basisCompare.months.reduce((a, x) => a + x.otherBasisAmt, 0));
+      basisCompare.totalDiff = r2(basisCompare.totalThis - basisCompare.totalOther);
+      basisCompare.biggestMove = basisCompare.months
+        .slice().sort((a, b) => Math.abs(b.diff) - Math.abs(a.diff))[0] || null;
+    } catch (e) {
+      /* a comparison is a convenience; never fail the report for it */
+      basisCompare = null;
+    }
+
     const sourceKind = {};
     for (const m of months) sourceKind[m] = src.uploadedMonths.includes(m) ? 'unified' : 'ledger';
     const audit = auditLedger(ledger, { sources: sourceKind,
@@ -355,7 +395,7 @@ const runReco = async (req, res, next) => {
                       value: r2(st.reduce((a, r) => a + num(r.product_sales ?? r['product sales']), 0)) } };
     });
 
-    const result = { three, ledger, audit, drills, sources: perSource, sourceKind, basis };
+    const result = { three, ledger, audit, drills, sources: perSource, sourceKind, basis, basisCompare };
     const ms = Date.now() - t0;
     const fp = `${src.orders.length}|${src.mtr.length}|${src.settlement.length}`;
 
