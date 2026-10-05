@@ -117,7 +117,7 @@ function build(src, months, opts = {}) {
     let e = mtr.get(id);
     if (!e) {
       e = { id, types: new Set(), invoiced: 0, refunded: 0, invMonth: '', orderDate: '',
-            principal: 0, shipping: 0, giftWrap: 0, promo: 0 };
+            principal: 0, shipping: 0, giftWrap: 0, promo: 0, otherDiff: 0 };
       mtr.set(id, e);
     }
     const t = txt(r['Transaction Type']);
@@ -130,10 +130,27 @@ function build(src, months, opts = {}) {
          carries ONLY the principal. Comparing the two directly leaves a
          difference that looks like a fault and is not one, so the parts are
          kept and named. */
-      e.principal += num(r['Principal Amount']);
-      e.shipping += num(r['Shipping Amount']);
-      e.giftWrap += num(r['Gift Wrap Amount']);
-      e.promo += num(r['Item Promo Discount']) + num(r['Shipping Promo Discount']);
+      const prin = num(r['Principal Amount']);
+      const sh = num(r['Shipping Amount']);
+      const gw = num(r['Gift Wrap Amount']);
+      const ip = num(r['Item Promo Discount']);
+      const sp = num(r['Shipping Promo Discount']);
+      e.principal += prin;
+      /* The raw columns are NOT the components of the gap. A row can record a
+         Shipping Amount that is not in its Invoice Amount at all — summing the
+         column therefore attributes money the invoice never carried, which is
+         how a bridge can foot by coincidence while every line of it is wrong.
+         Measured on 20,851 shipment rows: 20,614 have invoice EXACTLY equal to
+         principal; of the 237 that differ, 212 differ by shipping + its promo
+         and 25 by the item promo. So the difference is classified per row by
+         what actually explains it, and anything unexplained stays visible. */
+      const diff = r2(amt - prin);
+      if (Math.abs(diff) >= 0.005) {
+        if (Math.abs(diff - (sh + sp)) < 0.02) e.shipping += diff;
+        else if (Math.abs(diff - ip) < 0.02) e.promo += diff;
+        else if (Math.abs(diff - gw) < 0.02) e.giftWrap += diff;
+        else e.otherDiff += diff;
+      }
       e.invMonth = e.invMonth || monthKey(r['Invoice Date'] || r['Shipment Date']);
       e.orderDate = e.orderDate || txt(r['Order Date']);
     } else if (t === 'Refund') {
@@ -143,7 +160,7 @@ function build(src, months, opts = {}) {
   for (const e of mtr.values()) {
     e.invoiced = r2(e.invoiced); e.refunded = r2(e.refunded);
     e.principal = r2(e.principal); e.shipping = r2(e.shipping);
-    e.giftWrap = r2(e.giftWrap); e.promo = r2(e.promo);
+    e.giftWrap = r2(e.giftWrap); e.promo = r2(e.promo); e.otherDiff = r2(e.otherDiff);
   }
 
   /* ── the order side, folded to one entry per order ─────────────────────── */
@@ -220,6 +237,7 @@ function build(src, months, opts = {}) {
       invoicedValue: inv ? inv.invoiced : 0, refundedValue: inv ? inv.refunded : 0,
       principalValue: inv ? inv.principal : 0, shippingValue: inv ? inv.shipping : 0,
       giftWrapValue: inv ? inv.giftWrap : 0, promoValue: inv ? inv.promo : 0,
+      otherDiffValue: inv ? inv.otherDiff : 0,
       status: [...o.statuses].filter(Boolean).join(', ') || '(blank)',
       sku: o.sku, purchaseDate: o.purchaseDate,
       mtrTypes: inv ? [...inv.types].filter(Boolean).sort().join(', ') : '',
@@ -246,7 +264,7 @@ function build(src, months, opts = {}) {
       orderValue: 0, cancelledValue: 0, liveValue: 0,
       invoicedValue: e.invoiced, refundedValue: e.refunded,
       principalValue: e.principal, shippingValue: e.shipping,
-      giftWrapValue: e.giftWrap, promoValue: e.promo,
+      giftWrapValue: e.giftWrap, promoValue: e.promo, otherDiffValue: e.otherDiff,
       status: '(no order row)', sku: '', purchaseDate: e.orderDate,
       mtrTypes: [...e.types].filter(Boolean).sort().join(', '),
     });
@@ -287,16 +305,22 @@ function build(src, months, opts = {}) {
   const shipping = r2(matchedRows.reduce((a, r) => a + r.shippingValue, 0));
   const giftWrap = r2(matchedRows.reduce((a, r) => a + r.giftWrapValue, 0));
   const promo = r2(matchedRows.reduce((a, r) => a + r.promoValue, 0));
+  const otherDiff = r2(matchedRows.reduce((a, r) => a + r.otherDiffValue, 0));
+  const nShip = matchedRows.filter((r) => Math.abs(r.shippingValue) > 0.005).length;
+  const nPromo = matchedRows.filter((r) => Math.abs(r.promoValue) > 0.005).length;
   const principal = r2(matchedRows.reduce((a, r) => a + r.principalValue, 0));
   const matchedOrderValue = r2(matchedRows.reduce((a, r) => a + r.orderValue, 0));
   const notInvoiced = r2(buckets.find((b) => b.key === 'shippedNoInvoice')?.orderValue || 0);
   const bridge = [
-    { key: 'shipping', label: 'Shipping charged to the customer', amount: shipping,
-      note: 'In the MTR\u2019s invoice amount; the order report\u2019s item price does not carry it.' },
-    { key: 'giftWrap', label: 'Gift wrap', amount: giftWrap,
-      note: 'Same \u2014 billed on the invoice, absent from the item price.' },
-    { key: 'promo', label: 'Promotional discounts', amount: promo,
-      note: 'Deducted on the invoice, so the invoice is lower than the item price by this much.' },
+    { key: 'shipping', label: `Delivery billed on the invoice (${nShip} orders)`, amount: shipping,
+      note: 'On almost every order the invoice equals the item price exactly. On these the customer '
+          + 'was also billed for delivery, so the invoice is higher.' },
+    { key: 'giftWrap', label: 'Gift wrap billed on the invoice', amount: giftWrap,
+      note: 'Billed on the invoice, absent from the item price.' },
+    { key: 'promo', label: `Promotional discount on the invoice (${nPromo} orders)`, amount: promo,
+      note: 'The discount is deducted on the invoice but not from the order report\u2019s item price.' },
+    { key: 'otherDiff', label: 'Other invoice adjustments', amount: otherDiff,
+      note: 'Invoice differs from the item price for a reason none of the named columns explains.' },
     { key: 'mtrOnly', label: 'Invoiced, order placed before this period', amount: mtrOnlyValue,
       note: 'The invoice is inside the period but the order is not, so only one side counts it.' },
     { key: 'notInvoiced', label: 'Shipped but not invoiced', amount: -notInvoiced,
