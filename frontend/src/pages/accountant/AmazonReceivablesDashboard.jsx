@@ -1363,7 +1363,13 @@ function Card({ title, sub, children, right }) {
    claims, each one openable into the explanation, the evidence and a ready
    message. Same shape as the Marketplace Ticket Generator, so the two agents
    read alike. */
+/* `label` names the row's badge; `subject`/`body` are present only where there
+   is actually something to ask Amazon for. A finding that is ours to resolve —
+   returns of sales from before the report starts — gets a badge and an
+   explanation but no message, because sending one would waste the accountant's
+   credibility on a non-issue. */
 const TICKET = {
+  'prior-period-refunds': { label: 'Sold before this period' },
   outstanding: {
     label: 'Payment not received',
     subject: (i) => `Settlement not received for ${i.month} — ₹${inr(Math.abs(i.amount), 0)}`,
@@ -1394,16 +1400,6 @@ const TICKET = {
       + `This is usually payment made on dispatch for orders the customer returned afterwards, `
       + `recovered in a later settlement. Please confirm which settlement recovers it, so we do not `
       + `treat it as income.\n\nBrand: ${brand}`,
-  },
-  'prior-period-refunds': {
-    label: 'Refunds against closed months',
-    subject: (i) => `Credit notes against periods already filed — ₹${inr(Math.abs(i.amount), 0)}`,
-    body: (i, brand) =>
-      `Hi Amazon Seller Support,\n\n`
-      + `Your MTR carries refunds totalling ₹${inr(Math.abs(i.amount), 0)} against orders invoiced `
-      + `before the period we are reconciling.\n\n`
-      + `We need the credit note number and credit note date for each, so they are reported in the `
-      + `correct GST period.\n\nBrand: ${brand}`,
   },
   'source-unified': {
     label: 'Rebuilt from the unified report',
@@ -1448,7 +1444,9 @@ function IssuesPanel({ audit, shown, onDrill, data, brand }) {
   };
   const ticketFor = (i) => {
     const t = TICKET[i.key];
-    if (!t) return null;
+    /* an entry may carry only a `label` for the badge — that means this finding
+       is ours to resolve and there is deliberately no message to send */
+    if (!t || typeof t.subject !== 'function' || typeof t.body !== 'function') return null;
     const orders = ordersFor(i);
     const enriched = { ...i,
       /* [\d,.]+ greedily eats the sentence's full stop, printing
@@ -1490,6 +1488,7 @@ function IssuesPanel({ audit, shown, onDrill, data, brand }) {
           const s = SEV[i.severity];
           const isOpen = open === i.id;
           const t = isOpen ? ticketFor(i) : null;
+          const ords = isOpen ? ordersFor(i) : [];
           return (
             <div key={i.id} className="border rounded-xl overflow-hidden"
                  style={{ borderColor: isOpen ? s.fg + '55' : '#E3E6EA' }}>
@@ -1516,8 +1515,13 @@ function IssuesPanel({ audit, shown, onDrill, data, brand }) {
                   <p className="text-sm text-slate-500 leading-relaxed mt-2">{i.why}</p>
 
                   <div className="grid gap-3 grid-cols-2 lg:grid-cols-4 mt-3.5">
-                    {[['Month', i.month || '—'], ['Amount', `₹${inr(Math.abs(i.amount || 0))}`],
-                      ['Orders with no payment', int(i.count || 0)],
+                    {[['Month', i.month || rangeLabel(shown)],
+                      ['Amount', `₹${inr(Math.abs(i.amount || 0))}`],
+                      /* the count means a different thing per finding — calling
+                         26 returns "orders with no payment" reads as a loss */
+                      [i.key === 'prior-period-refunds' ? 'Orders returned'
+                        : i.key === 'outstanding' ? 'Orders with no payment'
+                        : 'Orders', int(i.count || 0)],
                       ['Severity', s.label]].map(([k, v]) => (
                       <div key={k} className="rounded-lg px-3 py-2" style={{ background: '#F8FAFC' }}>
                         <div className="text-[10px] uppercase tracking-wide font-bold text-slate-500">{k}</div>
@@ -1526,19 +1530,20 @@ function IssuesPanel({ audit, shown, onDrill, data, brand }) {
                     ))}
                   </div>
 
-                  {t && t.orders.length > 0 && (
+                  {ords.length > 0 && (
                     <div className="mt-3.5">
                       <div className="text-[10.5px] uppercase tracking-wide font-bold text-slate-500 mb-1.5">
-                        Affected orders ({int(t.orders.length)} total)
+                        {i.key === 'prior-period-refunds' ? 'Returned orders' : 'Affected orders'}
+                        {' '}({int(ords.length)} total)
                       </div>
                       <div className="flex flex-wrap gap-1.5 max-h-28 overflow-y-auto">
-                        {t.orders.slice(0, 60).map((o) => (
+                        {ords.slice(0, 60).map((o) => (
                           <span key={o} className="text-[11px] font-mono px-2 py-0.5 rounded"
                                 style={{ background: '#F1F5F9', color: '#475569' }}>{o}</span>
                         ))}
-                        {t.orders.length > 60 && (
+                        {ords.length > 60 && (
                           <span className="text-[11px] text-slate-400 px-1 py-0.5">
-                            +{int(t.orders.length - 60)} more
+                            +{int(ords.length - 60)} more
                           </span>
                         )}
                       </div>
@@ -1550,7 +1555,7 @@ function IssuesPanel({ audit, shown, onDrill, data, brand }) {
                     <strong>What to do:</strong> {i.howToFix}
                   </div>
 
-                  {t && (
+                  {t ? (
                     <div className="mt-3.5">
                       <div className="text-[10.5px] uppercase tracking-wide font-bold mb-1.5"
                            style={{ color: T.blue }}>Message to Amazon Seller Support</div>
@@ -1575,7 +1580,17 @@ function IssuesPanel({ audit, shown, onDrill, data, brand }) {
                         )}
                       </div>
                     </div>
-                  )}
+                  ) : i.drill ? (
+                    /* nothing to ask Amazon for, but the evidence is still worth
+                       opening — this finding is ours to resolve, not theirs */
+                    <div className="mt-3.5">
+                      <button onClick={() => onDrill(i)}
+                              className="text-xs font-bold px-3.5 py-2 rounded-lg text-white transition-colors"
+                              style={{ background: T.ink }}>
+                        Show the orders behind this
+                      </button>
+                    </div>
+                  ) : null}
                 </div>
               )}
             </div>

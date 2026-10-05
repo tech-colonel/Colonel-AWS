@@ -153,16 +153,21 @@ function auditLedger(ledger, context = {}) {
   if (ppr.length) {
     const amt = r2(ppr.reduce((a, x) => a + x.amount, 0));
     add({
-      key: 'prior-period-refunds', month: null, severity: 'warning',
-      title: `${ppr.length} refund(s) worth ${money(amt)} belong to sales made before this period`,
+      /* NOT a fault, and nothing to ask Amazon for. These are ordinary returns
+         of goods sold before the report happens to start — the only reason
+         they stand out is that we did not load the earlier months. Reporting
+         them as a warning sent the reader looking for a problem that is ours,
+         not Amazon's, so it is information and it says whose it is. */
+      key: 'prior-period-refunds', month: null, severity: 'info',
+      title: `${ppr.length} return(s) worth ${money(amt)} are for sales made before ${ledger.months[0]}`,
       amount: amt, count: ppr.length,
-      what: `These orders were invoiced before ${ledger.months[0]}, so this report has no sales figure to `
-          + 'set them against. They are sitting in this period’s MTR files carrying their original '
-          + 'invoice dates.',
-      why: 'Amazon adds a return to the CURRENT month’s report with the ORIGINAL invoice date; it never '
-         + 'goes back and amends the month that has already been issued.',
-      howToFix: `Extend the report back to cover those months, or treat the ${money(amt)} as a `
-              + 'prior-period adjustment in the month the file arrived.',
+      what: `These goods were sold before ${ledger.months[0]}, which is where this report starts, so `
+          + 'there is no sales figure here to set the returns against. The returns themselves are '
+          + 'genuine and are already deducted in the month their credit note was raised.',
+      why: 'Nothing is wrong with the data. The report simply begins after these orders were sold — '
+         + 'load the earlier months and they would net off against their own sales.',
+      howToFix: `No action with Amazon. Either extend the report back to cover those months, or book `
+              + `the ${money(amt)} as a prior-period adjustment — it is a return, not a shortfall.`,
       drill: 'priorRefunds',
     });
   }
