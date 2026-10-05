@@ -195,7 +195,12 @@ function build(src, months, opts = {}) {
     const inv = mtr.get(o.id);
     let bucket;
     let why;
-    if (inv && inv.invoiced > 0) {
+    /* "has a Shipment row", NOT "invoiced > 0". A tax invoice raised for zero
+       — a fully discounted or promotional order — is still an invoice and still
+       belongs in the MTR leg; testing the amount pushed it into the
+       free-replacement bucket, which claims no invoice exists. Koparo has none
+       today, so this never bit; it would the first time a brand ships one. */
+    if (inv && inv.types.has('Shipment')) {
       bucket = 'matched';
       why = `Invoice raised${inv.invMonth ? ` in ${inv.invMonth}` : ''}.`;
     } else if (inv && inv.types.has('Cancel')) {
@@ -311,6 +316,13 @@ function build(src, months, opts = {}) {
   const principal = r2(matchedRows.reduce((a, r) => a + r.principalValue, 0));
   const matchedOrderValue = r2(matchedRows.reduce((a, r) => a + r.orderValue, 0));
   const notInvoiced = r2(buckets.find((b) => b.key === 'shippedNoInvoice')?.orderValue || 0);
+  /* Any bucket carrying order value but NO invoice has to be named here, or it
+     lands in "unexplained". Koparo's unshipped and free-replacement orders
+     happen to be worth zero, so the bridge balanced by luck; a brand whose
+     unshipped orders carry a price would have seen a false unexplained figure
+     equal to them. */
+  const notShippedVal = r2(buckets.find((b) => b.key === 'notShipped')?.orderValue || 0);
+  const freeRepVal = r2(buckets.find((b) => b.key === 'freeReplacement')?.orderValue || 0);
   const bridge = [
     { key: 'shipping', label: `Delivery billed on the invoice (${nShip} orders)`, amount: shipping,
       note: 'On almost every order the invoice equals the item price exactly. On these the customer '
@@ -325,6 +337,10 @@ function build(src, months, opts = {}) {
       note: 'The invoice is inside the period but the order is not, so only one side counts it.' },
     { key: 'notInvoiced', label: 'Shipped but not invoiced', amount: -notInvoiced,
       note: 'Counted at order level, with no invoice to match it.' },
+    { key: 'notShipped', label: 'Ordered but not shipped yet', amount: -notShippedVal,
+      note: 'Still in the warehouse, so no invoice exists for it yet.' },
+    { key: 'freeRep', label: 'Free replacements', amount: -freeRepVal,
+      note: 'Goods moved but nothing was sold, so there is no invoice.' },
   ];
   const bridgeTotal = r2(bridge.reduce((a, x) => a + x.amount, 0));
   const revenue = {
