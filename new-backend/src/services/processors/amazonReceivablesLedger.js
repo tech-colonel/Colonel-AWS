@@ -174,12 +174,25 @@ function foldSettled(settlementRows) {
     const cashMonth = monthKey(when);
     let o = byOrder.get(id);
     if (!o) {
-      o = { id, month: '', sales: 0, payout: 0, feesSigned: 0, tdsSigned: 0, tcsSigned: 0,
+      o = { id, month: '', sales: 0, payout: 0, credits: 0, feesSigned: 0, tdsSigned: 0, tcsSigned: 0,
             refundRows: 0, byMonth: {} };
       byOrder.set(id, o);
     }
     o.month = o.month || cashMonth;
     o.sales += num(r.product_sales ?? r['product sales']);
+    /* NOT every rupee Amazon pays is payment for an invoice. A Reimbursement
+       compensates for goods lost or damaged on the way back, an Adjustment
+       corrects an earlier settlement, a Fulfilment Fee Refund returns a fee —
+       none of them settles a sale. Measured over 17 months: Reimbursements
+       Rs 32,084 (95 rows), Adjustment Rs 32,635, Fulfilment Fee Refund
+       Rs 6,004. They were counted as payment, which pushed "received" above
+       "amount due" and made every month close with a NEGATIVE amount still
+       pending — money we really have, against a bill that was already settled
+       or cancelled. Kept apart so the pending figure means what it says. */
+    const ty = String(r.type || '').trim().toLowerCase();
+    if (ty && ty !== 'order' && ty !== 'refund' && ty !== 'transfer') {
+      o.credits += num(r.total ?? r['total']);
+    }
     /* What Amazon actually paid for this row. The settlement states it, and the
        parts foot to it exactly, so use it rather than re-deriving: product
        sales are ex-GST and rebuilding the payout by hand invites a sign error
@@ -210,6 +223,7 @@ function foldSettled(settlementRows) {
   for (const o of byOrder.values()) {
     o.sales = r2(o.sales); o.payout = r2(o.payout);
     o.fees = r2(Math.abs(o.feesSigned));
+    o.credits = r2(o.credits);
     o.tds = r2(Math.abs(o.tdsSigned));
     o.tcs = r2(Math.abs(o.tcsSigned));
     o.tdsTcs = r2(o.tds + o.tcs);
@@ -313,6 +327,8 @@ function buildLedger(src, months, opts = {}) {
       fees: s ? s.fees : 0,
       tds: s ? s.tds : 0, tcs: s ? s.tcs : 0, tdsTcs: s ? s.tdsTcs : 0,
       settled,
+      /* what of that was NOT payment against an invoice */
+      credits: s ? s.credits : 0,
       settledMonth: s ? s.month : '',
       settledBy: s ? s.byMonth : {},
       charged: p.charged,
@@ -421,6 +437,11 @@ function buildLedger(src, months, opts = {}) {
         },
       },
       /* this month's sales returned AFTER the month end — not deducted here */
+      /* money received this month that was NOT for this month's sales, and
+         money that was not payment for any invoice at all — the two reasons
+         cash and billings never tie order for order */
+      creditsNotAgainstInvoice: { count: billable.filter((r) => Math.abs(r.credits || 0) > 0.01).length,
+                                  amount: sum(billable, 'credits') },
       returnedLater: {
         count: billable.filter((r) => r.refunded > 0 && r.refundMonth && r.refundMonth > m).length,
         amount: returnedLater,

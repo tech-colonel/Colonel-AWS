@@ -131,6 +131,15 @@ const LINES = [
   { key: 'closing', label: 'Closing balance', sign: '=', strong: true, final: true, prov: 'closing',
     what: 'Still to be received as on the month end. Carried into the next month.' },
 ];
+/* Two reasons the cash never ties to the billing order for order, both shown
+   rather than left to be discovered as a negative pending figure. */
+const EXTRA = [
+  { key: 'creditsNotAgainstInvoice', label: 'Reimbursements and other credits', sign: '+',
+    prov: 'received',
+    note: 'Money Amazon paid that is NOT payment for an invoice — compensation for goods lost or '
+        + 'damaged on the way back, settlement adjustments, fee refunds. Real money, but it settles '
+        + 'no sale, so it makes a month look over-collected.' },
+];
 const AFTER = [
   { key: 'receivedLater', label: 'Received later, in a following month', sign: '−', prov: 'settled',
     what: 'Only visible because later months are loaded.' },
@@ -1623,6 +1632,11 @@ function PeriodOverview({ led, data, shown, onDrill, ST }) {
     { cap: 'Received to date', v: amt('settled'), note: 'In this month or later', op: '=', fg: T.green, bg: '#F3FBF6', line: 'received' },
     { cap: 'Still pending', v: amt('stillOpen'), note: 'Not received after every loaded file', op: '', fg: T.red, bg: '#FEF8F8', line: 'stillOpen' },
   ];
+  /* Reimbursements, adjustments and fee refunds are money Amazon paid that is
+     not payment for any invoice. They sit inside "received", so a month can
+     close having been paid MORE than it billed — which reads as a negative
+     amount still pending and looks like an error. Named here instead. */
+  const credits = amt('creditsNotAgainstInvoice');
   return (
     <>
       <Card title="Order Cycle — Volume" sub="What happened to every order in this period. Click any number to see the orders.">
@@ -1666,6 +1680,36 @@ function PeriodOverview({ led, data, shown, onDrill, ST }) {
               </React.Fragment>
             ))}
           </div>
+          {Math.abs(credits) > 1 && (
+            <div className="mt-3 rounded-xl px-4 py-3"
+                 style={{ background: '#FFFBEB', border: '1px solid #FDE68A' }}>
+              <div className="flex items-start justify-between gap-4 flex-wrap">
+                <div className="min-w-0">
+                  <div className="text-[10px] font-bold uppercase tracking-wider" style={{ color: '#92400E' }}>
+                    Of which: reimbursements and other credits
+                  </div>
+                  <p className="text-[12px] leading-relaxed mt-1" style={{ color: '#78350F' }}>
+                    Money Amazon paid that is <strong>not payment for an invoice</strong> — compensation
+                    for goods lost or damaged on the way back, settlement adjustments, fee refunds. It
+                    is real money and it is correctly in the bank, but it settles no sale. It is why a
+                    month can show a <strong>negative</strong> amount still pending: Amazon paid more
+                    than that month billed.
+                    {amt('stillOpen') < 0 && (
+                      <> Excluding it, the period is <strong>₹{inr(amt('stillOpen') + credits, 0)}</strong>{' '}
+                      {amt('stillOpen') + credits >= 0 ? 'still to be received' : 'over-collected'}.</>
+                    )}
+                  </p>
+                </div>
+                <button onClick={() => onDrill({ kind: 'line', line: 'creditsNotAgainstInvoice', months: shown })}
+                        className="text-right shrink-0">
+                  <div className="text-[22px] font-bold tabular-nums" style={{ color: '#92400E' }}>
+                    ₹{inr(credits)}
+                  </div>
+                  <div className="text-[10px] font-bold" style={{ color: '#92400E' }}>see the orders</div>
+                </button>
+              </div>
+            </div>
+          )}
           <div className="grid md:grid-cols-2 gap-3 mt-3">
             <button onClick={() => onDrill({ kind: 'line', line: 'invoiced', months: shown })}
                     className="border border-slate-200 rounded-xl p-4 bg-slate-50/50 text-left hover:shadow-md hover:border-slate-300 transition-all">
@@ -2008,6 +2052,7 @@ function LedgerTable({ led, onDrill }) {
                 Afterwards — only visible because later months are loaded
               </td>
             </tr>
+            {EXTRA.map((L) => row(L, true))}
             {AFTER.map((L) => row(L, true))}
             <tr className="bg-sky-50/40">
               <td /><td className="px-2 py-2 text-xs italic text-slate-500 whitespace-nowrap">(memo) GST within it</td><td />
@@ -2301,6 +2346,7 @@ function drillRows(drill, data, ST) {
   const m0 = ms[0];
   const pick = {
     returned: () => mine.filter((r) => r.refunded > 0),
+    creditsNotAgainstInvoice: () => mine.filter((r) => Math.abs(r.credits || 0) > 0.01),
     fees: () => mine.filter((r) => r.fees > 0),
     tds: () => mine.filter((r) => r.tds > 0),
     tcs: () => mine.filter((r) => r.tcs > 0),
