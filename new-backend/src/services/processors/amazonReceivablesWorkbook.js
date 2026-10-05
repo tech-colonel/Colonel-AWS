@@ -775,6 +775,12 @@ function buildWorkbook(payload, { brand, months }) {
       { label: 'Status', width: 24, get: (r) => r.status },
       { label: 'Invoiced', width: 14, money: true, get: (r) => r.invoiced },
       { label: 'Returned', width: 13, money: true, get: (r) => r.refunded },
+      { label: 'Returned in', width: 13, get: (r) => (r.refundMonth ? fmtMonth(r.refundMonth) : '—'),
+        note: 'The month the CREDIT NOTE was raised, which is the month the return belongs to — not '
+            + 'the month of the sale. An order sold on 30 April and returned in May is a May credit '
+            + 'note, because April\u2019s GST is already filed.' },
+      { label: 'Credit note', width: 14, get: (r) => r.creditNote || '—',
+        note: 'Amazon\u2019s credit note number for the return, from the MTR.' },
       { label: 'GST within', width: 13, money: true, muted: true, get: (r) => r.gst,
         note: 'A memo. Amazon pays this across to you with the money; you remit it onward.' },
       { label: 'Amazon fees', width: 13, money: true, get: (r) => r.fees },

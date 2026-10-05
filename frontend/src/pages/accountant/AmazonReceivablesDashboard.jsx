@@ -2283,9 +2283,13 @@ function drillRows(drill, data, ST) {
 const LEDGER_COLS = [
   { key: 'orderId', label: 'Order ID', mono: true, w: 22 },
   { key: 'month', label: 'Sale month', fmt: fmtMonth },
-  { key: 'status', label: 'Status' },
+  /* the status names its month — "Settled in a later month" made the reader
+     go hunting for which one */
+  { key: 'status', label: 'Status', calc: (r) => statusText(r) },
   { key: 'invoiced', label: 'Invoiced', num: true },
   { key: 'refunded', label: 'Returned', num: true },
+  { key: 'refundMonth', label: 'Return month',
+    fmt: (v) => (v ? fmtMonth(v) : '—') },
   { key: 'fees', label: 'Amazon charges', num: true },
   { key: 'tds', label: 'TDS', num: true },
   { key: 'tcs', label: 'TCS', num: true },
@@ -2445,6 +2449,19 @@ function DrillPanel({ drill, data, ST, base, onClose }) {
 }
 
 /* ── every order, end to end ─────────────────────────────────────────────── */
+/* The stored status is a category; what an accountant needs is the category
+   AND the month it points at. Returned in Jul 2026, paid in Sep 2026 — the
+   month is the fact that decides which period the entry belongs to. */
+function statusText(r) {
+  const st = String(r.status || '');
+  if (/later/i.test(st) && r.settledMonth) return `Paid in ${fmtMonth(r.settledMonth)}`;
+  if (/^Settled in the month/i.test(st) && r.settledMonth) return `Paid in ${fmtMonth(r.settledMonth)}`;
+  if (/return|refund/i.test(st)) {
+    return r.refundMonth ? `Returned in ${fmtMonth(r.refundMonth)}` : st;
+  }
+  return st;
+}
+
 function TransactionData({ data, shown, ST, onClose }) {
   const [tab, setTab] = useState('all');
   const [q, setQ] = useState('');
@@ -2497,9 +2514,13 @@ function TransactionData({ data, shown, ST, onClose }) {
         <thead className="bg-slate-50 text-[10px] uppercase tracking-wider text-slate-400">
           <tr>
             <th className="w-8" />
-            {['Order ID', 'Sale month', 'Invoiced', 'Returned', 'Amazon charges', 'TDS', 'TCS',
-              'Net amount due', 'Received', 'Difference', 'Payment month', 'Status'].map((h, i) => (
-              <th key={h} className={`px-3 py-2.5 font-bold ${i >= 2 && i <= 9 ? 'text-right' : 'text-left'}`}>{h}</th>
+            {/* Return month sits beside the amount returned, because the
+                accountant's next question after "how much came back" is always
+                "in which month" — it decides the GST period of the credit note. */}
+            {['Order ID', 'Sale month', 'Invoiced', 'Returned', 'Return month', 'Amazon charges',
+              'TDS', 'TCS', 'Net amount due', 'Received', 'Difference', 'Payment month',
+              'Status'].map((h, i) => (
+              <th key={h} className={`px-3 py-2.5 font-bold ${(i >= 2 && i <= 3) || (i >= 5 && i <= 10) ? 'text-right' : 'text-left'}`}>{h}</th>
             ))}
           </tr>
         </thead>
@@ -2517,6 +2538,9 @@ function TransactionData({ data, shown, ST, onClose }) {
                   <td className="px-3 py-2 text-slate-600">{fmtMonth(r.month)}</td>
                   <td className="px-3 py-2 text-right tabular-nums">{inr(r.invoiced)}</td>
                   <td className="px-3 py-2 text-right tabular-nums text-slate-500">{r.refunded ? inr(r.refunded) : '—'}</td>
+                  <td className="px-3 py-2 text-slate-600">
+                    {r.refunded ? (r.refundMonth ? fmtMonth(r.refundMonth) : '—') : '—'}
+                  </td>
                   <td className="px-3 py-2 text-right tabular-nums text-slate-500">{r.fees ? inr(r.fees) : '—'}</td>
                   <td className="px-3 py-2 text-right tabular-nums text-slate-500">{r.tds ? inr(r.tds) : '—'}</td>
                   <td className="px-3 py-2 text-right tabular-nums text-slate-500">{r.tcs ? inr(r.tcs) : '—'}</td>
@@ -2530,15 +2554,21 @@ function TransactionData({ data, shown, ST, onClose }) {
                     </span>
                   </td>
                   <td className="px-3 py-2 text-slate-600">{r.settledMonth ? fmtMonth(r.settledMonth) : '—'}</td>
-                  <td className="px-3 py-2 text-slate-600">{r.status}</td>
+                  {/* "Settled in a later month" leaves the reader to go and find
+                      WHICH month. Name it — that is the whole question. */}
+                  <td className="px-3 py-2 text-slate-600">{statusText(r)}</td>
                 </tr>
                 {isOpen && (
                   <tr style={{ background: '#FAFBFC' }}>
-                    <td colSpan={13} className="px-10 py-4">
+                    <td colSpan={14} className="px-10 py-4">
                       <div className="grid md:grid-cols-4 gap-3">
                         {[
                           { f: 'order', rows: [['Sale month', fmtMonth(r.month)], ['Order status', r.status]] },
-                          { f: 'mtr', rows: [['Invoice value', `₹${inr(r.invoiced)}`], ['Returns', r.refunded ? `₹${inr(r.refunded)}` : 'none'],
+                          { f: 'mtr', rows: [['Invoice value', `₹${inr(r.invoiced)}`],
+                                             ['Returns', r.refunded ? `₹${inr(r.refunded)}` : 'none'],
+                                             ...(r.refunded ? [['Returned in',
+                                               r.refundMonth ? fmtMonth(r.refundMonth) : 'month not stated']] : []),
+                                             ...(r.creditNote ? [['Credit note', r.creditNote]] : []),
                                              ['GST within it', `₹${inr(r.gst)}`]] },
                           { f: 'settlement', rows: [['Received', `₹${inr(r.settled)}`],
                                                     ['Payment month', r.settledMonth ? fmtMonth(r.settledMonth) : 'no payment yet'],

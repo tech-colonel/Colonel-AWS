@@ -94,6 +94,20 @@ function monthKey(value) {
     const dd = +m[1], mm = +m[2];
     if (mm >= 1 && mm <= 12 && dd >= 1 && dd <= 31) return `20${m[3]}-${m[2]}`;
   }
+  /* M/D/YYYY — a FOURTH format, and only one file uses it. The June-2025 B2C
+     MTR writes every date as 6/17/2025 while every other file writes ISO or
+     DD-MM-YYYY. Month-first is not a guess: across the 2,134 slash values in
+     that file, 1,574 have a SECOND field above 12 (impossible as a month) and
+     NONE has a first field above 12, and the first field always equals the
+     file's own month. Guarded on both counts so a D/M file could never be read
+     backwards here — if the first field exceeds 12 it falls through. */
+  m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+  if (m) {
+    const mo = +m[1], dd = +m[2];
+    if (mo >= 1 && mo <= 12 && dd >= 1 && dd <= 31) {
+      return `${m[3]}-${String(mo).padStart(2, '0')}`;
+    }
+  }
   /* "1 Jun 2026 7:20:46 am UTC" — the unified transaction report's format */
   m = s.match(/^(\d{1,2})\s+([A-Za-z]{3})[a-z]*\s+(\d{4})/);
   if (m) {
