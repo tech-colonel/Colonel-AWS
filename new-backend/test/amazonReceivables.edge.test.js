@@ -1,8 +1,8 @@
 /* Synthetic edge-case harness. Feeds crafted rows straight into the real
    processors, so a failure here is a failure in production code. */
-const { buildLedger, BASIS } = require('./src/services/processors/amazonReceivablesLedger');
-const ovm = require('./src/services/processors/amazonOrderVsMtr');
-const { monthKey, isoDay, r2 } = require('./src/services/processors/amazonThreeWay');
+const { buildLedger, BASIS } = require('../src/services/processors/amazonReceivablesLedger');
+const ovm = require('../src/services/processors/amazonOrderVsMtr');
+const { monthKey, isoDay, r2 } = require('../src/services/processors/amazonThreeWay');
 
 let pass = 0, fail = 0;
 const T = (name, got, want) => {
