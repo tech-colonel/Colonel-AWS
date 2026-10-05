@@ -64,6 +64,13 @@ const BUCKETS = [
            + 'appear once Amazon ships it.',
   },
   {
+    key: 'freeReplacement', label: 'Free replacement sent', expected: true,
+    meaning: 'Amazon shipped a replacement for an item that arrived damaged or never arrived. '
+           + 'Nothing was sold and nothing was charged \u2014 the order carries a value of zero and the '
+           + 'MTR records it as a FreeReplacement, not a sale \u2014 so there is correctly no tax '
+           + 'invoice and nothing in GST. Goods did move, which is why it looks like a shipment.',
+  },
+  {
     key: 'shippedNoInvoice', label: 'Shipped but no invoice found', expected: false,
     meaning: 'Goods left the warehouse but no tax invoice is in the MTR files we hold. Almost '
            + 'always the order shipped in the last days of the period and its invoice sits in the '
@@ -109,7 +116,8 @@ function build(src, months, opts = {}) {
     if (!id) continue;
     let e = mtr.get(id);
     if (!e) {
-      e = { id, types: new Set(), invoiced: 0, refunded: 0, invMonth: '', orderDate: '' };
+      e = { id, types: new Set(), invoiced: 0, refunded: 0, invMonth: '', orderDate: '',
+            principal: 0, shipping: 0, giftWrap: 0, promo: 0 };
       mtr.set(id, e);
     }
     const t = txt(r['Transaction Type']);
@@ -117,13 +125,26 @@ function build(src, months, opts = {}) {
     const amt = num(r['Invoice Amount']);
     if (t === 'Shipment') {
       e.invoiced += amt;
+      /* Invoice Amount is NOT the item price. It is principal + shipping +
+         gift wrap − promotional discounts, and the order report's `item-price`
+         carries ONLY the principal. Comparing the two directly leaves a
+         difference that looks like a fault and is not one, so the parts are
+         kept and named. */
+      e.principal += num(r['Principal Amount']);
+      e.shipping += num(r['Shipping Amount']);
+      e.giftWrap += num(r['Gift Wrap Amount']);
+      e.promo += num(r['Item Promo Discount']) + num(r['Shipping Promo Discount']);
       e.invMonth = e.invMonth || monthKey(r['Invoice Date'] || r['Shipment Date']);
       e.orderDate = e.orderDate || txt(r['Order Date']);
     } else if (t === 'Refund') {
       e.refunded += Math.abs(amt);
     }
   }
-  for (const e of mtr.values()) { e.invoiced = r2(e.invoiced); e.refunded = r2(e.refunded); }
+  for (const e of mtr.values()) {
+    e.invoiced = r2(e.invoiced); e.refunded = r2(e.refunded);
+    e.principal = r2(e.principal); e.shipping = r2(e.shipping);
+    e.giftWrap = r2(e.giftWrap); e.promo = r2(e.promo);
+  }
 
   /* ── the order side, folded to one entry per order ─────────────────────── */
   const ord = new Map();
@@ -176,6 +197,13 @@ function build(src, months, opts = {}) {
     } else if (o.statuses.has('Unshipped') || o.statuses.has('Pending')) {
       bucket = 'notShipped';
       why = 'Still in the warehouse when the report was pulled — the invoice follows the dispatch.';
+    } else if (o.statuses.has('Shipped')
+               && (o.value === 0 || (inv && inv.types.has('FreeReplacement')))) {
+      /* A shipped order worth nothing is a replacement, not a missing invoice.
+         Measured: 11 of the 13 orders that looked like missing invoices carry a
+         value of zero, and the MTR holds exactly 11 FreeReplacement rows. */
+      bucket = 'freeReplacement';
+      why = 'Shipped at no charge as a replacement — nothing was sold, so no tax invoice is due.';
     } else if (o.statuses.has('Shipped')) {
       bucket = 'shippedNoInvoice';
       why = o.month === lastMonth
@@ -190,6 +218,8 @@ function build(src, months, opts = {}) {
       orderId: o.id, bucket, why, month: o.month, qty: o.qty,
       orderValue: o.value, cancelledValue: o.cancelledValue, liveValue: o.liveValue,
       invoicedValue: inv ? inv.invoiced : 0, refundedValue: inv ? inv.refunded : 0,
+      principalValue: inv ? inv.principal : 0, shippingValue: inv ? inv.shipping : 0,
+      giftWrapValue: inv ? inv.giftWrap : 0, promoValue: inv ? inv.promo : 0,
       status: [...o.statuses].filter(Boolean).join(', ') || '(blank)',
       sku: o.sku, purchaseDate: o.purchaseDate,
       mtrTypes: inv ? [...inv.types].filter(Boolean).sort().join(', ') : '',
@@ -202,11 +232,21 @@ function build(src, months, opts = {}) {
     if (!inWindow(e.invMonth)) continue;
     rows.push({
       orderId: e.id, bucket: 'mtrOnly', month: e.invMonth, qty: null,
+      /* The MTR dates an order in IST while the order report's purchase-date is
+         UTC, so an order placed just after midnight IST on the 1st sits in the
+         PREVIOUS month's order file. Three of Koparo's twelve are exactly that
+         — 00:55, 02:00 and 05:12 on 1 April — and calling them simply "before
+         this report begins" would send someone looking for a file they have. */
       why: e.orderDate
-        ? `Ordered on ${e.orderDate.slice(0, 10)}, before this report begins, and invoiced inside it.`
+        ? (monthKey(e.orderDate) === e.invMonth
+            ? `Ordered ${e.orderDate.slice(0, 16)} IST — just after midnight, so the order report (which `
+              + 'dates in UTC) files it in the previous month. Load that month and it pairs up.'
+            : `Ordered on ${e.orderDate.slice(0, 10)}, before this report begins, and invoiced inside it.`)
         : 'Invoiced in this period but the order is not in the order reports held.',
       orderValue: 0, cancelledValue: 0, liveValue: 0,
       invoicedValue: e.invoiced, refundedValue: e.refunded,
+      principalValue: e.principal, shippingValue: e.shipping,
+      giftWrapValue: e.giftWrap, promoValue: e.promo,
       status: '(no order row)', sku: '', purchaseDate: e.orderDate,
       mtrTypes: [...e.types].filter(Boolean).sort().join(', '),
     });
@@ -236,12 +276,43 @@ function build(src, months, opts = {}) {
      rather than quietly absorbed */
   const mtrOnlyValue = r2(buckets.find((b) => b.key === 'mtrOnly')?.invoicedValue || 0);
   const gap = r2(orderLevel - invoicedValue);
+
+  /* ── the gap, named line by line ────────────────────────────────────────
+     Measured on Koparo's 17 months this reconciles to the paisa, and it is
+     worth saying why it ever looked unexplained: the order report's
+     `item-price` is the PRINCIPAL, while the MTR's `Invoice Amount` is
+     principal + shipping + gift wrap − promotional discounts. Like was never
+     being compared with like. */
+  const matchedRows = rows.filter((r) => r.bucket === 'matched');
+  const shipping = r2(matchedRows.reduce((a, r) => a + r.shippingValue, 0));
+  const giftWrap = r2(matchedRows.reduce((a, r) => a + r.giftWrapValue, 0));
+  const promo = r2(matchedRows.reduce((a, r) => a + r.promoValue, 0));
+  const principal = r2(matchedRows.reduce((a, r) => a + r.principalValue, 0));
+  const matchedOrderValue = r2(matchedRows.reduce((a, r) => a + r.orderValue, 0));
+  const notInvoiced = r2(buckets.find((b) => b.key === 'shippedNoInvoice')?.orderValue || 0);
+  const bridge = [
+    { key: 'shipping', label: 'Shipping charged to the customer', amount: shipping,
+      note: 'In the MTR\u2019s invoice amount; the order report\u2019s item price does not carry it.' },
+    { key: 'giftWrap', label: 'Gift wrap', amount: giftWrap,
+      note: 'Same \u2014 billed on the invoice, absent from the item price.' },
+    { key: 'promo', label: 'Promotional discounts', amount: promo,
+      note: 'Deducted on the invoice, so the invoice is lower than the item price by this much.' },
+    { key: 'mtrOnly', label: 'Invoiced, order placed before this period', amount: mtrOnlyValue,
+      note: 'The invoice is inside the period but the order is not, so only one side counts it.' },
+    { key: 'notInvoiced', label: 'Shipped but not invoiced', amount: -notInvoiced,
+      note: 'Counted at order level, with no invoice to match it.' },
+  ];
+  const bridgeTotal = r2(bridge.reduce((a, x) => a + x.amount, 0));
   const revenue = {
     allOrderValue, cancelledValue, orderLevel,
     invoicedValue, refundedValue, netBilled: r2(invoicedValue - refundedValue),
     gap,
-    explainedByMtrOnly: mtrOnlyValue,
-    unexplained: r2(gap + mtrOnlyValue),
+    /* like-for-like: the order report's item price against the MTR's PRINCIPAL,
+       which is the same measure on both sides */
+    matchedOrderValue, matchedPrincipal: principal,
+    principalDiff: r2(matchedOrderValue - principal),
+    bridge, bridgeTotal,
+    unexplained: r2(-gap - bridgeTotal),
   };
 
   /* ── what the MTR says about cancellation, which the order file cannot ─── */

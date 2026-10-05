@@ -172,23 +172,13 @@ function auditLedger(ledger, context = {}) {
     });
   }
 
-  /* ── 5. where each month came from, and what that costs ────────────────── */
-  for (const [month, kind] of Object.entries(src)) {
-    if (kind !== 'unified') continue;
-    add({
-      key: 'source-unified', month, severity: 'info',
-      title: `${month} is rebuilt from the unified transaction report, not raw settlements`,
-      amount: 0, count: 0,
-      what: 'The raw settlement ledgers for this month are past Amazon’s 90-day API window and cannot '
-          + 'be fetched again. The unified transaction report recovers the month, but merges Amazon’s '
-          + 'fee columns.',
-      why: 'The SP-API serves settlement reports for 90 days and then refuses them outright. Any month '
-         + 'not pulled inside that window can only be recovered this way.',
-      howToFix: 'Nothing for this month. The weekly settlement pull now in place stops it happening again; '
-              + 'if a fee-level breakdown is ever needed for this month, it is not recoverable.',
-      drill: null,
-    });
-  }
+  /* ── 5. where each month came from ─────────────────────────────────────
+     Deliberately NOT an issue. A month older than 90 days can only come from
+     the unified transaction report — that is Amazon's retention policy, not a
+     fault of ours and not something anyone can act on. Fifteen identical rows
+     saying so buried the one finding that mattered. The fact still reaches the
+     reader: every month's source is named in the Files panel, and the month
+     statement says it on the month itself. */
 
   const blockers = issues.filter((i) => i.severity === 'blocker');
   return {

@@ -914,17 +914,57 @@ function InvoicingView({ inv, shown, onDrill }) {
           ))}
         </div>
         <div className="px-4 pb-4">
-          <div className="rounded-lg px-4 py-3 text-[12.5px] leading-relaxed"
-               style={{ background: '#FFFBEB', border: '1px solid #FDE68A', color: '#78350F' }}>
-            <strong>₹{inr(r.orderLevel, 0)}</strong> at order level against{' '}
-            <strong>₹{inr(r.invoicedValue, 0)}</strong> invoiced — a difference of{' '}
-            <strong>₹{inr(Math.abs(r.gap || 0), 0)}</strong>
-            {r.orderLevel ? ` (${Math.abs(100 * (r.gap || 0) / r.orderLevel).toFixed(2)}%)` : ''}.{' '}
-            ₹{inr(Math.abs(r.explainedByMtrOnly || 0), 0)} is invoices whose order was placed before
-            this period. <strong>₹{inr(Math.abs(r.unexplained || 0), 0)} is still unexplained</strong> —
-            most likely shipping or gift wrap inside the MTR&rsquo;s invoice amount but not the order
-            report&rsquo;s item price. Shown, not absorbed.
+          {/* THE BRIDGE. The two totals were never measuring the same thing:
+              the order report's item-price is the PRINCIPAL, while the MTR's
+              Invoice Amount is principal + shipping + gift wrap − promotional
+              discounts. Naming each step turns a number that read as a fault
+              into arithmetic the reader can follow. */}
+          <div className="rounded-xl border border-slate-200 overflow-hidden">
+            <div className="px-4 py-2 text-[11px] uppercase tracking-wide font-bold"
+                 style={{ background: '#F8FAFC', color: '#475569' }}>
+              Why the two totals differ, line by line
+            </div>
+            <div className="px-4 py-2 border-t border-slate-100 flex justify-between">
+              <span className="text-[13px] text-slate-600">
+                Order level (item price)
+                <span className="text-[11px] text-slate-400 ml-1.5">what customers were charged for goods</span>
+              </span>
+              <span className="text-[13px] tabular-nums font-semibold text-slate-800">₹{inr(r.orderLevel)}</span>
+            </div>
+            {(r.bridge || []).filter((x) => Math.abs(x.amount) > 0.5).map((x) => (
+              <div key={x.key} className="px-4 py-2 border-t border-slate-100 flex justify-between gap-3">
+                <span className="text-[13px] text-slate-600 min-w-0">
+                  {x.amount > 0 ? 'Add: ' : 'Less: '}{x.label}
+                  <span className="block text-[11px] text-slate-400 leading-snug">{x.note}</span>
+                </span>
+                <span className="text-[13px] tabular-nums whitespace-nowrap"
+                      style={{ color: x.amount > 0 ? T.green : T.red }}>
+                  {x.amount > 0 ? '+' : '−'}₹{inr(Math.abs(x.amount))}
+                </span>
+              </div>
+            ))}
+            <div className="px-4 py-2.5 border-t border-slate-200 flex justify-between"
+                 style={{ background: '#F8FAFC' }}>
+              <span className="text-[13px] font-bold text-slate-800">Invoiced (MTR invoice amount)</span>
+              <span className="text-[13px] tabular-nums font-bold text-slate-800">₹{inr(r.invoicedValue)}</span>
+            </div>
+            {Math.abs(r.unexplained || 0) > 1 && (
+              <div className="px-4 py-2 border-t flex justify-between"
+                   style={{ background: '#FFFBEB', borderColor: '#FDE68A' }}>
+                <span className="text-[13px] font-bold" style={{ color: '#78350F' }}>Still unexplained</span>
+                <span className="text-[13px] tabular-nums font-bold" style={{ color: '#78350F' }}>
+                  ₹{inr(Math.abs(r.unexplained))}
+                </span>
+              </div>
+            )}
           </div>
+          <p className="text-[12px] text-slate-500 leading-relaxed mt-2.5">
+            On the matched orders the two files agree exactly: the order report&rsquo;s item price totals{' '}
+            <strong>₹{inr(r.matchedOrderValue, 0)}</strong> and the MTR&rsquo;s <em>Principal Amount</em>{' '}
+            totals <strong>₹{inr(r.matchedPrincipal, 0)}</strong>
+            {Math.abs(r.principalDiff || 0) < 1 ? ' — the same number' : ''}. Everything above is the
+            difference between <em>principal</em> and <em>invoice value</em>, not a discrepancy.
+          </p>
         </div>
       </Card>
 
@@ -1679,16 +1719,6 @@ const TICKET = {
       + `recovered in a later settlement. Please confirm which settlement recovers it, so we do not `
       + `treat it as income.\n\nBrand: ${brand}`,
   },
-  'source-unified': {
-    label: 'Rebuilt from the unified report',
-    subject: (i) => `Settlement report unavailable for ${i.month}`,
-    body: (i, brand) =>
-      `Hi Amazon Seller Support,\n\n`
-      + `The settlement reports for ${i.month} are past the 90-day window and can no longer be `
-      + `retrieved through SP-API, so that month has been rebuilt from the unified transaction report, `
-      + `which merges the fee columns.\n\n`
-      + `Please confirm the fee-level breakdown for ${i.month}.\n\nBrand: ${brand}`,
-  },
 };
 
 function IssuesPanel({ audit, shown, onDrill, data, brand }) {
@@ -1725,6 +1755,11 @@ function IssuesPanel({ audit, shown, onDrill, data, brand }) {
     /* an entry may carry only a `label` for the badge — that means this finding
        is ours to resolve and there is deliberately no message to send */
     if (!t || typeof t.subject !== 'function' || typeof t.body !== 'function') return null;
+    /* and nothing informational gets a message either. The latest month always
+       shows a balance because Amazon pays on a ~7 day cycle — the panel itself
+       says "No action needed, upload the next month's file" — so offering an
+       email asking where the money is contradicts the advice directly above it. */
+    if (i.severity === 'info') return null;
     const orders = ordersFor(i);
     const enriched = { ...i,
       /* [\d,.]+ greedily eats the sentence's full stop, printing
