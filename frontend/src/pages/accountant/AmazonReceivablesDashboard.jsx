@@ -149,7 +149,9 @@ export default function AmazonReceivablesDashboard() {
   const [drill, setDrill] = useState(null);
   const [view, setView] = useState('list');     // 'list' | 'report'
   const [wizard, setWizard] = useState(false);
-  const [sel, setSel] = useState('');           // '' = whole period, else one month
+  /* null = the whole period; otherwise {from,to} month keys, inclusive.
+     from === to is a single month and opens that month's statement. */
+  const [sel, setSel] = useState(null);
   const [txOpen, setTxOpen] = useState(false);
 
   useEffect(() => {
@@ -188,7 +190,7 @@ export default function AmazonReceivablesDashboard() {
       setData(r.data);
       setWizard(false);
       setView('report');
-      setSel('');
+      setSel(null);
       toast.success(`Report ready — ${months.length} month(s) in ${r.data.builtInMs} ms`);
       load();
     } catch (e) {
@@ -206,7 +208,9 @@ export default function AmazonReceivablesDashboard() {
   ]);
 
   const months = data?.ledger?.months || [];
-  const shown = useMemo(() => (sel && months.includes(sel) ? [sel] : months), [sel, months]);
+  const shown = useMemo(() => (sel && sel.from && sel.to
+    ? months.filter((m) => m >= sel.from && m <= sel.to)
+    : months), [sel, months]);
   const ST = data?.ledger?.STATUS || {};
   const openDrill = (d) => setDrill({ months: shown, ...d });
 
@@ -231,7 +235,7 @@ export default function AmazonReceivablesDashboard() {
 
         {view === 'list' ? (
           <ReportList status={status} data={data} months={months}
-                      onOpen={() => { setView('report'); setSel(''); }}
+                      onOpen={() => { setView('report'); setSel(null); }}
                       onGenerate={() => setWizard(true)} onRefresh={load} />
         ) : (
           <ReportView data={data} status={status} months={months} shown={shown} sel={sel}
@@ -600,7 +604,8 @@ function GenerateWizard({ status, running, onClose, onRun }) {
 function ReportView({ data, status, months, shown, sel, setSel, onDrill, base, onTx, onRefresh, ST }) {
   const all = data?.ledger?.perMonth || [];
   const led = all.filter((m) => shown.includes(m.month));
-  const one = sel && led.length === 1 ? led[0] : null;
+  /* one month selected -> its statement; any wider range -> the overview */
+  const one = led.length === 1 ? led[0] : null;
   const basisLabel = data?.basis === 'order' ? 'order date' : 'dispatch date';
 
   return (
@@ -636,40 +641,14 @@ function ReportView({ data, status, months, shown, sel, setSel, onDrill, base, o
         </div>
       </div>
 
-      {/* period filter */}
-      <div className="flex items-center gap-2 flex-wrap mb-5">
-        <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400 mr-1">Period</span>
-        {[{ v: '', label: `All · ${rangeLabel(months)}`, sub: `${months.length} month(s)` },
-          ...months.map((m) => ({ v: m, label: fmtMonth(m),
-            sub: `${int(all.find((x) => x.month === m)?.invoiced?.count ?? 0)} invoices` }))]
-          .map((p) => {
-            const on = sel === p.v;
-            const openAmt = p.v ? (all.find((x) => x.month === p.v)?.stillOpen?.amount || 0)
-                                : all.reduce((a, m) => a + (m.stillOpen?.amount || 0), 0);
-            return (
-              <button key={p.v || 'all'} onClick={() => setSel(p.v)}
-                      className="px-3.5 py-2 rounded-lg border text-left transition-colors"
-                      style={on ? { background: T.ink, borderColor: T.ink, color: '#fff' }
-                                : { background: '#fff', borderColor: '#E3E6EA', color: '#374151' }}>
-                <div className="text-sm font-semibold leading-tight">{p.label}</div>
-                <div className="text-[11px] leading-tight mt-0.5" style={{ color: on ? '#C3CAD3' : '#94A3B8' }}>
-                  {p.sub}
-                  {/* A negative open balance is money HELD IN EXCESS, not
-                      minus-pending: Amazon paid on dispatch and takes it back
-                      when the goods return later. Never print a minus sign
-                      against the word "pending". */}
-                  {Math.abs(openAmt) > 1 && (
-                    <span className="font-semibold"
-                          style={{ color: openAmt < 0 ? (on ? '#FCD34D' : T.amberText)
-                                                      : (on ? '#FCA5A5' : T.red) }}>
-                      {' '}· ₹{inr(Math.abs(openAmt), 0)} {openAmt < 0 ? 'held in excess' : 'pending'}
-                    </span>
-                  )}
-                </div>
-              </button>
-            );
-          })}
-      </div>
+      {/* ── period: a From/To range, not a row of pills ──────────────────────
+          Seventeen months of pills is a wall, and it hides the question the
+          accountant actually asks — "show me this quarter" or "show me the
+          financial year". Same picker as the Shopify Order Cycle: two month+
+          year selects, clamped to the months the report actually covers, and
+          nothing re-reads until Search is pressed. From === To is a single
+          month and opens that month's statement. */}
+      <RangeBar months={months} sel={sel} setSel={setSel} all={all} />
 
       {one ? <MonthStatement m={one} data={data} onDrill={onDrill} />
            : <PeriodOverview led={led} data={data} shown={shown} onDrill={onDrill} />}
@@ -681,6 +660,119 @@ function ReportView({ data, status, months, shown, sel, setSel, onDrill, base, o
       <SourcesPanel status={status} sources={(data?.sources || []).filter((s) => shown.includes(s.month))}
                     sourceKind={data?.sourceKind || {}} />
     </>
+  );
+}
+
+/* ── the period picker ────────────────────────────────────────────────────
+   Two month+year selects and a Search, the same shape the Shopify Order Cycle
+   uses, so an accountant moving between the two agents is not learning a second
+   control. The selects are CLAMPED to the months this report actually covers —
+   offering a month with no data only invites an empty screen — and nothing
+   re-reads until Search is pressed, so half-typed ranges never run.
+   From === To is a single month and opens that month's statement. */
+function RangeBar({ months, sel, setSel, all }) {
+  const lo = months[0] || '';
+  const hi = months[months.length - 1] || '';
+  const cur = sel && sel.from ? sel : { from: lo, to: hi };
+  const [d, setD] = useState(cur);
+  useEffect(() => { setD(sel && sel.from ? sel : { from: lo, to: hi }); }, [sel, lo, hi]);
+
+  const years = [...new Set(months.map((m) => +m.slice(0, 4)))].sort();
+  const monthsIn = (y) => months.filter((m) => +m.slice(0, 4) === y).map((m) => +m.slice(5));
+  const mk = (y, mo) => `${y}-${String(mo).padStart(2, '0')}`;
+  /* keep a half-made selection inside the data rather than letting it 404 */
+  const clamp = (v) => (months.includes(v) ? v : (v < lo ? lo : hi));
+
+  const set = (which, y, mo) => setD((p) => ({ ...p, [which]: clamp(mk(y, mo)) }));
+  const invalid = d.from > d.to;
+  const dirty = d.from !== cur.from || d.to !== cur.to;
+  const narrowed = cur.from !== lo || cur.to !== hi;
+
+  const Picker = ({ which }) => {
+    const v = d[which]; const y = +v.slice(0, 4); const mo = +v.slice(5);
+    const avail = monthsIn(y);
+    return (
+      <div className="flex items-center gap-1.5 ml-1">
+        <select value={mo} onChange={(e) => set(which, y, +e.target.value)}
+                className="text-sm font-semibold px-3 py-2 rounded-lg border border-slate-200 bg-white text-slate-800">
+          {avail.map((n) => <option key={n} value={n}>{MON[n - 1]}</option>)}
+        </select>
+        <select value={y}
+                onChange={(e) => {
+                  const ny = +e.target.value;
+                  const av = monthsIn(ny);
+                  set(which, ny, av.includes(mo) ? mo : av[0]);
+                }}
+                className="text-sm font-semibold px-3 py-2 rounded-lg border border-slate-200 bg-white text-slate-800">
+          {years.map((yy) => <option key={yy} value={yy}>{yy}</option>)}
+        </select>
+      </div>
+    );
+  };
+
+  const openAmt = all
+    .filter((m) => m.month >= cur.from && m.month <= cur.to)
+    .reduce((a, m) => a + (m.stillOpen?.amount || 0), 0);
+
+  return (
+    <div className="flex items-center justify-between flex-wrap gap-4 px-5 py-4 rounded-2xl mb-5"
+         style={{ background: `${T.amber}0A`, border: `1px solid ${T.amber}35` }}>
+      <div className="flex items-center flex-wrap gap-x-6 gap-y-3">
+        <div className="flex items-center gap-2.5">
+          <CalendarRange className="w-4 h-4 flex-shrink-0" style={{ color: T.amberText }} />
+          <div>
+            <p className="text-xs font-bold whitespace-nowrap text-slate-800">From</p>
+            <p className="text-[10px] whitespace-nowrap text-slate-400">report covers {fmtMonth(lo)}</p>
+          </div>
+          <Picker which="from" />
+        </div>
+
+        <div className="w-px h-9 hidden sm:block bg-slate-200" />
+
+        <div className="flex items-center gap-2.5">
+          <CalendarRange className="w-4 h-4 flex-shrink-0" style={{ color: T.amberText }} />
+          <div>
+            <p className="text-xs font-bold whitespace-nowrap text-slate-800">To</p>
+            <p className="text-[10px] whitespace-nowrap text-slate-400">through {fmtMonth(hi)}</p>
+          </div>
+          <Picker which="to" />
+        </div>
+
+        {!dirty && (
+          <div className="text-[11px] leading-tight">
+            <div className="font-semibold text-slate-600">
+              {cur.from === cur.to ? fmtMonth(cur.from) : `${fmtMonth(cur.from)} – ${fmtMonth(cur.to)}`}
+            </div>
+            <div style={{ color: Math.abs(openAmt) < 1 ? '#94A3B8'
+                                : openAmt < 0 ? T.amberText : T.red }}>
+              {Math.abs(openAmt) < 1 ? 'fully settled'
+                : `₹${inr(Math.abs(openAmt), 0)} ${openAmt < 0 ? 'held in excess' : 'pending'}`}
+            </div>
+          </div>
+        )}
+      </div>
+
+      <div className="flex items-center gap-3 flex-shrink-0">
+        {narrowed && !dirty && (
+          <button onClick={() => setSel(null)}
+                  className="text-[11px] font-bold px-2.5 py-1 rounded-full border transition-colors"
+                  style={{ background: '#FFF7ED', color: T.amberText, borderColor: '#FED7AA' }}>
+            Narrowed · show all {months.length}
+          </button>
+        )}
+        <button onClick={() => !invalid && setSel({ from: d.from, to: d.to })}
+                disabled={!dirty || invalid}
+                title={invalid ? '“From” must be on or before “To”'
+                               : dirty ? 'Apply this range' : 'Range already applied'}
+                className="flex items-center gap-1.5 text-sm font-bold px-4 py-2.5 rounded-xl flex-shrink-0 transition-all"
+                style={dirty && !invalid
+                  ? { background: T.ink, color: '#fff', boxShadow: `0 2px 8px ${T.ink}40` }
+                  : { background: '#fff', border: '1px solid #e2e8f0', color: '#94a3b8', cursor: 'default' }}>
+          <Search className="w-4 h-4" />
+          Search
+        </button>
+      </div>
+    </div>
   );
 }
 
