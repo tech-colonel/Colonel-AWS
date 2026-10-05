@@ -682,7 +682,7 @@ function ReportView({ data, status, months, shown, sel, setSel, onDrill, base, o
       <BasisCompare cmp={data?.basisCompare} shown={shown} onDrill={onDrill} />
 
       {one ? <MonthStatement m={one} data={data} onDrill={onDrill} />
-           : <PeriodOverview led={led} data={data} shown={shown} onDrill={onDrill} />}
+           : <PeriodOverview led={led} data={data} shown={shown} onDrill={onDrill} ST={ST} />}
 
       <IssuesPanel audit={data?.audit} shown={shown} data={data} brand={status?.brand}
                    onDrill={(i) => onDrill({ kind: 'issue', issue: i })} />
@@ -1594,28 +1594,34 @@ function ReturnsView({ m, data, ret, onDrill }) {
 }
 
 /* ── the whole period: volume, summary, cash cycle ───────────────────────── */
-function PeriodOverview({ led, data, shown, onDrill }) {
+function PeriodOverview({ led, data, shown, onDrill, ST }) {
   const t = data?.three?.totals || {};
   const amt = (k) => led.reduce((a, m) => a + (m[k]?.amount || 0), 0);
   const cnt = (k) => led.reduce((a, m) => a + (m[k]?.count || 0), 0);
   const VOL = [
-    { cap: 'Orders placed', v: t.placed, src: 'order', note: 'All orders in the period, counted once each' },
-    { cap: 'Cancelled', v: t.cancelled, src: 'order', note: 'Cancelled before dispatch — no invoice, no payment', fg: T.amberText },
-    { cap: 'Invoiced', v: t.shipped, src: 'mtr', note: 'Invoice raised in the MTR sales report' },
-    { cap: 'Paid by Amazon', v: t.settled, src: 'settlement', note: 'Payment received, in any month', fg: T.green },
-    { cap: 'Not paid yet', v: t.unsettled, src: 'settlement', note: 'No payment received at all', fg: T.red },
+    { cap: 'Orders placed', v: t.placed, src: 'order', note: 'All orders in the period, counted once each',
+      drill: { kind: 'chain', step: 'placed' } },
+    { cap: 'Cancelled', v: t.cancelled, src: 'order', note: 'Cancelled before dispatch — no invoice, no payment', fg: T.amberText,
+      drill: { kind: 'chain', step: 'cancelled' } },
+    { cap: 'Invoiced', v: t.shipped, src: 'mtr', note: 'Invoice raised in the MTR sales report',
+      drill: { kind: 'chain', step: 'invoiced' } },
+    { cap: 'Paid by Amazon', v: t.settled, src: 'settlement', note: 'Payment received, in any month', fg: T.green,
+      drill: { kind: 'chain', step: 'settled' } },
+    { cap: 'Not paid yet', v: t.unsettled, src: 'settlement', note: 'No payment received at all', fg: T.red,
+      drill: { kind: 'chain', step: 'unsettled' } },
     { cap: 'Not an Amazon sale', v: (led[0]?.byStatus || []).length
         ? led.reduce((a, m) => a + (m.byStatus.find((b) => /MCF/.test(b.status))?.count || 0), 0) : 0,
-      src: 'order', note: 'Sold on another website, only shipped by Amazon', fg: '#5B6472' },
+      src: 'order', note: 'Sold on another website, only shipped by Amazon', fg: '#5B6472',
+      drill: { kind: 'status', status: ST.NOT_AMAZON } },
   ];
   const EQ = [
-    { cap: 'Net sales', v: amt('netBillable'), note: 'Sales after customer returns', op: '−' },
-    { cap: 'Amazon charges', v: amt('fees'), note: 'Commission, closing fee, FBA and storage', op: '−', fg: T.amberText, bg: '#FFFBF4' },
-    { cap: 'TDS u/s 194-O', v: amt('tds'), note: 'Against our PAN. Claim in the income-tax return.', op: '−', fg: T.amberText, bg: '#FFFBF4' },
-    { cap: 'TCS u/s 52 (GST)', v: amt('tcs'), note: 'Claim in the GST cash ledger.', op: '=', fg: T.amberText, bg: '#FFFBF4' },
-    { cap: 'Due from Amazon', v: amt('expected'), note: 'Amount due on these invoices', op: '−', bg: '#F7F9FB' },
-    { cap: 'Received to date', v: amt('settled'), note: 'In this month or later', op: '=', fg: T.green, bg: '#F3FBF6' },
-    { cap: 'Still pending', v: amt('stillOpen'), note: 'Not received after every loaded file', op: '', fg: T.red, bg: '#FEF8F8' },
+    { cap: 'Net sales', v: amt('netBillable'), note: 'Sales after customer returns', op: '−', line: 'netBillable' },
+    { cap: 'Amazon charges', v: amt('fees'), note: 'Commission, closing fee, FBA and storage', op: '−', fg: T.amberText, bg: '#FFFBF4', line: 'fees' },
+    { cap: 'TDS u/s 194-O', v: amt('tds'), note: 'Against our PAN. Claim in the income-tax return.', op: '−', fg: T.amberText, bg: '#FFFBF4', line: 'tds' },
+    { cap: 'TCS u/s 52 (GST)', v: amt('tcs'), note: 'Claim in the GST cash ledger.', op: '=', fg: T.amberText, bg: '#FFFBF4', line: 'tcs' },
+    { cap: 'Due from Amazon', v: amt('expected'), note: 'Amount due on these invoices', op: '−', bg: '#F7F9FB', line: 'expected' },
+    { cap: 'Received to date', v: amt('settled'), note: 'In this month or later', op: '=', fg: T.green, bg: '#F3FBF6', line: 'received' },
+    { cap: 'Still pending', v: amt('stillOpen'), note: 'Not received after every loaded file', op: '', fg: T.red, bg: '#FEF8F8', line: 'stillOpen' },
   ];
   return (
     <>
@@ -1623,8 +1629,11 @@ function PeriodOverview({ led, data, shown, onDrill }) {
         <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-px bg-slate-100">
           {VOL.map((v) => {
             const f = FILES[v.src]; const Icon = f.icon;
+            /* the card said "click any number" and was a div — it is a button now */
             return (
-              <div key={v.cap} className="bg-white p-4">
+              <button key={v.cap} onClick={() => v.drill && onDrill({ ...v.drill, months: shown })}
+                      disabled={!v.drill}
+                      className={`bg-white p-4 text-left w-full transition-colors ${v.drill ? 'hover:bg-slate-50 cursor-pointer' : ''}`}>
                 <div className="text-[10.5px] font-bold uppercase tracking-wider text-slate-400">{v.cap}</div>
                 <div className="text-[29px] font-bold tracking-tight mt-1 tabular-nums" style={{ color: v.fg || '#111927' }}>
                   {int(v.v)}
@@ -1633,7 +1642,7 @@ function PeriodOverview({ led, data, shown, onDrill }) {
                 <div className="flex items-center gap-1 mt-2 text-[10px] font-bold" style={{ color: f.tone }}>
                   <Icon className="h-3 w-3" /> {f.short}
                 </div>
-              </div>
+              </button>
             );
           })}
         </div>
@@ -1644,19 +1653,22 @@ function PeriodOverview({ led, data, shown, onDrill }) {
           <div className="flex items-stretch gap-2.5 flex-wrap">
             {EQ.map((e) => (
               <React.Fragment key={e.cap}>
-                <div className="flex-1 min-w-[170px] border border-slate-200 rounded-xl p-4"
-                     style={{ background: e.bg || '#fff' }}>
+                <button onClick={() => e.line && onDrill({ kind: 'line', line: e.line, months: shown })}
+                        disabled={!e.line}
+                        className={`flex-1 min-w-[170px] border border-slate-200 rounded-xl p-4 text-left transition-all ${e.line ? 'hover:shadow-md hover:border-slate-300 cursor-pointer' : ''}`}
+                        style={{ background: e.bg || '#fff' }}>
                   <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">{e.cap}</div>
                   <div className="text-[22px] font-bold tracking-tight mt-1 tabular-nums"
                        style={{ color: e.fg || '#111927' }}>₹{inr(e.v)}</div>
                   <p className="text-[11px] text-slate-500 mt-1.5 leading-snug">{e.note}</p>
-                </div>
+                </button>
                 {e.op && <div className="flex items-center text-xl font-bold text-slate-300">{e.op}</div>}
               </React.Fragment>
             ))}
           </div>
           <div className="grid md:grid-cols-2 gap-3 mt-3">
-            <div className="border border-slate-200 rounded-xl p-4 bg-slate-50/50">
+            <button onClick={() => onDrill({ kind: 'line', line: 'invoiced', months: shown })}
+                    className="border border-slate-200 rounded-xl p-4 bg-slate-50/50 text-left hover:shadow-md hover:border-slate-300 transition-all">
               <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
                 GST included in the amount due (memo)
               </div>
@@ -1664,8 +1676,9 @@ function PeriodOverview({ led, data, shown, onDrill }) {
               <p className="text-[11px] text-slate-500 mt-1">
                 Amazon pays this to us along with the sale amount. It is not a deduction. We pay it to the government.
               </p>
-            </div>
-            <div className="border border-slate-200 rounded-xl p-4 bg-slate-50/50">
+            </button>
+            <button onClick={() => onDrill({ kind: 'line', line: 'receivedLater', months: shown })}
+                    className="border border-slate-200 rounded-xl p-4 bg-slate-50/50 text-left hover:shadow-md hover:border-slate-300 transition-all">
               <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
                 Received after the sale month ended
               </div>
@@ -1673,7 +1686,7 @@ function PeriodOverview({ led, data, shown, onDrill }) {
               <p className="text-[11px] text-slate-500 mt-1">
                 Sales of one month for which payment came in a later month.
               </p>
-            </div>
+            </button>
           </div>
         </div>
       </Card>
