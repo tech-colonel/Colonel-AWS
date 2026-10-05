@@ -83,6 +83,17 @@ function monthKey(value) {
     const dd = +m[1], mm = +m[2];
     if (mm >= 1 && mm <= 12 && dd >= 1 && dd <= 31) return `${m[3]}-${m[2]}`;
   }
+  /* DD-MM-YY — a THIRD format, and the one that breaks silently. The Credit
+     Note Date column writes the year as two digits in the January-2026 files
+     ("01-01-26 20:53") while the same column is ISO in 447 other rows and
+     DD-MM-YYYY in 53. The \d{4} branch above rejects it and returns '',
+     which would drop 29 credit notes out of their month. Day-first, to match
+     the DD-MM-YYYY branch; 2-digit years are this century. */
+  m = s.match(/^(\d{2})-(\d{2})-(\d{2})(?!\d)/);
+  if (m) {
+    const dd = +m[1], mm = +m[2];
+    if (mm >= 1 && mm <= 12 && dd >= 1 && dd <= 31) return `20${m[3]}-${m[2]}`;
+  }
   /* "1 Jun 2026 7:20:46 am UTC" — the unified transaction report's format */
   m = s.match(/^(\d{1,2})\s+([A-Za-z]{3})[a-z]*\s+(\d{4})/);
   if (m) {

@@ -169,7 +169,16 @@ async function gather(ctx, months) {
   const perMonth = (rows, get) => rows.reduce((a, r) => {
     const m = monthKey(get(r)); if (m) a[m] = (a[m] || 0) + 1; return a;
   }, {});
-  for (const r of settlement.rows) r.__src = 'upload';
+  /* Each uploaded FILE is its own source, not one lumped 'upload'.
+     Date Range Reports are requested by hand and overlap all the time: a
+     Jun-1..Jul-1 report and an Apr-1..Sep-22 report both carry every June row.
+     With a single blanket tag the de-duplication's "same row, other source"
+     test can never fire between two uploads, so those months were counted
+     twice. Keying on the filename makes a cross-file repeat a duplicate while
+     a genuine repeated payment INSIDE one file — two identical rows for a
+     2-unit order, which is real and was once wrongly discarded — still has a
+     matching source and is kept. */
+  for (const r of settlement.rows) r.__src = `upload:${r.__file || 'unknown'}`;
   const upCount = perMonth(settlement.rows, (r) => r['date/time'] || r.date_time);
   const ledCount = perMonth(ledgerRows, (r) => r.date_time);
   const uploadedMonths = Object.keys(upCount)

@@ -75,7 +75,7 @@ const FILES = {
 const PROV = {
   invoiced: { file: 'mtr', column: 'Invoice Amount', filter: 'Transaction Type = Shipment',
     dated: 'Shipment Date, else Invoice Date' },
-  returned: { file: 'mtr', column: 'Invoice Amount', filter: 'Transaction Type = Refund',
+  returned: { file: 'mtr', column: 'Invoice Amount + Credit Note Date', filter: 'Transaction Type = Refund',
     note: 'Returns are negative in the MTR and are shown positive here, as a deduction.' },
   netBillable: { file: 'derived', column: 'Sales invoiced − customer returns' },
   fees: { file: 'settlement', column: 'selling fees + fba fees + other transaction fees',
@@ -654,9 +654,15 @@ function ReportView({ data, status, months, shown, sel, setSel, onDrill, base, o
                 <div className="text-sm font-semibold leading-tight">{p.label}</div>
                 <div className="text-[11px] leading-tight mt-0.5" style={{ color: on ? '#C3CAD3' : '#94A3B8' }}>
                   {p.sub}
+                  {/* A negative open balance is money HELD IN EXCESS, not
+                      minus-pending: Amazon paid on dispatch and takes it back
+                      when the goods return later. Never print a minus sign
+                      against the word "pending". */}
                   {Math.abs(openAmt) > 1 && (
-                    <span className="font-semibold" style={{ color: on ? '#FCA5A5' : T.red }}>
-                      {' '}· ₹{inr(openAmt, 0)} pending
+                    <span className="font-semibold"
+                          style={{ color: openAmt < 0 ? (on ? '#FCD34D' : T.amberText)
+                                                      : (on ? '#FCA5A5' : T.red) }}>
+                      {' '}· ₹{inr(Math.abs(openAmt), 0)} {openAmt < 0 ? 'held in excess' : 'pending'}
                     </span>
                   )}
                 </div>
@@ -687,6 +693,19 @@ function MonthStatement({ m, data, onDrill }) {
   const olderAmt = older.reduce((a, x) => a + x.amount, 0);
   const olderOrders = older.reduce((a, x) => a + x.orders, 0);
   const diff = +(cash.total - own.amount - olderAmt).toFixed(2);
+
+  /* Returns read on the CREDIT-NOTE month — the month the note was raised, not
+     the month of the sale — split into this month's own sales coming back and
+     an earlier month's. `later` is this month's sales returned after the month
+     end, which is NOT part of this month's total and is shown as a note. */
+  const r = m.returned || {};
+  const ret = {
+    total: r.amount || 0,
+    count: r.count || 0,
+    own: (r.own && r.own.amount) || 0,
+    earlier: (r.earlier && r.earlier.amount) || 0,
+    later: (m.returnedLater && m.returnedLater.amount) || 0,
+  };
 
   const cards = [
     { n: 1, q: 'How much did we sell in this month?', val: m.expected.amount, tone: T.blue, fg: '#111927',
@@ -728,6 +747,23 @@ function MonthStatement({ m, data, onDrill }) {
       sub: `${int(olderOrders)} orders · sold in an earlier month`,
       lines: [['Part of card 2, not card 1', ''], ['No sales invoice in this report', '']],
       drill: { kind: 'cash', month: m.month } },
+    /* RETURNS, read the same way as the money: a credit note belongs to the
+       month it was RAISED, not the month the goods were sold. A 30-April sale
+       returned in May is a MAY credit note — April's GST is filed and is not
+       reopened. So this month's returns are split into the part that is this
+       month's own sales coming back and the part that belongs to an earlier
+       month, exactly as card 2 splits the cash. */
+    { n: 5, q: 'How much came back as returns in this month?', val: ret.total,
+      tone: T.violet, fg: T.violet,
+      sub: ret.count
+        ? `${int(ret.count)} credit note${ret.count === 1 ? '' : 's'} raised in ${fmtMonth(m.month)}`
+        : 'no credit notes raised in this month',
+      lines: [['Returns of this month’s sales', inr(ret.own)],
+              ['Returns of earlier months’ sales', inr(ret.earlier)],
+              ...(ret.later > 0
+                ? [[`Sold this month, returned later: ₹${inr(ret.later, 0)}`, '']]
+                : [])],
+      drill: { kind: 'returns', month: m.month } },
   ];
 
   return (
@@ -744,7 +780,9 @@ function MonthStatement({ m, data, onDrill }) {
         </p>
       </div>
 
-      <div className="grid gap-3.5 grid-cols-1 md:grid-cols-2 xl:grid-cols-4 mb-5">
+      {/* five questions now — sales, cash in, what is still owed, how much of
+          the cash was old, and what came back as returns */}
+      <div className="grid gap-3.5 grid-cols-1 md:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-5 mb-5">
         {cards.map((c) => (
           <button key={c.n} onClick={() => onDrill({ ...c.drill, months: [m.month] })}
                   className="text-left bg-white border border-slate-200 rounded-xl p-4 hover:shadow-md hover:border-slate-300 transition-all"
@@ -773,7 +811,7 @@ function MonthStatement({ m, data, onDrill }) {
       {/* how the four tie together */}
       <div className="bg-white border border-slate-200 rounded-xl p-5 mb-5">
         <div className="text-[11px] font-bold uppercase tracking-wider text-slate-400 mb-3">
-          How the four amounts tie together
+          How the amounts tie together
         </div>
         <div className="grid md:grid-cols-2 gap-7">
           <div>
@@ -1355,6 +1393,13 @@ function drillRows(drill, data, ST) {
     return { kind: 'ledger', prov: PROV.received,
              rows: all.filter((r) => r.month !== m && (r.settledBy || {})[m]) };
   }
+  if (drill.kind === 'returns') {
+    /* every credit note RAISED in this month, whichever month was sold —
+       so the list foots to card 5 and shows both halves of its split */
+    const m = drill.month;
+    return { kind: 'ledger', prov: PROV.returned,
+             rows: all.filter((r) => r.refunded > 0 && r.refundMonth === m) };
+  }
   if (drill.kind === 'chain') {
     const rows = (data?.three?.orderRows || []).filter(inSel);
     const pick = {
@@ -1418,6 +1463,7 @@ function DrillPanel({ drill, data, ST, base, onClose }) {
   const title = drill.kind === 'issue' ? drill.issue.title
     : drill.kind === 'status' ? `${period} · ${drill.status}`
     : drill.kind === 'cash' ? `${period} · credited for earlier months’ sales`
+    : drill.kind === 'returns' ? `${period} · credit notes raised in this month`
     : drill.kind === 'chain' ? `${period} · ${{
         placed: 'Orders placed', cancelled: 'Cancelled', net: 'Net orders',
         invoiced: 'Invoiced', settled: 'Paid by Amazon', unsettled: 'Not paid yet',

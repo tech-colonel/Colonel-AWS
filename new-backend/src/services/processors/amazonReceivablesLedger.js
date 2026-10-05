@@ -108,10 +108,24 @@ function foldInvoiced(mtrRows) {
       o.refunded += Math.abs(amt);
       /* WHERE the refund turned up, which is NOT where the sale was invoiced.
          Amazon never restates a month it has already issued: a return on a June
-         order appears in the JULY file carrying the ORIGINAL June invoice date.
-         Keeping the file lets a prior-period refund be reported instead of
-         silently dropped. */
-      o.refundMonth = o.refundMonth || monthKey(r['Invoice Date']);
+         order appears in the JULY file still carrying the ORIGINAL June invoice
+         date. Measured over 34 MTR files (Apr-25..Aug-26): 190 returns land in a
+         later file than the sale and 172 of them appear ONLY there; the 18 that
+         look restated are orders with two separate events (a Cancel, then a
+         Refund), not one return written twice.
+
+         So `Invoice Date` is the WRONG field for a refund — it is the original
+         sale's date, and using it books the return back into a month that has
+         already been signed off. `Credit Note Date` is the date the credit note
+         was actually raised, and every one of the 529 refund rows carries it.
+         That is also the correct GST period for a credit note.
+         Falls back to the file the row arrived in, and only then to the invoice
+         date, so a month is never silently rewritten. */
+      o.refundMonth = o.refundMonth
+        || monthKey(r['Credit Note Date'] ?? r['credit_note_date'])
+        || monthKey(r.file_month)
+        || monthKey(r['Invoice Date']);
+      o.creditNote = o.creditNote || String(r['Credit Note No'] ?? r['credit_note_no'] ?? '').trim();
       o.refundFile = o.refundFile || String(r.__file || '');
     }
   }
@@ -283,6 +297,9 @@ function buildLedger(src, months, opts = {}) {
     rows.push({
       orderId: id, month: m, status,
       invoiced: i.invoiced, refunded: i.refunded, gst: i.gst,
+      /* the month the CREDIT NOTE was raised — which month the return belongs
+         to. Not the sale's month. See the returns block below. */
+      refundMonth: i.refundMonth || '', creditNote: i.creditNote || '',
       fees: s ? s.fees : 0,
       tds: s ? s.tds : 0, tcs: s ? s.tcs : 0, tdsTcs: s ? s.tdsTcs : 0,
       settled,
@@ -309,7 +326,46 @@ function buildLedger(src, months, opts = {}) {
                                      && r.status !== STATUS.NOT_AMAZON);
 
     const invoiced = sum(billable, 'invoiced');
+
+    /* ── A RETURN BELONGS TO THE MONTH ITS CREDIT NOTE WAS RAISED ──────────
+       An order sold on 30 April and returned in May does NOT reduce April.
+       April's GST has been filed on April's invoices; the return is a MAY
+       credit note and reduces May. That is how the books work and how Amazon
+       itself files the row — measured across 34 MTR files, 100% of refunds sit
+       in the file for their credit-note month, never the month of the sale.
+       The gap runs to 134 days (median 16), so a return can be two or three
+       months after the sale and even cross the financial year — charging it
+       back to the sale month would mean reopening a filed period.
+
+       So this month's returns are every credit note RAISED this month, whatever
+       month the goods were sold in, split so the reader can see both parts. */
+    const creditedHere = rows.filter((r) => r.refundMonth === m && r.refunded > 0);
+    const returnedOwn = sum(creditedHere.filter((r) => r.month === m), 'refunded');
+    const returnedEarlier = sum(creditedHere.filter((r) => r.month !== m), 'refunded');
+    /* sales before the report window have no row of their own, but their credit
+       notes are still this month's returns */
+    const returnedPrior = r2(priorPeriodRefunds
+      .filter((p) => p.refundMonth === m)
+      .reduce((a, p) => a + (Number(p.amount) || 0), 0));
+    /* The CREDIT-NOTE view: what this month's returns are for GST and the P&L.
+       April's sale returned in May is a MAY credit note and reduces MAY's net
+       sales — April's GST is already filed and is never reopened. */
+    const creditNotesRaised = r2(returnedOwn + returnedEarlier + returnedPrior);
+
+    /* The RECEIVABLE view, which is a different question and must stay on the
+       same population as the cash. "What does Amazon still owe for THIS
+       month's orders" can only net off returns OF THOSE ORDERS, whenever the
+       credit note was raised. Deducting another month's credit notes here
+       shrinks this cohort's bill below the cash already collected against it
+       and drives the closing balance negative — which is what happened when
+       both views were briefly computed the same way. */
     const refunded = sum(billable, 'refunded');
+
+    /* returns of THIS month's sales that were credited in a LATER month — not
+       deducted here, shown separately, exactly as cash received later is */
+    const returnedLater = sum(
+      billable.filter((r) => r.refunded > 0 && r.refundMonth && r.refundMonth > m), 'refunded');
+
     const gst = sum(billable, 'gst');          // memo only — see the header
     const fees = sum(billable, 'fees');
     const tds = sum(billable, 'tds');
@@ -336,7 +392,29 @@ function buildLedger(src, months, opts = {}) {
       invoiced: { count: billable.length, amount: invoiced },
       cancelled: { count: mine.length - billable.length,
                    amount: sum(mine.filter((r) => r.status === STATUS.CANCELLED), 'charged') },
-      returned: { count: billable.filter((r) => r.refunded > 0).length, amount: refunded },
+      /* `returned` = credit notes RAISED this month, whatever month was sold.
+         `own` is this month's own sales coming back, `earlier` is the part that
+         belongs to an earlier month's sales — the same split card 2 makes for
+         cash, so the reader can read both sides the same way. */
+      returned: {
+        count: creditedHere.length + priorPeriodRefunds.filter((p) => p.refundMonth === m).length,
+        amount: creditNotesRaised,
+        /* what the receivable above actually netted off: returns of THIS
+           month's own orders, whenever credited. Shown so the two numbers can
+           never be mistaken for each other. */
+        againstThisCohort: refunded,
+        own: { count: creditedHere.filter((r) => r.month === m).length, amount: returnedOwn },
+        earlier: {
+          count: creditedHere.filter((r) => r.month !== m).length
+               + priorPeriodRefunds.filter((p) => p.refundMonth === m).length,
+          amount: r2(returnedEarlier + returnedPrior),
+        },
+      },
+      /* this month's sales returned AFTER the month end — not deducted here */
+      returnedLater: {
+        count: billable.filter((r) => r.refunded > 0 && r.refundMonth && r.refundMonth > m).length,
+        amount: returnedLater,
+      },
       netBillable: { count: billable.length, amount: netBillable },
       /* memo: how much of the receivable is tax to be remitted onward */
       gstMemo: { count: billable.filter((r) => r.gst > 0).length, amount: gst },
