@@ -883,9 +883,18 @@ function InvoicingView({ inv, shown, onDrill }) {
                         byKey.cancelledBeforeInvoice?.n, 'cancelledBeforeInvoice'],
                       ['Less: invoiced then cancelled', -(byKey.invoicedThenCancelled?.order || 0),
                         byKey.invoicedThenCancelled?.n, 'invoicedThenCancelled'],
-                      ['Should have been invoiced', r.orderLevel, null, null, true]] },
+                      ['Less: shipped but never invoiced', -(byKey.shippedNoInvoice?.order || 0),
+                        byKey.shippedNoInvoice?.n, 'shippedNoInvoice'],
+                      ['Goods on orders in BOTH files', r.matchedOrderValue, m.n, 'matched', true]] },
             { head: 'At MTR (invoice) level', file: 'MTR', tone: T.blue,
-              lines: [['Invoiced', r.invoicedValue, m.n, 'matched'],
+              lines: [['Goods on the same orders — MTR principal', r.matchedPrincipal, m.n, 'matched', true],
+                      ['Add: delivery billed on the invoice',
+                        (r.bridge || []).find((x) => x.key === 'shipping')?.amount || 0, null, null],
+                      ['Less: promotional discount',
+                        (r.bridge || []).find((x) => x.key === 'promo')?.amount || 0, null, null],
+                      ['Add: invoiced, no order row', r.bridge?.find((x) => x.key === 'mtrOnly')?.amount || 0,
+                        byKey.mtrOnly?.n, 'mtrOnly'],
+                      ['Invoiced', r.invoicedValue, null, null],
                       ['Less: returns credited', -(r.refundedValue || 0), null, null],
                       ['Net invoiced', r.netBilled, null, null, true]] },
           ].map((col) => (
@@ -900,12 +909,14 @@ function InvoicingView({ inv, shown, onDrill }) {
                 <button key={i} disabled={!bucket}
                         onClick={() => bucket && go(bucket, k, col.file === 'MTR' ? 'mtr' : 'order')}
                         className={`w-full flex justify-between items-baseline gap-2 px-4 py-2 border-t border-slate-100 text-left ${bucket ? 'hover:bg-slate-50 cursor-pointer' : ''}`}
-                        style={strong ? { background: '#F8FAFC' } : {}}>
-                  <span className={`text-[13px] ${strong ? 'font-bold text-slate-800' : 'text-slate-600'}`}>
+                        style={strong ? { background: '#EFF6FF' } : {}}>
+                  <span className={`text-[13px] ${strong ? 'font-bold' : 'text-slate-600'}`}
+                        style={strong ? { color: '#1E3A8A' } : {}}>
                     {k}
                     {n != null && <span className="text-[11px] text-slate-400 ml-1.5">{int(n)} orders</span>}
                   </span>
-                  <span className={`text-[13px] tabular-nums ${strong ? 'font-bold' : ''} text-slate-800 whitespace-nowrap`}>
+                  <span className={`text-[13px] tabular-nums ${strong ? 'font-bold' : ''} whitespace-nowrap`}
+                        style={strong ? { color: '#1E3A8A' } : { color: '#1F2937' }}>
                     ₹{inr(Math.abs(v || 0))}
                   </span>
                 </button>
@@ -958,8 +969,12 @@ function InvoicingView({ inv, shown, onDrill }) {
               </div>
             )}
           </div>
-          <p className="text-[12px] text-slate-500 leading-relaxed mt-2.5">
-            On the matched orders the two files agree exactly: the order report&rsquo;s item price totals{' '}
+          <p className="text-[12px] leading-relaxed mt-2.5 rounded-lg px-3.5 py-2.5"
+             style={{ background: '#EFF6FF', border: '1px solid #BFDBFE', color: '#1E40AF' }}>
+            <strong>The two highlighted rows are the same {int(m.n)} orders, measured the same way —
+            and they are equal.</strong> Everything above and below them is one file counting orders the
+            other does not have, or the invoice carrying something the item price never did. On the
+            matched orders the two files agree exactly: the order report&rsquo;s item price totals{' '}
             <strong>₹{inr(r.matchedOrderValue, 0)}</strong> and the MTR&rsquo;s <em>Principal Amount</em>{' '}
             totals <strong>₹{inr(r.matchedPrincipal, 0)}</strong>
             {Math.abs(r.principalDiff || 0) < 1 ? ' — the same number' : ''}. Everything above is the
