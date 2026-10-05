@@ -781,7 +781,13 @@ function BasisCompare({ cmp, shown, onDrill }) {
    the files. This view names each one, in the order a reader meets them, and
    every number opens the orders behind it. */
 function InvoicingView({ inv, shown, onDrill }) {
-  const [open, setOpen] = useState('matched');
+  /* Counting by ORDERS and counting by MONEY answer different questions and
+     disagree sharply here — 1,581 cancellations are 7% of the orders but 0.02%
+     of the value, while 316 are 1.4% of orders and 1.6% of value. Showing only
+     one of them hides whichever matters, so both are always present and the
+     toggle only decides which leads. */
+  const [by, setBy] = useState('amount');
+  const [open, setOpen] = useState(null);
   if (!inv) {
     return (
       <div className="rounded-xl px-5 py-4" style={{ background: '#F8FAFC', border: '1px solid #E3E6EA' }}>
@@ -796,175 +802,210 @@ function InvoicingView({ inv, shown, onDrill }) {
   const r = inv.revenue || {};
   const inSel = (m) => !m || shown.includes(m);
   const rowsFor = (k) => (inv.rows || []).filter((x) => x.bucket === k && inSel(x.month));
-  const nOf = (k) => rowsFor(k).length;
+  const agg = (k) => {
+    const rs = rowsFor(k);
+    return { n: rs.length,
+             order: rs.reduce((a, x) => a + (x.orderValue || 0), 0),
+             inv: rs.reduce((a, x) => a + (x.invoicedValue || 0), 0) };
+  };
+  const byKey = {}; for (const b of inv.buckets || []) byKey[b.key] = agg(b.key);
+  const totOrders = Object.values(byKey).reduce((a, x) => a + x.n, 0);
+  const totOrderVal = Object.values(byKey).reduce((a, x) => a + x.order, 0);
+  const check = ['shippedNoInvoice', 'mtrOnly'];
+  const checkN = check.reduce((a, k) => a + (byKey[k]?.n || 0), 0);
+  const checkV = check.reduce((a, k) => a + (byKey[k]?.order || 0) + (byKey[k]?.inv || 0), 0);
+  const m = byKey.matched || { n: 0, order: 0, inv: 0 };
 
+  const pct = (a, b) => (b ? `${((100 * a) / b).toFixed(2)}%` : '—');
+  const go = (bucket, label, side) => onDrill({ kind: 'invoicing', bucket, label, side, months: shown });
+
+  /* every headline carries BOTH a count and a value, and opens its orders */
   const KPI = [
-    ['Orders placed', int(inv.orders), '#111927', 'every order line in the order report'],
-    ['Tax invoices raised', int(inv.matched), T.green, 'orders that reached the MTR'],
-    ['Match rate', `${inv.matchRate}%`, T.blue, 'the rest is explained below'],
-    ['Needs checking', int(nOf('shippedNoInvoice') + nOf('mtrOnly')), 
-      (nOf('shippedNoInvoice') + nOf('mtrOnly')) ? T.red : '#94A3B8', 'only these two buckets'],
+    { k: 'Orders placed', n: totOrders, v: totOrderVal, c: '#111927',
+      sub: 'every order in the order report', bucket: '__all' },
+    { k: 'Tax invoices raised', n: m.n, v: m.inv, c: T.green,
+      sub: 'orders that reached the MTR', bucket: 'matched' },
+    { k: 'Match rate', n: null, v: null, c: T.blue, bucket: 'matched',
+      big: pct(m.n, totOrders), sub: `${pct(m.inv, totOrderVal)} by value` },
+    { k: 'Needs checking', n: checkN, v: checkV, c: checkN ? T.red : '#94A3B8',
+      sub: 'only these two buckets', buckets: check },
   ];
+
+  const Bar = ({ a, b, tone }) => (
+    <div className="h-1.5 rounded-full mt-2 overflow-hidden" style={{ background: '#EEF1F4' }}>
+      <div className="h-full rounded-full" style={{ width: `${b ? Math.min(100, (100 * a) / b) : 0}%`, background: tone }} />
+    </div>
+  );
 
   return (
     <>
-      {/* the one fact that explains everything below it */}
       <div className="rounded-xl px-5 py-4 mb-5" style={{ background: '#EFF6FF', border: '1px solid #BFDBFE' }}>
         <div className="text-sm font-bold mb-1.5" style={{ color: '#1E3A8A' }}>
           When does Amazon raise the invoice?
         </div>
         <p className="text-[13px] leading-relaxed" style={{ color: '#1E40AF' }}>
-          Measured on {int(t.sample || 0)} invoices in these files: Amazon raises the tax invoice a
-          median of <strong>{t.medianOrderToInvoiceHrs} hours</strong> after the order
-          ({t.pctInvoicedWithin24h}% inside 24 hours), and the goods leave the warehouse a median of{' '}
+          Measured on {int(t.sample || 0)} invoices in these files: the tax invoice is raised a median
+          of <strong>{t.medianOrderToInvoiceHrs} hours</strong> after the order
+          ({t.pctInvoicedWithin24h}% inside 24 hours), and the goods leave a median of{' '}
           <strong>{t.medianInvoiceToShipHrs} hours</strong> later —{' '}
-          <strong>{t.pctInvoicedBeforeShipping}% are invoiced BEFORE they ship.</strong>
-        </p>
-        <p className="text-[13px] leading-relaxed mt-2" style={{ color: '#1E40AF' }}>
-          So the invoice belongs to <strong>order confirmation, not dispatch</strong>. That is the whole
-          reason the two files differ: an order cancelled inside that first half hour never got an
-          invoice and is absent from the MTR. Cancel any later and the invoice already exists, so it
-          stays in the MTR with a <strong>Cancel</strong> row reversing it.
+          <strong>{t.pctInvoicedBeforeShipping}% are invoiced BEFORE they ship.</strong> So the invoice
+          belongs to <strong>order confirmation, not dispatch</strong>: cancel inside that first half
+          hour and no invoice ever existed, cancel later and it stays in the MTR with a Cancel row.
         </p>
       </div>
 
       <div className="grid gap-3.5 grid-cols-2 xl:grid-cols-4 mb-5">
-        {KPI.map(([k, v, c, sub]) => (
-          <div key={k} className="bg-white border border-slate-200 rounded-xl p-4">
-            <div className="text-[12px] font-bold text-slate-600">{k}</div>
-            <div className="text-[26px] font-bold tracking-tight mt-1 tabular-nums" style={{ color: c }}>{v}</div>
-            <div className="text-[11px] text-slate-500 mt-0.5">{sub}</div>
-          </div>
+        {KPI.map((x) => (
+          <button key={x.k}
+                  onClick={() => (x.buckets
+                    ? onDrill({ kind: 'invoicing', buckets: x.buckets, label: x.k, months: shown })
+                    : go(x.bucket, x.k, x.k === 'Tax invoices raised' ? 'mtr' : 'order'))}
+                  className="text-left bg-white border border-slate-200 rounded-xl p-4 hover:shadow-md hover:border-slate-300 transition-all">
+            <div className="text-[12px] font-bold text-slate-600">{x.k}</div>
+            <div className="text-[26px] font-bold tracking-tight mt-1 tabular-nums" style={{ color: x.c }}>
+              {x.big || int(x.n)}
+            </div>
+            {x.v !== null && (
+              <div className="text-[13px] font-bold tabular-nums text-slate-700 mt-0.5">₹{inr(x.v, 0)}</div>
+            )}
+            <div className="text-[11px] text-slate-500 mt-0.5">{x.sub}</div>
+          </button>
         ))}
       </div>
 
-      {/* sales counted both ways */}
-      <Card title="The same sales, counted two ways"
-            sub="what customers ordered, against what you actually invoiced">
+      {/* sales, the two ways, every line opening its orders */}
+      <Card title="Sales at order level vs MTR level"
+            sub="the same month counted from the order report and from the tax invoices — click any line">
         <div className="p-4 grid gap-4 lg:grid-cols-2">
-          <div className="rounded-xl overflow-hidden border border-slate-200">
-            <div className="px-4 py-2 text-[11px] uppercase tracking-wide font-bold"
-                 style={{ background: '#F8FAFC', color: '#475569' }}>At order level</div>
-            {[['Everything customers ordered', r.allOrderValue],
-              ['Less: cancelled', -(r.cancelledValue || 0)],
-              ['Should have been invoiced', r.orderLevel, true]].map(([k, v, strong], i) => (
-              <div key={i} className="flex justify-between px-4 py-2 border-t border-slate-100"
-                   style={strong ? { background: '#F8FAFC' } : {}}>
-                <span className={`text-[13px] ${strong ? 'font-bold text-slate-800' : 'text-slate-600'}`}>{k}</span>
-                <span className={`text-[13px] tabular-nums ${strong ? 'font-bold' : ''} text-slate-800`}>
-                  ₹{inr(Math.abs(v || 0))}
-                </span>
+          {[{ head: 'At order level', file: 'Order report', tone: T.violet,
+              lines: [['Everything customers ordered', r.allOrderValue, totOrders, '__all'],
+                      ['Less: cancelled before invoice', -(byKey.cancelledBeforeInvoice?.order || 0),
+                        byKey.cancelledBeforeInvoice?.n, 'cancelledBeforeInvoice'],
+                      ['Less: invoiced then cancelled', -(byKey.invoicedThenCancelled?.order || 0),
+                        byKey.invoicedThenCancelled?.n, 'invoicedThenCancelled'],
+                      ['Should have been invoiced', r.orderLevel, null, null, true]] },
+            { head: 'At MTR (invoice) level', file: 'MTR', tone: T.blue,
+              lines: [['Invoiced', r.invoicedValue, m.n, 'matched'],
+                      ['Less: returns credited', -(r.refundedValue || 0), null, null],
+                      ['Net invoiced', r.netBilled, null, null, true]] },
+          ].map((col) => (
+            <div key={col.head} className="rounded-xl overflow-hidden border border-slate-200">
+              <div className="px-4 py-2 flex items-center justify-between"
+                   style={{ background: '#F8FAFC' }}>
+                <span className="text-[11px] uppercase tracking-wide font-bold text-slate-600">{col.head}</span>
+                <span className="text-[10px] font-bold px-2 py-0.5 rounded"
+                      style={{ background: `${col.tone}18`, color: col.tone }}>{col.file}</span>
               </div>
-            ))}
-          </div>
-          <div className="rounded-xl overflow-hidden border border-slate-200">
-            <div className="px-4 py-2 text-[11px] uppercase tracking-wide font-bold"
-                 style={{ background: '#F8FAFC', color: '#475569' }}>At MTR (invoice) level</div>
-            {[['Invoiced', r.invoicedValue],
-              ['Less: returns credited', -(r.refundedValue || 0)],
-              ['Net invoiced', r.netBilled, true]].map(([k, v, strong], i) => (
-              <div key={i} className="flex justify-between px-4 py-2 border-t border-slate-100"
-                   style={strong ? { background: '#F8FAFC' } : {}}>
-                <span className={`text-[13px] ${strong ? 'font-bold text-slate-800' : 'text-slate-600'}`}>{k}</span>
-                <span className={`text-[13px] tabular-nums ${strong ? 'font-bold' : ''} text-slate-800`}>
-                  ₹{inr(Math.abs(v || 0))}
-                </span>
-              </div>
-            ))}
-          </div>
+              {col.lines.map(([k, v, n, bucket, strong], i) => (
+                <button key={i} disabled={!bucket}
+                        onClick={() => bucket && go(bucket, k, col.file === 'MTR' ? 'mtr' : 'order')}
+                        className={`w-full flex justify-between items-baseline gap-2 px-4 py-2 border-t border-slate-100 text-left ${bucket ? 'hover:bg-slate-50 cursor-pointer' : ''}`}
+                        style={strong ? { background: '#F8FAFC' } : {}}>
+                  <span className={`text-[13px] ${strong ? 'font-bold text-slate-800' : 'text-slate-600'}`}>
+                    {k}
+                    {n != null && <span className="text-[11px] text-slate-400 ml-1.5">{int(n)} orders</span>}
+                  </span>
+                  <span className={`text-[13px] tabular-nums ${strong ? 'font-bold' : ''} text-slate-800 whitespace-nowrap`}>
+                    ₹{inr(Math.abs(v || 0))}
+                  </span>
+                </button>
+              ))}
+            </div>
+          ))}
         </div>
         <div className="px-4 pb-4">
           <div className="rounded-lg px-4 py-3 text-[12.5px] leading-relaxed"
                style={{ background: '#FFFBEB', border: '1px solid #FDE68A', color: '#78350F' }}>
-            <strong>Order level ₹{inr(r.orderLevel, 0)}</strong> against{' '}
-            <strong>invoiced ₹{inr(r.invoicedValue, 0)}</strong> — a difference of{' '}
+            <strong>₹{inr(r.orderLevel, 0)}</strong> at order level against{' '}
+            <strong>₹{inr(r.invoicedValue, 0)}</strong> invoiced — a difference of{' '}
             <strong>₹{inr(Math.abs(r.gap || 0), 0)}</strong>
-            {r.orderLevel ? ` (${Math.abs(100 * (r.gap || 0) / r.orderLevel).toFixed(2)}%)` : ''}.
-            {' '}₹{inr(Math.abs(r.explainedByMtrOnly || 0), 0)} of it is invoices whose order was placed
-            before this period began. The remaining{' '}
-            <strong>₹{inr(Math.abs(r.unexplained || 0), 0)}</strong> is not yet explained — most likely
-            shipping or gift-wrap carried in the MTR&rsquo;s invoice amount but not in the order
-            report&rsquo;s item price. It is shown rather than absorbed.
+            {r.orderLevel ? ` (${Math.abs(100 * (r.gap || 0) / r.orderLevel).toFixed(2)}%)` : ''}.{' '}
+            ₹{inr(Math.abs(r.explainedByMtrOnly || 0), 0)} is invoices whose order was placed before
+            this period. <strong>₹{inr(Math.abs(r.unexplained || 0), 0)} is still unexplained</strong> —
+            most likely shipping or gift wrap inside the MTR&rsquo;s invoice amount but not the order
+            report&rsquo;s item price. Shown, not absorbed.
           </div>
         </div>
       </Card>
 
-      {/* every bucket, with its reason */}
+      {/* the buckets, counted both ways */}
       <Card title="Where the difference comes from"
-            sub="every order is in exactly one bucket — open a bucket to read why and see the orders">
+            sub="every order sits in exactly one bucket — click a bucket to open its orders"
+            right={
+              <div className="flex rounded-lg overflow-hidden border border-slate-200">
+                {[['amount', 'By amount'], ['orders', 'By orders']].map(([k, label]) => (
+                  <button key={k} onClick={() => setBy(k)}
+                          className="px-3 py-1.5 text-[11.5px] font-bold transition-colors"
+                          style={by === k ? { background: T.ink, color: '#fff' }
+                                          : { background: '#fff', color: '#64748B' }}>
+                    {label}
+                  </button>
+                ))}
+              </div>}>
         <div className="p-4 space-y-2">
           {(inv.buckets || []).map((b) => {
-            const n = nOf(b.key);
-            if (!n) return null;
+            const a = byKey[b.key] || { n: 0, order: 0, inv: 0 };
+            if (!a.n) return null;
+            const value = a.order || a.inv;
+            const lead = by === 'amount' ? `₹${inr(value, 0)}` : int(a.n);
+            const trail = by === 'amount' ? `${int(a.n)} orders` : `₹${inr(value, 0)}`;
+            const share = by === 'amount' ? pct(value, totOrderVal) : pct(a.n, totOrders);
             const isOpen = open === b.key;
-            const rows = isOpen ? rowsFor(b.key) : [];
             return (
               <div key={b.key} className="border rounded-xl overflow-hidden"
                    style={{ borderColor: isOpen ? (b.expected ? '#CBD5E1' : '#FCA5A5') : '#E3E6EA' }}>
-                <button onClick={() => setOpen(isOpen ? null : b.key)}
-                        className="w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-slate-50 transition-colors">
+                <div className="flex items-center gap-3 px-4 py-3">
                   <span className="text-[10px] font-bold px-2 py-1 rounded uppercase tracking-wide shrink-0"
                         style={b.expected ? { background: '#F1F5F9', color: '#475569' }
                                           : { background: '#FEF2F2', color: T.red }}>
                     {b.expected ? 'Expected' : 'Check'}
                   </span>
-                  <span className="font-semibold text-slate-800 text-sm flex-1 min-w-0">{b.label}</span>
-                  <span className="text-sm font-bold tabular-nums shrink-0 text-slate-700">{int(n)}</span>
-                  <ChevronDown className="h-4 w-4 shrink-0 text-slate-400 transition-transform"
-                               style={{ transform: isOpen ? 'rotate(180deg)' : 'none' }} />
-                </button>
+                  <button onClick={() => setOpen(isOpen ? null : b.key)}
+                          className="flex-1 min-w-0 text-left">
+                    <div className="font-semibold text-slate-800 text-sm">{b.label}</div>
+                    <Bar a={by === 'amount' ? value : a.n} b={by === 'amount' ? totOrderVal : totOrders}
+                         tone={b.expected ? '#CBD5E1' : T.red} />
+                  </button>
+                  <div className="text-right shrink-0">
+                    <div className="text-sm font-bold tabular-nums text-slate-800">{lead}</div>
+                    <div className="text-[11px] text-slate-500 tabular-nums">{trail} · {share}</div>
+                  </div>
+                  <button onClick={() => go(b.key, b.label)}
+                          className="text-[11px] font-bold px-2.5 py-1.5 rounded-lg border shrink-0 hover:bg-slate-50"
+                          style={{ borderColor: '#E3E6EA', color: '#475569' }}>
+                    Open
+                  </button>
+                  <button onClick={() => setOpen(isOpen ? null : b.key)} className="shrink-0">
+                    <ChevronDown className="h-4 w-4 text-slate-400 transition-transform"
+                                 style={{ transform: isOpen ? 'rotate(180deg)' : 'none' }} />
+                  </button>
+                </div>
                 {isOpen && (
                   <div className="px-4 pb-4 border-t" style={{ borderColor: '#EEF1F4' }}>
                     <p className="text-[13px] text-slate-700 leading-relaxed mt-3">{b.meaning}</p>
+                    <div className="grid gap-3 grid-cols-2 lg:grid-cols-4 mt-3">
+                      {[['Orders', int(a.n)], ['Order value', `₹${inr(a.order)}`],
+                        ['Invoiced value', `₹${inr(a.inv)}`],
+                        ['Share of orders', pct(a.n, totOrders)]].map(([k, v]) => (
+                        <div key={k} className="rounded-lg px-3 py-2" style={{ background: '#F8FAFC' }}>
+                          <div className="text-[10px] uppercase tracking-wide font-bold text-slate-500">{k}</div>
+                          <div className="text-sm font-bold text-slate-800 tabular-nums mt-0.5">{v}</div>
+                        </div>
+                      ))}
+                    </div>
                     {b.key === 'shippedNoInvoice' && b.atPeriodEdge > 0 && (
-                      <p className="text-[12px] mt-2 rounded-lg px-3 py-2"
+                      <p className="text-[12px] mt-3 rounded-lg px-3 py-2"
                          style={{ background: '#FFFBEB', border: '1px solid #FDE68A', color: '#78350F' }}>
-                        {int(b.atPeriodEdge)} of these shipped in the last month of the report, so their
-                        invoice is in the next month&rsquo;s MTR — a timing difference, not a missing
-                        invoice. The other {int(n - b.atPeriodEdge)} are worth checking.
+                        {int(b.atPeriodEdge)} shipped in the last month of the report, so the invoice is
+                        in the next month&rsquo;s MTR — timing, not a missing invoice. The other{' '}
+                        {int(a.n - b.atPeriodEdge)} are worth checking.
                       </p>
                     )}
-                    <div className="mt-3 overflow-x-auto" style={{ maxHeight: 340 }}>
-                      <table className="w-full text-sm">
-                        <thead className="sticky top-0" style={{ background: '#F8FAFC' }}>
-                          <tr className="text-[11px] uppercase tracking-wide text-slate-500">
-                            <th className="px-3 py-2 text-left font-semibold">Order</th>
-                            <th className="px-3 py-2 text-left font-semibold">Month</th>
-                            <th className="px-3 py-2 text-left font-semibold">Status</th>
-                            <th className="px-3 py-2 text-right font-semibold">Qty</th>
-                            <th className="px-3 py-2 text-right font-semibold">Order value</th>
-                            <th className="px-3 py-2 text-right font-semibold">Invoiced</th>
-                            <th className="px-3 py-2 text-left font-semibold">Why it is here</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {rows.slice(0, 300).map((x, i) => (
-                            <tr key={x.orderId + i} className="border-t border-slate-100 hover:bg-slate-50">
-                              <td className="px-3 py-1.5 font-mono text-[11.5px] text-slate-700">{x.orderId}</td>
-                              <td className="px-3 py-1.5 text-[12px] text-slate-600">
-                                {x.month ? fmtMonth(x.month) : '—'}
-                              </td>
-                              <td className="px-3 py-1.5 text-[12px] text-slate-600">{x.status}</td>
-                              <td className="px-3 py-1.5 text-right tabular-nums text-[12px] text-slate-700">
-                                {x.qty === null ? '—' : int(x.qty)}
-                              </td>
-                              <td className="px-3 py-1.5 text-right tabular-nums text-[12px] text-slate-700">
-                                {x.orderValue ? `₹${inr(x.orderValue)}` : '—'}
-                              </td>
-                              <td className="px-3 py-1.5 text-right tabular-nums text-[12px] font-semibold text-slate-800">
-                                {x.invoicedValue ? `₹${inr(x.invoicedValue)}` : '—'}
-                              </td>
-                              <td className="px-3 py-1.5 text-[11.5px] text-slate-500">{x.why}</td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                      {rows.length > 300 && (
-                        <div className="px-3 py-2 text-[11.5px] text-slate-400">
-                          showing the first 300 of {int(rows.length)}
-                        </div>
-                      )}
-                    </div>
+                    <button onClick={() => go(b.key, b.label)}
+                            className="mt-3 text-xs font-bold px-3.5 py-2 rounded-lg text-white"
+                            style={{ background: T.ink }}>
+                      Open all {int(a.n)} orders
+                    </button>
                   </div>
                 )}
               </div>
@@ -973,17 +1014,14 @@ function InvoicingView({ inv, shown, onDrill }) {
         </div>
       </Card>
 
-      {/* what only the MTR can tell you about cancellation */}
       <Card title="What the MTR says about cancellations"
             sub="the order report says only “Cancelled” — the MTR says what happened to the invoice">
-        <div className="p-4 space-y-2">
+        <div className="p-4 grid gap-2 md:grid-cols-3">
           {(inv.cancellation || []).map((c) => (
             <div key={c.key} className="rounded-xl border border-slate-200 px-4 py-3">
-              <div className="flex items-center justify-between gap-3">
-                <span className="font-semibold text-slate-800 text-sm">{c.label}</span>
-                <span className="text-sm font-bold tabular-nums text-slate-700">{int(c.count)}</span>
-              </div>
-              <p className="text-[12.5px] text-slate-500 leading-relaxed mt-1">{c.meaning}</p>
+              <div className="text-2xl font-bold tabular-nums text-slate-800">{int(c.count)}</div>
+              <div className="font-semibold text-slate-700 text-[13px] mt-0.5">{c.label}</div>
+              <p className="text-[12px] text-slate-500 leading-relaxed mt-1.5">{c.meaning}</p>
             </div>
           ))}
         </div>
@@ -2151,6 +2189,17 @@ function drillRows(drill, data, ST) {
     return { kind: 'ledger', prov: PROV.returned,
              rows: all.filter((r) => r.refunded > 0 && r.refundMonth === m) };
   }
+  if (drill.kind === 'invoicing') {
+    /* order-vs-MTR rows, not ledger rows — a different population with a
+       different question, so it carries its own columns and provenance */
+    const all2 = (data?.invoicing?.rows || [])
+      .filter((r) => (!ms.length || !r.month || ms.includes(r.month)));
+    const rows = drill.bucket === '__all' ? all2
+      : drill.buckets ? all2.filter((r) => drill.buckets.includes(r.bucket))
+      : all2.filter((r) => r.bucket === drill.bucket);
+    return { kind: 'invoicing', rows,
+             prov: PROV[drill.side === 'mtr' ? 'invoiced' : 'placed'] || PROV.invoiced };
+  }
   if (drill.kind === 'chain') {
     const rows = (data?.three?.orderRows || []).filter(inSel);
     const pick = {
@@ -2205,16 +2254,30 @@ const CHAIN_COLS = [
   { key: 'shipState', label: 'Ship state' },
 ];
 
+/* An invoicing drill has to show BOTH files on one row — the order side and
+   the invoice side — otherwise the reader cannot see which one is missing. */
+const INVOICING_COLS = [
+  { key: 'orderId', label: 'Order ID', mono: true, w: 22 },
+  { key: 'month', label: 'Month', fmt: fmtMonth },
+  { key: 'status', label: 'Order status' },
+  { key: 'qty', label: 'Qty', num: true },
+  { key: 'orderValue', label: 'Order value', num: true },
+  { key: 'invoicedValue', label: 'Invoiced', num: true },
+  { key: 'why', label: 'Why it is here' },
+];
+
 function DrillPanel({ drill, data, ST, base, onClose }) {
   const [busy, setBusy] = useState(false);
   const { kind, rows, prov } = useMemo(() => drillRows(drill, data, ST), [drill, data, ST]);
-  const cols = kind === 'chain' ? CHAIN_COLS : LEDGER_COLS;
+  const cols = kind === 'chain' ? CHAIN_COLS
+             : kind === 'invoicing' ? INVOICING_COLS : LEDGER_COLS;
   const f = FILES[prov.file]; const FIcon = f.icon;
   const period = rangeLabel(drill.months || []);
   const title = drill.kind === 'issue' ? drill.issue.title
     : drill.kind === 'status' ? `${period} · ${drill.status}`
     : drill.kind === 'cash' ? `${period} · credited for earlier months’ sales`
     : drill.kind === 'returns' ? `${period} · credit notes raised in this month`
+    : drill.kind === 'invoicing' ? `${period} · ${drill.label || drill.bucket}`
     : drill.kind === 'chain' ? `${period} · ${{
         placed: 'Orders placed', cancelled: 'Cancelled', net: 'Net orders',
         invoiced: 'Invoiced', settled: 'Paid by Amazon', unsettled: 'Not paid yet',
