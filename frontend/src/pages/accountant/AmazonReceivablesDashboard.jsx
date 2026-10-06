@@ -809,6 +809,48 @@ function BasisCompare({ cmp, shown, onDrill }) {
   );
 }
 
+/* ── one aggregation, two tabs ────────────────────────────────────────────
+   The Receivables tab's sales walk and the Order-vs-Invoice tab's bridge
+   describe the same movement, so it is computed once, here, from the SELECTED
+   rows. Reading a backend aggregate built over the whole run is exactly what
+   let the two disagree: the counts were filtered and the amounts were not, so
+   with Apr 2025 - Jan 2026 chosen the page valued 13,277 orders at the
+   seventeen-month figure of 87,13,747.73. */
+function invAgg(inv, shown) {
+  const inSel = (mm) => !mm || shown.includes(mm);
+  const sel = (inv?.rows || []).filter((x) => inSel(x.month));
+  const S = (rs, k) => r2(rs.reduce((a, x) => a + (x[k] || 0), 0));
+  const byKey = {};
+  for (const b of inv?.buckets || []) {
+    const rs = sel.filter((x) => x.bucket === b.key);
+    byKey[b.key] = { n: rs.length, order: S(rs, 'orderValue'), inv: S(rs, 'invoicedValue') };
+  }
+  const matchedRows = sel.filter((x) => x.bucket === 'matched');
+  const mtrOnlyRows = sel.filter((x) => x.bucket === 'mtrOnly');
+  const R = {
+    allOrderValue: S(sel, 'orderValue'),
+    cancelledValue: S(sel, 'cancelledValue'),
+    matchedOrderValue: S(matchedRows, 'orderValue'),
+    matchedPrincipal: S(matchedRows, 'principalValue'),
+    shipping: S(matchedRows, 'shippingValue'),
+    promo: S(matchedRows, 'promoValue'),
+    giftWrap: S(matchedRows, 'giftWrapValue'),
+    mtrOnly: S(mtrOnlyRows, 'invoicedValue'),
+    invoicedValue: S(sel, 'invoicedValue'),
+    refundedValue: S(sel, 'refundedValue'),
+  };
+  R.netBilled = r2(R.invoicedValue - R.refundedValue);
+  R.orderLevel = r2(R.allOrderValue - R.cancelledValue);
+  R.other = r2(R.invoicedValue - (R.matchedPrincipal + R.shipping + R.promo
+                                  + R.giftWrap + R.mtrOnly));
+  return {
+    sel, byKey, R, S,
+    totOrders: Object.values(byKey).reduce((a, x) => a + x.n, 0),
+    totOrderVal: Object.values(byKey).reduce((a, x) => a + x.order, 0),
+    m: byKey.matched || { n: 0, order: 0, inv: 0 },
+  };
+}
+
 /* ── ORDER REPORT vs MTR ──────────────────────────────────────────────────
    Everyone knows the two files disagree; almost nobody can say why, so the gap
    gets written off as "Amazon's data is messy" and a real missing invoice hides
@@ -834,52 +876,10 @@ function InvoicingView({ inv, shown, onDrill }) {
     );
   }
   const t = inv.invoiceTiming || {};
-  const inSel = (m) => !m || shown.includes(m);
-  const rowsFor = (k) => (inv.rows || []).filter((x) => x.bucket === k && inSel(x.month));
-  const agg = (k) => {
-    const rs = rowsFor(k);
-    return { n: rs.length,
-             order: rs.reduce((a, x) => a + (x.orderValue || 0), 0),
-             inv: rs.reduce((a, x) => a + (x.invoicedValue || 0), 0) };
-  };
-  const byKey = {}; for (const b of inv.buckets || []) byKey[b.key] = agg(b.key);
-
-  const totOrders = Object.values(byKey).reduce((a, x) => a + x.n, 0);
-  const totOrderVal = Object.values(byKey).reduce((a, x) => a + x.order, 0);
+  const { byKey, totOrders, totOrderVal, m, R } = invAgg(inv, shown);
   const check = ['shippedNoInvoice', 'mtrOnly'];
   const checkN = check.reduce((a, k) => a + (byKey[k]?.n || 0), 0);
   const checkV = check.reduce((a, k) => a + (byKey[k]?.order || 0) + (byKey[k]?.inv || 0), 0);
-  const m = byKey.matched || { n: 0, order: 0, inv: 0 };
-
-  /* ── the bridge is derived from the SELECTED rows, never from the backend's
-     whole-period aggregate ─────────────────────────────────────────────────
-     It used to read `inv.revenue`, which is built once over every month the run
-     covers, while the counts beside it were filtered to the chosen range. With
-     Apr 2025 – Jan 2026 selected the headline said 13,277 orders worth
-     54,66,856 and the bridge two blocks below valued those same 13,277 orders
-     at 87,13,747.73 — the seventeen-month figure. Changing the range moved the
-     counts and left every amount standing. Both now come off one filtered row
-     set, so they cannot describe different populations again. */
-  const sel = (inv.rows || []).filter((x) => inSel(x.month));
-  const S = (rs, k) => r2(rs.reduce((a, x) => a + (x[k] || 0), 0));
-  const matchedRows = sel.filter((x) => x.bucket === 'matched');
-  const mtrOnlyRows = sel.filter((x) => x.bucket === 'mtrOnly');
-  const R = {
-    allOrderValue: S(sel, 'orderValue'),
-    matchedOrderValue: S(matchedRows, 'orderValue'),
-    matchedPrincipal: S(matchedRows, 'principalValue'),
-    shipping: S(matchedRows, 'shippingValue'),
-    promo: S(matchedRows, 'promoValue'),
-    giftWrap: S(matchedRows, 'giftWrapValue'),
-    mtrOnly: S(mtrOnlyRows, 'invoicedValue'),
-    invoicedValue: S(sel, 'invoicedValue'),
-    refundedValue: S(sel, 'refundedValue'),
-  };
-  R.netBilled = r2(R.invoicedValue - R.refundedValue);
-  /* whatever the named parts do not explain stays on its own line rather than
-     being absorbed into one of them */
-  R.other = r2(R.invoicedValue - (R.matchedPrincipal + R.shipping + R.promo
-                                  + R.giftWrap + R.mtrOnly));
 
   /* Both columns are generated FROM the bucket list, so a bucket can never be
      left out of the walk again. "Not an Amazon sale" and "free replacement"
@@ -908,7 +908,6 @@ function InvoicingView({ inv, shown, onDrill }) {
      too stood still when the range moved. Built from the selected rows now,
      and from the SAME figures as the two columns above it — one period, one
      population, three presentations of it. */
-  R.orderLevel = r2(R.allOrderValue - S(sel, 'cancelledValue'));
   const bridgeLines = [
     { key: 'matchedGap', label: 'orders in the order report that never reached the MTR',
       note: 'Cancelled, not an Amazon sale, replaced at no charge, or shipped without an invoice.',
@@ -1676,6 +1675,94 @@ function ReturnsView({ m, data, ret, onDrill }) {
   );
 }
 
+/* ── how a shelf full of orders becomes one "Net sales" figure ────────────
+   The Cash Cycle opened on Net sales 83,19,418.98 with no parentage: an
+   accountant comparing it with the order report found neither the gross figure
+   nor the deductions, and concluded the report did not match the orders. It
+   does. This is the walk, vertical because eleven rungs across a page cannot be
+   read, and each rung names the file it came from.
+
+   The rungs are the Order-vs-Invoice bridge plus returns — the same
+   aggregation, so the two tabs cannot drift apart. */
+function SalesWalk({ inv, shown, onDrill }) {
+  if (!inv) return null;
+  const { byKey, totOrders, m, R } = invAgg(inv, shown);
+  const L = [];
+  L.push({ label: 'Everything customers ordered', v: R.allOrderValue, n: totOrders, op: '',
+           src: 'order', bucket: '__all', note: 'Every order placed in the period, cancellations included' });
+  for (const b of inv.buckets || []) {
+    if (b.key === 'matched' || b.key === 'mtrOnly') continue;
+    const a = byKey[b.key] || { n: 0, order: 0 };
+    if (!a.n && !a.order) continue;
+    L.push({ label: String(b.label || b.key), v: -a.order, n: a.n, op: '−', src: 'order',
+             bucket: b.key, note: b.meaning ? String(b.meaning).split('. ')[0] + '.' : '' });
+  }
+  L.push({ label: 'Goods on the orders that were invoiced', v: R.matchedOrderValue, n: m.n, op: '=',
+           src: 'derived', bucket: 'matched', strong: true,
+           note: 'The order report and the MTR agree on these to the paisa' });
+  const add = (k, label, v, note) => {
+    if (Math.abs(v) < 0.01) return;
+    L.push({ label, v, op: v > 0 ? '+' : '−', src: 'mtr', note,
+             bucket: k === 'mtrOnly' ? 'mtrOnly' : null, n: k === 'mtrOnly' ? byKey.mtrOnly?.n : null });
+  };
+  add('shipping', 'Delivery billed on the invoice', R.shipping,
+      'The invoice carries a delivery charge the item price never did');
+  add('promo', 'Promotional discount on the invoice', R.promo,
+      'A discount applied on the invoice and not in the item price');
+  add('giftWrap', 'Gift wrap billed on the invoice', R.giftWrap, '');
+  add('mtrOnly', 'Invoiced with no order row in this period', R.mtrOnly,
+      'Ordered just before the period opened, or just after midnight IST on the first');
+  add('other', 'Other invoice differences', R.other,
+      'Not explained by delivery, discount or gift wrap');
+  L.push({ label: 'Invoiced', v: R.invoicedValue, n: null, op: '=', src: 'mtr', strong: true,
+           note: 'Invoice Amount on every Shipment row of the MTR' });
+  L.push({ label: 'Customer returns', v: -R.refundedValue, n: null, op: '−', src: 'mtr',
+           bucket: null, note: 'Refunds credited against these orders' });
+  L.push({ label: 'Net sales', v: R.netBilled, n: null, op: '=', src: 'derived', strong: true, final: true,
+           note: 'What Amazon owes us before its own charges — the figure the Cash Cycle starts from' });
+
+  return (
+    <div className="rounded-xl border border-slate-200 overflow-hidden mb-5">
+      <div className="px-4 py-2.5 flex items-center justify-between" style={{ background: '#F8FAFC' }}>
+        <span className="text-[11px] uppercase tracking-wide font-bold text-slate-600">
+          How we get to net sales
+        </span>
+        <span className="text-[11px] text-slate-500">GST-inclusive throughout · click any line</span>
+      </div>
+      {L.map((x, i) => {
+        const f = FILES[x.src]; const Icon = f.icon;
+        return (
+          <button key={i} disabled={!x.bucket}
+                  onClick={() => x.bucket && onDrill({ kind: 'invoicing', bucket: x.bucket, label: x.label,
+                                                       side: x.src === 'mtr' ? 'mtr' : 'order', months: shown })}
+                  className={`w-full flex items-baseline gap-3 px-4 py-2.5 border-t border-slate-100 text-left
+                              ${x.bucket ? 'hover:bg-slate-50 cursor-pointer' : ''}`}
+                  style={x.final ? { background: '#EFF6FF' } : x.strong ? { background: '#F8FAFC' } : {}}>
+            <span className="w-4 shrink-0 text-[15px] text-slate-300 font-semibold">{x.op}</span>
+            <span className="min-w-0 flex-1">
+              <span className={`text-[13.5px] ${x.strong ? 'font-bold' : 'text-slate-700'}`}
+                    style={x.final ? { color: '#1E3A8A' } : {}}>
+                {x.label}
+                {x.n != null && <span className="text-[11px] text-slate-400 ml-1.5">{int(x.n)} orders</span>}
+              </span>
+              {x.note && <span className="block text-[11px] text-slate-400 leading-snug mt-0.5">{x.note}</span>}
+            </span>
+            <span className="flex items-center gap-1 text-[10px] font-bold shrink-0 w-[92px] justify-end"
+                  style={{ color: f.tone }}>
+              <Icon className="h-3 w-3" /> {f.short}
+            </span>
+            <span className={`text-[13.5px] tabular-nums whitespace-nowrap w-[130px] text-right
+                              ${x.strong ? 'font-bold' : ''}`}
+                  style={x.final ? { color: '#1E3A8A' } : {}}>
+              ₹{inr(Math.abs(x.v || 0))}
+            </span>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 /* ── the order chain, as a ladder ─────────────────────────────────────────
    Every order leaves by exactly one door, so the rungs subtract to the next
    one and nothing sits between two cards unexplained. The screen used to show
@@ -1790,8 +1877,11 @@ function PeriodOverview({ led, data, shown, onDrill, ST }) {
         title="Order Cycle — what happened to every order"
         sub="Each step subtracts to the next, so the row adds up with nothing left over." />
 
-      <Card title="Cash Cycle" sub="How much of the net sales has actually been received">
-        <div className="p-5">
+      <Card title="Cash Cycle" sub="From everything that was ordered, down to what is still to come in">
+        <div className="px-5 pt-5">
+          <SalesWalk inv={data?.invoicing} shown={shown} onDrill={onDrill} />
+        </div>
+        <div className="px-5 pb-5">
           <div className="flex items-stretch gap-2.5 flex-wrap">
             {EQ.map((e) => (
               <React.Fragment key={e.cap}>
