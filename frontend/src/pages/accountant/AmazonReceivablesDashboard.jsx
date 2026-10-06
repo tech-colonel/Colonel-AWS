@@ -707,6 +707,7 @@ function ReportView({ data, status, months, shown, sel, setSel, onDrill, base, o
         ))}
       </div>
 
+      <Motion />
       <RangeBar months={months} sel={sel} setSel={setSel} all={all} />
 
       {layer === 'money'
@@ -957,68 +958,147 @@ function FileTag({ kind, col }) {
   );
 }
 
-/* ── one file against another, and every rupee between them ───────────────
-   The strip and the difference block were two renderings of one fact — here
-   is file A, here is file B, here is the gap — stacked one on the other, each
-   repeating the other's numbers. They are one block now: A on the left, B on
-   the right, the difference on the far right, and underneath it every line
-   that makes the difference up.
+/* ── page motion ─────────────────────────────────────────────────────────
+   One stylesheet for the whole report rather than one per tab: it lived
+   inside the MTR-vs-Settlement view, so the Order-vs-MTR tab got the markup
+   for the pulse and none of the keyframes to drive it. */
+function Motion() {
+  return (
+    <style>{`
+        @keyframes arGrow { from { transform: scaleX(0); } to { transform: scaleX(1); } }
+        @keyframes arRise { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+        /* the pulse that walks the equation: each card lights for about half a
+           second of a 5.4s loop, and the dot crosses the connector in between */
+        @keyframes arLit {
+          0%    { box-shadow: 0 0 0 0 color-mix(in srgb, var(--lit) 40%, transparent); }
+          5%    { box-shadow: 0 0 0 5px color-mix(in srgb, var(--lit) 13%, transparent); }
+          13%   { box-shadow: 0 0 0 0 color-mix(in srgb, var(--lit) 0%, transparent); }
+          100%  { box-shadow: 0 0 0 0 color-mix(in srgb, var(--lit) 0%, transparent); }
+        }
+        @keyframes arDot {
+          0%   { left: 0;    opacity: 0; transform: translate(-50%, -50%) scale(.6); }
+          3%   { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+          18%  { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+          22%  { left: 100%; opacity: 0; transform: translate(-50%, -50%) scale(.6); }
+          100% { left: 100%; opacity: 0; }
+        }
+        .ar-grow { transform-origin: left; animation: arGrow .7s cubic-bezier(.22,.8,.3,1) both; }
+        .ar-rise { animation: arRise .45s cubic-bezier(.22,.8,.3,1) both; }
+        .ar-lit  { animation: arLit 5.4s ease-out infinite; }
+        .ar-dot  {
+          position: absolute; top: 50%; left: 0;
+          width: 7px; height: 7px; border-radius: 9999px; opacity: 0;
+          animation: arDot 5.4s linear infinite;
+        }
+        @media (prefers-reduced-motion: reduce) {
+          .ar-grow, .ar-rise, .ar-lit, .ar-dot { animation: none; }
+          .ar-dot { display: none; }
+        }
+`}</style>
+  );
+}
 
-   Clicking DIFFERENCE lights up the lines that produce it, so the reader can
-   see at a glance which rows they have to care about. */
+/* ── one file against another, and every rupee between them ───────────────
+   Three KPI cards reading as the equation they are — ORDER REPORT − MTR =
+   DIFFERENCE — each with its amount and, under it in bold, how many orders
+   that amount is. Underneath, every line that makes the difference up, with
+   the order count in a column of its own beside the amount rather than as
+   grey text trailing the label.
+
+   A pulse travels left to right along the connectors on a loop and each card
+   lights as it arrives, so the eye is walked through the subtraction instead
+   of being handed three numbers at once. It stays where it is — nothing
+   actually moves — and the whole thing stops under prefers-reduced-motion. */
 function DiffWalk({ from, to, lines, diff, pctOf, onLine, note }) {
   const [glow, setGlow] = useState(false);
   const agree = Math.abs(diff) < 1;
   const tone = agree ? T.green : T.amberText;
-  const Side = ({ s }) => (
-    <div>
-      <FileTag kind={s.kind} col={s.col} />
-      <div className="text-[25px] font-bold tabular-nums mt-1.5" style={{ color: FILEMARK[s.kind].tone }}>
-        ₹{inr(s.v || 0)}
+  /* how many ORDERS the difference is, not just how many rupees */
+  const diffOrders = lines.reduce((a, d) => a + (d.n || 0), 0);
+
+  const Stop = ({ s, i, big, label, sub, color, bg, bd }) => (
+    <div className="flex-1 min-w-[208px] rounded-xl px-4 py-3.5 ar-lit"
+         style={{ background: bg, border: `1px solid ${bd}`, '--lit': color, animationDelay: `${i * 1.8}s` }}>
+      {s ? <FileTag kind={s.kind} col={s.col} />
+         : <span className="inline-flex items-center text-[10px] font-bold px-1.5 py-0.5 rounded uppercase tracking-wider"
+                 style={{ background: '#FFFBEB', color: tone, border: '1px solid #FDE68A' }}>Difference</span>}
+      <div className="text-[27px] font-bold tabular-nums leading-none mt-2" style={{ color }}>
+        ₹{inr(big || 0)}
       </div>
-      <div className="text-[11.5px] text-slate-500">
-        <span className="font-semibold text-slate-600">{int(s.n || 0)}</span> {s.unit}
+      <div className="text-[12.5px] text-slate-500 mt-1.5">
+        <span className="font-bold text-slate-800 tabular-nums">{int(label || 0)}</span> {sub}
       </div>
     </div>
   );
+
+  const Link = ({ op, i }) => (
+    <div className="flex flex-col justify-center items-center px-2 w-[58px] shrink-0">
+      <div className="text-[19px] font-bold text-slate-300 leading-none mb-1.5">{op}</div>
+      <div className="relative w-full h-px" style={{ background: '#E2E8F0' }}>
+        <span className="ar-dot" style={{ animationDelay: `${0.6 + i * 1.8}s`, background: tone }} />
+      </div>
+    </div>
+  );
+
   return (
     <div className="rounded-xl mb-5 overflow-hidden"
          style={{ background: '#fff', border: `1px solid ${agree ? '#BBF7D0' : '#FDE68A'}` }}>
-      <div className="px-5 py-4 flex items-center gap-6 flex-wrap"
-           style={{ background: agree ? '#F3FBF6' : '#FFFBEB' }}>
-        <Side s={from} />
-        <div className="text-[20px] font-bold text-slate-300">−</div>
-        <Side s={to} />
+      <div className="px-4 py-4 flex items-stretch flex-wrap lg:flex-nowrap gap-y-3"
+           style={{ background: agree ? '#F7FCF9' : '#FFFDF5' }}>
+        <Stop s={from} i={0} big={from.v} label={from.n} sub={from.unit}
+              color={FILEMARK[from.kind].tone} bg={FILEMARK[from.kind].bg} bd={FILEMARK[from.kind].bd} />
+        <Link op="−" i={0} />
+        <Stop s={to} i={1} big={to.v} label={to.n} sub={to.unit}
+              color={FILEMARK[to.kind].tone} bg={FILEMARK[to.kind].bg} bd={FILEMARK[to.kind].bd} />
+        <Link op="=" i={1} />
         <button onClick={() => setGlow((g) => !g)}
-                className="ml-auto text-right rounded-lg px-3 py-1.5 -mr-1 transition-all hover:bg-white/70">
-          <div className="text-[11px] font-bold uppercase tracking-wider" style={{ color: tone }}>
+                className="flex-1 min-w-[208px] rounded-xl px-4 py-3.5 text-left ar-lit transition-shadow hover:shadow-md"
+                style={{ background: agree ? '#F0FDF4' : '#FFFBEB',
+                         border: `1.5px solid ${agree ? '#86EFAC' : '#FCD34D'}`,
+                         '--lit': tone, animationDelay: '3.6s' }}>
+          <span className="inline-flex items-center text-[10px] font-bold px-1.5 py-0.5 rounded uppercase tracking-wider"
+                style={{ background: '#fff', color: tone, border: `1px solid ${agree ? '#86EFAC' : '#FCD34D'}` }}>
             {agree ? 'No difference' : 'Difference'}
-          </div>
-          <div className="text-[32px] font-bold tabular-nums leading-none mt-1" style={{ color: tone }}>
+          </span>
+          <div className="text-[27px] font-bold tabular-nums leading-none mt-2" style={{ color: tone }}>
             ₹{inr(Math.abs(diff))}
           </div>
-          <div className="text-[11.5px] mt-0.5" style={{ color: glow ? tone : '#64748B' }}>
-            {glow ? 'these are the lines it comes from ↓'
-                  : `${pctOf} · click to see what it is made of`}
+          <div className="text-[12.5px] text-slate-500 mt-1.5">
+            <span className="font-bold text-slate-800 tabular-nums">{int(diffOrders)}</span> orders make it up
+          </div>
+          <div className="text-[11px] mt-1" style={{ color: glow ? tone : '#94A3B8' }}>
+            {glow ? 'these are the lines ↓' : pctOf}
           </div>
         </button>
       </div>
+
       <div className="px-5 py-1">
-        <div className="text-[10.5px] font-bold uppercase tracking-wider text-slate-400 pt-3 pb-1">
-          And every rupee of it
+        <div className="flex items-baseline gap-4 pt-3 pb-1.5 border-b border-slate-100">
+          <span className="flex-1 text-[10.5px] font-bold uppercase tracking-wider text-slate-400">
+            And every rupee of it
+          </span>
+          <span className="w-[86px] text-right text-[10.5px] font-bold uppercase tracking-wider text-slate-400">
+            Orders
+          </span>
+          <span className="w-[132px] text-right text-[10.5px] font-bold uppercase tracking-wider text-slate-400">
+            Amount
+          </span>
         </div>
         {lines.map((d) => {
           const lit = glow && Math.abs(d.v) >= 0.01;
           return (
             <button key={d.k} onClick={() => d.bucket && onLine(d)} disabled={!d.bucket}
-                    className={`w-full flex justify-between items-baseline gap-4 py-2.5 border-b border-slate-100 last:border-0 text-left transition-colors ${d.bucket ? 'hover:bg-slate-50' : ''}`}
+                    className={`w-full flex items-baseline gap-4 py-2.5 border-b border-slate-100 last:border-0 text-left transition-colors ${d.bucket ? 'hover:bg-slate-50' : ''}`}
                     style={lit ? { background: '#FFFBEB' } : {}}>
-              <span className="min-w-0">
+              <span className="flex-1 min-w-0">
                 <span className="text-[13px] font-semibold text-slate-700">{d.k}</span>
-                {d.n != null && <span className="text-[11px] text-slate-400 ml-1.5">{int(d.n)} orders</span>}
                 <span className="block text-[11px] text-slate-400 leading-snug mt-0.5">{d.note}</span>
               </span>
-              <span className="text-[13.5px] tabular-nums font-semibold whitespace-nowrap transition-all"
+              <span className="w-[86px] text-right text-[13px] tabular-nums font-semibold"
+                    style={{ color: d.n ? '#334155' : '#CBD5E1' }}>
+                {d.n != null ? int(d.n) : '—'}
+              </span>
+              <span className="w-[132px] text-right text-[13.5px] tabular-nums font-semibold transition-transform"
                     style={{ color: d.v > 0 ? T.amberText : d.v < 0 ? T.green : '#94A3B8',
                              transform: lit ? 'scale(1.06)' : 'none' }}>
                 {d.v < 0 ? '−' : ''}₹{inr(Math.abs(d.v))}
@@ -1026,14 +1106,17 @@ function DiffWalk({ from, to, lines, diff, pctOf, onLine, note }) {
             </button>
           );
         })}
-        <div className="flex justify-between items-baseline gap-4 py-3 border-t border-slate-200 mt-1">
-          <span className="text-[13px] font-bold text-slate-900">Difference</span>
-          <span className="text-[14px] tabular-nums font-bold" style={{ color: tone }}>₹{inr(diff)}</span>
+        <div className="flex items-baseline gap-4 py-3 border-t border-slate-200 mt-1">
+          <span className="flex-1 text-[13px] font-bold text-slate-900">Difference</span>
+          <span className="w-[86px] text-right text-[13px] font-bold tabular-nums text-slate-900">
+            {int(diffOrders)}
+          </span>
+          <span className="w-[132px] text-right text-[14px] tabular-nums font-bold" style={{ color: tone }}>
+            ₹{inr(diff)}
+          </span>
         </div>
       </div>
-      {note && (
-        <p className="px-5 pb-4 text-[11.5px] text-slate-500 leading-relaxed">{note}</p>
-      )}
+      {note && <p className="px-5 pb-4 text-[11.5px] text-slate-500 leading-relaxed">{note}</p>}
     </div>
   );
 }
@@ -1320,7 +1403,10 @@ function MoneyMatchView({ mm, shown, onDrill }) {
       note: A.totals.neverOrders
         ? 'A tax invoice exists and no settlement anywhere mentions the order. Worth taking to Amazon.'
         : 'Every tax invoice in this period has a settlement against it.' },
-    { k: 'Credited more than the invoice asked for', v: matchedDiff, n: null,
+    /* the orders this line is actually made of, so the Difference card can say
+       how MANY orders it is and not only how many rupees */
+    { k: 'Credited more than the invoice asked for', v: matchedDiff,
+      n: A.rows.filter((r) => r.bucket === 'settledInPeriod' && Math.abs(r.shortfall || 0) > 1).length,
       bucket: 'settledInPeriod',
       note: 'On the orders both files had settled inside the period — usually a reversal landing '
           + 'against the wrong order.' },
@@ -1331,16 +1417,6 @@ function MoneyMatchView({ mm, shown, onDrill }) {
 
   return (
     <>
-      <style>{`
-        @keyframes arGrow { from { transform: scaleX(0); } to { transform: scaleX(1); } }
-        @keyframes arRise { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
-        .ar-grow { transform-origin: left; animation: arGrow .7s cubic-bezier(.22,.8,.3,1) both; }
-        .ar-rise { animation: arRise .45s cubic-bezier(.22,.8,.3,1) both; }
-        @media (prefers-reduced-motion: reduce) {
-          .ar-grow, .ar-rise { animation: none; }
-        }
-      `}</style>
-
       <div className="ar-rise">
         <DiffWalk
           from={{ kind: 'mtr', col: 'Invoice Amount', v: A.money.invoiced,
