@@ -2307,7 +2307,11 @@ function CashCycle({ led, data, shown, onDrill }) {
     { cap: 'TDS u/s 194-O', v: amt('tds'), note: 'Against our PAN. Claim in the income-tax return.', op: '−', fg: T.amberText, bg: '#FFFBF4', line: 'tds' },
     { cap: 'TCS u/s 52 (GST)', v: amt('tcs'), note: 'Claim in the GST cash ledger.', op: '=', fg: T.amberText, bg: '#FFFBF4', line: 'tcs' },
     { cap: 'Due from Amazon', v: amt('expected'), note: 'Amount due on these invoices', op: '−', bg: '#F7F9FB', line: 'expected' },
-    { cap: 'Received to date', v: amt('settled'), note: 'In this month or later', op: '=', fg: T.green, bg: '#F3FBF6', line: 'received' },
+    /* The value here is `settled` — every payment for these orders, in any
+       month — so the drill and the provenance must be `settled` too. They
+       pointed at `received`, which is the narrower "by the month end" figure,
+       so the card opened a shorter list than the number it was printed under. */
+    { cap: 'Received to date', v: amt('settled'), note: 'In this month or later', op: '=', fg: T.green, bg: '#F3FBF6', line: 'settled' },
     { cap: 'Still pending', v: amt('stillOpen'), note: 'Not received after every loaded file', op: '', fg: T.red, bg: '#FEF8F8', line: 'stillOpen' },
   ];
   /* Reimbursements, adjustments and fee refunds are money Amazon paid that is
@@ -2342,6 +2346,25 @@ function CashCycle({ led, data, shown, onDrill }) {
                   <div className="text-[22px] font-bold tracking-tight mt-1 tabular-nums"
                        style={{ color: e.fg || '#111927' }}>₹{inr(e.v)}</div>
                   <p className="text-[11px] text-slate-500 mt-1.5 leading-snug">{e.note}</p>
+                  {/* Which file, and WHICH ROWS OF IT. A file list at the foot
+                      of the page does not tell an accountant whether a figure
+                      took every order or only the live ones, which is exactly
+                      what was being asked and could not be answered. */}
+                  {(() => {
+                    const pv = PROV[e.line];
+                    if (!pv) return null;
+                    const f = FILES[pv.file]; const Ic = f.icon;
+                    return (
+                      <div className="mt-2 pt-2 border-t border-slate-200/70">
+                        <div className="flex items-center gap-1 text-[10px] font-bold" style={{ color: f.tone }}>
+                          <Ic className="h-3 w-3" /> {f.short}
+                        </div>
+                        <div className="text-[10.5px] text-slate-400 leading-snug mt-0.5">
+                          {pv.column}{pv.filter ? ` · ${pv.filter}` : ''}
+                        </div>
+                      </div>
+                    );
+                  })()}
                 </button>
                 {e.op
                   ? <div className="flex items-center text-xl font-bold text-slate-300">{e.op}</div>
@@ -3057,6 +3080,9 @@ function drillRows(drill, data, ST) {
     tds: () => mine.filter((r) => r.tds > 0),
     tcs: () => mine.filter((r) => r.tcs > 0),
     received: () => mine.filter((r) => recdBy(r, m0) !== 0),
+    /* every order with a payment against it, in ANY month — the "received to
+       date" card's own population, which it did not have before */
+    settled: () => mine.filter((r) => r.settled !== 0),
     receivedLater: () => mine.filter((r) => r.settled - recdBy(r, m0) !== 0),
     /* the closing balance: every order not fully paid by the month end — a part
        settlement belongs here just as much as an order with no payment at all */
@@ -3147,7 +3173,11 @@ function DrillPanel({ drill, data, ST, base, onClose }) {
         notInvoicedFree: 'Replaced at no charge',
         invoiced: 'Invoiced', settled: 'Paid by Amazon', unsettled: 'Invoiced but not paid',
       }[drill.step] || drill.step}`
-    : `${period} · ${[...LINES, ...AFTER].find((l) => l.key === drill.line)?.label || drill.line}`;
+    : `${period} · ${[...LINES, ...AFTER].find((l) => l.key === drill.line)?.label
+        || { settled: 'Received to date', received: 'Received by the month end',
+             stillOpen: 'Still pending', closing: 'Not received at the month end',
+             creditsNotAgainstInvoice: 'Credits not against an invoice' }[drill.line]
+        || drill.line}`;
 
   const val = (r, c) => (c.calc ? c.calc(r) : r[c.key]);
   const cell = (r, c) => {
