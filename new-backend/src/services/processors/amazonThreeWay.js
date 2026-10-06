@@ -224,6 +224,44 @@ function foldMtr(rows) {
   return byOrder;
 }
 
+/* ── WHEN THE MONEY ACTUALLY ARRIVED ──────────────────────────────────────
+   Amazon gives two dates for every settlement row and they are not the same
+   day: `date/time` is when Amazon RECORDED the transaction, and
+   `Transaction Release Date` is when it RELEASED the money. Measured across
+   Koparo's 22,931 rows the gap is a median of 11.4 days, never under 7, and
+   as much as 24.6 — Amazon holds the money until delivery is confirmed.
+
+   The report used to read `date/time`, so an order recorded 31 March and paid
+   12 April counted as March cash. At a year end that is money in the bank on
+   31 March that was still with Amazon. The sale stays in March either way —
+   the SALES BASIS is the order date and this does not touch it. This is only
+   about which month the CASH landed in.
+
+   Worse, it was not even consistent: a month restored from a retained
+   settlement ledger is already dated by release (an order recorded 17 Aug
+   reads 02.09.2026 there), so Jul–Aug 2026 answered the question one way and
+   the fifteen months before it answered the other.
+
+   One rule now, for every source. */
+function cashDate(r) {
+  /* NEVER String() the value: the settlement pivot hands back a real Date, and
+     stringifying it gives "Sat Jul 18 2026 …", which monthKey matches with
+     none of its patterns and silently returns ''. Doing that here marked 916
+     perfectly ordinary ledger-sourced payments as deferred and moved 3.1 lakh
+     out of "received". monthKey already handles a Date; pass it through. */
+  const keep = (v) => (typeof v === 'string' ? v.trim() : v);
+  const rel = r['Transaction Release Date'] ?? r.transaction_release_date ?? r.release_date;
+  /* The column is THERE and EMPTY: the row is deferred — Amazon has recorded
+     the sale and is still holding the money. 142 of Koparo's rows are exactly
+     that, every one marked "Deferred". No date means no cash, so it must not
+     be counted as received. */
+  if (rel !== undefined) return keep(rel);
+  /* A retained settlement ledger carries no such column; its own posted date
+     IS the release date — the same order reads 3 Jul / released 18 Jul in the
+     unified file and 18.07.2026 in the ledger. */
+  return keep(r.date_time ?? r['date/time'] ?? r.month ?? '');
+}
+
 /* ── leg 3: the settlement ────────────────────────────────────────────────
    Accepts either shape, because both are legitimate sources and a month may
    only be available as one of them:
@@ -237,11 +275,16 @@ function foldSettlement(rows) {
     if (!id) continue;
     let s = byOrder.get(id);
     if (!s) {
-      s = { id, month: monthKey(r.date_time ?? r['date/time'] ?? r.month), sales: 0, types: new Set() };
+      s = { id, month: '', sales: 0, types: new Set() };
       byOrder.set(id, s);
     }
     s.types.add(String(r.type || '').trim());
     s.sales += num(r.product_sales ?? r['product sales']);
+    /* the EARLIEST month money moved on this order, not whichever row happened
+       to come first in the file — "was it paid by the month end" is a question
+       about the first payment, and the rows are in no particular order */
+    const cm = monthKey(cashDate(r));
+    if (cm && (!s.month || cm < s.month)) s.month = cm;
   }
   for (const s of byOrder.values()) s.sales = r2(s.sales);
   return byOrder;
@@ -255,9 +298,9 @@ function foldSettlement(rows) {
  * @param {object} opts  { basis } — 'order' or 'dispatch'; must match the ledger
  */
 const COUNT_KEYS = ['placed', 'cancelled', 'net', 'mcf', 'notInvoicedFree', 'notInvoiced',
-                   'shipped', 'settled', 'unsettled'];
+                   'shipped', 'settled', 'settledLater', 'unsettled'];
 const VALUE_KEYS = ['valuePlaced', 'valueCancelled', 'valueMcf', 'valueNotInvoicedFree', 'valueNotInvoiced',
-                    'valueInvoiced', 'valueSettled', 'valueNet', 'valueUnsettled',
+                    'valueInvoiced', 'valueSettled', 'valueSettledLater', 'valueNet', 'valueUnsettled',
                     'taxPlaced', 'taxInvoiced'];
 
 function reconcile(src, months, opts = {}) {
@@ -288,6 +331,22 @@ function reconcile(src, months, opts = {}) {
      than either answer. The window already decides which orders are in scope;
      it has no business also deciding whether they were paid. */
   const settled = new Set([...S.values()].map((s) => s.id));
+  /* ── PAID BY WHEN? ──────────────────────────────────────────────────────
+     "Settled" above means the order has been paid at some point in the files
+     held, which is why the chain could report nought unpaid while the
+     MTR-vs-Settlement tab reported 141 still out at the period end. Both were
+     true and together they read as a contradiction.
+
+     We only hold data to a point, so "ever" is not a thing this report can
+     know. The chain closes AT THE PERIOD END now, exactly as a month statement
+     does, and says which of the two it is: paid in time, paid later, or not
+     paid at all. Measured against the period end for every month so the rungs
+     still sum across the range. */
+  const periodEnd = months.length ? months[months.length - 1] : '';
+  const paidBy = (id) => {
+    const s = S.get(id);
+    return !!(s && s.month && (!periodEnd || s.month <= periodEnd));
+  };
 
   /* ── THE CHAIN ───────────────────────────────────────────────────────────
      Every order leaves by exactly one door, so each step subtracts cleanly to
@@ -329,7 +388,8 @@ function reconcile(src, months, opts = {}) {
        "paid" count of 20,171 sitting directly under an "invoiced" count of
        20,157, which is how the chain came to show more orders paid than were
        ever billed. */
-    const se = sh.filter((o) => settled.has(o.id));
+    const se = sh.filter((o) => paidBy(o.id));
+    const late = sh.filter((o) => settled.has(o.id) && !paidBy(o.id));
     const un = sh.filter((o) => !settled.has(o.id));
     return {
       month,
@@ -341,6 +401,7 @@ function reconcile(src, months, opts = {}) {
       notInvoiced: noInv.length,
       shipped: sh.length,
       settled: se.length,
+      settledLater: late.length,
       unsettled: un.length,
       /* GST-inclusive throughout; the tax contained in each is reported beside
          it so a rung can be read either way without ever adding the two. */
@@ -351,6 +412,7 @@ function reconcile(src, months, opts = {}) {
       valueNotInvoiced: V(noInv),
       valueInvoiced: V(sh),
       valueSettled: V(se),
+      valueSettledLater: V(late),
       valueNet: V(net),
       valueUnsettled: V(un),
       taxPlaced: V(all, 'grossTax'),
@@ -365,7 +427,7 @@ function reconcile(src, months, opts = {}) {
   /* Outstanding means INVOICED AND NOT PAID. An MCF order is neither invoiced
      nor payable, and listing it here is what made 107 orders read as unpaid
      money when not one rupee of it was ever owed. */
-  const unsettled = net.filter((o) => !o.mcf && shipped.has(o.id) && !settled.has(o.id))
+  const unsettled = net.filter((o) => !o.mcf && shipped.has(o.id) && !paidBy(o.id))
     .map((o) => ({ orderId: o.id, month: o.month, status: o.status,
                    inMtr: shipped.has(o.id), value: o.value, shipState: o.shipState }))
     .sort((a, b) => (a.month === b.month ? b.value - a.value : a.month.localeCompare(b.month)));
@@ -411,7 +473,8 @@ function reconcile(src, months, opts = {}) {
     orderRows: [...O.values()].filter((o) => inWindow(o.month)).map((o) => ({
       orderId: o.id, month: o.month, status: o.status, cancelled: !!o.cancelled,
       mcf: !!o.mcf, channel: o.channel,
-      invoiced: shipped.has(o.id), settled: settled.has(o.id),
+      invoiced: shipped.has(o.id), settled: paidBy(o.id),
+      settledLater: settled.has(o.id) && !paidBy(o.id),
       value: o.value, tax: o.tax, gross: o.gross, shipState: o.shipState, lines: o.lines,
     })).sort((a, b) => (a.month === b.month ? b.value - a.value
                                             : a.month.localeCompare(b.month))),
@@ -421,4 +484,4 @@ function reconcile(src, months, opts = {}) {
   };
 }
 
-module.exports = { isoDay, reconcile, foldOrders, foldMtr, foldSettlement, monthKey, num, r2 };
+module.exports = { cashDate, isoDay, reconcile, foldOrders, foldMtr, foldSettlement, monthKey, num, r2 };

@@ -111,6 +111,9 @@ const PROV = {
   chainSettled: { file: 'settlement', column: 'order id',
     filter: 'an INVOICED order that appears in a settlement',
     note: 'Asked of the invoiced orders only. Asked of every live order it counted the MCF orders as unpaid and returned more paid orders than were ever billed.' },
+  chainSettledLater: { file: 'settlement', column: 'Transaction Release Date',
+    filter: 'invoiced inside the period, released after it closed',
+    note: 'Amazon holds the money a median of 11.4 days, so a slice of every month is paid after it ends. Not outstanding — just later.' },
   chainUnsettled: { file: 'derived', column: 'Invoiced orders with no payment at all',
     note: 'An MCF order is neither invoiced nor payable, so it is not outstanding and is not counted here.' },
   mcf: { file: 'order', column: 'sales-channel', filter: 'sales-channel is not Amazon',
@@ -2795,10 +2798,19 @@ const chainRungs = (t = {}) => [
     src: 'derived', fg: T.red, note: 'Goods went out with a price, no tax invoice in the MTR' },
   { key: 'invoiced', op: '=', cap: 'Invoiced', n: t.shipped, v: t.valueInvoiced, src: 'mtr', strong: true,
     note: 'A tax invoice for it exists in the MTR' },
-  { key: 'unsettled', op: '−', cap: 'Invoiced, not paid', n: t.unsettled, v: t.valueUnsettled,
-    src: 'settlement', fg: T.red, note: 'No payment at all, in any settlement' },
-  { key: 'settled', op: '=', cap: 'Paid by Amazon', n: t.settled, v: t.valueSettled, src: 'settlement',
-    fg: T.green, strong: true, note: 'Payment received, in this month or a later one' },
+  /* Amazon holds the money a median of 11.4 days, so a slice of every month is
+     invoiced inside it and paid after it. The chain used to ask only "was this
+     ever paid" — nought unpaid — while the MTR-vs-Settlement tab asked "paid by
+     the period end" and answered 141. Both true, and together unreadable. It
+     closes at the period end now, like a month statement, and names the three
+     states separately. */
+  { key: 'settledLater', op: '−', cap: 'Paid after the period', n: t.settledLater,
+    v: t.valueSettledLater, src: 'settlement', fg: T.amberText,
+    note: 'Invoiced inside the period, money released after it closed' },
+  { key: 'unsettled', op: '−', cap: 'Not paid at all', n: t.unsettled, v: t.valueUnsettled,
+    src: 'settlement', fg: T.red, note: 'No payment in any settlement held' },
+  { key: 'settled', op: '=', cap: 'Paid by the period end', n: t.settled, v: t.valueSettled,
+    src: 'settlement', fg: T.green, strong: true, note: 'Money actually released by the closing date' },
 ];
 
 function ChainLadder({ t, months, onDrill, title, sub }) {
@@ -3635,11 +3647,14 @@ function drillRows(drill, data, ST) {
       notInvoiced: () => rows.filter((r) => !r.cancelled && !r.mcf && !r.invoiced && r.value > 0),
       invoiced: () => rows.filter((r) => !r.cancelled && !r.mcf && r.invoiced),
       settled: () => rows.filter((r) => !r.cancelled && !r.mcf && r.invoiced && r.settled),
-      unsettled: () => rows.filter((r) => !r.cancelled && !r.mcf && r.invoiced && !r.settled),
+      settledLater: () => rows.filter((r) => !r.cancelled && !r.mcf && r.invoiced && r.settledLater),
+      unsettled: () => rows.filter((r) => !r.cancelled && !r.mcf && r.invoiced
+                                          && !r.settled && !r.settledLater),
     }[drill.step] || (() => rows);
     const pk = { placed: 'placed', cancelled: 'cancelled', net: 'net', invoiced: 'chainInvoiced',
                  mcf: 'mcf', notInvoiced: 'notInvoiced', notInvoicedFree: 'notInvoicedFree',
-                 settled: 'chainSettled', unsettled: 'chainUnsettled' }[drill.step] || 'placed';
+                 settled: 'chainSettled', settledLater: 'chainSettledLater',
+                 unsettled: 'chainUnsettled' }[drill.step] || 'placed';
     return { kind: 'chain', rows: pick(), prov: PROV[pk] };
   }
   const mine = all.filter(inSel).filter(billable);
@@ -3745,8 +3760,9 @@ function DrillPanel({ drill, data, ST, base, onClose }) {
     : drill.kind === 'chain' ? `${period} · ${{
         placed: 'Orders placed', cancelled: 'Cancelled', net: 'Net orders',
         mcf: 'Not an Amazon sale', notInvoiced: 'Shipped, never invoiced',
+        settledLater: 'Paid after the period',
         notInvoicedFree: 'Replaced at no charge',
-        invoiced: 'Invoiced', settled: 'Paid by Amazon', unsettled: 'Invoiced but not paid',
+        invoiced: 'Invoiced', settled: 'Paid by the period end', unsettled: 'Not paid at all',
       }[drill.step] || drill.step}`
     : `${period} · ${[...LINES, ...AFTER].find((l) => l.key === drill.line)?.label
         || { settled: 'Received to date', received: 'Received by the month end',

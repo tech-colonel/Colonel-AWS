@@ -30,7 +30,7 @@
    worse than a disclosed gap.
    ────────────────────────────────────────────────────────────────────────── */
 
-const { monthKey, isoDay, num } = require('./amazonThreeWay');
+const { monthKey, isoDay, num, cashDate } = require('./amazonThreeWay');
 
 const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
 const txt = (v) => String(v ?? '').trim();
@@ -127,7 +127,8 @@ function foldSettlement(rows) {
     if (first !== undefined && first !== src) continue;
     if (first === undefined) seen.set(sig, src);
 
-    const cashMonth = monthKey(r.date_time ?? r['date/time'] ?? r.month);
+    /* when the money arrived, one rule for every source — see cashDate */
+    const cashMonth = monthKey(cashDate(r));
     let e = by.get(id);
     if (!e) {
       e = { id, gross: 0, net: 0, feesSigned: 0, tdsSigned: 0, tcsSigned: 0,

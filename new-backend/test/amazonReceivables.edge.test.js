@@ -3,7 +3,7 @@
 const { buildLedger, BASIS } = require('../src/services/processors/amazonReceivablesLedger');
 const ovm = require('../src/services/processors/amazonOrderVsMtr');
 const mvs = require('../src/services/processors/amazonMtrVsSettlement');
-const { monthKey, isoDay, r2 } = require('../src/services/processors/amazonThreeWay');
+const { monthKey, isoDay, r2, cashDate } = require('../src/services/processors/amazonThreeWay');
 
 let pass = 0, fail = 0;
 const T = (name, got, want) => {
@@ -34,6 +34,29 @@ T('isoDay garbage', isoDay('xx'),                  '');
 /* UTC->IST roll: 31 Dec 18:40 UTC is 1 Jan IST */
 T('year roll utc->ist', monthKey('2026-12-31T18:40:00'), '2027-01');
 T('day roll utc->ist',  isoDay('2026-06-30T19:00:00'),   '2026-07-01');
+
+console.log('--- WHEN THE MONEY ARRIVED ---');
+/* Amazon holds the money a median of 11.4 days, so the date it RECORDS a
+   transaction and the date it RELEASES the cash are different months often
+   enough to matter at a year end. */
+T('release date wins over the posted date',
+  monthKey(cashDate({ 'date/time': '3 Jul 2026 7:48:26 am UTC',
+                      'Transaction Release Date': '18 Jul 2026 11:40:05 pm UTC' })), '2026-07');
+T('a March posting released in April is APRIL cash',
+  monthKey(cashDate({ 'date/time': '31 Mar 2026 11:08:33 pm UTC',
+                      'Transaction Release Date': '12 Apr 2026 8:51:50 pm UTC' })), '2026-04');
+T('the column present and EMPTY means deferred, so no cash month',
+  monthKey(cashDate({ 'date/time': '1 Aug 2026 1:00:00 am UTC',
+                      'Transaction Release Date': '' })), '');
+/* The settlement pivot hands back a real DATE, not a string. String()-ing it
+   gives "Sat Jul 18 2026 ..." which monthKey matches with none of its
+   patterns and silently returns '' — that marked 916 ordinary ledger-sourced
+   payments as deferred and moved 3.1 lakh out of "received". */
+T('a ledger Date object survives (never String() it)',
+  monthKey(cashDate({ date_time: new Date('2026-07-18T23:40:05.000Z') })), '2026-07');
+T('a ledger row with no release column falls back to its own date',
+  monthKey(cashDate({ 'date/time': '18 Jul 2026 11:40:05 pm UTC' })), '2026-07');
+T('an invalid Date does not become a month', monthKey(cashDate({ date_time: new Date('x') })), '');
 
 console.log('--- LEDGER EDGE CASES ---');
 const O = (id, date, status, qty, price, ch) => ({

@@ -50,7 +50,7 @@
    A figure nobody can drill into is a figure nobody can defend.
    ────────────────────────────────────────────────────────────────────────────── */
 
-const { monthKey, num, r2, isoDay } = require('./amazonThreeWay');
+const { monthKey, num, r2, isoDay, cashDate } = require('./amazonThreeWay');
 
 /* The closing state of an order. Exactly one applies, so the buckets sum to the
    order count and nothing can be counted twice or lost between them. */
@@ -170,12 +170,14 @@ function foldSettled(settlementRows) {
     if (first !== undefined && first !== src) continue;   // same row, other source
     if (first === undefined) seen.set(sig, src);
 
-    const when = r.date_time ?? r['date/time'] ?? r.month;
+    /* WHEN THE MONEY ARRIVED, not when Amazon wrote the row down — see
+       cashDate in amazonThreeWay. Blank means deferred: recorded, not paid. */
+    const when = cashDate(r);
     const cashMonth = monthKey(when);
     let o = byOrder.get(id);
     if (!o) {
-      o = { id, month: '', sales: 0, payout: 0, credits: 0, feesSigned: 0, tdsSigned: 0, tcsSigned: 0,
-            refundRows: 0, byMonth: {} };
+      o = { id, month: '', sales: 0, payout: 0, credits: 0, deferred: 0,
+            feesSigned: 0, tdsSigned: 0, tcsSigned: 0, refundRows: 0, byMonth: {} };
       byOrder.set(id, o);
     }
     o.month = o.month || cashMonth;
@@ -203,7 +205,12 @@ function foldSettled(settlementRows) {
        credit is still reported, on its own line. */
     const ty = String(r.type || '').trim().toLowerCase();
     const isCredit = ty && ty !== 'order' && ty !== 'refund' && ty !== 'transfer';
-    if (isCredit) {
+    if (!cashMonth && !isCredit) {
+      /* Deferred: Amazon has recorded the sale and is still holding the money.
+         Counting it in the payout said it was received when it is not in the
+         bank, so it is held on its own line until a release date appears. */
+      o.deferred += total;
+    } else if (isCredit) {
       o.credits += total;
     } else {
       o.payout += total;
@@ -234,7 +241,7 @@ function foldSettled(settlementRows) {
     if (String(r.type || '').trim() === 'Refund') o.refundRows += 1;
   }
   for (const o of byOrder.values()) {
-    o.sales = r2(o.sales); o.payout = r2(o.payout);
+    o.sales = r2(o.sales); o.payout = r2(o.payout); o.deferred = r2(o.deferred);
     o.fees = r2(Math.abs(o.feesSigned));
     o.credits = r2(o.credits);
     o.tds = r2(Math.abs(o.tdsSigned));
@@ -345,6 +352,7 @@ function buildLedger(src, months, opts = {}) {
       refundMonth: i.refundMonth || '', creditNote: i.creditNote || '',
       saleDate: i.invDate || i.shipDate || p.date || '',
       refundDate: i.refundDate || '',
+      deferred: s ? s.deferred : 0,
       fees: s ? s.fees : 0,
       tds: s ? s.tds : 0, tcs: s ? s.tcs : 0, tdsTcs: s ? s.tdsTcs : 0,
       settled,
