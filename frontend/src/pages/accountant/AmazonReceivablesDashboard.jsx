@@ -1975,6 +1975,20 @@ function ChainLadder({ t, months, onDrill, title, sub }) {
    component, `led` is just one month long. */
 function CashCycle({ led, data, shown, onDrill }) {
   const amt = (k) => led.reduce((a, m) => a + (m[k]?.amount || 0), 0);
+  /* ── money that arrived in this period but belongs to an earlier one ─────
+     "Received to date" is a COHORT figure: cash against the sales of the
+     months on screen, whenever it turned up. That is the right number for a
+     receivable, but it silently drops cash that landed inside the period for
+     sales made before it — which is how the page could report receipts that
+     did not agree with the bank, and why a period could look over-collected
+     with no bucket saying why. It is not part of the subtraction; it is its
+     own bucket, named. */
+  const sel = new Set(shown);
+  const oldMoney = (data?.ledger?.cash || [])
+    .filter((c) => sel.has(c.month))
+    .flatMap((c) => (c.bySaleMonth || []).filter((x) => !sel.has(x.saleMonth)))
+    .reduce((a, x) => ({ amount: r2(a.amount + x.amount), orders: a.orders + x.orders }),
+            { amount: 0, orders: 0 });
   const EQ = [
     { cap: 'Net sales', v: amt('netBillable'), note: 'Sales after customer returns', op: '−', line: 'netBillable' },
     { cap: 'Amazon charges', v: amt('fees'), note: 'Commission, closing fee, FBA and storage', op: '−', fg: T.amberText, bg: '#FFFBF4', line: 'fees' },
@@ -2051,7 +2065,21 @@ function CashCycle({ led, data, shown, onDrill }) {
               </div>
             </div>
           )}
-          <div className="grid md:grid-cols-2 gap-3 mt-3">
+          <div className="grid md:grid-cols-3 gap-3 mt-3">
+            <button onClick={() => onDrill({ kind: 'cash', month: shown[0], months: shown })}
+                    className="border rounded-xl p-4 text-left hover:shadow-md transition-all"
+                    style={{ background: '#FFFBF4', borderColor: '#FFD591' }}>
+              <div className="text-[10px] font-bold uppercase tracking-wider" style={{ color: T.amberText }}>
+                Also credited in this period, for earlier sales
+              </div>
+              <div className="text-xl font-bold mt-1 tabular-nums" style={{ color: T.amberText }}>
+                ₹{inr(oldMoney.amount)}
+              </div>
+              <p className="text-[11px] text-slate-500 mt-1">
+                {int(oldMoney.orders)} orders sold before this period. Real cash, in the bank, but it
+                settles sales that are not on this screen — so it is not part of the equation above.
+              </p>
+            </button>
             <button onClick={() => onDrill({ kind: 'line', line: 'invoiced', months: shown })}
                     className="border border-slate-200 rounded-xl p-4 bg-slate-50/50 text-left hover:shadow-md hover:border-slate-300 transition-all">
               <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
