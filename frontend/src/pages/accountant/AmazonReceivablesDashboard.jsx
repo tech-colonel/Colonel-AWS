@@ -957,79 +957,84 @@ function FileTag({ kind, col }) {
   );
 }
 
-/* ── the money's journey, end to end ─────────────────────────────────────
-   This tab is the MTR against the settlement, so the order report has no
-   business on it — it was showing a stop that belongs on the Order-vs-MTR tab
-   and making the strip look like a three-file reconciliation it is not.
+/* ── one file against another, and every rupee between them ───────────────
+   The strip and the difference block were two renderings of one fact — here
+   is file A, here is file B, here is the gap — stacked one on the other, each
+   repeating the other's numbers. They are one block now: A on the left, B on
+   the right, the difference on the far right, and underneath it every line
+   that makes the difference up.
 
-   Three stops, all money: what the tax invoices asked for, what Amazon
-   actually credited, and what reached the bank after its own deductions. The
-   gaps BETWEEN the stops are the whole story, so they carry the amounts. */
-function MoneyJourney({ A, shown, onDrill }) {
-  const m = A.money;
-  const pending = r2(m.invoiced - m.credited);
-  const taken = r2(m.fees + m.tds + m.tcs);
-  const stops = [
-    { kind: 'mtr', cap: 'Tax invoices raised', col: 'Invoice Amount',
-      n: A.totals.invoicedOrders, unit: 'invoices', v: m.invoiced, bucket: '__all' },
-    { kind: 'settlement', cap: 'Credited by Amazon', col: 'total before fees',
-      n: A.coverage.orders - A.totals.laterOrders, unit: 'credited', v: m.credited,
-      bucket: 'settledInPeriod' },
-    { kind: 'settlement', cap: 'Reached the bank', col: 'total',
-      n: null, v: m.net, bucket: 'settledInPeriod' },
-  ];
-  const gaps = [
-    { amt: pending, label: 'not credited by the period end',
-      note: `${int(A.totals.laterOrders)} invoices Amazon credited in a later month`
-            + (A.totals.neverOrders ? ` · ${int(A.totals.neverOrders)} never credited` : '') },
-    { amt: taken, label: 'Amazon\u2019s own deductions',
-      note: 'selling / fba / other transaction fees, TDS 194-O and TCS 52' },
-  ];
-  const max = Math.max(...stops.map((x) => x.v || 0), 1);
+   Clicking DIFFERENCE lights up the lines that produce it, so the reader can
+   see at a glance which rows they have to care about. */
+function DiffWalk({ from, to, lines, diff, pctOf, onLine, note }) {
+  const [glow, setGlow] = useState(false);
+  const agree = Math.abs(diff) < 1;
+  const tone = agree ? T.green : T.amberText;
+  const Side = ({ s }) => (
+    <div>
+      <FileTag kind={s.kind} col={s.col} />
+      <div className="text-[25px] font-bold tabular-nums mt-1.5" style={{ color: FILEMARK[s.kind].tone }}>
+        ₹{inr(s.v || 0)}
+      </div>
+      <div className="text-[11.5px] text-slate-500">
+        <span className="font-semibold text-slate-600">{int(s.n || 0)}</span> {s.unit}
+      </div>
+    </div>
+  );
   return (
-    <Card title="Where the money goes, end to end"
-          sub="What the tax invoices asked for, what Amazon credited, and what reached the bank.">
-      <div className="p-5">
-        <div className="flex items-stretch flex-wrap lg:flex-nowrap">
-          {stops.map((st, i) => {
-            const f = FILEMARK[st.kind];
-            return (
-              <React.Fragment key={st.cap}>
-                {i > 0 && (
-                  <div className="flex flex-col justify-center items-center px-3 min-w-[176px] shrink-0">
-                    <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">less</div>
-                    <div className="text-[15px] font-bold tabular-nums my-0.5" style={{ color: T.amberText }}>
-                      ₹{inr(Math.abs(gaps[i - 1].amt))}
-                    </div>
-                    <div className="w-full h-px my-1" style={{ background: '#E2E8F0' }} />
-                    <div className="text-[10.5px] text-center leading-snug text-slate-500">
-                      {gaps[i - 1].label}
-                      <span className="block text-[9.5px] text-slate-400 mt-0.5">{gaps[i - 1].note}</span>
-                    </div>
-                  </div>
-                )}
-                <button onClick={() => onDrill({ kind: 'money', bucket: st.bucket, label: st.cap, months: shown })}
-                        className="flex-1 min-w-[220px] rounded-xl p-4 text-left transition-all hover:shadow-md"
-                        style={{ background: f.bg, border: `1px solid ${f.bd}` }}>
-                  <FileTag kind={st.kind} col={st.col} />
-                  <div className="text-[11px] font-bold uppercase tracking-wider text-slate-500 mt-2">{st.cap}</div>
-                  <div className="text-[25px] font-bold tabular-nums leading-none mt-1" style={{ color: f.tone }}>
-                    ₹{inr(st.v || 0)}
-                  </div>
-                  <div className="text-[11.5px] text-slate-500 mt-1">
-                    {st.n != null ? `${int(st.n)} ${st.unit}` : 'after every deduction'}
-                  </div>
-                  <div className="h-1.5 rounded-full mt-2.5 overflow-hidden" style={{ background: '#fff' }}>
-                    <div className="h-full rounded-full ar-grow"
-                         style={{ width: `${Math.max(3, (100 * (st.v || 0)) / max)}%`, background: f.tone }} />
-                  </div>
-                </button>
-              </React.Fragment>
-            );
-          })}
+    <div className="rounded-xl mb-5 overflow-hidden"
+         style={{ background: '#fff', border: `1px solid ${agree ? '#BBF7D0' : '#FDE68A'}` }}>
+      <div className="px-5 py-4 flex items-center gap-6 flex-wrap"
+           style={{ background: agree ? '#F3FBF6' : '#FFFBEB' }}>
+        <Side s={from} />
+        <div className="text-[20px] font-bold text-slate-300">−</div>
+        <Side s={to} />
+        <button onClick={() => setGlow((g) => !g)}
+                className="ml-auto text-right rounded-lg px-3 py-1.5 -mr-1 transition-all hover:bg-white/70">
+          <div className="text-[11px] font-bold uppercase tracking-wider" style={{ color: tone }}>
+            {agree ? 'No difference' : 'Difference'}
+          </div>
+          <div className="text-[32px] font-bold tabular-nums leading-none mt-1" style={{ color: tone }}>
+            ₹{inr(Math.abs(diff))}
+          </div>
+          <div className="text-[11.5px] mt-0.5" style={{ color: glow ? tone : '#64748B' }}>
+            {glow ? 'these are the lines it comes from ↓'
+                  : `${pctOf} · click to see what it is made of`}
+          </div>
+        </button>
+      </div>
+      <div className="px-5 py-1">
+        <div className="text-[10.5px] font-bold uppercase tracking-wider text-slate-400 pt-3 pb-1">
+          And every rupee of it
+        </div>
+        {lines.map((d) => {
+          const lit = glow && Math.abs(d.v) >= 0.01;
+          return (
+            <button key={d.k} onClick={() => d.bucket && onLine(d)} disabled={!d.bucket}
+                    className={`w-full flex justify-between items-baseline gap-4 py-2.5 border-b border-slate-100 last:border-0 text-left transition-colors ${d.bucket ? 'hover:bg-slate-50' : ''}`}
+                    style={lit ? { background: '#FFFBEB' } : {}}>
+              <span className="min-w-0">
+                <span className="text-[13px] font-semibold text-slate-700">{d.k}</span>
+                {d.n != null && <span className="text-[11px] text-slate-400 ml-1.5">{int(d.n)} orders</span>}
+                <span className="block text-[11px] text-slate-400 leading-snug mt-0.5">{d.note}</span>
+              </span>
+              <span className="text-[13.5px] tabular-nums font-semibold whitespace-nowrap transition-all"
+                    style={{ color: d.v > 0 ? T.amberText : d.v < 0 ? T.green : '#94A3B8',
+                             transform: lit ? 'scale(1.06)' : 'none' }}>
+                {d.v < 0 ? '−' : ''}₹{inr(Math.abs(d.v))}
+              </span>
+            </button>
+          );
+        })}
+        <div className="flex justify-between items-baseline gap-4 py-3 border-t border-slate-200 mt-1">
+          <span className="text-[13px] font-bold text-slate-900">Difference</span>
+          <span className="text-[14px] tabular-nums font-bold" style={{ color: tone }}>₹{inr(diff)}</span>
         </div>
       </div>
-    </Card>
+      {note && (
+        <p className="px-5 pb-4 text-[11.5px] text-slate-500 leading-relaxed">{note}</p>
+      )}
+    </div>
   );
 }
 
@@ -1047,7 +1052,6 @@ function MoneyJourney({ A, shown, onDrill }) {
 function CompareChart({ series, A, B, title, sub, note, countLabel, onSee }) {
   const [gran, setGran] = useState('month');
   const [metric, setMetric] = useState('amount');
-  const [open, setOpen] = useState(null);
 
   const months = (series || []).map((x) => x.month);
   const [from, setFrom] = useState('');
@@ -1092,12 +1096,15 @@ function CompareChart({ series, A, B, title, sub, note, countLabel, onSee }) {
     return Object.values(by).map(withGap);
   }, [series, gran, from, to]);
 
-  const sel = open ? data.find((d) => d.month === open) : null;
-  /* Recharts hands the BAR's props, with the row under `payload`; reading
+  /* Clicking a bar used to open a panel that repeated the hover tooltip — the
+     same three numbers, one scroll lower. It opens the DRILL now: both reports
+     side by side for that period, with the difference on every single order
+     behind them, which is the one thing the chart cannot already say.
+     Recharts hands the BAR's props with the row under `payload`; reading
      `d.month` straight off it silently did nothing at all. */
   const pickBar = (d) => {
-    const k = d?.payload?.month ?? d?.month;
-    if (k) setOpen((prev) => (prev === k ? null : k));
+    const row = d?.payload ?? d;
+    if (row && row.month && onSee) onSee(row);
   };
 
   /* Recharts' ResponsiveContainer measures on its first commit, before the
@@ -1212,61 +1219,9 @@ function CompareChart({ series, A, B, title, sub, note, countLabel, onSee }) {
           )}
         </div>
 
-        {sel && (
-          <div className="mt-3 rounded-xl overflow-hidden ar-rise"
-               style={{ border: `1px solid ${Math.abs(sel.gap) < 1 ? '#BBF7D0' : '#FDE68A'}` }}>
-            <div className="px-4 py-3 flex items-center gap-5 flex-wrap"
-                 style={{ background: Math.abs(sel.gap) < 1 ? '#F3FBF6' : '#FFFBEB' }}>
-              <span className="text-[13px] font-bold text-slate-800">{sel.label}</span>
-              <span>
-                <span className="block text-[10px] font-bold uppercase tracking-wider text-slate-400">
-                  {A.label}
-                </span>
-                <span className="text-[16px] font-bold tabular-nums" style={{ color: A.tone }}>
-                  ₹{inr(sel.a)}
-                </span>
-              </span>
-              <span className="text-[15px] font-bold text-slate-300">−</span>
-              <span>
-                <span className="block text-[10px] font-bold uppercase tracking-wider text-slate-400">
-                  {B.label}
-                </span>
-                <span className="text-[16px] font-bold tabular-nums" style={{ color: B.tone }}>
-                  ₹{inr(sel.b)}
-                </span>
-              </span>
-              <span className="ml-auto text-right">
-                <span className="block text-[10px] font-bold uppercase tracking-wider"
-                      style={{ color: Math.abs(sel.gap) < 1 ? T.green : T.amberText }}>
-                  {Math.abs(sel.gap) < 1 ? 'No difference' : 'Difference'}
-                </span>
-                <span className="text-[22px] font-bold tabular-nums leading-none"
-                      style={{ color: Math.abs(sel.gap) < 1 ? T.green : T.amberText }}>
-                  ₹{inr(Math.abs(sel.gap))}
-                </span>
-              </span>
-              <button onClick={() => setOpen(null)}
-                      className="text-slate-400 hover:text-slate-600 shrink-0"><X className="h-4 w-4" /></button>
-            </div>
-            <div className="px-4 py-2.5 bg-white flex items-center justify-between gap-4 flex-wrap">
-              <p className="text-[11.5px] text-slate-500 leading-snug min-w-0">
-                {int(sel.orders)} {countLabel} in {sel.label}.{' '}
-                {Math.abs(sel.gap) < 1
-                  ? 'The two files agree on this period to within a rupee.'
-                  : sel.gap > 0 ? B.short : A.short}
-              </p>
-              {onSee && (
-                <button onClick={() => onSee(sel)}
-                        className="text-[11.5px] font-bold shrink-0 underline underline-offset-2"
-                        style={{ color: A.tone }}>
-                  see the {int(sel.orders)} {countLabel}
-                </button>
-              )}
-            </div>
-          </div>
-        )}
         <p className="text-[11.5px] text-slate-500 mt-2 leading-relaxed">
-          Click any bar for that period&rsquo;s own difference. {note}
+          Hover a bar for the period&rsquo;s totals; click it for every order behind them, both
+          reports side by side with the difference on each. {note}
         </p>
       </div>
     </Card>
@@ -1387,81 +1342,18 @@ function MoneyMatchView({ mm, shown, onDrill }) {
       `}</style>
 
       <div className="ar-rise">
-        <MoneyJourney A={A} shown={shown} onDrill={onDrill} />
-      </div>
-
-      {/* ── THE DIFFERENCE ───────────────────────────────────────────────
-          The strip above showed 83,19,418.98 against 82,67,205.89 — a gap of
-          about 52,000 — and this block then announced that the settlement was
-          over by 27.23. Both were true and they were answering different
-          questions: the gap is every tax invoice against the money in by the
-          period end, the 27.23 is only the orders both files had settled.
-          Reading them one under the other was simply confusing.
-
-          So the DIFFERENCE leads, and the 27.23 is one of the three lines that
-          add up to it. */}
-      <div className="ar-rise rounded-xl mb-5 overflow-hidden"
-           style={{ background: '#fff', border: `1px solid ${Math.abs(DIFF) < 1 ? '#BBF7D0' : '#FDE68A'}` }}>
-        <div className="px-5 py-4 flex items-center gap-6 flex-wrap"
-             style={{ background: Math.abs(DIFF) < 1 ? '#F3FBF6' : '#FFFBEB' }}>
-          <div>
-            <FileTag kind="mtr" col="Invoice Amount" />
-            <div className="text-[25px] font-bold tabular-nums mt-1.5" style={{ color: T.blue }}>
-              ₹{inr(A.money.invoiced)}
-            </div>
-            <div className="text-[11.5px] text-slate-500">
-              {int(A.totals.invoicedOrders)} tax invoices raised in this period
-            </div>
-          </div>
-          <div className="text-[20px] font-bold text-slate-300">−</div>
-          <div>
-            <FileTag kind="settlement" col="total before fees" />
-            <div className="text-[25px] font-bold tabular-nums mt-1.5" style={{ color: T.green }}>
-              ₹{inr(A.money.credited)}
-            </div>
-            <div className="text-[11.5px] text-slate-500">credited by the end of this period</div>
-          </div>
-          <div className="ml-auto text-right">
-            <div className="text-[11px] font-bold uppercase tracking-wider"
-                 style={{ color: Math.abs(DIFF) < 1 ? T.green : T.amberText }}>
-              {Math.abs(DIFF) < 1 ? 'No difference' : 'Difference'}
-            </div>
-            <div className="text-[32px] font-bold tabular-nums leading-none mt-1"
-                 style={{ color: Math.abs(DIFF) < 1 ? T.green : T.amberText }}>
-              ₹{inr(Math.abs(DIFF))}
-            </div>
-            <div className="text-[11.5px] text-slate-500 mt-0.5">
-              {DIFF > 0 ? 'the MTR invoiced more than the settlement has credited'
-                        : 'the settlement has credited more than the MTR invoiced'}
-            </div>
-          </div>
-        </div>
-        <div className="px-5 py-1">
-          <div className="text-[10.5px] font-bold uppercase tracking-wider text-slate-400 pt-3 pb-1">
-            And every rupee of it
-          </div>
-          {DIFF_PARTS.map((d) => (
-            <button key={d.k} onClick={() => d.bucket && go(d.bucket, d.k)} disabled={!d.bucket}
-                    className={`w-full flex justify-between items-baseline gap-4 py-2.5 border-b border-slate-100 last:border-0 text-left ${d.bucket ? 'hover:bg-slate-50' : ''}`}>
-              <span className="min-w-0">
-                <span className="text-[13px] font-semibold text-slate-700">{d.k}</span>
-                {d.n != null && <span className="text-[11px] text-slate-400 ml-1.5">{int(d.n)} orders</span>}
-                <span className="block text-[11px] text-slate-400 leading-snug mt-0.5">{d.note}</span>
-              </span>
-              <span className="text-[13.5px] tabular-nums font-semibold whitespace-nowrap"
-                    style={{ color: d.v > 0 ? T.amberText : d.v < 0 ? T.green : '#94A3B8' }}>
-                {d.v < 0 ? '−' : ''}₹{inr(Math.abs(d.v))}
-              </span>
-            </button>
-          ))}
-          <div className="flex justify-between items-baseline gap-4 py-3 border-t border-slate-200 mt-1">
-            <span className="text-[13px] font-bold text-slate-900">Difference</span>
-            <span className="text-[14px] tabular-nums font-bold"
-                  style={{ color: Math.abs(DIFF) < 1 ? T.green : T.amberText }}>
-              ₹{inr(DIFF)}
-            </span>
-          </div>
-        </div>
+        <DiffWalk
+          from={{ kind: 'mtr', col: 'Invoice Amount', v: A.money.invoiced,
+                  n: A.totals.invoicedOrders, unit: 'tax invoices raised in this period' }}
+          to={{ kind: 'settlement', col: 'total before fees', v: A.money.credited,
+                n: A.coverage.orders - A.totals.laterOrders, unit: 'credited by the end of it' }}
+          lines={DIFF_PARTS}
+          diff={DIFF}
+          pctOf={DIFF > 0 ? 'the MTR invoiced more than the settlement has credited'
+                          : 'the settlement has credited more than the MTR invoiced'}
+          onLine={(d) => go(d.bucket, d.k)}
+          note={'What Amazon then takes off this before the money reaches the bank is below, named by '
+              + 'the column each deduction comes from.'} />
       </div>
 
       <div className="ar-rise">
@@ -1477,7 +1369,8 @@ function MoneyMatchView({ mm, shown, onDrill }) {
           sub="Blue is what the MTR invoiced. Green is what the settlement moved. The gap is the lag."
           countLabel="tax invoices"
           onSee={(d) => onDrill({ kind: 'money', bucket: '__all',
-                                  label: `Tax invoices · ${d.label}`, months: d.months })}
+                                  label: 'MTR against settlement, invoice by invoice',
+                                  months: d.months })}
           note={'The two bars are keyed on different dates on purpose. The MTR bar sits in the month '
               + 'its invoice (or credit note) is dated; the settlement bar sits in the month the money '
               + 'actually moved. Amazon settles on its own cycle, so a short green bar beside a tall '
@@ -1673,9 +1566,6 @@ function InvoicingView({ inv, shown, onDrill }) {
   }
   const t = inv.invoiceTiming || {};
   const { byKey, totOrders, ordersPlaced, totOrderVal, m, R, series } = invAgg(inv, shown);
-  const check = ['shippedNoInvoice', 'mtrOnly'];
-  const checkN = check.reduce((a, k) => a + (byKey[k]?.n || 0), 0);
-  const checkV = check.reduce((a, k) => a + (byKey[k]?.order || 0) + (byKey[k]?.inv || 0), 0);
 
   /* Both columns are generated FROM the bucket list, so a bucket can never be
      left out of the walk again. "Not an Amazon sale" and "free replacement"
@@ -1724,17 +1614,6 @@ function InvoicingView({ inv, shown, onDrill }) {
   const go = (bucket, label, side) => onDrill({ kind: 'invoicing', bucket, label, side, months: shown });
 
   /* every headline carries BOTH a count and a value, and opens its orders */
-  const KPI = [
-    { k: 'Orders placed', n: ordersPlaced, v: totOrderVal, c: '#111927',
-      sub: 'every order in the order report', bucket: '__all' },
-    { k: 'Tax invoices raised', n: m.n, v: m.inv, c: T.green,
-      sub: 'orders that reached the MTR', bucket: 'matched' },
-    { k: 'Match rate', n: null, v: null, c: T.blue, bucket: 'matched',
-      big: pct(m.n, ordersPlaced), sub: `${pct(m.inv, totOrderVal)} by value` },
-    { k: 'Needs checking', n: checkN, v: checkV, c: checkN ? T.red : '#94A3B8',
-      sub: 'only these two buckets', buckets: check },
-  ];
-
   const Bar = ({ a, b, tone }) => (
     <div className="h-1.5 rounded-full mt-2 overflow-hidden" style={{ background: '#EEF1F4' }}>
       <div className="h-full rounded-full" style={{ width: `${b ? Math.min(100, (100 * a) / b) : 0}%`, background: tone }} />
@@ -1767,114 +1646,18 @@ function InvoicingView({ inv, shown, onDrill }) {
 
   return (
     <>
-      <Card title="The journey of an order, order report to tax invoice"
-            sub="Every order placed, and how much of it reached the MTR. Click either stop for the orders.">
-        <div className="p-5">
-          <div className="flex items-stretch flex-wrap lg:flex-nowrap">
-            {[{ kind: 'order', cap: 'Orders placed', col: 'item-price', n: ordersPlaced,
-                v: R.allOrderValue, bucket: '__all', unit: 'orders in the order report' },
-              { kind: 'mtr', cap: 'Tax invoices raised', col: 'Invoice Amount', n: m.n + (byKey.mtrOnly?.n || 0),
-                v: R.invoicedValue, bucket: 'matched', unit: 'reached the MTR' }].map((st, i) => {
-              const f = FILEMARK[st.kind];
-              return (
-                <React.Fragment key={st.cap}>
-                  {i > 0 && (
-                    <div className="flex flex-col justify-center items-center px-3 min-w-[186px] shrink-0">
-                      <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">less</div>
-                      <div className="text-[15px] font-bold tabular-nums my-0.5" style={{ color: T.amberText }}>
-                        ₹{inr(Math.abs(DIFF))}
-                      </div>
-                      <div className="w-full h-px my-1" style={{ background: '#E2E8F0' }} />
-                      <div className="text-[10.5px] text-center leading-snug text-slate-500">
-                        never reached the tax invoice
-                        <span className="block text-[9.5px] text-slate-400 mt-0.5">
-                          cancelled, not an Amazon sale, replaced free — every rupee named below
-                        </span>
-                      </div>
-                    </div>
-                  )}
-                  <button onClick={() => go(st.bucket, st.cap, st.kind === 'mtr' ? 'mtr' : 'order')}
-                          className="flex-1 min-w-[220px] rounded-xl p-4 text-left transition-all hover:shadow-md"
-                          style={{ background: f.bg, border: `1px solid ${f.bd}` }}>
-                    <FileTag kind={st.kind} col={st.col} />
-                    <div className="text-[11px] font-bold uppercase tracking-wider text-slate-500 mt-2">{st.cap}</div>
-                    <div className="text-[25px] font-bold tabular-nums leading-none mt-1" style={{ color: f.tone }}>
-                      ₹{inr(st.v || 0)}
-                    </div>
-                    <div className="text-[11.5px] text-slate-500 mt-1">{int(st.n || 0)} {st.unit}</div>
-                    <div className="h-1.5 rounded-full mt-2.5 overflow-hidden" style={{ background: '#fff' }}>
-                      <div className="h-full rounded-full ar-grow"
-                           style={{ width: `${Math.max(3, (100 * (st.v || 0)) / Math.max(R.allOrderValue, 1))}%`,
-                                    background: f.tone }} />
-                    </div>
-                  </button>
-                </React.Fragment>
-              );
-            })}
-          </div>
-        </div>
-      </Card>
-
-      <div className="rounded-xl mb-5 overflow-hidden"
-           style={{ background: '#fff', border: `1px solid ${Math.abs(DIFF) < 1 ? '#BBF7D0' : '#FDE68A'}` }}>
-        <div className="px-5 py-4 flex items-center gap-6 flex-wrap"
-             style={{ background: Math.abs(DIFF) < 1 ? '#F3FBF6' : '#FFFBEB' }}>
-          <div>
-            <FileTag kind="order" col="item-price" />
-            <div className="text-[25px] font-bold tabular-nums mt-1.5" style={{ color: T.violet }}>
-              ₹{inr(R.allOrderValue)}
-            </div>
-            <div className="text-[11.5px] text-slate-500">{int(ordersPlaced)} orders placed in this period</div>
-          </div>
-          <div className="text-[20px] font-bold text-slate-300">−</div>
-          <div>
-            <FileTag kind="mtr" col="Invoice Amount" />
-            <div className="text-[25px] font-bold tabular-nums mt-1.5" style={{ color: T.blue }}>
-              ₹{inr(R.invoicedValue)}
-            </div>
-            <div className="text-[11.5px] text-slate-500">raised as tax invoices</div>
-          </div>
-          <div className="ml-auto text-right">
-            <div className="text-[11px] font-bold uppercase tracking-wider"
-                 style={{ color: Math.abs(DIFF) < 1 ? T.green : T.amberText }}>
-              {Math.abs(DIFF) < 1 ? 'No difference' : 'Difference'}
-            </div>
-            <div className="text-[32px] font-bold tabular-nums leading-none mt-1"
-                 style={{ color: Math.abs(DIFF) < 1 ? T.green : T.amberText }}>
-              ₹{inr(Math.abs(DIFF))}
-            </div>
-            <div className="text-[11.5px] text-slate-500 mt-0.5">
-              {((100 * Math.abs(DIFF)) / Math.max(R.allOrderValue, 1)).toFixed(2)}% of what customers ordered
-            </div>
-          </div>
-        </div>
-        <div className="px-5 py-1">
-          <div className="text-[10.5px] font-bold uppercase tracking-wider text-slate-400 pt-3 pb-1">
-            And every rupee of it
-          </div>
-          {DIFF_PARTS.map((d) => (
-            <button key={d.k} onClick={() => d.bucket && go(d.bucket, d.k, 'order')} disabled={!d.bucket}
-                    className={`w-full flex justify-between items-baseline gap-4 py-2.5 border-b border-slate-100 last:border-0 text-left ${d.bucket ? 'hover:bg-slate-50' : ''}`}>
-              <span className="min-w-0">
-                <span className="text-[13px] font-semibold text-slate-700">{d.k}</span>
-                {d.n != null && <span className="text-[11px] text-slate-400 ml-1.5">{int(d.n)} orders</span>}
-                <span className="block text-[11px] text-slate-400 leading-snug mt-0.5">{d.note}</span>
-              </span>
-              <span className="text-[13.5px] tabular-nums font-semibold whitespace-nowrap"
-                    style={{ color: d.v > 0 ? T.amberText : T.green }}>
-                {d.v < 0 ? '−' : ''}₹{inr(Math.abs(d.v))}
-              </span>
-            </button>
-          ))}
-          <div className="flex justify-between items-baseline gap-4 py-3 border-t border-slate-200 mt-1">
-            <span className="text-[13px] font-bold text-slate-900">Difference</span>
-            <span className="text-[14px] tabular-nums font-bold"
-                  style={{ color: Math.abs(DIFF) < 1 ? T.green : T.amberText }}>
-              ₹{inr(DIFF)}
-            </span>
-          </div>
-        </div>
-      </div>
+      <DiffWalk
+        from={{ kind: 'order', col: 'item-price', v: R.allOrderValue, n: ordersPlaced,
+                unit: 'orders placed in this period' }}
+        to={{ kind: 'mtr', col: 'Invoice Amount', v: R.invoicedValue,
+              n: m.n + (byKey.mtrOnly?.n || 0), unit: 'raised as tax invoices' }}
+        lines={DIFF_PARTS}
+        diff={DIFF}
+        pctOf={`${((100 * Math.abs(DIFF)) / Math.max(R.allOrderValue, 1)).toFixed(2)}% of what customers ordered`}
+        onLine={(d) => go(d.bucket, d.k, 'order')}
+        note={'An order and its tax invoice are usually minutes apart, so most of this difference is '
+            + 'cancellation. The two lines that carry no order count are differences in what the '
+            + 'invoice bills for, not in which orders reached it.'} />
 
       <CompareChart
         series={series || []}
@@ -1888,7 +1671,8 @@ function InvoicingView({ inv, shown, onDrill }) {
         sub="Purple is what customers ordered. Blue is what became a tax invoice."
         countLabel="orders"
         onSee={(d) => onDrill({ kind: 'invoicing', bucket: '__all',
-                                label: `Orders · ${d.label}`, side: 'order', months: d.months })}
+                                label: 'order report against MTR, order by order',
+                                side: 'order', months: d.months })}
         note={'An order and its tax invoice are usually minutes apart, so these two bars track each '
             + 'other closely. Where they do not, the difference is cancellations — and at a period '
             + 'edge, orders placed just before it opened.'} />
@@ -1906,25 +1690,6 @@ function InvoicingView({ inv, shown, onDrill }) {
           belongs to <strong>order confirmation, not dispatch</strong>: cancel inside that first half
           hour and no invoice ever existed, cancel later and it stays in the MTR with a Cancel row.
         </p>
-      </div>
-
-      <div className="grid gap-3.5 grid-cols-2 xl:grid-cols-4 mb-5">
-        {KPI.map((x) => (
-          <button key={x.k}
-                  onClick={() => (x.buckets
-                    ? onDrill({ kind: 'invoicing', buckets: x.buckets, label: x.k, months: shown })
-                    : go(x.bucket, x.k, x.k === 'Tax invoices raised' ? 'mtr' : 'order'))}
-                  className="text-left bg-white border border-slate-200 rounded-xl p-4 hover:shadow-md hover:border-slate-300 transition-all">
-            <div className="text-[12px] font-bold text-slate-600">{x.k}</div>
-            <div className="text-[26px] font-bold tracking-tight mt-1 tabular-nums" style={{ color: x.c }}>
-              {x.big || int(x.n)}
-            </div>
-            {x.v !== null && (
-              <div className="text-[13px] font-bold tabular-nums text-slate-700 mt-0.5">₹{inr(x.v, 0)}</div>
-            )}
-            <div className="text-[11px] text-slate-500 mt-0.5">{x.sub}</div>
-          </button>
-        ))}
       </div>
 
       {/* sales, the two ways, every line opening its orders */}
@@ -3671,6 +3436,9 @@ function drillRows(drill, data, ST) {
     const rows = drill.bucket === '__all' ? all2
       : drill.buckets ? all2.filter((r) => drill.buckets.includes(r.bucket))
       : all2.filter((r) => r.bucket === drill.bucket);
+    /* biggest difference first — the order anyone reads a reconciliation in */
+    rows.sort((a, b) => Math.abs((b.orderValue || 0) - (b.invoicedValue || 0))
+                      - Math.abs((a.orderValue || 0) - (a.invoicedValue || 0)));
     return { kind: 'invoicing', rows,
              prov: PROV[drill.side === 'mtr' ? 'invoiced' : 'placed'] || PROV.invoiced };
   }
@@ -3679,6 +3447,7 @@ function drillRows(drill, data, ST) {
     const rows = drill.bucket === '__all'
       ? all3.filter((r) => r.bucket !== 'settlementOnly')
       : all3.filter((r) => r.bucket === drill.bucket);
+    rows.sort((a, b) => Math.abs(b.shortfall || 0) - Math.abs(a.shortfall || 0));
     return { kind: 'money', rows, prov: PROV.money };
   }
   if (drill.kind === 'chain') {
@@ -3775,8 +3544,12 @@ const INVOICING_COLS = [
   { key: 'month', label: 'Month', fmt: fmtMonth },
   { key: 'status', label: 'Order status' },
   { key: 'qty', label: 'Qty', num: true },
-  { key: 'orderValue', label: 'Order value', num: true },
-  { key: 'invoicedValue', label: 'Invoiced', num: true },
+  { key: 'orderValue', label: 'Order report', num: true },
+  { key: 'invoicedValue', label: 'MTR', num: true },
+  /* the point of the drill: the two reports on one row and what is between
+     them. Without it the reader has to subtract 2,000 rows by eye. */
+  { key: 'diff', label: 'Difference', num: true,
+    calc: (r) => r2((r.orderValue || 0) - (r.invoicedValue || 0)) },
   { key: 'why', label: 'Why it is here' },
 ];
 
