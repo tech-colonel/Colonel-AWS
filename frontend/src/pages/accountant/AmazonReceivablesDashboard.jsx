@@ -3712,6 +3712,7 @@ const LEDGER_COLS = [
   { key: 'settled', label: 'Received', num: true },
   { key: 'diff', label: 'Difference', num: true, calc: (r) => +(r.invoiced - r.refunded - r.fees - r.tds - r.tcs - r.settled).toFixed(2) },
   { key: 'settledMonth', label: 'Payment month', fmt: (v) => (v ? fmtMonth(v) : '—') },
+  { key: 'settledDate', label: 'Payment date', fmt: (v) => (v ? fmtDay(v) : '—') },
 ];
 /* Both files on one row, and the month the money actually moved — without that
    last column a "paid in a later month" row is indistinguishable from an unpaid
@@ -4011,7 +4012,13 @@ function TransactionData({ data, shown, ST, onClose }) {
                       {Math.abs(d) < 0.01 ? '₹0' : inr(d)}
                     </span>
                   </td>
-                  <td className="px-3 py-2 text-slate-600">{r.settledMonth ? fmtMonth(r.settledMonth) : '—'}</td>
+                  {/* the payment side carries its day too, exactly as the sale
+                      does — the two are checked against each other and against
+                      the bank, so one without a date is half an answer */}
+                  <td className="px-3 py-2 text-slate-600">
+                    {r.settledMonth ? fmtMonth(r.settledMonth) : '—'}
+                    {r.settledDate && <span className="block text-[10px] text-slate-400">{fmtDay(r.settledDate)}</span>}
+                  </td>
                   {/* "Settled in a later month" leaves the reader to go and find
                       WHICH month. Name it — that is the whole question. */}
                   <td className="px-3 py-2 text-slate-600">{statusText(r)}</td>
@@ -4033,6 +4040,7 @@ function TransactionData({ data, shown, ST, onClose }) {
                                              ['GST within it', `₹${inr(r.gst)}`]] },
                           { f: 'settlement', rows: [['Received', `₹${inr(r.settled)}`],
                                                     ['Payment month', r.settledMonth ? fmtMonth(r.settledMonth) : 'no payment yet'],
+                                                    ['Payment date', r.settledDate ? fmtDay(r.settledDate) : '—'],
                                                     ...Object.entries(r.settledBy || {}).map(([m, v]) => [`Paid in ${fmtMonth(m)}`, `₹${inr(v)}`])] },
                           { f: 'derived', rows: [['Amazon charges', `₹${inr(r.fees)}`], ['TDS u/s 194-O', `₹${inr(r.tds)}`],
                                                  ['TCS u/s 52', `₹${inr(r.tcs)}`], ['Net amount due', `₹${inr(due(r))}`],

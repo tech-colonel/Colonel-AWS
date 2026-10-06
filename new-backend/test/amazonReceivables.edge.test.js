@@ -57,6 +57,18 @@ T('a ledger Date object survives (never String() it)',
 T('a ledger row with no release column falls back to its own date',
   monthKey(cashDate({ 'date/time': '18 Jul 2026 11:40:05 pm UTC' })), '2026-07');
 T('an invalid Date does not become a month', monthKey(cashDate({ date_time: new Date('x') })), '');
+/* the payment side carries its DAY as well as its month, like the sale does.
+   isoDay knew neither of the shapes a settlement arrives in, so it returned
+   '' for every one of them and the column would have been empty. */
+T('payment day, unified report format', isoDay('18 Jul 2026 11:40:05 pm UTC'), '2026-07-18');
+T('payment day, ledger Date object',    isoDay(new Date('2026-07-18T23:40:05.000Z')), '2026-07-19');
+T('payment day, nothing to parse',      isoDay(''), '');
+/* a day that disagrees with its own month is worse than no day at all */
+for (const v of ['18 Jul 2026 11:40:05 pm UTC', new Date('2026-07-18T23:40:05.000Z'),
+                 '2026-07-18T23:40:05.000Z', '18-07-2026 23:40']) {
+  T(`day agrees with month for ${String(v).slice(0, 24)}`,
+    isoDay(v).slice(0, 7), monthKey(v));
+}
 
 console.log('--- LEDGER EDGE CASES ---');
 const O = (id, date, status, qty, price, ch) => ({

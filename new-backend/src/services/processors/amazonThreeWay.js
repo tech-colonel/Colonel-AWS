@@ -58,7 +58,23 @@ function isoDay(value) {
   if (value == null || value === '') return '';
   const mk = monthKey(value);
   if (!mk) return '';
+  /* A real Date — the settlement pivot hands these back. monthKey shifts them
+     to IST, so the day must shift the same way or the two disagree. */
+  if (value instanceof Date) {
+    const i = new Date(value.getTime() + IST_MS);
+    return `${i.getUTCFullYear()}-${String(i.getUTCMonth() + 1).padStart(2, '0')}-${String(i.getUTCDate()).padStart(2, '0')}`;
+  }
   const s = String(value).trim();
+  /* "18 Jul 2026 11:40:05 pm UTC" — the unified transaction report's format,
+     which carries the release date. monthKey reads the month straight off the
+     string without shifting, so the day is read the same way. */
+  {
+    const m2 = s.match(/^(\d{1,2})\s+([A-Za-z]{3})[a-z]*\s+(\d{4})/);
+    if (m2) {
+      const mm = MONTH_NAMES[m2[2].toLowerCase()];
+      if (mm) return `${m2[3]}-${mm}-${String(+m2[1]).padStart(2, '0')}`;
+    }
+  }
   let d = null;
   let m = s.match(/^(\d{4})-(\d{2})-(\d{2})[T ]?(\d{2})?:?(\d{2})?/);
   if (m) d = new Date(Date.UTC(+m[1], +m[2] - 1, +m[3], +(m[4] || 0), +(m[5] || 0)));

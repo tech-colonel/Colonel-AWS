@@ -180,11 +180,17 @@ function foldSettled(settlementRows) {
     const cashMonth = monthKey(when);
     let o = byOrder.get(id);
     if (!o) {
-      o = { id, month: '', sales: 0, payout: 0, credits: 0, deferred: 0,
+      o = { id, month: '', payDate: '', sales: 0, payout: 0, credits: 0, deferred: 0,
             feesSigned: 0, tdsSigned: 0, tcsSigned: 0, refundRows: 0, byMonth: {} };
       byOrder.set(id, o);
     }
     o.month = o.month || cashMonth;
+    /* the DAY the money moved, not just its month. The sale already carries its
+       date; an accountant checking a payment against the bank needs the same
+       for the other side. Earliest wins — the rows arrive in no order, and the
+       question is when the money FIRST came. */
+    const payDay = isoDay(when);
+    if (payDay && (!o.payDate || payDay < o.payDate)) o.payDate = payDay;
     o.sales += num(r.product_sales ?? r['product sales']);
     /* NOT every rupee Amazon pays is payment for an invoice. A Reimbursement
        compensates for goods lost or damaged on the way back, an Adjustment
@@ -371,6 +377,7 @@ function buildLedger(src, months, opts = {}) {
       credits: s ? s.credits : 0,
       creditsBy: s ? (s.creditsBy || {}) : {},
       settledMonth: s ? s.month : '',
+      settledDate: s ? s.payDate : '',
       settledBy: s ? s.byMonth : {},
       charged: p.charged, cancelledValue: p.cancelledValue, orderTax: p.tax,
     });
