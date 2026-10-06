@@ -975,6 +975,24 @@ function Motion() {
           13%   { box-shadow: 0 0 0 0 color-mix(in srgb, var(--lit) 0%, transparent); }
           100%  { box-shadow: 0 0 0 0 color-mix(in srgb, var(--lit) 0%, transparent); }
         }
+        /* the agreement band: a slow ring, and a light sweeping its top edge */
+        @keyframes arTie {
+          0%   { box-shadow: 0 0 0 0 rgba(6,118,71,.30); }
+          55%  { box-shadow: 0 0 0 11px rgba(6,118,71,0); }
+          100% { box-shadow: 0 0 0 0 rgba(6,118,71,0); }
+        }
+        @keyframes arGlide {
+          0%   { left: 2%;  opacity: 0; }
+          12%  { opacity: 1; }
+          78%  { opacity: 1; }
+          100% { left: 94%; opacity: 0; }
+        }
+        .ar-tie { animation: arTie 3.4s ease-out infinite; }
+        .ar-glide {
+          position: absolute; top: 0; left: 2%;
+          width: 56px; height: 2px; border-radius: 9999px; opacity: 0;
+          animation: arGlide 3.4s linear infinite;
+        }
         @keyframes arDot {
           0%   { left: 0;    opacity: 0; transform: translate(-50%, -50%) scale(.6); }
           3%   { opacity: 1; transform: translate(-50%, -50%) scale(1); }
@@ -991,8 +1009,8 @@ function Motion() {
           animation: arDot 5.4s linear infinite;
         }
         @media (prefers-reduced-motion: reduce) {
-          .ar-grow, .ar-rise, .ar-lit, .ar-dot { animation: none; }
-          .ar-dot { display: none; }
+          .ar-grow, .ar-rise, .ar-lit, .ar-dot, .ar-tie, .ar-glide { animation: none; }
+          .ar-dot, .ar-glide { display: none; }
         }
 `}</style>
   );
@@ -1590,6 +1608,7 @@ function invAgg(inv, shown) {
     mtrOnly: S(mtrOnlyRows, 'invoicedValue'),
     invoicedValue: S(sel, 'invoicedValue'),
     refundedValue: S(sel, 'refundedValue'),
+    refundOrders: sel.filter((x) => (x.refundedValue || 0) > 0).length,
   };
   R.netBilled = r2(R.invoicedValue - R.refundedValue);
   R.orderLevel = r2(R.allOrderValue - R.cancelledValue);
@@ -1647,24 +1666,29 @@ function InvoicingView({ inv, shown, onDrill }) {
      left out of the walk again. "Not an Amazon sale" and "free replacement"
      were absent from the left column; they happen to carry no money on this
      data, so the column footed by luck rather than by construction. */
-  const leftLines = [['Everything customers ordered', R.allOrderValue, ordersPlaced, '__all']];
+  const L = (k, v, n, bucket, kind, op) => ({ k, v, n, bucket, kind, op });
+  const leftLines = [L('Everything customers ordered', R.allOrderValue, ordersPlaced, '__all', 'strong', '')];
   for (const b of inv.buckets || []) {
     if (b.key === 'matched' || b.key === 'mtrOnly') continue;
     const a = byKey[b.key] || { n: 0, order: 0 };
     if (!a.n && !a.order) continue;
-    leftLines.push([`Less: ${String(b.label || b.key).toLowerCase()}`, -a.order, a.n, b.key]);
+    /* the only bucket worth chasing is called out in red; the rest are
+       ordinary life and must not read as faults */
+    leftLines.push(L(String(b.label || b.key), -a.order, a.n, b.key,
+                     b.key === 'shippedNoInvoice' ? 'flag' : '', '−'));
   }
-  leftLines.push(['Goods on orders in BOTH files', R.matchedOrderValue, m.n, 'matched', true]);
+  leftLines.push(L('Goods on orders in BOTH files', R.matchedOrderValue, m.n, 'matched', 'match', '='));
 
-  const rightLines = [['Goods on the same orders — MTR principal', R.matchedPrincipal, m.n, 'matched', true]];
-  if (Math.abs(R.shipping) >= 0.01) rightLines.push(['Add: delivery billed on the invoice', R.shipping, null, null]);
-  if (Math.abs(R.promo) >= 0.01) rightLines.push(['Less: promotional discount', R.promo, null, null]);
-  if (Math.abs(R.giftWrap) >= 0.01) rightLines.push(['Add: gift wrap', R.giftWrap, null, null]);
-  if (Math.abs(R.mtrOnly) >= 0.01) rightLines.push(['Add: invoiced, no order row', R.mtrOnly, byKey.mtrOnly?.n, 'mtrOnly']);
-  if (Math.abs(R.other) >= 0.01) rightLines.push(['Other invoice differences', R.other, null, null]);
-  rightLines.push(['Invoiced', R.invoicedValue, null, null]);
-  rightLines.push(['Less: returns credited', -R.refundedValue, null, null]);
-  rightLines.push(['Net invoiced', R.netBilled, null, null, true]);
+  const invoicedOrders = m.n + (byKey.mtrOnly?.n || 0);
+  const rightLines = [L('Goods on the same orders — MTR principal', R.matchedPrincipal, m.n, 'matched', 'match', '')];
+  if (Math.abs(R.shipping) >= 0.01) rightLines.push(L('Delivery billed on the invoice', R.shipping, null, null, '', '+'));
+  if (Math.abs(R.promo) >= 0.01) rightLines.push(L('Promotional discount on the invoice', R.promo, null, null, '', '−'));
+  if (Math.abs(R.giftWrap) >= 0.01) rightLines.push(L('Gift wrap billed on the invoice', R.giftWrap, null, null, '', '+'));
+  if (Math.abs(R.mtrOnly) >= 0.01) rightLines.push(L('Invoiced, no order row in this period', R.mtrOnly, byKey.mtrOnly?.n, 'mtrOnly', '', '+'));
+  if (Math.abs(R.other) >= 0.01) rightLines.push(L('Other invoice differences', R.other, null, null, '', '+'));
+  rightLines.push(L('Invoiced', R.invoicedValue, invoicedOrders, null, 'strong', '='));
+  rightLines.push(L('Returns credited', -R.refundedValue, R.refundOrders, 'matched', '', '−'));
+  rightLines.push(L('Net invoiced', R.netBilled, invoicedOrders, null, 'strong', '='));
 
   /* The line-by-line walk below read the same whole-period aggregate, so it
      too stood still when the range moved. Built from the selected rows now,
@@ -1770,37 +1794,112 @@ function InvoicingView({ inv, shown, onDrill }) {
 
       {/* sales, the two ways, every line opening its orders */}
       <Card title="Sales at order level vs MTR level"
-            sub="the same month counted from the order report and from the tax invoices — click any line">
-        <div className="p-4 grid gap-4 lg:grid-cols-2">
-          {[{ head: 'At order level', file: 'Order report', tone: T.violet, lines: leftLines },
-            { head: 'At MTR (invoice) level', file: 'MTR', tone: T.blue, lines: rightLines },
-          ].map((col) => (
-            <div key={col.head} className="rounded-xl overflow-hidden border border-slate-200">
-              <div className="px-4 py-2 flex items-center justify-between"
-                   style={{ background: '#F8FAFC' }}>
-                <span className="text-[11px] uppercase tracking-wide font-bold text-slate-600">{col.head}</span>
-                <span className="text-[10px] font-bold px-2 py-0.5 rounded"
-                      style={{ background: `${col.tone}18`, color: col.tone }}>{col.file}</span>
+            sub="The same months counted twice — once from the order report, once from the tax invoices. The green line is where they meet.">
+        <div className="p-4 grid gap-5 lg:grid-cols-2">
+          {[{ head: 'At order level', kind: 'order', col: 'item-price', lines: leftLines },
+            { head: 'At MTR (invoice) level', kind: 'mtr', col: 'Invoice Amount', lines: rightLines },
+          ].map((panel) => {
+            const f = FILEMARK[panel.kind];
+            /* scaled against the biggest line IN THIS COLUMN. Against the
+               87 lakh every deduction is an invisible sliver, which is how a
+               bar can be drawn and still say nothing. */
+            const top = Math.max(...panel.lines.map((x) => Math.abs(x.v || 0)), 1);
+            return (
+              <div key={panel.head} className="rounded-xl overflow-hidden"
+                   style={{ border: `1px solid ${f.bd}` }}>
+                <div className="px-4 py-2.5 flex items-baseline gap-2.5"
+                     style={{ background: f.bg, borderBottom: `1px solid ${f.bd}` }}>
+                  <span className="text-[11px] uppercase tracking-wider font-bold" style={{ color: f.tone }}>
+                    {panel.head}
+                  </span>
+                  <span className="text-[11px]" style={{ color: f.tone, opacity: .72 }}>
+                    {f.name} · {panel.col}
+                  </span>
+                  <span className="ml-auto w-[62px] text-right text-[10px] uppercase tracking-wider font-bold"
+                        style={{ color: f.tone, opacity: .6 }}>Orders</span>
+                  <span className="w-[120px] text-right text-[10px] uppercase tracking-wider font-bold"
+                        style={{ color: f.tone, opacity: .6 }}>Amount</span>
+                </div>
+                {panel.lines.map((x, i) => {
+                  const match = x.kind === 'match'; const strong = x.kind === 'strong';
+                  const bg = match ? '#F0FDF4' : strong ? f.bg : '#fff';
+                  return (
+                    <button key={i} disabled={!x.bucket}
+                            onClick={() => x.bucket && go(x.bucket, x.k, panel.kind === 'mtr' ? 'mtr' : 'order')}
+                            className={`w-full flex items-center gap-2.5 px-4 py-2.5 border-t border-slate-100 text-left transition-colors ${x.bucket ? 'hover:bg-slate-50 cursor-pointer' : ''}`}
+                            style={{ background: bg,
+                                     borderLeft: match ? '3px solid #34D399' : '3px solid transparent' }}>
+                      <span className="w-3.5 shrink-0 text-center text-[14px]" style={{ color: `${f.tone}66` }}>
+                        {x.op}
+                      </span>
+                      <span className="flex-1 min-w-0">
+                        <span className={`block text-[13px] truncate ${match || strong ? 'font-bold' : 'font-semibold'}`}
+                              style={{ color: match ? '#0A3D27' : '#1F2430' }}>
+                          {x.k}
+                        </span>
+                        <span className="block h-[3px] mt-1.5 rounded-full overflow-hidden max-w-[150px]"
+                              style={{ background: '#F1F3F6' }}>
+                          <span className="block h-full rounded-full ar-grow"
+                                style={{ width: `${Math.max(Math.abs(x.v) > 0 ? 3 : 0, (100 * Math.abs(x.v || 0)) / top)}%`,
+                                         background: match ? '#34D399' : f.tone,
+                                         opacity: match || strong ? 0.85 : 0.5 }} />
+                        </span>
+                      </span>
+                      <span className="w-[62px] shrink-0 text-right text-[12.5px] font-semibold tabular-nums"
+                            style={{ color: x.n == null ? '#CBD5E1' : '#334155' }}>
+                        {x.n == null ? '—' : int(x.n)}
+                      </span>
+                      <span className="w-[120px] shrink-0 text-right text-[13.5px] font-semibold tabular-nums"
+                            style={{ color: x.kind === 'flag' ? T.red : match ? T.green
+                                            : strong ? f.tone : '#1F2430' }}>
+                        ₹{inr(Math.abs(x.v || 0))}
+                      </span>
+                    </button>
+                  );
+                })}
               </div>
-              {col.lines.map(([k, v, n, bucket, strong], i) => (
-                <button key={i} disabled={!bucket}
-                        onClick={() => bucket && go(bucket, k, col.file === 'MTR' ? 'mtr' : 'order')}
-                        className={`w-full flex justify-between items-baseline gap-2 px-4 py-2 border-t border-slate-100 text-left ${bucket ? 'hover:bg-slate-50 cursor-pointer' : ''}`}
-                        style={strong ? { background: '#EFF6FF' } : {}}>
-                  <span className={`text-[13px] ${strong ? 'font-bold' : 'text-slate-600'}`}
-                        style={strong ? { color: '#1E3A8A' } : {}}>
-                    {k}
-                    {n != null && <span className="text-[11px] text-slate-400 ml-1.5">{int(n)} orders</span>}
-                  </span>
-                  <span className={`text-[13px] tabular-nums ${strong ? 'font-bold' : ''} whitespace-nowrap`}
-                        style={strong ? { color: '#1E3A8A' } : { color: '#1F2937' }}>
-                    ₹{inr(Math.abs(v || 0))}
-                  </span>
-                </button>
+            );
+          })}
+        </div>
+
+        {/* ── where the two columns meet ──────────────────────────────────
+            The matched figure closes the left column and opens the right, so
+            it sits in two far corners and the agreement has to be asserted
+            rather than seen. Stated here, under both, with the green edge
+            above tying it to the two rows it came from. */}
+        <div className="mx-4 mb-4 rounded-xl relative overflow-hidden ar-tie"
+             style={{ border: '1.5px solid #86EFAC', background: '#F0FDF4' }}>
+          <span className="ar-glide" style={{ background: '#34D399' }} />
+          <div className="px-5 py-3.5 flex items-center gap-6 flex-wrap">
+            <div className="min-w-0">
+              <div className="text-[11px] font-bold uppercase tracking-wider" style={{ color: T.green }}>
+                The green line above, in both columns
+              </div>
+              <p className="text-[12.5px] mt-1 leading-relaxed max-w-[430px]" style={{ color: '#3F5B4D' }}>
+                The order report&rsquo;s <em>item-price</em> and the MTR&rsquo;s <em>Principal Amount</em> on the
+                same orders — two files, counted apart, to the paisa.
+              </p>
+            </div>
+            <div className="ml-auto flex items-center gap-6">
+              {[['Orders', int(m.n), '#0A3D27'],
+                ['Order report', `₹${inr(R.matchedOrderValue)}`, T.violet],
+                ['=', null, T.green],
+                ['MTR', `₹${inr(R.matchedPrincipal)}`, T.blue]].map(([cap, val, c], i) => (
+                val === null
+                  ? <div key={i} className="text-[19px] font-bold" style={{ color: c }}>{cap}</div>
+                  : (
+                    <div key={i} className="text-right">
+                      <div className="text-[10px] font-bold uppercase tracking-wider" style={{ color: '#6B8A79' }}>
+                        {cap}
+                      </div>
+                      <div className="text-[20px] font-bold tabular-nums" style={{ color: c }}>{val}</div>
+                    </div>
+                  )
               ))}
             </div>
-          ))}
+          </div>
         </div>
+
         <div className="px-4 pb-4">
           {/* THE BRIDGE. The two totals were never measuring the same thing:
               the order report's item-price is the PRINCIPAL, while the MTR's
