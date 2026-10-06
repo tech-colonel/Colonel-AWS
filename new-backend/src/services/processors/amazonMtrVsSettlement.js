@@ -40,18 +40,18 @@ const monthName = (m) => (/^\d{4}-\d{2}$/.test(m || '')
   ? `${MON[+String(m).slice(5) - 1]} ${String(m).slice(0, 4)}` : (m || ''));
 
 const BUCKETS = [
-  { key: 'settledInPeriod', label: 'Invoiced and paid', expected: true,
+  { key: 'settledInPeriod', label: 'In the MTR and in the Settlement', expected: true,
     meaning: 'The tax invoice is in the MTR and Amazon settled it on or before the end of the '
            + 'selected period. This is the only bucket where the sale and the money are in the '
            + 'same period.' },
-  { key: 'settledLater', label: 'Invoiced here, paid in a later month', expected: true,
+  { key: 'settledLater', label: 'In the MTR here, in the Settlement later', expected: true,
     meaning: 'Amazon settles on its own cycle, so an order invoiced near the end of a month is '
            + 'very often paid in the next one. It is not outstanding — the row names the month '
            + 'the money actually arrived in.' },
-  { key: 'neverSettled', label: 'Invoiced, never paid', expected: false,
+  { key: 'neverSettled', label: 'In the MTR, in no Settlement at all', expected: false,
     meaning: 'A tax invoice exists and no settlement anywhere in the files held mentions the '
            + 'order. This is the only bucket worth taking to Amazon.' },
-  { key: 'settlementOnly', label: 'Paid here, invoiced outside this period', expected: true,
+  { key: 'settlementOnly', label: 'In the Settlement, invoiced outside this period', expected: true,
     meaning: 'Money credited inside the period against a sale made before it. Real cash, but it '
            + 'belongs to an earlier period’s sales and must not be read as this one’s.' },
 ];

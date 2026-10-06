@@ -31,6 +31,7 @@ import {
   Package, Receipt, Banknote, X, Loader2, ArrowLeft, CalendarRange, Plus,
   LayoutDashboard, Bot, FileSpreadsheet, Sigma, Clock, FileText, Eye, Trash2, Search,
 } from 'lucide-react';
+import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip } from 'recharts';
 import { toast } from 'sonner';
 import api from '../../lib/api';
 import DashboardLayout from '../../components/layout/DashboardLayout';
@@ -709,7 +710,7 @@ function ReportView({ data, status, months, shown, sel, setSel, onDrill, base, o
       <RangeBar months={months} sel={sel} setSel={setSel} all={all} />
 
       {layer === 'money'
-        ? <MoneyMatchView mm={data?.moneyMatch} shown={shown} onDrill={onDrill} />
+        ? <MoneyMatchView mm={data?.moneyMatch} three={data?.three} shown={shown} onDrill={onDrill} />
         : layer === 'invoicing'
         ? <InvoicingView inv={data?.invoicing} shown={shown} onDrill={onDrill} />
         : <>
@@ -905,6 +906,28 @@ function mmAgg(mm, shown) {
       return { key: k, label: REASON[k][0], meaning: REASON[k][1],
                count: mine.length, amount: sum(mine, 'shortfall') };
     }).filter((x) => x.count),
+    /* ── the two files, month by month ──────────────────────────────────
+       `mtrBy` is keyed by the month the invoice (or credit note) is dated;
+       `grossBy` by the month the money moved. Charting them against each other
+       is the whole point — the gap between the bars IS the settlement lag, and
+       it is invisible in any total. */
+    series: shown.map((m) => {
+      let mtr = 0, settled = 0, orders = 0;
+      for (const r of rows) {
+        mtr += (r.mtrBy || {})[m] || 0;
+        settled += (r.grossBy || {})[m] || 0;
+        if (r.mtrMonth === m) orders += 1;
+      }
+      return { month: m, label: fmtMonth(m), mtr: r2(mtr), settled: r2(settled),
+               gap: r2(mtr - settled), orders };
+    }),
+    money: {
+      invoiced: sum(covered, 'mtrValue'),
+      fees: sum(covered, 'fees'), tds: sum(covered, 'tds'), tcs: sum(covered, 'tcs'),
+      net: r2(sum(covered, 'settledGross') - sum(covered, 'fees')
+             - sum(covered, 'tds') - sum(covered, 'tcs')),
+      credited: sum(covered, 'settledGross'),
+    },
     laterByMonth: Object.values(rows.filter((x) => x.bucket === 'settledLater')
       .reduce((a, x) => {
         const k = Object.keys(x.grossBy || {}).filter(Boolean).sort()[0] || 'unknown';
@@ -915,22 +938,302 @@ function mmAgg(mm, shown) {
   };
 }
 
-/* ── MTR vs SETTLEMENT ────────────────────────────────────────────────────
-   "We did 5 lakh this month. The MTR shows 150 orders worth 5 lakh, the
-   settlement knows only 100 of them worth 4 lakh, and of that only 3.5 lakh is
-   actually in. Meanwhile Amazon's commission, TDS and TCS come off the 100
-   orders it does know, while net sales is built on all 150." Two sides of one
-   margin computed on different populations, and nothing on the screen saying
-   so.
+/* The three files, named the way the files are named — an accountant opening
+   Seller Central sees "MTR", "Settlement report" and "All orders", not
+   "what Amazon credited". Every figure on this tab says which file and which
+   COLUMN of it, because that is the question being asked. */
+const FILEMARK = {
+  order: { name: 'Order report', tone: T.violet, bg: '#F5F3FF', bd: '#DDD6FE' },
+  mtr: { name: 'MTR', tone: T.blue, bg: '#EFF6FF', bd: '#BFDBFE' },
+  settlement: { name: 'Settlement', tone: T.green, bg: '#F3FBF6', bd: '#BBF7D0' },
+};
 
-   Gross is compared with gross: the MTR's Invoice Amount (GST-inclusive)
-   against what Amazon credited before its own deductions. Fees, TDS and TCS
-   are reported underneath and never netted into the comparison - doing that
-   would put a quarter of the value inside the "difference" and make every
-   order look short-paid. Nothing is accrued for orders the settlement has not
-   reached: the COVERAGE line states the gap instead, because an invented
-   deduction makes a margin look complete and be wrong. */
-function MoneyMatchView({ mm, shown, onDrill }) {
+function FileTag({ kind, col }) {
+  const f = FILEMARK[kind]; const Ic = FILES[kind].icon;
+  return (
+    <span className="inline-flex items-center gap-1 text-[10px] font-bold px-1.5 py-0.5 rounded"
+          style={{ background: f.bg, color: f.tone, border: `1px solid ${f.bd}` }}>
+      <Ic className="h-2.5 w-2.5" />{f.name}{col ? <span className="font-medium opacity-80">· {col}</span> : null}
+    </span>
+  );
+}
+
+/* ── the order's journey, end to end ──────────────────────────────────────
+   Three files, left to right, in the order an order actually passes through
+   them. Each stop carries its own count and value; between the stops are the
+   orders that never made it to the next file, which is where every argument
+   about "the files don't match" actually lives. The bars grow on mount so the
+   eye follows the direction of travel. */
+function JourneyStrip({ three, A, shown, onDrill }) {
+  const t = three?.totals || {};
+  const paid = A.byKey.settledInPeriod || { count: 0, settledGross: 0 };
+  const stops = [
+    { kind: 'order', cap: 'Orders placed', col: 'amazon-order-id',
+      n: t.placed, v: t.valuePlaced, step: 'placed' },
+    { kind: 'mtr', cap: 'Tax invoices raised', col: 'Invoice Amount',
+      n: A.totals.invoicedOrders, v: A.totals.invoicedValue, step: 'invoiced' },
+    { kind: 'settlement', cap: 'Credited inside the period', col: 'total (before fees)',
+      n: paid.count, v: paid.settledGross, step: 'settled' },
+  ];
+  /* The stops have to SUBTRACT to one another or the strip is just three
+     numbers side by side — which is what the accountant objected to. The MTR
+     also ADDS invoices whose order sits outside the period, so that leg is
+     signed rather than assumed to be a loss. */
+  const lost = (t.cancelled || 0) + (t.mcf || 0) + (t.notInvoicedFree || 0) + (t.notInvoiced || 0);
+  const gained = A.totals.invoicedOrders - ((t.placed || 0) - lost);
+  const drops = [
+    { lines: [
+        { n: -lost, label: 'never reached the MTR',
+          note: 'cancelled, not an Amazon sale, replaced free, or shipped with no invoice' },
+        ...(gained ? [{ n: gained, label: 'invoiced with no order row in this period',
+          note: 'ordered just before the period opened, or just after midnight IST on the first' }] : []),
+      ] },
+    { lines: [
+        { n: -(A.totals.laterOrders + A.totals.neverOrders), label: 'not credited by the period end',
+          note: A.totals.neverOrders
+            ? `${int(A.totals.laterOrders)} credited in a later month · ${int(A.totals.neverOrders)} never credited`
+            : 'every one of them was credited in a later month — none is missing' },
+      ] },
+  ];
+  const max = Math.max(...stops.map((x) => x.v || 0), 1);
+  return (
+    <Card title="The journey of an order, end to end"
+          sub="Left to right, through the three files it passes. Click any stop for the orders.">
+      <div className="p-5">
+        <div className="flex items-stretch gap-0 flex-wrap lg:flex-nowrap">
+          {stops.map((st, i) => {
+            const f = FILEMARK[st.kind];
+            return (
+              <React.Fragment key={st.cap}>
+                {i > 0 && (
+                  <div className="flex flex-col justify-center items-center px-2 min-w-[168px] shrink-0">
+                    <div className="w-full h-px" style={{ background: '#E2E8F0' }} />
+                    {drops[i - 1].lines.map((d) => (
+                      <div key={d.label} className="text-[10.5px] text-center mt-1.5 leading-snug"
+                           style={{ color: d.n < 0 ? T.amberText : T.green }}>
+                        <span className="font-bold">{d.n < 0 ? '−' : '+'}{int(Math.abs(d.n))}</span> {d.label}
+                        <span className="block text-[9.5px] text-slate-400 mt-0.5">{d.note}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                <button onClick={() => onDrill({ kind: 'chain', step: st.step, months: shown })}
+                        className="flex-1 min-w-[210px] rounded-xl p-4 text-left transition-all hover:shadow-md"
+                        style={{ background: f.bg, border: `1px solid ${f.bd}` }}>
+                  <FileTag kind={st.kind} col={st.col} />
+                  <div className="text-[11px] font-bold uppercase tracking-wider text-slate-500 mt-2">{st.cap}</div>
+                  <div className="text-[26px] font-bold tabular-nums leading-none mt-1" style={{ color: f.tone }}>
+                    {int(st.n || 0)}
+                  </div>
+                  <div className="text-[13.5px] font-semibold text-slate-700 tabular-nums mt-1">
+                    ₹{inr(st.v || 0)}
+                  </div>
+                  <div className="h-1.5 rounded-full mt-2.5 overflow-hidden" style={{ background: '#fff' }}>
+                    <div className="h-full rounded-full ar-grow"
+                         style={{ width: `${Math.max(3, (100 * (st.v || 0)) / max)}%`, background: f.tone }} />
+                  </div>
+                </button>
+              </React.Fragment>
+            );
+          })}
+        </div>
+      </div>
+    </Card>
+  );
+}
+
+/* ── MTR against Settlement, period by period ─────────────────────────────
+   A total cannot show a lag. Two bars per period can: the MTR bar is what was
+   invoiced in that period, the settlement bar is what Amazon actually moved in
+   it, and where the second is shorter the money is simply still coming. */
+function FileChart({ A, onDrill, shown }) {
+  const [gran, setGran] = useState('month');
+  const [metric, setMetric] = useState('amount');
+  /* Recharts' ResponsiveContainer measures on its first commit, before the
+     tab's layout has resolved, and warns the chart is -1 by -1 every time.
+     Measuring the wrapper here instead is deterministic: the chart is not
+     rendered at all until there is a real width to give it, and it follows
+     the window afterwards. */
+  const box = React.useRef(null);
+  const [w, setW] = useState(0);
+  useEffect(() => {
+    const el = box.current; if (!el) return undefined;
+    const ro = new ResizeObserver(([e]) => {
+      const next = Math.floor(e.contentRect.width);
+      if (next > 0) setW((prev) => (Math.abs(prev - next) > 1 ? next : prev));
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+  const data = useMemo(() => {
+    const src = A.series || [];
+    if (gran === 'month') return src;
+    /* Apr-Mar, because that is the year an Indian accountant closes */
+    const by = {};
+    for (const r of src) {
+      const y = +r.month.slice(0, 4); const m = +r.month.slice(5);
+      const fy = m >= 4 ? y : y - 1;
+      const k = `FY ${String(fy).slice(2)}-${String(fy + 1).slice(2)}`;
+      by[k] = by[k] || { month: k, label: k, mtr: 0, settled: 0, orders: 0 };
+      by[k].mtr = r2(by[k].mtr + r.mtr);
+      by[k].settled = r2(by[k].settled + r.settled);
+      by[k].orders += r.orders;
+    }
+    return Object.values(by);
+  }, [A.series, gran]);
+
+  const Toggle = ({ v, set, opts }) => (
+    <div className="inline-flex rounded-lg p-0.5" style={{ background: '#F1F5F9' }}>
+      {opts.map(([k, label]) => (
+        <button key={k} onClick={() => set(k)}
+                className="px-2.5 py-1 rounded-md text-[11px] font-bold transition-all"
+                style={v === k ? { background: '#fff', color: T.ink, boxShadow: '0 1px 2px rgba(0,0,0,.08)' }
+                               : { color: '#94A3B8' }}>
+          {label}
+        </button>
+      ))}
+    </div>
+  );
+
+  const tip = ({ active, payload, label }) => {
+    if (!active || !payload?.length) return null;
+    const d = payload[0].payload;
+    const gap = r2(d.mtr - d.settled);
+    return (
+      <div className="rounded-lg px-3 py-2 text-[11.5px] shadow-lg"
+           style={{ background: '#fff', border: '1px solid #E2E8F0' }}>
+        <div className="font-bold text-slate-800 mb-1">{label}</div>
+        <div className="flex justify-between gap-5"><span style={{ color: T.blue }}>MTR invoiced</span>
+          <span className="tabular-nums font-semibold">₹{inr(d.mtr)}</span></div>
+        <div className="flex justify-between gap-5"><span style={{ color: T.green }}>Settlement credited</span>
+          <span className="tabular-nums font-semibold">₹{inr(d.settled)}</span></div>
+        <div className="flex justify-between gap-5 mt-1 pt-1 border-t border-slate-100">
+          <span className="text-slate-500">{gap >= 0 ? 'Still to come in' : 'Credited ahead'}</span>
+          <span className="tabular-nums font-bold" style={{ color: gap >= 0 ? T.amberText : T.green }}>
+            ₹{inr(Math.abs(gap))}
+          </span></div>
+        <div className="text-[10.5px] text-slate-400 mt-1">{int(d.orders)} invoices raised</div>
+      </div>
+    );
+  };
+
+  return (
+    <Card title="MTR against Settlement, period by period"
+          sub="Blue is what the MTR invoiced. Green is what the settlement moved. The gap is the lag."
+          right={
+            <div className="flex items-center gap-2">
+              <Toggle v={metric} set={setMetric} opts={[['amount', '₹'], ['orders', 'Orders']]} />
+              <Toggle v={gran} set={setGran} opts={[['month', 'Month'], ['fy', 'Financial year']]} />
+            </div>
+          }>
+      <div className="p-5">
+        <div className="flex items-center gap-4 mb-3">
+          <span className="inline-flex items-center gap-1.5 text-[11.5px] font-semibold text-slate-600">
+            <span className="w-3 h-3 rounded-sm" style={{ background: T.blue }} /> MTR · Invoice Amount
+          </span>
+          <span className="inline-flex items-center gap-1.5 text-[11.5px] font-semibold text-slate-600">
+            <span className="w-3 h-3 rounded-sm" style={{ background: T.green }} /> Settlement · total before fees
+          </span>
+        </div>
+        {/* minWidth 0 so Recharts does not measure the container at -1 on the
+            first pass and warn four times before it settles */}
+        <div ref={box} style={{ width: '100%', height: 300, minWidth: 0 }}>
+          {w > 0 && (
+            <BarChart width={w} height={300} data={data}
+                      margin={{ top: 4, right: 8, left: 8, bottom: 4 }} barGap={3}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#EEF1F4" vertical={false} />
+              <XAxis dataKey="label" tick={{ fontSize: 11, fill: '#64748B' }}
+                     axisLine={{ stroke: '#E2E8F0' }} tickLine={false} interval={0}
+                     angle={data.length > 8 ? -35 : 0} textAnchor={data.length > 8 ? 'end' : 'middle'}
+                     height={data.length > 8 ? 54 : 24} />
+              <YAxis tick={{ fontSize: 11, fill: '#94A3B8' }} axisLine={false} tickLine={false}
+                     tickFormatter={(v) => (metric === 'orders' ? int(v)
+                       : v >= 100000 ? `${(v / 100000).toFixed(1)}L` : int(v))} />
+              <Tooltip content={tip} cursor={{ fill: 'rgba(148,163,184,.08)' }} />
+              {metric === 'orders'
+                ? <Bar dataKey="orders" fill={T.blue} radius={[3, 3, 0, 0]} maxBarSize={38}
+                       onClick={(d) => onDrill({ kind: 'money', bucket: '__all',
+                                                 label: `Invoices raised · ${d.label}`, months: shown })} />
+                : <>
+                    <Bar dataKey="mtr" fill={T.blue} radius={[3, 3, 0, 0]} maxBarSize={22} />
+                    <Bar dataKey="settled" fill={T.green} radius={[3, 3, 0, 0]} maxBarSize={22} />
+                  </>}
+            </BarChart>
+          )}
+        </div>
+        <p className="text-[11.5px] text-slate-500 mt-2 leading-relaxed">
+          The two bars are keyed on different dates on purpose. The MTR bar sits in the month its
+          invoice (or credit note) is dated; the settlement bar sits in the month the money actually
+          moved. Amazon settles on its own cycle, so a short green bar beside a tall blue one at the
+          right-hand edge is the normal lag, not a shortfall.
+        </p>
+      </div>
+    </Card>
+  );
+}
+
+/* ── from the invoice to the bank ─────────────────────────────────────────
+   Named by the settlement's own columns, because "Amazon charges" is not
+   something anyone can look up in a file. */
+function MoneyFlow({ A }) {
+  const m = A.money;
+  /* It has to FOOT. It used to open on the MTR's invoiced value and then take
+     the settlement's deductions off it, which quietly skipped the invoices the
+     settlement has not reached yet — 52,213 of them — so the last line was
+     short by exactly that and no line said why. */
+  const pending = r2(m.invoiced - m.credited);
+  const steps = [
+    { k: 'MTR · Invoice Amount', v: m.invoiced, tone: T.blue, sign: '', file: 'mtr',
+      note: 'Shipment rows, less credit notes, GST included' },
+    ...(Math.abs(pending) > 0.5 ? [{ k: 'not in the Settlement by the period end',
+      v: -pending, tone: '#94A3B8', sign: '−', file: 'mtr',
+      note: 'Invoices Amazon credited in a later month — named further down the page' }] : []),
+    { k: 'Settlement · total before fees', v: m.credited, tone: T.green, sign: '=', file: 'settlement',
+      note: 'The same orders as the MTR line above, now in the settlement' },
+    { k: 'selling fees + fba fees + other transaction fees', v: -m.fees, tone: T.amberText,
+      sign: '−', file: 'settlement', note: 'Commission, closing fee, fulfilment and storage' },
+    { k: 'TDS (Section 194-O)', v: -m.tds, tone: T.amberText, sign: '−', file: 'settlement',
+      note: 'Withheld against our PAN. Claimed in the income-tax return.' },
+    { k: 'TCS-CGST + TCS-SGST + TCS-IGST', v: -m.tcs, tone: T.amberText, sign: '−', file: 'settlement',
+      note: 'Withheld under section 52. Claimed in the GST cash ledger.' },
+    { k: 'Settlement · total', v: m.net, tone: T.green, sign: '=', file: 'settlement',
+      note: 'What actually reached the bank for these orders', strong: true },
+  ];
+  const max = Math.max(...steps.map((x) => Math.abs(x.v)), 1);
+  return (
+    <Card title="From the tax invoice to the bank"
+          sub="Every deduction named by the column it comes from, so it can be found in the file">
+      <div className="px-5 py-4">
+        {steps.map((x) => (
+          <div key={x.k} className="flex items-center gap-3 py-2.5 border-b border-slate-100 last:border-0">
+            <span className="w-4 text-[15px] font-semibold text-slate-300 shrink-0">{x.sign}</span>
+            <span className="min-w-0 flex-1">
+              <span className="flex items-center gap-2 flex-wrap">
+                <FileTag kind={x.file} />
+                <span className={`text-[13px] ${x.strong ? 'font-bold text-slate-900' : 'text-slate-700'}`}>
+                  {x.k}
+                </span>
+              </span>
+              <span className="block text-[11px] text-slate-400 mt-0.5 leading-snug">{x.note}</span>
+            </span>
+            <span className="w-[38%] shrink-0 hidden md:block">
+              <span className="block h-2 rounded-full overflow-hidden" style={{ background: '#F1F5F9' }}>
+                <span className="block h-full rounded-full ar-grow"
+                      style={{ width: `${Math.max(2, (100 * Math.abs(x.v)) / max)}%`, background: x.tone }} />
+              </span>
+            </span>
+            <span className={`w-[132px] text-right text-[13.5px] tabular-nums shrink-0 ${x.strong ? 'font-bold' : 'font-semibold'}`}
+                  style={{ color: x.tone }}>
+              ₹{inr(Math.abs(x.v))}
+            </span>
+          </div>
+        ))}
+      </div>
+    </Card>
+  );
+}
+
+function MoneyMatchView({ mm, three, shown, onDrill }) {
   if (!mm) {
     return (
       <div className="rounded-xl px-5 py-4" style={{ background: '#F8FAFC', border: '1px solid #E3E6EA' }}>
@@ -947,129 +1250,124 @@ function MoneyMatchView({ mm, shown, onDrill }) {
   const byKey = A.byKey;
   const paid = byKey.settledInPeriod || { count: 0, mtrValue: 0, settledGross: 0 };
   const go = (bucket, label) => onDrill({ kind: 'money', bucket, label, months: shown });
-
-  const KPI = [
-    { k: 'Invoiced in this period', n: t.invoicedOrders, v: t.invoicedValue, c: '#111927',
-      sub: 'every tax invoice in the MTR', bucket: '__all' },
-    { k: 'Paid, in this period', n: paid.count, v: paid.settledGross, c: T.green,
-      sub: 'invoice and money in the same period', bucket: 'settledInPeriod' },
-    { k: 'Paid in a later month', n: t.laterOrders, v: t.laterValue, c: T.amberText,
-      sub: 'not outstanding — the month is named below', bucket: 'settledLater' },
-    { k: 'Never paid', n: t.neverOrders, v: t.neverValue, c: t.neverOrders ? T.red : '#94A3B8',
-      sub: t.neverOrders ? 'worth taking to Amazon' : 'nothing is unpaid', bucket: 'neverSettled' },
-  ];
-
   const diff = r2((paid.mtrValue || 0) - (paid.settledGross || 0));
+  const totalOrders = (A.buckets || []).reduce((a, b) => a + b.count, 0) || 1;
+  const TONE = { settledInPeriod: T.green, settledLater: T.amber, neverSettled: T.red,
+                 settlementOnly: '#94A3B8' };
 
   return (
     <>
-      <div className="rounded-xl px-5 py-4 mb-5" style={{ background: '#EFF6FF', border: '1px solid #BFDBFE' }}>
-        <div className="text-sm font-bold mb-1.5" style={{ color: '#1E3A8A' }}>
-          What this tab is for
-        </div>
-        <p className="text-[13px] leading-relaxed" style={{ color: '#1E40AF' }}>
-          Net sales is built on <strong>every</strong> invoice the MTR raised. Amazon&rsquo;s commission,
-          TDS and TCS are only known for the orders its settlement has actually reached. When those are
-          two different populations the margin is wrong by construction, however carefully each side is
-          added up. This page puts the two files side by side, order by order, and says exactly how far
-          apart they are.
-        </p>
+      <style>{`
+        @keyframes arGrow { from { transform: scaleX(0); } to { transform: scaleX(1); } }
+        @keyframes arRise { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+        .ar-grow { transform-origin: left; animation: arGrow .7s cubic-bezier(.22,.8,.3,1) both; }
+        .ar-rise { animation: arRise .45s cubic-bezier(.22,.8,.3,1) both; }
+        @media (prefers-reduced-motion: reduce) {
+          .ar-grow, .ar-rise { animation: none; }
+        }
+      `}</style>
+
+      <div className="ar-rise">
+        <JourneyStrip three={three} A={A} shown={shown} onDrill={onDrill} />
       </div>
 
-      <div className="grid gap-3.5 grid-cols-1 md:grid-cols-2 xl:grid-cols-4 mb-5">
-        {KPI.map((x) => (
-          <button key={x.k} onClick={() => go(x.bucket, x.k)}
-                  className="bg-white border border-slate-200 rounded-xl p-4 text-left hover:shadow-md hover:border-slate-300 transition-all">
-            <div className="text-[12px] font-bold text-slate-600">{x.k}</div>
-            <div className="text-[28px] font-bold tracking-tight mt-1.5 tabular-nums leading-none"
-                 style={{ color: x.c }}>{int(x.n || 0)}</div>
-            <div className="text-[14px] font-semibold text-slate-700 mt-1.5 tabular-nums">
-              ₹{inr(x.v || 0)}
+      {/* the one number this tab exists to produce */}
+      <div className="ar-rise rounded-xl p-5 mb-5"
+           style={{ background: Math.abs(diff) < 1 ? '#F3FBF6' : '#FFFBEB',
+                    border: `1px solid ${Math.abs(diff) < 1 ? '#BBF7D0' : '#FDE68A'}` }}>
+        <div className="flex items-center gap-6 flex-wrap">
+          <div>
+            <FileTag kind="mtr" col="Invoice Amount" />
+            <div className="text-[26px] font-bold tabular-nums mt-1.5" style={{ color: T.blue }}>
+              ₹{inr(paid.mtrValue)}
             </div>
-            <p className="text-[11.5px] text-slate-500 mt-1.5 leading-snug">{x.sub}</p>
-          </button>
-        ))}
-      </div>
-
-      <Card title="The invoices and the money, side by side"
-            sub="Gross against gross — what the invoice asked for, and what Amazon credited before its own charges">
-        <div className="p-5">
-          <div className="grid md:grid-cols-3 gap-3">
-            {[['The MTR asked for', paid.mtrValue, T.blue, 'Invoice Amount on the matched orders, GST included'],
-              ['Amazon credited', paid.settledGross, T.green, 'Before commission, TDS and TCS are taken off'],
-              [Math.abs(diff) < 1 ? 'They agree' : (diff > 0 ? 'Short by' : 'Over by'), Math.abs(diff),
-               Math.abs(diff) < 1 ? T.green : T.red,
-               Math.abs(diff) < 1
-                 ? `On ${int(paid.count)} orders, to within a rupee`
-                 : 'Explained line by line below']].map(([k, v, tone, note]) => (
-              <div key={k} className="rounded-xl border border-slate-200 p-4">
-                <div className="text-[10.5px] font-bold uppercase tracking-wider text-slate-400">{k}</div>
-                <div className="text-[22px] font-bold mt-1 tabular-nums" style={{ color: tone }}>₹{inr(v)}</div>
-                <p className="text-[11.5px] text-slate-500 mt-1.5 leading-snug">{note}</p>
+            <div className="text-[11.5px] text-slate-500">on {int(paid.count)} orders both files hold</div>
+          </div>
+          <div className="text-[22px] font-bold text-slate-300">vs</div>
+          <div>
+            <FileTag kind="settlement" col="total before fees" />
+            <div className="text-[26px] font-bold tabular-nums mt-1.5" style={{ color: T.green }}>
+              ₹{inr(paid.settledGross)}
+            </div>
+            <div className="text-[11.5px] text-slate-500">the same orders, in the settlement</div>
+          </div>
+          <div className="ml-auto text-right">
+            <div className="text-[11px] font-bold uppercase tracking-wider"
+                 style={{ color: Math.abs(diff) < 1 ? T.green : T.amberText }}>
+              {Math.abs(diff) < 1 ? 'The two files agree' : diff > 0 ? 'Settlement is short by' : 'Settlement is over by'}
+            </div>
+            <div className="text-[30px] font-bold tabular-nums leading-none mt-1"
+                 style={{ color: Math.abs(diff) < 1 ? T.green : T.red }}>
+              ₹{inr(Math.abs(diff))}
+            </div>
+            <div className="text-[11.5px] text-slate-500 mt-0.5">
+              {Math.abs(diff) < 1 ? `to within a rupee, across ${int(paid.count)} orders`
+                : (() => {
+                    const pc = (100 * Math.abs(diff)) / (paid.mtrValue || 1);
+                    return pc < 0.001 ? 'less than a thousandth of a percent of the invoiced value'
+                      : `${pc.toFixed(pc < 1 ? 3 : 2)}% of the invoiced value`;
+                  })()}
+            </div>
+          </div>
+        </div>
+        {A.shortfallBy.length > 0 && (
+          <div className="mt-4 pt-3 border-t" style={{ borderColor: 'rgba(0,0,0,.07)' }}>
+            {A.shortfallBy.map((x) => (
+              <div key={x.key} className="flex justify-between gap-4 py-1.5">
+                <span className="min-w-0">
+                  <span className="text-[12.5px] font-semibold text-slate-700">{x.label}</span>
+                  <span className="text-[11px] text-slate-400 ml-1.5">{int(x.count)} orders</span>
+                  <span className="block text-[11px] text-slate-400 leading-snug">{x.meaning}</span>
+                </span>
+                <span className="text-[13px] tabular-nums font-semibold whitespace-nowrap"
+                      style={{ color: x.amount > 0 ? T.red : T.green }}>
+                  {x.amount > 0 ? '' : '−'}₹{inr(Math.abs(x.amount))}
+                </span>
               </div>
             ))}
           </div>
+        )}
+      </div>
 
-          {A.shortfallBy.length > 0 && (
-            <div className="mt-4 rounded-xl border border-slate-200 overflow-hidden">
-              <div className="px-4 py-2 text-[11px] uppercase tracking-wide font-bold"
-                   style={{ background: '#F8FAFC', color: '#475569' }}>
-                And what explains the difference
-              </div>
-              {A.shortfallBy.map((x) => (
-                <div key={x.key} className="px-4 py-2.5 border-t border-slate-100 flex justify-between gap-4">
-                  <span className="min-w-0">
-                    <span className="text-[13px] text-slate-700">{x.label}</span>
-                    <span className="text-[11px] text-slate-400 ml-1.5">{int(x.count)} orders</span>
-                    <span className="block text-[11px] text-slate-400 leading-snug mt-0.5">{x.meaning}</span>
-                  </span>
-                  <span className="text-[13px] tabular-nums whitespace-nowrap font-semibold"
-                        style={{ color: x.amount > 0 ? T.red : T.green }}>
-                    {x.amount > 0 ? '' : '−'}₹{inr(Math.abs(x.amount))}
-                  </span>
-                </div>
-              ))}
-            </div>
-          )}
+      <div className="ar-rise"><FileChart A={A} onDrill={onDrill} shown={shown} /></div>
+      <div className="ar-rise"><MoneyFlow A={A} /></div>
 
-          {/* ── the coverage statement ─────────────────────────────────────
-              The honest answer to "is my margin right?" is a population count,
-              not an estimate. */}
-          <div className="mt-4 rounded-xl px-4 py-3"
-               style={{ background: c.pctByOrders >= 99.95 ? '#F3FBF6' : '#FFFBEB',
-                        border: `1px solid ${c.pctByOrders >= 99.95 ? '#BBF7D0' : '#FDE68A'}` }}>
-            <div className="text-[11px] font-bold uppercase tracking-wider"
-                 style={{ color: c.pctByOrders >= 99.95 ? T.green : '#92400E' }}>
-              Do the charges cover the sales?
-            </div>
-            <p className="text-[12.5px] leading-relaxed mt-1" style={{ color: '#3F3F46' }}>
-              Net sales is built on <strong>{int(c.ofOrders || 0)} invoiced orders</strong> worth{' '}
-              <strong>₹{inr(c.ofValue || 0, 0)}</strong>. Amazon&rsquo;s charges —{' '}
-              ₹{inr(t.fees || 0, 0)} commission and fulfilment, ₹{inr(t.tds || 0, 0)} TDS,{' '}
-              ₹{inr(t.tcs || 0, 0)} TCS — are known for{' '}
-              <strong>{int(c.orders || 0)} of them ({c.pctByOrders}%, {c.pctByValue}% by value)</strong>.
-              {c.pctByOrders >= 99.95
-                ? ' The two sides are the same population, so the margin on this period is complete.'
-                : ' The remainder carries no charge in these files, so the margin on this period is'
-                  + ' overstated by whatever Amazon will eventually deduct from it. Nothing is estimated'
-                  + ' here — load the settlement month that pays them and the gap closes by itself.'}
-            </p>
+      <Card title="Every tax invoice, by what the settlement did with it"
+            sub="Click any band or row for the orders, with the month each one was paid in">
+        <div className="p-5">
+          <div className="flex h-9 rounded-lg overflow-hidden" style={{ background: '#F1F5F9' }}>
+            {A.buckets.filter((b) => b.count).map((b) => (
+              <button key={b.key} onClick={() => go(b.key, b.label)}
+                      title={`${b.label} — ${int(b.count)} orders`}
+                      className="h-full ar-grow transition-opacity hover:opacity-80"
+                      style={{ width: `${(100 * b.count) / totalOrders}%`, background: TONE[b.key] }} />
+            ))}
+          </div>
+          <div className="flex gap-4 flex-wrap mt-2.5">
+            {A.buckets.filter((b) => b.count).map((b) => (
+              <span key={b.key} className="inline-flex items-center gap-1.5 text-[11.5px] text-slate-600">
+                <span className="w-2.5 h-2.5 rounded-sm" style={{ background: TONE[b.key] }} />
+                {b.label} <span className="font-bold tabular-nums">{int(b.count)}</span>
+                <span className="text-slate-400">
+                  ({((100 * b.count) / totalOrders).toFixed(1)}%)
+                </span>
+              </span>
+            ))}
           </div>
         </div>
-      </Card>
-
-      <Card title="Every invoice, by what happened to the money"
-            sub="Click any row for the orders, with the month each one was actually paid in">
         <div>
           {A.buckets.map((b) => (
             <button key={b.key} onClick={() => go(b.key, b.label)}
                     className="w-full px-5 py-3.5 border-t border-slate-100 text-left hover:bg-slate-50 flex items-start justify-between gap-5">
               <span className="min-w-0">
-                <span className="text-[13.5px] font-semibold text-slate-800">{b.label}</span>
-                {!b.expected && b.count > 0 && (
-                  <span className="ml-2 text-[10px] font-bold px-2 py-0.5 rounded-full"
-                        style={{ background: '#FEE4E2', color: T.red }}>needs checking</span>
-                )}
+                <span className="flex items-center gap-2">
+                  <span className="w-2.5 h-2.5 rounded-sm shrink-0" style={{ background: TONE[b.key] }} />
+                  <span className="text-[13.5px] font-semibold text-slate-800">{b.label}</span>
+                  {!b.expected && b.count > 0 && (
+                    <span className="text-[10px] font-bold px-2 py-0.5 rounded-full"
+                          style={{ background: '#FEE4E2', color: T.red }}>needs checking</span>
+                  )}
+                </span>
                 <span className="block text-[11.5px] text-slate-500 leading-snug mt-1">{b.meaning}</span>
               </span>
               <span className="flex items-baseline gap-5 shrink-0">
@@ -1078,14 +1376,12 @@ function MoneyMatchView({ mm, shown, onDrill }) {
                   <span className="text-[15px] font-bold tabular-nums">{int(b.count)}</span>
                 </span>
                 <span className="text-right w-[120px]">
-                  <span className="block text-[10px] uppercase tracking-wider text-slate-400 font-bold">invoiced</span>
-                  <span className="text-[15px] font-bold tabular-nums">₹{inr(b.mtrValue)}</span>
+                  <span className="block text-[10px] uppercase tracking-wider text-slate-400 font-bold">MTR</span>
+                  <span className="text-[15px] font-bold tabular-nums" style={{ color: T.blue }}>₹{inr(b.mtrValue)}</span>
                 </span>
                 <span className="text-right w-[120px]">
-                  <span className="block text-[10px] uppercase tracking-wider text-slate-400 font-bold">credited</span>
-                  <span className="text-[15px] font-bold tabular-nums" style={{ color: T.green }}>
-                    ₹{inr(b.settledGross)}
-                  </span>
+                  <span className="block text-[10px] uppercase tracking-wider text-slate-400 font-bold">Settlement</span>
+                  <span className="text-[15px] font-bold tabular-nums" style={{ color: T.green }}>₹{inr(b.settledGross)}</span>
                 </span>
               </span>
             </button>
@@ -1093,16 +1389,38 @@ function MoneyMatchView({ mm, shown, onDrill }) {
         </div>
       </Card>
 
+      <div className="rounded-xl px-5 py-4 mb-5"
+           style={{ background: c.pctByOrders >= 99.95 ? '#F3FBF6' : '#FFFBEB',
+                    border: `1px solid ${c.pctByOrders >= 99.95 ? '#BBF7D0' : '#FDE68A'}` }}>
+        <div className="text-[11px] font-bold uppercase tracking-wider mb-1"
+             style={{ color: c.pctByOrders >= 99.95 ? T.green : '#92400E' }}>
+          Are the charges and the sales the same orders?
+        </div>
+        <p className="text-[12.5px] leading-relaxed" style={{ color: '#3F3F46' }}>
+          Net sales is built on <strong>{int(c.ofOrders || 0)}</strong> tax invoices worth{' '}
+          <strong>₹{inr(c.ofValue || 0, 0)}</strong>. The settlement&rsquo;s deductions —{' '}
+          ₹{inr(t.fees || 0, 0)} in <em>selling / fba / other transaction fees</em>,{' '}
+          ₹{inr(t.tds || 0, 0)} <em>TDS (Section 194-O)</em>, ₹{inr(t.tcs || 0, 0)}{' '}
+          <em>TCS-CGST/SGST/IGST</em> — are known for{' '}
+          <strong>{int(c.orders || 0)} of them ({c.pctByOrders}%, {c.pctByValue}% by value)</strong>.
+          {c.pctByOrders >= 99.95
+            ? ' Same population on both sides, so the margin on this period is complete.'
+            : ' The rest carry no deduction in these files, so the margin is overstated by whatever'
+              + ' Amazon will eventually take off them. Nothing is estimated here — load the'
+              + ' settlement month that pays them and the gap closes by itself.'}
+        </p>
+      </div>
+
       {A.laterByMonth.length > 0 && (
-        <Card title="The invoices paid after the period closed"
-              sub="Not outstanding — this is the month the money actually arrived in">
+        <Card title="Invoiced here, credited after the period closed"
+              sub="Not outstanding — this is the month the settlement actually moved the money">
           <div className="px-5 py-2">
             {A.laterByMonth.map((x) => (
-              <button key={x.month} onClick={() => go('settledLater', `Settled in ${fmtMonth(x.month)}`)}
+              <button key={x.month} onClick={() => go('settledLater', `Credited in ${fmtMonth(x.month)}`)}
                       className="w-full flex justify-between items-baseline gap-3 py-2.5 border-b border-slate-100 text-left hover:bg-slate-50">
                 <span className="text-[13.5px] text-slate-700">
-                  Settled in {fmtMonth(x.month)}
-                  <span className="text-[11.5px] text-slate-400 ml-1.5">{int(x.orders)} orders</span>
+                  Credited in {fmtMonth(x.month)}
+                  <span className="text-[11.5px] text-slate-400 ml-1.5">{int(x.orders)} invoices</span>
                 </span>
                 <span className="text-[13.5px] font-semibold tabular-nums" style={{ color: T.amberText }}>
                   ₹{inr(x.amount)}
@@ -1110,9 +1428,9 @@ function MoneyMatchView({ mm, shown, onDrill }) {
               </button>
             ))}
             <p className="text-[11.5px] text-slate-500 py-2.5 leading-relaxed">
-              Amazon settles on its own cycle, so invoices raised near a month end are very often paid in
-              the next one. They are shown here rather than as unpaid, because they are not unpaid — the
-              only bucket that means money is genuinely missing is &ldquo;invoiced, never paid&rdquo;.
+              Amazon settles on its own cycle, so invoices raised near a month end are very often
+              credited in the next one. The only bucket that means money is genuinely missing is
+              &ldquo;invoiced, never credited&rdquo;.
             </p>
           </div>
         </Card>
