@@ -482,6 +482,23 @@ function buildLedger(src, months, opts = {}) {
       closing: { count: billable.length - paidInMonth.length, amount: closingAmt },
       /* only knowable once later months are loaded — never folded into closing */
       receivedLater: { count: paidLater.length, amount: receivedLater },
+      /* WHICH later months it came in. The card can only ever say what was
+         unpaid at the month end, because that is what the month closed on —
+         but the reader's next question is always "and did we get it?", and
+         "Later: 8,132 came in" did not answer it. Named months now. */
+      laterBy: (() => {
+        const by = {};
+        for (const r of billable) {
+          for (const [cm, v] of Object.entries(r.settledBy || {})) {
+            if (!cm || cm <= m) continue;
+            const b = (by[cm] = by[cm] || { amount: 0, orders: new Set() });
+            b.amount = r2(b.amount + v); b.orders.add(r.orderId);
+          }
+        }
+        return Object.entries(by)
+          .map(([month, v]) => ({ month, amount: r2(v.amount), orders: v.orders.size }))
+          .sort((a, b) => a.month.localeCompare(b.month));
+      })(),
       settled: { count: billable.filter((r) => r.settled !== 0).length, amount: receivedToDate },
       stillOpen: { count: neverPaid.length, amount: stillOpen },
       unpaidOrders: { count: neverPaid.length, amount: sum(neverPaid, 'invoiced') },

@@ -1354,11 +1354,13 @@ function MonthStatement({ m, data, onDrill }) {
               [m.receivedLater.amount > 0
                 ? `Later: ₹${inr(m.receivedLater.amount, 0)} came in · ₹${inr(m.stillOpen.amount, 0)} open`
                 : 'Nothing has come in since', '']],
+      foot: 'Month by month, in the box below ↓',
       drill: { kind: 'line', line: 'closing' },
     }]),
     { n: 4, q: 'How much of it was old money?', val: olderAmt, tone: T.amber, fg: T.amberText,
       sub: `${int(olderOrders)} orders · sold in an earlier month`,
       lines: [['Part of card 2, not card 1', ''], ['No sales invoice in this report', '']],
+      foot: 'Month by month, in the box below ↓',
       drill: { kind: 'cash', month: m.month } },
   ];
 
@@ -1432,9 +1434,112 @@ function MonthStatement({ m, data, onDrill }) {
                   <span className="text-[11.5px] font-bold text-slate-700 tabular-nums whitespace-nowrap">{v}</span>
                 </div>
               ))}
+              {c.foot && (
+                <div className="text-[11.5px] font-semibold mt-1.5" style={{ color: c.fg }}>{c.foot}</div>
+              )}
             </div>
           </button>
         ))}
+      </div>
+
+      {/* ── the two boxes cards 3 and 4 point down to ──────────────────────
+          A card can only ever state the position AT THE MONTH END, because
+          that is what the month closed on. The reader's next question is
+          always "and did we get it?" / "whose sales was it?", and a 11px line
+          reading "Later: 8,132 came in" answered neither. Named months, at a
+          size someone will actually read. */}
+      <div className="grid gap-3.5 grid-cols-1 lg:grid-cols-2 mb-5">
+        <div className="bg-white border rounded-xl overflow-hidden" style={{ borderColor: '#FBD5D5' }}>
+          <div className="px-5 py-3 border-b" style={{ background: '#FEF8F8', borderColor: '#FBD5D5' }}>
+            <div className="text-[13.5px] font-bold" style={{ color: T.red }}>
+              The ₹{inr(Math.abs(m.closing.amount))} unpaid on {endLabel(m.month)} — what happened to it
+            </div>
+            <div className="text-[12px] text-slate-500 mt-0.5">
+              The card above still reads ₹{inr(Math.abs(m.closing.amount))}, because that is what the month
+              closed on. This is what came in afterwards.
+            </div>
+          </div>
+          <div className="px-5 py-2">
+            {(m.laterBy || []).length === 0 && (
+              <div className="text-[13px] text-slate-500 py-2">
+                Nothing has come in since the month ended.
+              </div>
+            )}
+            {(m.laterBy || []).map((x) => (
+              <button key={x.month}
+                      onClick={() => onDrill({ kind: 'line', line: 'receivedLater', months: [m.month] })}
+                      className="w-full flex justify-between items-baseline gap-3 py-2 border-b border-slate-100 text-left hover:bg-slate-50">
+                <span className="text-[13.5px] text-slate-700">
+                  {/* a later month can also take money BACK — Jun 2025 was paid
+                      4,206.33 in July and 381.95 of it reversed in September.
+                      Calling that "came in" would be a lie about the sign. */}
+                  {x.amount < 0 ? 'Taken back in ' : 'Came in '}{fmtMonth(x.month)}
+                  <span className="text-[11.5px] text-slate-400 ml-1.5">{int(x.orders)} orders</span>
+                </span>
+                <span className="text-[13.5px] font-semibold tabular-nums"
+                      style={{ color: x.amount < 0 ? T.red : T.green }}>
+                  {x.amount < 0 ? '−' : ''}₹{inr(Math.abs(x.amount))}
+                </span>
+              </button>
+            ))}
+            <div className="flex justify-between items-baseline gap-3 py-2.5">
+              <span className="text-[13.5px] font-bold text-slate-800">
+                Still not received
+                <span className="text-[11.5px] text-slate-400 ml-1.5">after every file loaded</span>
+              </span>
+              <span className="text-[14px] font-bold tabular-nums"
+                    style={{ color: Math.abs(m.stillOpen.amount) < 1 ? T.green : T.red }}>
+                ₹{inr(m.stillOpen.amount)}
+              </span>
+            </div>
+          </div>
+        </div>
+
+        <div className="bg-white border rounded-xl overflow-hidden" style={{ borderColor: '#FFD591' }}>
+          <div className="px-5 py-3 border-b" style={{ background: '#FFFBF4', borderColor: '#FFD591' }}>
+            <div className="text-[13.5px] font-bold" style={{ color: T.amberText }}>
+              The ₹{inr(olderAmt)} of old money — which months it was for
+            </div>
+            <div className="text-[12px] text-slate-500 mt-0.5">
+              Amazon credited it in {fmtMonth(m.month)}, but the sale was made earlier, so it belongs to
+              card 2 and never to card 1.
+            </div>
+          </div>
+          <div className="px-5 py-2">
+            {older.length === 0 && (
+              <div className="text-[13px] text-slate-500 py-2">
+                Every rupee credited this month was for this month&rsquo;s own sales.
+              </div>
+            )}
+            {older.map((x) => (
+              <button key={x.saleMonth}
+                      onClick={() => onDrill({ kind: 'cash', month: m.month, months: [m.month] })}
+                      className="w-full flex justify-between items-baseline gap-3 py-2 border-b border-slate-100 text-left hover:bg-slate-50">
+                <span className="text-[13.5px] text-slate-700">
+                  {x.saleMonth === 'EARLIER'
+                    ? 'Sold before this report begins'
+                    : `Sold in ${fmtMonth(x.saleMonth)}`}
+                  <span className="text-[11.5px] text-slate-400 ml-1.5">{int(x.orders)} orders</span>
+                  {x.saleMonth === 'EARLIER' && (
+                    <span className="block text-[11.5px] text-slate-400 leading-snug">
+                      No sales invoice inside this report, so the month cannot be named. Load the earlier
+                      months and it will be.
+                    </span>
+                  )}
+                </span>
+                <span className="text-[13.5px] font-semibold tabular-nums" style={{ color: T.amberText }}>
+                  ₹{inr(x.amount)}
+                </span>
+              </button>
+            ))}
+            <div className="flex justify-between items-baseline gap-3 py-2.5">
+              <span className="text-[13.5px] font-bold text-slate-800">Old money credited in {fmtMonth(m.month)}</span>
+              <span className="text-[14px] font-bold tabular-nums" style={{ color: T.amberText }}>
+                ₹{inr(olderAmt)}
+              </span>
+            </div>
+          </div>
+        </div>
       </div>
 
       {/* how the four tie together */}
