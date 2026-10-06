@@ -35,6 +35,7 @@ const { getBrandConnection } = require('../../../config/database');
 const amazonReports = require('../../../services/amazonReports');
 const { reconcile, monthKey, num } = require('../../../services/processors/amazonThreeWay');
 const orderVsMtr = require('../../../services/processors/amazonOrderVsMtr');
+const mtrVsSettlement = require('../../../services/processors/amazonMtrVsSettlement');
 const { buildLedger, BASIS } = require('../../../services/processors/amazonReceivablesLedger');
 const { auditLedger, drillFor } = require('../../../services/processors/amazonReceivablesAudit');
 const { buildWorkbook, buildDrillWorkbook } = require('../../../services/processors/amazonReceivablesWorkbook');
@@ -373,6 +374,15 @@ const runReco = async (req, res, next) => {
     try { invoicing = orderVsMtr.build(src, months, { basis }); }
     catch (e) { invoicing = null; }
 
+    /* MTR vs settlement — the tax invoice against the money, and the coverage
+       the margin depends on: net sales is built on every invoiced order while
+       Amazon's charges are known only for the ones the settlement has reached.
+       Wrapped like the one above so a brand with no settlement files still
+       gets the rest of the report rather than a 500. */
+    let moneyMatch = null;
+    try { moneyMatch = mtrVsSettlement.build(src, months, { basis }); }
+    catch (e) { moneyMatch = null; }
+
     const sourceKind = {};
     for (const m of months) sourceKind[m] = src.uploadedMonths.includes(m) ? 'unified' : 'ledger';
     const audit = auditLedger(ledger, { sources: sourceKind,
@@ -402,7 +412,8 @@ const runReco = async (req, res, next) => {
                       value: r2(st.reduce((a, r) => a + num(r.product_sales ?? r['product sales']), 0)) } };
     });
 
-    const result = { three, ledger, audit, drills, sources: perSource, sourceKind, basis, basisCompare, invoicing };
+    const result = { three, ledger, audit, drills, sources: perSource, sourceKind, basis,
+                     basisCompare, invoicing, moneyMatch };
     const ms = Date.now() - t0;
     const fp = `${src.orders.length}|${src.mtr.length}|${src.settlement.length}`;
 

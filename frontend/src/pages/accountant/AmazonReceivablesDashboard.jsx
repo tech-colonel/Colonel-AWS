@@ -114,6 +114,10 @@ const PROV = {
     note: 'An MCF order is neither invoiced nor payable, so it is not outstanding and is not counted here.' },
   mcf: { file: 'order', column: 'sales-channel', filter: 'sales-channel is not Amazon',
     note: 'Sold on another website and only shipped by Amazon, so Amazon raises no tax invoice and pays nothing. Every one carries an item-price of zero.' },
+  money: { file: 'settlement', column: 'total, less selling/FBA/other fees, TDS and TCS',
+    filter: 'Order and Refund rows, matched to the MTR by order id',
+    note: 'Gross is derived from the stated total plus the deductions, not rebuilt from the GST and '
+        + 'shipping columns — a month restored from a retained settlement ledger does not carry them.' },
   notInvoicedFree: { file: 'order', column: 'item-price', filter: 'item-price is nil and the order is in no MTR',
     note: 'A replacement sent at no charge. There is nothing to invoice and nothing to claim from Amazon.' },
   notInvoiced: { file: 'derived', column: 'order report minus MTR',
@@ -689,7 +693,8 @@ function ReportView({ data, status, months, shown, sel, setSel, onDrill, base, o
           month and opens that month's statement. */}
       <div className="flex items-center gap-1.5 mb-4 border-b border-slate-200">
         {[['receivables', 'Receivables', 'what Amazon owes us'],
-          ['invoicing', 'Order vs Invoice', 'was everything invoiced']].map(([k, label, sub]) => (
+          ['invoicing', 'Order vs Invoice', 'was everything invoiced'],
+          ['money', 'MTR vs Settlement', 'was every invoice paid']].map(([k, label, sub]) => (
           <button key={k} onClick={() => setLayer(k)}
                   className="px-4 py-2.5 text-sm font-semibold -mb-px border-b-2 transition-colors text-left"
                   style={layer === k
@@ -703,7 +708,9 @@ function ReportView({ data, status, months, shown, sel, setSel, onDrill, base, o
 
       <RangeBar months={months} sel={sel} setSel={setSel} all={all} />
 
-      {layer === 'invoicing'
+      {layer === 'money'
+        ? <MoneyMatchView mm={data?.moneyMatch} shown={shown} onDrill={onDrill} />
+        : layer === 'invoicing'
         ? <InvoicingView inv={data?.invoicing} shown={shown} onDrill={onDrill} />
         : <>
       <BasisCompare cmp={data?.basisCompare} shown={shown} onDrill={onDrill} />
@@ -806,6 +813,311 @@ function BasisCompare({ cmp, shown, onDrill }) {
         </div>
       )}
     </div>
+  );
+}
+
+/* ── one aggregation for the MTR-vs-Settlement tab ────────────────────────
+   Derived from the SELECTED months, never from the backend's whole-run answer,
+   for exactly the reason the Order-vs-Invoice bridge had to be rebuilt: a
+   pre-computed total does not move when the range does, and a page whose
+   breakdown reshuffles under a total that never changes is worse than no page.
+
+   "Paid" has to be re-asked at the new period end too, which is why each row
+   carries `grossBy` — what Amazon credited in each month — rather than one
+   settled figure. */
+function mmAgg(mm, shown) {
+  const sel = new Set(shown);
+  const periodEnd = shown.length ? shown[shown.length - 1] : '';
+  const upTo = (by) => r2(Object.entries(by || {})
+    .reduce((a, [cm, v]) => a + (cm && (!periodEnd || cm <= periodEnd) ? v : 0), 0));
+  const inPeriod = (by) => Object.keys(by || {}).some((cm) => cm && sel.has(cm));
+  const paidBy = (by) => Object.keys(by || {}).filter(Boolean)
+    .some((cm) => !periodEnd || cm <= periodEnd);
+
+  const rows = [];
+  for (const r of mm?.rows || []) {
+    const hasSettlement = Object.keys(r.grossBy || {}).length > 0;
+    let bucket;
+    if (sel.has(r.mtrMonth)) {
+      bucket = !hasSettlement ? 'neverSettled' : paidBy(r.grossBy) ? 'settledInPeriod' : 'settledLater';
+    } else if (inPeriod(r.grossBy)) {
+      bucket = 'settlementOnly';
+    } else continue;
+    const gross = bucket === 'settlementOnly' ? r2(Object.entries(r.grossBy || {})
+      .reduce((a, [cm, v]) => a + (sel.has(cm) ? v : 0), 0)) : upTo(r.grossBy);
+    /* BOTH sides as at the same period end. Reading the invoice side at its
+       all-time net while the settlement side stopped at the period end made a
+       December sale returned in January look OVER-paid by the whole value of
+       the return — 6,821 of it across Apr-Dec 2025. */
+    const mtrValue = bucket === 'settlementOnly' ? (r.mtrValue || 0) : upTo(r.mtrBy);
+    const shortfall = bucket === 'settledInPeriod' ? r2(mtrValue - gross) : 0;
+    const movedAfter = r2((r.settledGrossAll || 0) - upTo(r.grossBy));
+    rows.push({ ...r, bucket, mtrValue, settledGross: gross, shortfall,
+      shortReason: bucket !== 'settledInPeriod' || Math.abs(shortfall) <= 1 ? ''
+        : (movedAfter < 0 && Math.abs(shortfall + movedAfter) <= 1) ? 'returnedAfter'
+        : r.deferred ? 'deferred' : shortfall > 0 ? 'shortPaid' : 'overPaid' });
+  }
+
+  const sum = (rs, k) => r2(rs.reduce((a, x) => a + (x[k] || 0), 0));
+  const buckets = (mm?.buckets || []).map((b) => {
+    const mine = rows.filter((x) => x.bucket === b.key);
+    return { ...b, count: mine.length,
+      mtrValue: sum(mine, 'mtrValue'), settledGross: sum(mine, 'settledGross'),
+      settledNet: sum(mine, 'settledNet'),
+      fees: sum(mine, 'fees'), tds: sum(mine, 'tds'), tcs: sum(mine, 'tcs') };
+  });
+  const byKey = Object.fromEntries(buckets.map((b) => [b.key, b]));
+  const invoiced = rows.filter((x) => x.bucket !== 'settlementOnly');
+  const covered = rows.filter((x) => x.bucket === 'settledInPeriod' || x.bucket === 'settledLater');
+  const paidRows = rows.filter((x) => x.bucket === 'settledInPeriod');
+
+  const REASON = {
+    returnedAfter: ['Returned by the customer after the period closed',
+      'The settlement has already taken the money back. The credit note that reduces the MTR is dated '
+      + 'in a later month, so until that month is loaded the sale still stands at full value here.'],
+    deferred: ['Amazon has not released the money yet',
+      'The transaction is in the report but marked deferred — Amazon is holding it, usually until '
+      + 'delivery is confirmed.'],
+    shortPaid: ['Paid less than the invoice, with no reason in the files',
+      'Nothing in the three files explains the difference. This is the only group worth taking to Amazon.'],
+    overPaid: ['Paid more than the invoice',
+      'More was credited than the invoice asked for, usually a reversal landing against the wrong order.'],
+  };
+
+  return {
+    rows, buckets, byKey,
+    totals: {
+      invoicedOrders: invoiced.length, invoicedValue: sum(invoiced, 'mtrValue'),
+      laterOrders: byKey.settledLater?.count || 0, laterValue: byKey.settledLater?.mtrValue || 0,
+      neverOrders: byKey.neverSettled?.count || 0, neverValue: byKey.neverSettled?.mtrValue || 0,
+      fees: sum(covered, 'fees'), tds: sum(covered, 'tds'), tcs: sum(covered, 'tcs'),
+      shortfall: sum(paidRows, 'shortfall'),
+    },
+    coverage: {
+      orders: covered.length, ofOrders: invoiced.length,
+      pctByOrders: invoiced.length ? r2((100 * covered.length) / invoiced.length) : 0,
+      value: sum(covered, 'mtrValue'), ofValue: sum(invoiced, 'mtrValue'),
+      pctByValue: sum(invoiced, 'mtrValue')
+        ? r2((100 * sum(covered, 'mtrValue')) / sum(invoiced, 'mtrValue')) : 0,
+    },
+    shortfallBy: Object.keys(REASON).map((k) => {
+      const mine = paidRows.filter((x) => x.shortReason === k);
+      return { key: k, label: REASON[k][0], meaning: REASON[k][1],
+               count: mine.length, amount: sum(mine, 'shortfall') };
+    }).filter((x) => x.count),
+    laterByMonth: Object.values(rows.filter((x) => x.bucket === 'settledLater')
+      .reduce((a, x) => {
+        const k = Object.keys(x.grossBy || {}).filter(Boolean).sort()[0] || 'unknown';
+        a[k] = a[k] || { month: k, orders: 0, amount: 0 };
+        a[k].orders += 1; a[k].amount = r2(a[k].amount + (x.mtrValue || 0));
+        return a;
+      }, {})).sort((a, b) => String(a.month).localeCompare(String(b.month))),
+  };
+}
+
+/* ── MTR vs SETTLEMENT ────────────────────────────────────────────────────
+   "We did 5 lakh this month. The MTR shows 150 orders worth 5 lakh, the
+   settlement knows only 100 of them worth 4 lakh, and of that only 3.5 lakh is
+   actually in. Meanwhile Amazon's commission, TDS and TCS come off the 100
+   orders it does know, while net sales is built on all 150." Two sides of one
+   margin computed on different populations, and nothing on the screen saying
+   so.
+
+   Gross is compared with gross: the MTR's Invoice Amount (GST-inclusive)
+   against what Amazon credited before its own deductions. Fees, TDS and TCS
+   are reported underneath and never netted into the comparison - doing that
+   would put a quarter of the value inside the "difference" and make every
+   order look short-paid. Nothing is accrued for orders the settlement has not
+   reached: the COVERAGE line states the gap instead, because an invented
+   deduction makes a margin look complete and be wrong. */
+function MoneyMatchView({ mm, shown, onDrill }) {
+  if (!mm) {
+    return (
+      <div className="rounded-xl px-5 py-4" style={{ background: '#F8FAFC', border: '1px solid #E3E6EA' }}>
+        <p className="text-sm text-slate-500">
+          This comparison needs both the MTR and the settlement report. Generate the report again once
+          both are loaded.
+        </p>
+      </div>
+    );
+  }
+  const A = mmAgg(mm, shown);
+  const t = A.totals;
+  const c = A.coverage;
+  const byKey = A.byKey;
+  const paid = byKey.settledInPeriod || { count: 0, mtrValue: 0, settledGross: 0 };
+  const go = (bucket, label) => onDrill({ kind: 'money', bucket, label, months: shown });
+
+  const KPI = [
+    { k: 'Invoiced in this period', n: t.invoicedOrders, v: t.invoicedValue, c: '#111927',
+      sub: 'every tax invoice in the MTR', bucket: '__all' },
+    { k: 'Paid, in this period', n: paid.count, v: paid.settledGross, c: T.green,
+      sub: 'invoice and money in the same period', bucket: 'settledInPeriod' },
+    { k: 'Paid in a later month', n: t.laterOrders, v: t.laterValue, c: T.amberText,
+      sub: 'not outstanding — the month is named below', bucket: 'settledLater' },
+    { k: 'Never paid', n: t.neverOrders, v: t.neverValue, c: t.neverOrders ? T.red : '#94A3B8',
+      sub: t.neverOrders ? 'worth taking to Amazon' : 'nothing is unpaid', bucket: 'neverSettled' },
+  ];
+
+  const diff = r2((paid.mtrValue || 0) - (paid.settledGross || 0));
+
+  return (
+    <>
+      <div className="rounded-xl px-5 py-4 mb-5" style={{ background: '#EFF6FF', border: '1px solid #BFDBFE' }}>
+        <div className="text-sm font-bold mb-1.5" style={{ color: '#1E3A8A' }}>
+          What this tab is for
+        </div>
+        <p className="text-[13px] leading-relaxed" style={{ color: '#1E40AF' }}>
+          Net sales is built on <strong>every</strong> invoice the MTR raised. Amazon&rsquo;s commission,
+          TDS and TCS are only known for the orders its settlement has actually reached. When those are
+          two different populations the margin is wrong by construction, however carefully each side is
+          added up. This page puts the two files side by side, order by order, and says exactly how far
+          apart they are.
+        </p>
+      </div>
+
+      <div className="grid gap-3.5 grid-cols-1 md:grid-cols-2 xl:grid-cols-4 mb-5">
+        {KPI.map((x) => (
+          <button key={x.k} onClick={() => go(x.bucket, x.k)}
+                  className="bg-white border border-slate-200 rounded-xl p-4 text-left hover:shadow-md hover:border-slate-300 transition-all">
+            <div className="text-[12px] font-bold text-slate-600">{x.k}</div>
+            <div className="text-[28px] font-bold tracking-tight mt-1.5 tabular-nums leading-none"
+                 style={{ color: x.c }}>{int(x.n || 0)}</div>
+            <div className="text-[14px] font-semibold text-slate-700 mt-1.5 tabular-nums">
+              ₹{inr(x.v || 0)}
+            </div>
+            <p className="text-[11.5px] text-slate-500 mt-1.5 leading-snug">{x.sub}</p>
+          </button>
+        ))}
+      </div>
+
+      <Card title="The invoices and the money, side by side"
+            sub="Gross against gross — what the invoice asked for, and what Amazon credited before its own charges">
+        <div className="p-5">
+          <div className="grid md:grid-cols-3 gap-3">
+            {[['The MTR asked for', paid.mtrValue, T.blue, 'Invoice Amount on the matched orders, GST included'],
+              ['Amazon credited', paid.settledGross, T.green, 'Before commission, TDS and TCS are taken off'],
+              [Math.abs(diff) < 1 ? 'They agree' : (diff > 0 ? 'Short by' : 'Over by'), Math.abs(diff),
+               Math.abs(diff) < 1 ? T.green : T.red,
+               Math.abs(diff) < 1
+                 ? `On ${int(paid.count)} orders, to within a rupee`
+                 : 'Explained line by line below']].map(([k, v, tone, note]) => (
+              <div key={k} className="rounded-xl border border-slate-200 p-4">
+                <div className="text-[10.5px] font-bold uppercase tracking-wider text-slate-400">{k}</div>
+                <div className="text-[22px] font-bold mt-1 tabular-nums" style={{ color: tone }}>₹{inr(v)}</div>
+                <p className="text-[11.5px] text-slate-500 mt-1.5 leading-snug">{note}</p>
+              </div>
+            ))}
+          </div>
+
+          {A.shortfallBy.length > 0 && (
+            <div className="mt-4 rounded-xl border border-slate-200 overflow-hidden">
+              <div className="px-4 py-2 text-[11px] uppercase tracking-wide font-bold"
+                   style={{ background: '#F8FAFC', color: '#475569' }}>
+                And what explains the difference
+              </div>
+              {A.shortfallBy.map((x) => (
+                <div key={x.key} className="px-4 py-2.5 border-t border-slate-100 flex justify-between gap-4">
+                  <span className="min-w-0">
+                    <span className="text-[13px] text-slate-700">{x.label}</span>
+                    <span className="text-[11px] text-slate-400 ml-1.5">{int(x.count)} orders</span>
+                    <span className="block text-[11px] text-slate-400 leading-snug mt-0.5">{x.meaning}</span>
+                  </span>
+                  <span className="text-[13px] tabular-nums whitespace-nowrap font-semibold"
+                        style={{ color: x.amount > 0 ? T.red : T.green }}>
+                    {x.amount > 0 ? '' : '−'}₹{inr(Math.abs(x.amount))}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* ── the coverage statement ─────────────────────────────────────
+              The honest answer to "is my margin right?" is a population count,
+              not an estimate. */}
+          <div className="mt-4 rounded-xl px-4 py-3"
+               style={{ background: c.pctByOrders >= 99.95 ? '#F3FBF6' : '#FFFBEB',
+                        border: `1px solid ${c.pctByOrders >= 99.95 ? '#BBF7D0' : '#FDE68A'}` }}>
+            <div className="text-[11px] font-bold uppercase tracking-wider"
+                 style={{ color: c.pctByOrders >= 99.95 ? T.green : '#92400E' }}>
+              Do the charges cover the sales?
+            </div>
+            <p className="text-[12.5px] leading-relaxed mt-1" style={{ color: '#3F3F46' }}>
+              Net sales is built on <strong>{int(c.ofOrders || 0)} invoiced orders</strong> worth{' '}
+              <strong>₹{inr(c.ofValue || 0, 0)}</strong>. Amazon&rsquo;s charges —{' '}
+              ₹{inr(t.fees || 0, 0)} commission and fulfilment, ₹{inr(t.tds || 0, 0)} TDS,{' '}
+              ₹{inr(t.tcs || 0, 0)} TCS — are known for{' '}
+              <strong>{int(c.orders || 0)} of them ({c.pctByOrders}%, {c.pctByValue}% by value)</strong>.
+              {c.pctByOrders >= 99.95
+                ? ' The two sides are the same population, so the margin on this period is complete.'
+                : ' The remainder carries no charge in these files, so the margin on this period is'
+                  + ' overstated by whatever Amazon will eventually deduct from it. Nothing is estimated'
+                  + ' here — load the settlement month that pays them and the gap closes by itself.'}
+            </p>
+          </div>
+        </div>
+      </Card>
+
+      <Card title="Every invoice, by what happened to the money"
+            sub="Click any row for the orders, with the month each one was actually paid in">
+        <div>
+          {A.buckets.map((b) => (
+            <button key={b.key} onClick={() => go(b.key, b.label)}
+                    className="w-full px-5 py-3.5 border-t border-slate-100 text-left hover:bg-slate-50 flex items-start justify-between gap-5">
+              <span className="min-w-0">
+                <span className="text-[13.5px] font-semibold text-slate-800">{b.label}</span>
+                {!b.expected && b.count > 0 && (
+                  <span className="ml-2 text-[10px] font-bold px-2 py-0.5 rounded-full"
+                        style={{ background: '#FEE4E2', color: T.red }}>needs checking</span>
+                )}
+                <span className="block text-[11.5px] text-slate-500 leading-snug mt-1">{b.meaning}</span>
+              </span>
+              <span className="flex items-baseline gap-5 shrink-0">
+                <span className="text-right">
+                  <span className="block text-[10px] uppercase tracking-wider text-slate-400 font-bold">orders</span>
+                  <span className="text-[15px] font-bold tabular-nums">{int(b.count)}</span>
+                </span>
+                <span className="text-right w-[120px]">
+                  <span className="block text-[10px] uppercase tracking-wider text-slate-400 font-bold">invoiced</span>
+                  <span className="text-[15px] font-bold tabular-nums">₹{inr(b.mtrValue)}</span>
+                </span>
+                <span className="text-right w-[120px]">
+                  <span className="block text-[10px] uppercase tracking-wider text-slate-400 font-bold">credited</span>
+                  <span className="text-[15px] font-bold tabular-nums" style={{ color: T.green }}>
+                    ₹{inr(b.settledGross)}
+                  </span>
+                </span>
+              </span>
+            </button>
+          ))}
+        </div>
+      </Card>
+
+      {A.laterByMonth.length > 0 && (
+        <Card title="The invoices paid after the period closed"
+              sub="Not outstanding — this is the month the money actually arrived in">
+          <div className="px-5 py-2">
+            {A.laterByMonth.map((x) => (
+              <button key={x.month} onClick={() => go('settledLater', `Settled in ${fmtMonth(x.month)}`)}
+                      className="w-full flex justify-between items-baseline gap-3 py-2.5 border-b border-slate-100 text-left hover:bg-slate-50">
+                <span className="text-[13.5px] text-slate-700">
+                  Settled in {fmtMonth(x.month)}
+                  <span className="text-[11.5px] text-slate-400 ml-1.5">{int(x.orders)} orders</span>
+                </span>
+                <span className="text-[13.5px] font-semibold tabular-nums" style={{ color: T.amberText }}>
+                  ₹{inr(x.amount)}
+                </span>
+              </button>
+            ))}
+            <p className="text-[11.5px] text-slate-500 py-2.5 leading-relaxed">
+              Amazon settles on its own cycle, so invoices raised near a month end are very often paid in
+              the next one. They are shown here rather than as unpaid, because they are not unpaid — the
+              only bucket that means money is genuinely missing is &ldquo;invoiced, never paid&rdquo;.
+            </p>
+          </div>
+        </Card>
+      )}
+    </>
   );
 }
 
@@ -2712,6 +3024,13 @@ function drillRows(drill, data, ST) {
     return { kind: 'invoicing', rows,
              prov: PROV[drill.side === 'mtr' ? 'invoiced' : 'placed'] || PROV.invoiced };
   }
+  if (drill.kind === 'money') {
+    const all3 = mmAgg(data?.moneyMatch, ms).rows;
+    const rows = drill.bucket === '__all'
+      ? all3.filter((r) => r.bucket !== 'settlementOnly')
+      : all3.filter((r) => r.bucket === drill.bucket);
+    return { kind: 'money', rows, prov: PROV.money };
+  }
   if (drill.kind === 'chain') {
     const rows = (data?.three?.orderRows || []).filter(inSel);
     const pick = {
@@ -2765,6 +3084,25 @@ const LEDGER_COLS = [
   { key: 'diff', label: 'Difference', num: true, calc: (r) => +(r.invoiced - r.refunded - r.fees - r.tds - r.tcs - r.settled).toFixed(2) },
   { key: 'settledMonth', label: 'Payment month', fmt: (v) => (v ? fmtMonth(v) : '—') },
 ];
+/* Both files on one row, and the month the money actually moved — without that
+   last column a "paid in a later month" row is indistinguishable from an unpaid
+   one, which is the whole question the tab exists to answer. */
+const MONEY_COLS = [
+  { key: 'orderId', label: 'Order ID', mono: true, w: 22 },
+  { key: 'month', label: 'Sale month', fmt: fmtMonth },
+  { key: 'invoiceNo', label: 'Invoice no', mono: true, w: 20 },
+  { key: 'invoiceDate', label: 'Invoice date', fmt: fmtDay },
+  { key: 'mtrValue', label: 'Invoiced (MTR)', num: true },
+  { key: 'settledGross', label: 'Credited by period end', num: true },
+  { key: 'shortfall', label: 'Difference', num: true },
+  { key: 'paidMonths', label: 'Paid in' },
+  { key: 'fees', label: 'Amazon charges', num: true },
+  { key: 'tds', label: 'TDS', num: true },
+  { key: 'tcs', label: 'TCS', num: true },
+  { key: 'settledNet', label: 'Net paid', num: true },
+  { key: 'why', label: 'What happened', w: 60 },
+];
+
 const CHAIN_COLS = [
   { key: 'orderId', label: 'Order ID', mono: true, w: 22 },
   { key: 'month', label: 'Sale month', fmt: fmtMonth },
@@ -2793,6 +3131,7 @@ function DrillPanel({ drill, data, ST, base, onClose }) {
   const [busy, setBusy] = useState(false);
   const { kind, rows, prov } = useMemo(() => drillRows(drill, data, ST), [drill, data, ST]);
   const cols = kind === 'chain' ? CHAIN_COLS
+             : kind === 'money' ? MONEY_COLS
              : kind === 'invoicing' ? INVOICING_COLS : LEDGER_COLS;
   const f = FILES[prov.file]; const FIcon = f.icon;
   const period = rangeLabel(drill.months || []);
@@ -2801,6 +3140,7 @@ function DrillPanel({ drill, data, ST, base, onClose }) {
     : drill.kind === 'cash' ? `${period} · credited for earlier months’ sales`
     : drill.kind === 'returns' ? `${period} · credit notes raised in this month`
     : drill.kind === 'invoicing' ? `${period} · ${drill.label || drill.bucket}`
+    : drill.kind === 'money' ? `${period} · ${drill.label || drill.bucket}`
     : drill.kind === 'chain' ? `${period} · ${{
         placed: 'Orders placed', cancelled: 'Cancelled', net: 'Net orders',
         mcf: 'Not an Amazon sale', notInvoiced: 'Shipped, never invoiced',

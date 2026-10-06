@@ -2,6 +2,7 @@
    processors, so a failure here is a failure in production code. */
 const { buildLedger, BASIS } = require('../src/services/processors/amazonReceivablesLedger');
 const ovm = require('../src/services/processors/amazonOrderVsMtr');
+const mvs = require('../src/services/processors/amazonMtrVsSettlement');
 const { monthKey, isoDay, r2 } = require('../src/services/processors/amazonThreeWay');
 
 let pass = 0, fail = 0;
@@ -128,6 +129,70 @@ T('zero-value shipped+invoiced is matched', rowOf('I-ZEROVAL').bucket, 'matched'
 T('every order in exactly one bucket',
   Object.values(bk).reduce((a, b) => a + b, 0), iv.rows.length);
 near('gap fully explained', Math.abs(iv.revenue.unexplained), 0, 0.02);
+
+console.log('--- MTR vs SETTLEMENT ---');
+/* gross must be DERIVED from the stated total plus the deductions, because a
+   month restored from a retained settlement ledger has no GST, shipping or
+   rebate column at all. Rebuilding gross from those columns returned zero for
+   every such month and made 1,019 ordinary Koparo orders read as short-paid. */
+const sRow = (id, when, type, total, fees, tds, tcs, extra = {}) => ({
+  __src: 'u1', order_id: id, 'date/time': when, type,
+  total: String(total), 'selling fees': String(fees),
+  'TDS (Section 194-O)': String(tds), 'TCS-CGST': String(tcs), ...extra,
+});
+const mRow = (id, date, type, amt) => ({
+  'Order Id': id, 'Invoice Date': date, 'Shipment Date': date, 'Transaction Type': type,
+  'Invoice Amount': String(amt), 'Invoice Number': 'IN-' + id,
+});
+const mmSrc = {
+  mtr: [
+    mRow('P-PAID',   '2026-05-04 10:00', 'Shipment', 1000),
+    mRow('P-LATER',  '2026-05-28 10:00', 'Shipment', 500),
+    mRow('P-NEVER',  '2026-05-10 10:00', 'Shipment', 300),
+    mRow('P-RETMTR', '2026-05-06 10:00', 'Shipment', 700),
+    mRow('P-RETMTR', '2026-05-20 10:00', 'Refund',  -700),
+  ],
+  settlement: [
+    /* gross 1000 = total 880 + fees 100 + tds 5 + tcs 15 */
+    sRow('P-PAID',   '4 May 2026 10:00:00 am UTC', 'Order',  880, -100, -5, -15),
+    sRow('P-LATER',  '3 Jun 2026 10:00:00 am UTC', 'Order',  440,  -50, -3,  -7),
+    sRow('P-RETMTR', '6 May 2026 10:00:00 am UTC', 'Order',  616,  -70, -4, -10),
+    sRow('P-RETMTR', '20 May 2026 9:00:00 am UTC', 'Refund', -616,  70,  4,  10),
+    /* money in the period for a sale with no invoice in it */
+    sRow('P-OLD',    '9 May 2026 10:00:00 am UTC', 'Order',  220,  -25, -2,  -3),
+    /* a Transfer is the bank sweep, never a settlement of an invoice */
+    sRow('',         '9 May 2026 10:00:00 am UTC', 'Transfer', -5000, 0, 0, 0),
+  ],
+};
+const mm = mvs.build(mmSrc, ['2026-05'], { basis: 'order' });
+const mb = Object.fromEntries(mm.buckets.map((b) => [b.key, b]));
+const mrow = (id) => mm.rows.find((r) => r.orderId === id);
+T('paid inside the period',        mrow('P-PAID').bucket, 'settledInPeriod');
+T('paid in a later month',         mrow('P-LATER').bucket, 'settledLater');
+T('never paid',                    mrow('P-NEVER').bucket, 'neverSettled');
+T('settlement with no invoice here', mrow('P-OLD').bucket, 'settlementOnly');
+near('gross derived from total + deductions', mrow('P-PAID').settledGross, 1000);
+near('later order credits nothing by the period end', mrow('P-LATER').settledGross, 0);
+T('later order names the month it was paid', mrow('P-LATER').paidMonths, 'Jun 2026');
+near('matched gross equals the invoice', mb.settledInPeriod.mtrValue - mb.settledInPeriod.settledGross, 0);
+T('a shortfall is only asked of orders paid in the period', mrow('P-LATER').shortReason, '');
+near('MTR refund inside the period nets off', mrow('P-RETMTR').mtrValue, 0);
+T('every invoiced order lands in exactly one bucket',
+  mb.settledInPeriod.count + mb.settledLater.count + mb.neverSettled.count, 4);
+T('coverage counts the invoiced orders only', mm.coverage.ofOrders, 4);
+T('Transfer rows are not settlements of an invoice',
+  mm.rows.some((r) => !r.orderId), false);
+/* P-RETMTR was charged 70 and refunded 70, so its fee is NIL, not 140 - the
+   deductions are accumulated signed and the magnitude taken once at the end.
+   Taking abs() per row would report 240 here and overstate every month. */
+near('fees reported, never netted into the comparison', mb.settledInPeriod.fees, 100);
+near('a reversed fee cancels rather than doubling', mrow('P-RETMTR').fees, 0);
+T('later months are listed by name', mm.laterByMonth.map((x) => x.month), ['2026-06']);
+
+const mmEmpty = mvs.build({ mtr: [], settlement: [] }, ['2026-05'], {});
+T('empty builds',            mmEmpty.rows.length, 0);
+T('empty coverage is 0 not NaN', mmEmpty.coverage.pctByValue, 0);
+T('empty has no shortfall reasons', mmEmpty.shortfallBy.length, 0);
 
 console.log('--- EMPTY / DEGENERATE ---');
 const empty = buildLedger({ orders: [], mtr: [], settlement: [], uploadedMonths: [], files: {} },
