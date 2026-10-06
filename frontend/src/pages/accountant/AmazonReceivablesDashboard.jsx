@@ -912,14 +912,13 @@ function mmAgg(mm, shown) {
        is the whole point — the gap between the bars IS the settlement lag, and
        it is invisible in any total. */
     series: shown.map((m) => {
-      let mtr = 0, settled = 0, orders = 0;
+      let a = 0, b = 0, orders = 0;
       for (const r of rows) {
-        mtr += (r.mtrBy || {})[m] || 0;
-        settled += (r.grossBy || {})[m] || 0;
+        a += (r.mtrBy || {})[m] || 0;
+        b += (r.grossBy || {})[m] || 0;
         if (r.mtrMonth === m) orders += 1;
       }
-      return { month: m, label: fmtMonth(m), mtr: r2(mtr), settled: r2(settled),
-               gap: r2(mtr - settled), orders };
+      return { month: m, label: fmtMonth(m), a: r2(a), b: r2(b), gap: r2(a - b), orders };
     }),
     money: {
       invoiced: sum(covered, 'mtrValue'),
@@ -1034,18 +1033,76 @@ function MoneyJourney({ A, shown, onDrill }) {
   );
 }
 
-/* ── MTR against Settlement, period by period ─────────────────────────────
-   A total cannot show a lag. Two bars per period can: the MTR bar is what was
-   invoiced in that period, the settlement bar is what Amazon actually moved in
-   it, and where the second is shorter the money is simply still coming. */
-function FileChart({ A, onDrill, shown }) {
+/* ── two files, period by period ──────────────────────────────────────────
+   One component, both comparisons: the order report against the MTR, and the
+   MTR against the settlement. A total cannot show a timing difference; two
+   bars per period can, and the gap between them IS it. Clicking a bar answers
+   the question the chart can only hint at — what the difference actually is
+   for that period, and which orders make it up.
+
+   Grouping runs Month / Quarter / Financial year / Custom, where Custom
+   narrows this chart alone and leaves the rest of the page on the page range.
+   Quarters and years are Apr-Mar, because that is the year an Indian
+   accountant closes. */
+function CompareChart({ series, A, B, title, sub, note, countLabel, onSee }) {
   const [gran, setGran] = useState('month');
   const [metric, setMetric] = useState('amount');
+  const [open, setOpen] = useState(null);
+
+  const months = (series || []).map((x) => x.month);
+  const [from, setFrom] = useState('');
+  const [to, setTo] = useState('');
+  useEffect(() => {
+    if (!months.length) return;
+    setFrom((f) => (f && months.includes(f) ? f : months[0]));
+    setTo((t) => (t && months.includes(t) ? t : months[months.length - 1]));
+  }, [months.join('|')]);   // eslint-disable-line react-hooks/exhaustive-deps
+
+  const data = useMemo(() => {
+    let src = series || [];
+    if (gran === 'custom' && from && to) {
+      const lo = from <= to ? from : to; const hi = from <= to ? to : from;
+      src = src.filter((r) => r.month >= lo && r.month <= hi);
+    }
+    const withGap = (x) => ({ ...x, gap: r2((x.a || 0) - (x.b || 0)) });
+    if (gran === 'month' || gran === 'custom') {
+      return src.map((r) => withGap({ ...r, months: [r.month] }));
+    }
+    const keyOf = gran === 'quarter'
+      ? (m) => {
+        const y = +m.slice(0, 4); const mo = +m.slice(5);
+        const q = Math.floor(((mo + 8) % 12) / 3) + 1;
+        const fy = mo >= 4 ? y : y - 1;
+        return `Q${q} FY${String(fy).slice(2)}-${String(fy + 1).slice(2)}`;
+      }
+      : (m) => {
+        const y = +m.slice(0, 4); const mo = +m.slice(5);
+        const fy = mo >= 4 ? y : y - 1;
+        return `FY ${String(fy).slice(2)}-${String(fy + 1).slice(2)}`;
+      };
+    const by = {};
+    for (const r of src) {
+      const k = keyOf(r.month);
+      by[k] = by[k] || { month: k, label: k, a: 0, b: 0, orders: 0, months: [] };
+      by[k].a = r2(by[k].a + (r.a || 0));
+      by[k].b = r2(by[k].b + (r.b || 0));
+      by[k].orders += r.orders || 0;
+      by[k].months.push(r.month);
+    }
+    return Object.values(by).map(withGap);
+  }, [series, gran, from, to]);
+
+  const sel = open ? data.find((d) => d.month === open) : null;
+  /* Recharts hands the BAR's props, with the row under `payload`; reading
+     `d.month` straight off it silently did nothing at all. */
+  const pickBar = (d) => {
+    const k = d?.payload?.month ?? d?.month;
+    if (k) setOpen((prev) => (prev === k ? null : k));
+  };
+
   /* Recharts' ResponsiveContainer measures on its first commit, before the
      tab's layout has resolved, and warns the chart is -1 by -1 every time.
-     Measuring the wrapper here instead is deterministic: the chart is not
-     rendered at all until there is a real width to give it, and it follows
-     the window afterwards. */
+     Measuring the wrapper here is deterministic. */
   const box = React.useRef(null);
   const [w, setW] = useState(0);
   useEffect(() => {
@@ -1057,63 +1114,6 @@ function FileChart({ A, onDrill, shown }) {
     ro.observe(el);
     return () => ro.disconnect();
   }, []);
-  /* "Custom" lets the chart be narrowed without touching the page's own range,
-     so one month can be examined while every other block keeps its context. */
-  const all = (A.series || []).map((x) => x.month);
-  const [from, setFrom] = useState('');
-  const [to, setTo] = useState('');
-  useEffect(() => {
-    if (!all.length) return;
-    setFrom((f) => (f && all.includes(f) ? f : all[0]));
-    setTo((t) => (t && all.includes(t) ? t : all[all.length - 1]));
-  }, [all.join('|')]);   // eslint-disable-line react-hooks/exhaustive-deps
-
-  const data = useMemo(() => {
-    let src = A.series || [];
-    if (gran === 'custom' && from && to) {
-      const lo = from <= to ? from : to; const hi = from <= to ? to : from;
-      src = src.filter((r) => r.month >= lo && r.month <= hi);
-    }
-    const roll = (keyOf) => {
-      const by = {};
-      for (const r of src) {
-        const k = keyOf(r.month);
-        by[k] = by[k] || { month: k, label: k, mtr: 0, settled: 0, orders: 0, months: [] };
-        by[k].mtr = r2(by[k].mtr + r.mtr);
-        by[k].settled = r2(by[k].settled + r.settled);
-        by[k].orders += r.orders;
-        by[k].months.push(r.month);
-      }
-      return Object.values(by).map((x) => ({ ...x, gap: r2(x.mtr - x.settled) }));
-    };
-    if (gran === 'month' || gran === 'custom') return src.map((r) => ({ ...r, months: [r.month] }));
-    if (gran === 'quarter') {
-      return roll((m) => {
-        const y = +m.slice(0, 4); const mo = +m.slice(5);
-        /* Indian quarters run Apr-Jun, Jul-Sep, Oct-Dec, Jan-Mar */
-        const q = Math.floor(((mo + 8) % 12) / 3) + 1;
-        const fy = mo >= 4 ? y : y - 1;
-        return `Q${q} FY${String(fy).slice(2)}-${String(fy + 1).slice(2)}`;
-      });
-    }
-    /* Apr-Mar, because that is the year an Indian accountant closes */
-    return roll((m) => {
-      const y = +m.slice(0, 4); const mo = +m.slice(5);
-      const fy = mo >= 4 ? y : y - 1;
-      return `FY ${String(fy).slice(2)}-${String(fy + 1).slice(2)}`;
-    });
-  }, [A.series, gran, from, to]);
-
-  /* Clicking a bar answers the question the chart can only hint at: what IS
-     the difference for that period, and which orders is it. */
-  const [open, setOpen] = useState(null);
-  const sel = open ? data.find((d) => d.month === open) : null;
-  /* Recharts hands the BAR's props, with the row under `payload`; reading
-     `d.month` straight off it silently did nothing at all. */
-  const pickBar = (d) => {
-    const k = d?.payload?.month ?? d?.month;
-    if (k) setOpen((prev) => (prev === k ? null : k));
-  };
 
   const Toggle = ({ v, set, opts }) => (
     <div className="inline-flex rounded-lg p-0.5" style={{ background: '#F1F5F9' }}>
@@ -1131,28 +1131,27 @@ function FileChart({ A, onDrill, shown }) {
   const tip = ({ active, payload, label }) => {
     if (!active || !payload?.length) return null;
     const d = payload[0].payload;
-    const gap = r2(d.mtr - d.settled);
     return (
       <div className="rounded-lg px-3 py-2 text-[11.5px] shadow-lg"
            style={{ background: '#fff', border: '1px solid #E2E8F0' }}>
         <div className="font-bold text-slate-800 mb-1">{label}</div>
-        <div className="flex justify-between gap-5"><span style={{ color: T.blue }}>MTR invoiced</span>
-          <span className="tabular-nums font-semibold">₹{inr(d.mtr)}</span></div>
-        <div className="flex justify-between gap-5"><span style={{ color: T.green }}>Settlement credited</span>
-          <span className="tabular-nums font-semibold">₹{inr(d.settled)}</span></div>
+        <div className="flex justify-between gap-5"><span style={{ color: A.tone }}>{A.label}</span>
+          <span className="tabular-nums font-semibold">₹{inr(d.a)}</span></div>
+        <div className="flex justify-between gap-5"><span style={{ color: B.tone }}>{B.label}</span>
+          <span className="tabular-nums font-semibold">₹{inr(d.b)}</span></div>
         <div className="flex justify-between gap-5 mt-1 pt-1 border-t border-slate-100">
-          <span className="text-slate-500">{gap >= 0 ? 'Still to come in' : 'Credited ahead'}</span>
-          <span className="tabular-nums font-bold" style={{ color: gap >= 0 ? T.amberText : T.green }}>
-            ₹{inr(Math.abs(gap))}
+          <span className="text-slate-500">Difference</span>
+          <span className="tabular-nums font-bold"
+                style={{ color: Math.abs(d.gap) < 1 ? T.green : T.amberText }}>
+            ₹{inr(Math.abs(d.gap))}
           </span></div>
-        <div className="text-[10.5px] text-slate-400 mt-1">{int(d.orders)} invoices raised</div>
+        <div className="text-[10.5px] text-slate-400 mt-1">{int(d.orders)} {countLabel}</div>
       </div>
     );
   };
 
   return (
-    <Card title="MTR against Settlement, period by period"
-          sub="Blue is what the MTR invoiced. Green is what the settlement moved. The gap is the lag."
+    <Card title={title} sub={sub}
           right={
             <div className="flex items-center gap-2">
               <Toggle v={metric} set={setMetric} opts={[['amount', '₹'], ['orders', 'Orders']]} />
@@ -1171,7 +1170,7 @@ function FileChart({ A, onDrill, shown }) {
                 {i === 1 && <span className="text-[11.5px] font-bold text-slate-500">to</span>}
                 <select value={val} onChange={(e) => set(e.target.value)}
                         className="text-[12px] font-semibold px-2 py-1 rounded-md border border-slate-200 bg-white">
-                  {all.map((m) => <option key={m} value={m}>{fmtMonth(m)}</option>)}
+                  {months.map((m) => <option key={m} value={m}>{fmtMonth(m)}</option>)}
                 </select>
               </React.Fragment>
             ))}
@@ -1181,15 +1180,12 @@ function FileChart({ A, onDrill, shown }) {
           </div>
         )}
         <div className="flex items-center gap-4 mb-3">
-          <span className="inline-flex items-center gap-1.5 text-[11.5px] font-semibold text-slate-600">
-            <span className="w-3 h-3 rounded-sm" style={{ background: T.blue }} /> MTR · Invoice Amount
-          </span>
-          <span className="inline-flex items-center gap-1.5 text-[11.5px] font-semibold text-slate-600">
-            <span className="w-3 h-3 rounded-sm" style={{ background: T.green }} /> Settlement · total before fees
-          </span>
+          {[A, B].map((x) => (
+            <span key={x.label} className="inline-flex items-center gap-1.5 text-[11.5px] font-semibold text-slate-600">
+              <span className="w-3 h-3 rounded-sm" style={{ background: x.tone }} /> {x.legend || x.label}
+            </span>
+          ))}
         </div>
-        {/* minWidth 0 so Recharts does not measure the container at -1 on the
-            first pass and warn four times before it settles */}
         <div ref={box} style={{ width: '100%', height: 300, minWidth: 0 }}>
           {w > 0 && (
             <BarChart width={w} height={300} data={data}
@@ -1204,17 +1200,18 @@ function FileChart({ A, onDrill, shown }) {
                        : v >= 100000 ? `${(v / 100000).toFixed(1)}L` : int(v))} />
               <Tooltip content={tip} cursor={{ fill: 'rgba(148,163,184,.08)' }} />
               {metric === 'orders'
-                ? <Bar dataKey="orders" fill={T.blue} radius={[3, 3, 0, 0]} maxBarSize={38}
+                ? <Bar dataKey="orders" fill={A.tone} radius={[3, 3, 0, 0]} maxBarSize={38}
                        cursor="pointer" onClick={pickBar} />
                 : <>
-                    <Bar dataKey="mtr" fill={T.blue} radius={[3, 3, 0, 0]} maxBarSize={22}
+                    <Bar dataKey="a" fill={A.tone} radius={[3, 3, 0, 0]} maxBarSize={22}
                          cursor="pointer" onClick={pickBar} />
-                    <Bar dataKey="settled" fill={T.green} radius={[3, 3, 0, 0]} maxBarSize={22}
+                    <Bar dataKey="b" fill={B.tone} radius={[3, 3, 0, 0]} maxBarSize={22}
                          cursor="pointer" onClick={pickBar} />
                   </>}
             </BarChart>
           )}
         </div>
+
         {sel && (
           <div className="mt-3 rounded-xl overflow-hidden ar-rise"
                style={{ border: `1px solid ${Math.abs(sel.gap) < 1 ? '#BBF7D0' : '#FDE68A'}` }}>
@@ -1223,19 +1220,19 @@ function FileChart({ A, onDrill, shown }) {
               <span className="text-[13px] font-bold text-slate-800">{sel.label}</span>
               <span>
                 <span className="block text-[10px] font-bold uppercase tracking-wider text-slate-400">
-                  MTR invoiced
+                  {A.label}
                 </span>
-                <span className="text-[16px] font-bold tabular-nums" style={{ color: T.blue }}>
-                  ₹{inr(sel.mtr)}
+                <span className="text-[16px] font-bold tabular-nums" style={{ color: A.tone }}>
+                  ₹{inr(sel.a)}
                 </span>
               </span>
               <span className="text-[15px] font-bold text-slate-300">−</span>
               <span>
                 <span className="block text-[10px] font-bold uppercase tracking-wider text-slate-400">
-                  Settlement credited
+                  {B.label}
                 </span>
-                <span className="text-[16px] font-bold tabular-nums" style={{ color: T.green }}>
-                  ₹{inr(sel.settled)}
+                <span className="text-[16px] font-bold tabular-nums" style={{ color: B.tone }}>
+                  ₹{inr(sel.b)}
                 </span>
               </span>
               <span className="ml-auto text-right">
@@ -1253,31 +1250,23 @@ function FileChart({ A, onDrill, shown }) {
             </div>
             <div className="px-4 py-2.5 bg-white flex items-center justify-between gap-4 flex-wrap">
               <p className="text-[11.5px] text-slate-500 leading-snug min-w-0">
-                {int(sel.orders)} tax invoices were raised in {sel.label}.{' '}
-                {sel.gap > 1
-                  ? 'The settlement moved less than that inside the period — the rest lands in a '
-                    + 'later settlement, which the buckets below name by month.'
-                  : sel.gap < -1
-                    ? 'The settlement moved MORE than the MTR invoiced here, which is money arriving '
-                      + 'for sales invoiced in an earlier period.'
-                    : 'The two files agree on this period to within a rupee.'}
+                {int(sel.orders)} {countLabel} in {sel.label}.{' '}
+                {Math.abs(sel.gap) < 1
+                  ? 'The two files agree on this period to within a rupee.'
+                  : sel.gap > 0 ? B.short : A.short}
               </p>
-              <button onClick={() => onDrill({ kind: 'money', bucket: '__all',
-                                               label: `Tax invoices · ${sel.label}`,
-                                               months: sel.months })}
-                      className="text-[11.5px] font-bold shrink-0 underline underline-offset-2"
-                      style={{ color: T.blue }}>
-                see the {int(sel.orders)} invoices
-              </button>
+              {onSee && (
+                <button onClick={() => onSee(sel)}
+                        className="text-[11.5px] font-bold shrink-0 underline underline-offset-2"
+                        style={{ color: A.tone }}>
+                  see the {int(sel.orders)} {countLabel}
+                </button>
+              )}
             </div>
           </div>
         )}
         <p className="text-[11.5px] text-slate-500 mt-2 leading-relaxed">
-          Click any bar for that period&rsquo;s own difference.{' '}
-          The two bars are keyed on different dates on purpose. The MTR bar sits in the month its
-          invoice (or credit note) is dated; the settlement bar sits in the month the money actually
-          moved. Amazon settles on its own cycle, so a short green bar beside a tall blue one at the
-          right-hand edge is the normal lag, not a shortfall.
+          Click any bar for that period&rsquo;s own difference. {note}
         </p>
       </div>
     </Card>
@@ -1475,7 +1464,25 @@ function MoneyMatchView({ mm, shown, onDrill }) {
         </div>
       </div>
 
-      <div className="ar-rise"><FileChart A={A} onDrill={onDrill} shown={shown} /></div>
+      <div className="ar-rise">
+        <CompareChart
+          series={A.series}
+          A={{ label: 'MTR invoiced', legend: 'MTR · Invoice Amount', tone: T.blue,
+               short: 'The settlement moved MORE than the MTR invoiced here, which is money arriving '
+                    + 'for sales invoiced in an earlier period.' }}
+          B={{ label: 'Settlement credited', legend: 'Settlement · total before fees', tone: T.green,
+               short: 'The settlement moved less than the MTR invoiced inside the period — the rest '
+                    + 'lands in a later settlement, which the buckets below name by month.' }}
+          title="MTR against Settlement, period by period"
+          sub="Blue is what the MTR invoiced. Green is what the settlement moved. The gap is the lag."
+          countLabel="tax invoices"
+          onSee={(d) => onDrill({ kind: 'money', bucket: '__all',
+                                  label: `Tax invoices · ${d.label}`, months: d.months })}
+          note={'The two bars are keyed on different dates on purpose. The MTR bar sits in the month '
+              + 'its invoice (or credit note) is dated; the settlement bar sits in the month the money '
+              + 'actually moved. Amazon settles on its own cycle, so a short green bar beside a tall '
+              + 'blue one at the right-hand edge is the normal lag, not a shortfall.'} />
+      </div>
       <div className="ar-rise"><MoneyFlow A={A} /></div>
 
       <Card title="Every tax invoice, by what the settlement did with it"
@@ -1620,8 +1627,14 @@ function invAgg(inv, shown) {
   R.other = r2(R.invoicedValue - (R.matchedPrincipal + R.shipping + R.promo
                                   + R.giftWrap + R.mtrOnly));
   const totOrders = Object.values(byKey).reduce((a, x) => a + x.n, 0);
+  const series = (shown || []).map((m) => {
+    const rs = sel.filter((x) => x.month === m);
+    const a = S(rs, 'orderValue'); const b = S(rs, 'invoicedValue');
+    return { month: m, label: fmtMonth(m), a, b, gap: r2(a - b),
+             orders: rs.filter((x) => x.bucket !== 'mtrOnly').length };
+  });
   return {
-    sel, byKey, R, S,
+    sel, byKey, R, S, series,
     totOrders,
     /* "Everything customers ordered" must count the ORDER REPORT's orders. The
        mtrOnly rows have no order row at all — they are invoices whose order
@@ -1659,7 +1672,7 @@ function InvoicingView({ inv, shown, onDrill }) {
     );
   }
   const t = inv.invoiceTiming || {};
-  const { byKey, totOrders, ordersPlaced, totOrderVal, m, R } = invAgg(inv, shown);
+  const { byKey, totOrders, ordersPlaced, totOrderVal, m, R, series } = invAgg(inv, shown);
   const check = ['shippedNoInvoice', 'mtrOnly'];
   const checkN = check.reduce((a, k) => a + (byKey[k]?.n || 0), 0);
   const checkV = check.reduce((a, k) => a + (byKey[k]?.order || 0) + (byKey[k]?.inv || 0), 0);
@@ -1728,8 +1741,158 @@ function InvoicingView({ inv, shown, onDrill }) {
     </div>
   );
 
+  /* ── the order report against the MTR, as one figure ──────────────────
+     The tab opened on four counters and a 2x7 table. The question it answers
+     is a single number — how much of what customers ordered reached the tax
+     invoice — so that number leads, and the table underneath explains it. */
+  const DIFF = r2(R.allOrderValue - R.invoicedValue);
+  const DIFF_PARTS = [
+    ...(inv.buckets || []).filter((b) => b.key !== 'matched' && b.key !== 'mtrOnly')
+      .map((b) => ({ k: String(b.label || b.key), v: byKey[b.key]?.order || 0,
+                     n: byKey[b.key]?.n || 0, bucket: b.key,
+                     note: b.meaning ? String(b.meaning).split('. ')[0] + '.' : '' }))
+      .filter((x) => x.n || x.v),
+    ...(Math.abs(R.shipping) >= 0.01 ? [{ k: 'Delivery billed on the invoice', v: -R.shipping, n: null,
+      note: 'The invoice carries a delivery charge the item price never did.' }] : []),
+    ...(Math.abs(R.promo) >= 0.01 ? [{ k: 'Promotional discount on the invoice', v: -R.promo, n: null,
+      note: 'A discount applied on the invoice and not in the item price.' }] : []),
+    ...(Math.abs(R.giftWrap) >= 0.01 ? [{ k: 'Gift wrap billed on the invoice', v: -R.giftWrap, n: null,
+      note: '' }] : []),
+    ...(Math.abs(R.mtrOnly) >= 0.01 ? [{ k: 'Invoiced with no order row in this period', v: -R.mtrOnly,
+      n: byKey.mtrOnly?.n || 0, bucket: 'mtrOnly',
+      note: 'Ordered just before the period opened, or just after midnight IST on the first.' }] : []),
+    ...(Math.abs(R.other) >= 0.01 ? [{ k: 'Other invoice differences', v: -R.other, n: null,
+      note: 'Not explained by delivery, discount or gift wrap.' }] : []),
+  ];
+
   return (
     <>
+      <Card title="The journey of an order, order report to tax invoice"
+            sub="Every order placed, and how much of it reached the MTR. Click either stop for the orders.">
+        <div className="p-5">
+          <div className="flex items-stretch flex-wrap lg:flex-nowrap">
+            {[{ kind: 'order', cap: 'Orders placed', col: 'item-price', n: ordersPlaced,
+                v: R.allOrderValue, bucket: '__all', unit: 'orders in the order report' },
+              { kind: 'mtr', cap: 'Tax invoices raised', col: 'Invoice Amount', n: m.n + (byKey.mtrOnly?.n || 0),
+                v: R.invoicedValue, bucket: 'matched', unit: 'reached the MTR' }].map((st, i) => {
+              const f = FILEMARK[st.kind];
+              return (
+                <React.Fragment key={st.cap}>
+                  {i > 0 && (
+                    <div className="flex flex-col justify-center items-center px-3 min-w-[186px] shrink-0">
+                      <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">less</div>
+                      <div className="text-[15px] font-bold tabular-nums my-0.5" style={{ color: T.amberText }}>
+                        ₹{inr(Math.abs(DIFF))}
+                      </div>
+                      <div className="w-full h-px my-1" style={{ background: '#E2E8F0' }} />
+                      <div className="text-[10.5px] text-center leading-snug text-slate-500">
+                        never reached the tax invoice
+                        <span className="block text-[9.5px] text-slate-400 mt-0.5">
+                          cancelled, not an Amazon sale, replaced free — every rupee named below
+                        </span>
+                      </div>
+                    </div>
+                  )}
+                  <button onClick={() => go(st.bucket, st.cap, st.kind === 'mtr' ? 'mtr' : 'order')}
+                          className="flex-1 min-w-[220px] rounded-xl p-4 text-left transition-all hover:shadow-md"
+                          style={{ background: f.bg, border: `1px solid ${f.bd}` }}>
+                    <FileTag kind={st.kind} col={st.col} />
+                    <div className="text-[11px] font-bold uppercase tracking-wider text-slate-500 mt-2">{st.cap}</div>
+                    <div className="text-[25px] font-bold tabular-nums leading-none mt-1" style={{ color: f.tone }}>
+                      ₹{inr(st.v || 0)}
+                    </div>
+                    <div className="text-[11.5px] text-slate-500 mt-1">{int(st.n || 0)} {st.unit}</div>
+                    <div className="h-1.5 rounded-full mt-2.5 overflow-hidden" style={{ background: '#fff' }}>
+                      <div className="h-full rounded-full ar-grow"
+                           style={{ width: `${Math.max(3, (100 * (st.v || 0)) / Math.max(R.allOrderValue, 1))}%`,
+                                    background: f.tone }} />
+                    </div>
+                  </button>
+                </React.Fragment>
+              );
+            })}
+          </div>
+        </div>
+      </Card>
+
+      <div className="rounded-xl mb-5 overflow-hidden"
+           style={{ background: '#fff', border: `1px solid ${Math.abs(DIFF) < 1 ? '#BBF7D0' : '#FDE68A'}` }}>
+        <div className="px-5 py-4 flex items-center gap-6 flex-wrap"
+             style={{ background: Math.abs(DIFF) < 1 ? '#F3FBF6' : '#FFFBEB' }}>
+          <div>
+            <FileTag kind="order" col="item-price" />
+            <div className="text-[25px] font-bold tabular-nums mt-1.5" style={{ color: T.violet }}>
+              ₹{inr(R.allOrderValue)}
+            </div>
+            <div className="text-[11.5px] text-slate-500">{int(ordersPlaced)} orders placed in this period</div>
+          </div>
+          <div className="text-[20px] font-bold text-slate-300">−</div>
+          <div>
+            <FileTag kind="mtr" col="Invoice Amount" />
+            <div className="text-[25px] font-bold tabular-nums mt-1.5" style={{ color: T.blue }}>
+              ₹{inr(R.invoicedValue)}
+            </div>
+            <div className="text-[11.5px] text-slate-500">raised as tax invoices</div>
+          </div>
+          <div className="ml-auto text-right">
+            <div className="text-[11px] font-bold uppercase tracking-wider"
+                 style={{ color: Math.abs(DIFF) < 1 ? T.green : T.amberText }}>
+              {Math.abs(DIFF) < 1 ? 'No difference' : 'Difference'}
+            </div>
+            <div className="text-[32px] font-bold tabular-nums leading-none mt-1"
+                 style={{ color: Math.abs(DIFF) < 1 ? T.green : T.amberText }}>
+              ₹{inr(Math.abs(DIFF))}
+            </div>
+            <div className="text-[11.5px] text-slate-500 mt-0.5">
+              {((100 * Math.abs(DIFF)) / Math.max(R.allOrderValue, 1)).toFixed(2)}% of what customers ordered
+            </div>
+          </div>
+        </div>
+        <div className="px-5 py-1">
+          <div className="text-[10.5px] font-bold uppercase tracking-wider text-slate-400 pt-3 pb-1">
+            And every rupee of it
+          </div>
+          {DIFF_PARTS.map((d) => (
+            <button key={d.k} onClick={() => d.bucket && go(d.bucket, d.k, 'order')} disabled={!d.bucket}
+                    className={`w-full flex justify-between items-baseline gap-4 py-2.5 border-b border-slate-100 last:border-0 text-left ${d.bucket ? 'hover:bg-slate-50' : ''}`}>
+              <span className="min-w-0">
+                <span className="text-[13px] font-semibold text-slate-700">{d.k}</span>
+                {d.n != null && <span className="text-[11px] text-slate-400 ml-1.5">{int(d.n)} orders</span>}
+                <span className="block text-[11px] text-slate-400 leading-snug mt-0.5">{d.note}</span>
+              </span>
+              <span className="text-[13.5px] tabular-nums font-semibold whitespace-nowrap"
+                    style={{ color: d.v > 0 ? T.amberText : T.green }}>
+                {d.v < 0 ? '−' : ''}₹{inr(Math.abs(d.v))}
+              </span>
+            </button>
+          ))}
+          <div className="flex justify-between items-baseline gap-4 py-3 border-t border-slate-200 mt-1">
+            <span className="text-[13px] font-bold text-slate-900">Difference</span>
+            <span className="text-[14px] tabular-nums font-bold"
+                  style={{ color: Math.abs(DIFF) < 1 ? T.green : T.amberText }}>
+              ₹{inr(DIFF)}
+            </span>
+          </div>
+        </div>
+      </div>
+
+      <CompareChart
+        series={series || []}
+        A={{ label: 'Ordered', legend: 'Order report · item-price', tone: T.violet,
+             short: 'The MTR invoiced MORE than the order report shows, which is invoices whose order '
+                  + 'was placed before this period opened.' }}
+        B={{ label: 'Invoiced', legend: 'MTR · Invoice Amount', tone: T.blue,
+             short: 'Part of what customers ordered never reached a tax invoice — cancelled, not an '
+                  + 'Amazon sale, or replaced at no charge.' }}
+        title="Order report against MTR, period by period"
+        sub="Purple is what customers ordered. Blue is what became a tax invoice."
+        countLabel="orders"
+        onSee={(d) => onDrill({ kind: 'invoicing', bucket: '__all',
+                                label: `Orders · ${d.label}`, side: 'order', months: d.months })}
+        note={'An order and its tax invoice are usually minutes apart, so these two bars track each '
+            + 'other closely. Where they do not, the difference is cancellations — and at a period '
+            + 'edge, orders placed just before it opened.'} />
+
       <div className="rounded-xl px-5 py-4 mb-5" style={{ background: '#EFF6FF', border: '1px solid #BFDBFE' }}>
         <div className="text-sm font-bold mb-1.5" style={{ color: '#1E3A8A' }}>
           When does Amazon raise the invoice?
