@@ -843,9 +843,16 @@ function invAgg(inv, shown) {
   R.orderLevel = r2(R.allOrderValue - R.cancelledValue);
   R.other = r2(R.invoicedValue - (R.matchedPrincipal + R.shipping + R.promo
                                   + R.giftWrap + R.mtrOnly));
+  const totOrders = Object.values(byKey).reduce((a, x) => a + x.n, 0);
   return {
     sel, byKey, R, S,
-    totOrders: Object.values(byKey).reduce((a, x) => a + x.n, 0),
+    totOrders,
+    /* "Everything customers ordered" must count the ORDER REPORT's orders. The
+       mtrOnly rows have no order row at all — they are invoices whose order
+       sits outside the period — so including them made this read 22,203 while
+       the Order Cycle beside it read 22,191, with the 12 unexplained. They add
+       themselves back further down the walk, on their own line. */
+    ordersPlaced: totOrders - (byKey.mtrOnly?.n || 0),
     totOrderVal: Object.values(byKey).reduce((a, x) => a + x.order, 0),
     m: byKey.matched || { n: 0, order: 0, inv: 0 },
   };
@@ -876,7 +883,7 @@ function InvoicingView({ inv, shown, onDrill }) {
     );
   }
   const t = inv.invoiceTiming || {};
-  const { byKey, totOrders, totOrderVal, m, R } = invAgg(inv, shown);
+  const { byKey, totOrders, ordersPlaced, totOrderVal, m, R } = invAgg(inv, shown);
   const check = ['shippedNoInvoice', 'mtrOnly'];
   const checkN = check.reduce((a, k) => a + (byKey[k]?.n || 0), 0);
   const checkV = check.reduce((a, k) => a + (byKey[k]?.order || 0) + (byKey[k]?.inv || 0), 0);
@@ -885,7 +892,7 @@ function InvoicingView({ inv, shown, onDrill }) {
      left out of the walk again. "Not an Amazon sale" and "free replacement"
      were absent from the left column; they happen to carry no money on this
      data, so the column footed by luck rather than by construction. */
-  const leftLines = [['Everything customers ordered', R.allOrderValue, totOrders, '__all']];
+  const leftLines = [['Everything customers ordered', R.allOrderValue, ordersPlaced, '__all']];
   for (const b of inv.buckets || []) {
     if (b.key === 'matched' || b.key === 'mtrOnly') continue;
     const a = byKey[b.key] || { n: 0, order: 0 };
@@ -929,12 +936,12 @@ function InvoicingView({ inv, shown, onDrill }) {
 
   /* every headline carries BOTH a count and a value, and opens its orders */
   const KPI = [
-    { k: 'Orders placed', n: totOrders, v: totOrderVal, c: '#111927',
+    { k: 'Orders placed', n: ordersPlaced, v: totOrderVal, c: '#111927',
       sub: 'every order in the order report', bucket: '__all' },
     { k: 'Tax invoices raised', n: m.n, v: m.inv, c: T.green,
       sub: 'orders that reached the MTR', bucket: 'matched' },
     { k: 'Match rate', n: null, v: null, c: T.blue, bucket: 'matched',
-      big: pct(m.n, totOrders), sub: `${pct(m.inv, totOrderVal)} by value` },
+      big: pct(m.n, ordersPlaced), sub: `${pct(m.inv, totOrderVal)} by value` },
     { k: 'Needs checking', n: checkN, v: checkV, c: checkN ? T.red : '#94A3B8',
       sub: 'only these two buckets', buckets: check },
   ];
@@ -1395,6 +1402,15 @@ function MonthStatement({ m, data, onDrill }) {
         </p>
       </div>
 
+      {/* The order chain for THIS month, above the four questions: in April the
+          order report holds N orders, the MTR invoiced fewer, the settlement
+          paid fewer still, and until now the month view opened straight on a
+          rupee figure with none of that said. */}
+      <ChainLadder t={(data?.three?.perMonth || []).find((x) => x.month === m.month) || {}}
+                   months={[m.month]} onDrill={onDrill}
+                   title={`Order Cycle — ${fmtMonth(m.month)}`}
+                   sub="What happened to every order placed in this month. Each step subtracts to the next." />
+
       <div className="grid gap-3.5 grid-cols-1 md:grid-cols-2 xl:grid-cols-4 mb-5">
         {cards.map((c) => (
           <button key={c.n} onClick={() => onDrill({ ...c.drill, months: [m.month] })}
@@ -1464,6 +1480,10 @@ function MonthStatement({ m, data, onDrill }) {
           Same money, read from the sales side and from the receipts side.
         </p>
       </div>
+
+      {/* The same Cash Cycle the multi-month view gets, for this one month —
+          gross ordered down to what is still to come in. */}
+      <CashCycle led={[m]} data={data} shown={[m.month]} onDrill={onDrill} />
 
       {/* whose sales was the cash for */}
       <div className="bg-white border rounded-xl overflow-hidden mb-5" style={{ borderColor: T.amber }}>
@@ -1686,9 +1706,9 @@ function ReturnsView({ m, data, ret, onDrill }) {
    aggregation, so the two tabs cannot drift apart. */
 function SalesWalk({ inv, shown, onDrill }) {
   if (!inv) return null;
-  const { byKey, totOrders, m, R } = invAgg(inv, shown);
+  const { byKey, ordersPlaced, m, R } = invAgg(inv, shown);
   const L = [];
-  L.push({ label: 'Everything customers ordered', v: R.allOrderValue, n: totOrders, op: '',
+  L.push({ label: 'Everything customers ordered', v: R.allOrderValue, n: ordersPlaced, op: '',
            src: 'order', bucket: '__all', note: 'Every order placed in the period, cancellations included' });
   for (const b of inv.buckets || []) {
     if (b.key === 'matched' || b.key === 'mtrOnly') continue;
@@ -1843,10 +1863,13 @@ function ChainLadder({ t, months, onDrill, title, sub }) {
 }
 
 /* ── the whole period: volume, summary, cash cycle ───────────────────────── */
-function PeriodOverview({ led, data, shown, onDrill, ST }) {
-  const t = data?.three?.totals || {};
+/* ── the Cash Cycle, for a period OR for one month ────────────────────────
+   It only ever existed for a multi-month range. Opening a single month gave
+   the four question cards and nothing else, so the month that an accountant
+   actually closes was the one view with no walk from sales to cash. Same
+   component, `led` is just one month long. */
+function CashCycle({ led, data, shown, onDrill }) {
   const amt = (k) => led.reduce((a, m) => a + (m[k]?.amount || 0), 0);
-  const cnt = (k) => led.reduce((a, m) => a + (m[k]?.count || 0), 0);
   const EQ = [
     { cap: 'Net sales', v: amt('netBillable'), note: 'Sales after customer returns', op: '−', line: 'netBillable' },
     { cap: 'Amazon charges', v: amt('fees'), note: 'Commission, closing fee, FBA and storage', op: '−', fg: T.amberText, bg: '#FFFBF4', line: 'fees' },
@@ -1859,11 +1882,10 @@ function PeriodOverview({ led, data, shown, onDrill, ST }) {
   /* Reimbursements, adjustments and fee refunds are money Amazon paid that is
      not payment for any invoice. They sit inside "received", so a month can
      close having been paid MORE than it billed — which reads as a negative
-     amount still pending and looks like an error. Named here instead. */
+     amount still pending and looks like an error. Named here instead, between
+     "Received to date" and "Still pending" and with NO operator, so it never
+     reads as a term in the subtraction that produces the pending figure. */
   const credits = amt('creditsNotAgainstInvoice');
-  /* Sits between "Received to date" and "Still pending" with NO operator: it is
-     part of the money that arrived, but it settles no invoice, so it must not
-     read as a term in the subtraction that produces the pending figure. */
   if (Math.abs(credits) > 1) {
     EQ.splice(6, 0, {
       cap: 'Of which: not against an invoice', v: credits, op: '',
@@ -1872,11 +1894,6 @@ function PeriodOverview({ led, data, shown, onDrill, ST }) {
     });
   }
   return (
-    <>
-      <ChainLadder t={t} months={shown} onDrill={onDrill}
-        title="Order Cycle — what happened to every order"
-        sub="Each step subtracts to the next, so the row adds up with nothing left over." />
-
       <Card title="Cash Cycle" sub="From everything that was ordered, down to what is still to come in">
         <div className="px-5 pt-5">
           <SalesWalk inv={data?.invoicing} shown={shown} onDrill={onDrill} />
@@ -1953,6 +1970,17 @@ function PeriodOverview({ led, data, shown, onDrill, ST }) {
           </div>
         </div>
       </Card>
+  );
+}
+
+function PeriodOverview({ led, data, shown, onDrill, ST }) {
+  const t = data?.three?.totals || {};
+  return (
+    <>
+      <ChainLadder t={t} months={shown} onDrill={onDrill}
+        title="Order Cycle — what happened to every order"
+        sub="Each step subtracts to the next, so the row adds up with nothing left over." />
+      <CashCycle led={led} data={data} shown={shown} onDrill={onDrill} />
     </>
   );
 }
