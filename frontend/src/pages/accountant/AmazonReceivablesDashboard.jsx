@@ -57,6 +57,8 @@ const daysOld = (m) => Math.max(0, Math.floor((Date.now() - monthEnd(m).getTime(
 /* "18 Jun 2026" — the day matters: an accountant matching a credit note to a
    filed return needs the date on the document, and "Jun 2026" does not settle
    whether a 30-June sale belongs to June or July. */
+/* Round ONCE, at the point a figure is shown or compared — never per row. */
+const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
 const fmtDay = (d) => {
   if (!d || !/^\d{4}-\d{2}-\d{2}/.test(d)) return '—';
   const [y, m, dd] = d.slice(0, 10).split('-');
@@ -832,7 +834,6 @@ function InvoicingView({ inv, shown, onDrill }) {
     );
   }
   const t = inv.invoiceTiming || {};
-  const r = inv.revenue || {};
   const inSel = (m) => !m || shown.includes(m);
   const rowsFor = (k) => (inv.rows || []).filter((x) => x.bucket === k && inSel(x.month));
   const agg = (k) => {
@@ -842,12 +843,87 @@ function InvoicingView({ inv, shown, onDrill }) {
              inv: rs.reduce((a, x) => a + (x.invoicedValue || 0), 0) };
   };
   const byKey = {}; for (const b of inv.buckets || []) byKey[b.key] = agg(b.key);
+
   const totOrders = Object.values(byKey).reduce((a, x) => a + x.n, 0);
   const totOrderVal = Object.values(byKey).reduce((a, x) => a + x.order, 0);
   const check = ['shippedNoInvoice', 'mtrOnly'];
   const checkN = check.reduce((a, k) => a + (byKey[k]?.n || 0), 0);
   const checkV = check.reduce((a, k) => a + (byKey[k]?.order || 0) + (byKey[k]?.inv || 0), 0);
   const m = byKey.matched || { n: 0, order: 0, inv: 0 };
+
+  /* ── the bridge is derived from the SELECTED rows, never from the backend's
+     whole-period aggregate ─────────────────────────────────────────────────
+     It used to read `inv.revenue`, which is built once over every month the run
+     covers, while the counts beside it were filtered to the chosen range. With
+     Apr 2025 – Jan 2026 selected the headline said 13,277 orders worth
+     54,66,856 and the bridge two blocks below valued those same 13,277 orders
+     at 87,13,747.73 — the seventeen-month figure. Changing the range moved the
+     counts and left every amount standing. Both now come off one filtered row
+     set, so they cannot describe different populations again. */
+  const sel = (inv.rows || []).filter((x) => inSel(x.month));
+  const S = (rs, k) => r2(rs.reduce((a, x) => a + (x[k] || 0), 0));
+  const matchedRows = sel.filter((x) => x.bucket === 'matched');
+  const mtrOnlyRows = sel.filter((x) => x.bucket === 'mtrOnly');
+  const R = {
+    allOrderValue: S(sel, 'orderValue'),
+    matchedOrderValue: S(matchedRows, 'orderValue'),
+    matchedPrincipal: S(matchedRows, 'principalValue'),
+    shipping: S(matchedRows, 'shippingValue'),
+    promo: S(matchedRows, 'promoValue'),
+    giftWrap: S(matchedRows, 'giftWrapValue'),
+    mtrOnly: S(mtrOnlyRows, 'invoicedValue'),
+    invoicedValue: S(sel, 'invoicedValue'),
+    refundedValue: S(sel, 'refundedValue'),
+  };
+  R.netBilled = r2(R.invoicedValue - R.refundedValue);
+  /* whatever the named parts do not explain stays on its own line rather than
+     being absorbed into one of them */
+  R.other = r2(R.invoicedValue - (R.matchedPrincipal + R.shipping + R.promo
+                                  + R.giftWrap + R.mtrOnly));
+
+  /* Both columns are generated FROM the bucket list, so a bucket can never be
+     left out of the walk again. "Not an Amazon sale" and "free replacement"
+     were absent from the left column; they happen to carry no money on this
+     data, so the column footed by luck rather than by construction. */
+  const leftLines = [['Everything customers ordered', R.allOrderValue, totOrders, '__all']];
+  for (const b of inv.buckets || []) {
+    if (b.key === 'matched' || b.key === 'mtrOnly') continue;
+    const a = byKey[b.key] || { n: 0, order: 0 };
+    if (!a.n && !a.order) continue;
+    leftLines.push([`Less: ${String(b.label || b.key).toLowerCase()}`, -a.order, a.n, b.key]);
+  }
+  leftLines.push(['Goods on orders in BOTH files', R.matchedOrderValue, m.n, 'matched', true]);
+
+  const rightLines = [['Goods on the same orders — MTR principal', R.matchedPrincipal, m.n, 'matched', true]];
+  if (Math.abs(R.shipping) >= 0.01) rightLines.push(['Add: delivery billed on the invoice', R.shipping, null, null]);
+  if (Math.abs(R.promo) >= 0.01) rightLines.push(['Less: promotional discount', R.promo, null, null]);
+  if (Math.abs(R.giftWrap) >= 0.01) rightLines.push(['Add: gift wrap', R.giftWrap, null, null]);
+  if (Math.abs(R.mtrOnly) >= 0.01) rightLines.push(['Add: invoiced, no order row', R.mtrOnly, byKey.mtrOnly?.n, 'mtrOnly']);
+  if (Math.abs(R.other) >= 0.01) rightLines.push(['Other invoice differences', R.other, null, null]);
+  rightLines.push(['Invoiced', R.invoicedValue, null, null]);
+  rightLines.push(['Less: returns credited', -R.refundedValue, null, null]);
+  rightLines.push(['Net invoiced', R.netBilled, null, null, true]);
+
+  /* The line-by-line walk below read the same whole-period aggregate, so it
+     too stood still when the range moved. Built from the selected rows now,
+     and from the SAME figures as the two columns above it — one period, one
+     population, three presentations of it. */
+  R.orderLevel = r2(R.allOrderValue - S(sel, 'cancelledValue'));
+  const bridgeLines = [
+    { key: 'matchedGap', label: 'orders in the order report that never reached the MTR',
+      note: 'Cancelled, not an Amazon sale, replaced at no charge, or shipped without an invoice.',
+      amount: r2(R.matchedOrderValue - R.orderLevel) },
+    { key: 'shipping', label: 'delivery billed on the invoice',
+      note: 'The invoice carries a delivery charge the item price never did.', amount: R.shipping },
+    { key: 'promo', label: 'promotional discount on the invoice',
+      note: 'A discount applied on the invoice and not in the item price.', amount: R.promo },
+    { key: 'giftWrap', label: 'gift wrap billed on the invoice', note: '', amount: R.giftWrap },
+    { key: 'mtrOnly', label: 'invoiced with no order row in this period',
+      note: 'Ordered just before the period opened, or just after midnight IST on the first.',
+      amount: R.mtrOnly },
+    { key: 'other', label: 'other invoice differences',
+      note: 'Not explained by delivery, discount or gift wrap.', amount: R.other },
+  ].filter((x) => Math.abs(x.amount) > 0.5);
 
   const pct = (a, b) => (b ? `${((100 * a) / b).toFixed(2)}%` : '—');
   const go = (bucket, label, side) => onDrill({ kind: 'invoicing', bucket, label, side, months: shown });
@@ -910,26 +986,8 @@ function InvoicingView({ inv, shown, onDrill }) {
       <Card title="Sales at order level vs MTR level"
             sub="the same month counted from the order report and from the tax invoices — click any line">
         <div className="p-4 grid gap-4 lg:grid-cols-2">
-          {[{ head: 'At order level', file: 'Order report', tone: T.violet,
-              lines: [['Everything customers ordered', r.allOrderValue, totOrders, '__all'],
-                      ['Less: cancelled before invoice', -(byKey.cancelledBeforeInvoice?.order || 0),
-                        byKey.cancelledBeforeInvoice?.n, 'cancelledBeforeInvoice'],
-                      ['Less: invoiced then cancelled', -(byKey.invoicedThenCancelled?.order || 0),
-                        byKey.invoicedThenCancelled?.n, 'invoicedThenCancelled'],
-                      ['Less: shipped but never invoiced', -(byKey.shippedNoInvoice?.order || 0),
-                        byKey.shippedNoInvoice?.n, 'shippedNoInvoice'],
-                      ['Goods on orders in BOTH files', r.matchedOrderValue, m.n, 'matched', true]] },
-            { head: 'At MTR (invoice) level', file: 'MTR', tone: T.blue,
-              lines: [['Goods on the same orders — MTR principal', r.matchedPrincipal, m.n, 'matched', true],
-                      ['Add: delivery billed on the invoice',
-                        (r.bridge || []).find((x) => x.key === 'shipping')?.amount || 0, null, null],
-                      ['Less: promotional discount',
-                        (r.bridge || []).find((x) => x.key === 'promo')?.amount || 0, null, null],
-                      ['Add: invoiced, no order row', r.bridge?.find((x) => x.key === 'mtrOnly')?.amount || 0,
-                        byKey.mtrOnly?.n, 'mtrOnly'],
-                      ['Invoiced', r.invoicedValue, null, null],
-                      ['Less: returns credited', -(r.refundedValue || 0), null, null],
-                      ['Net invoiced', r.netBilled, null, null, true]] },
+          {[{ head: 'At order level', file: 'Order report', tone: T.violet, lines: leftLines },
+            { head: 'At MTR (invoice) level', file: 'MTR', tone: T.blue, lines: rightLines },
           ].map((col) => (
             <div key={col.head} className="rounded-xl overflow-hidden border border-slate-200">
               <div className="px-4 py-2 flex items-center justify-between"
@@ -973,9 +1031,9 @@ function InvoicingView({ inv, shown, onDrill }) {
                 Order level (item price)
                 <span className="text-[11px] text-slate-400 ml-1.5">what customers were charged for goods</span>
               </span>
-              <span className="text-[13px] tabular-nums font-semibold text-slate-800">₹{inr(r.orderLevel)}</span>
+              <span className="text-[13px] tabular-nums font-semibold text-slate-800">₹{inr(R.orderLevel)}</span>
             </div>
-            {(r.bridge || []).filter((x) => Math.abs(x.amount) > 0.5).map((x) => (
+            {bridgeLines.map((x) => (
               <div key={x.key} className="px-4 py-2 border-t border-slate-100 flex justify-between gap-3">
                 <span className="text-[13px] text-slate-600 min-w-0">
                   {x.amount > 0 ? 'Add: ' : 'Less: '}{x.label}
@@ -990,14 +1048,14 @@ function InvoicingView({ inv, shown, onDrill }) {
             <div className="px-4 py-2.5 border-t border-slate-200 flex justify-between"
                  style={{ background: '#F8FAFC' }}>
               <span className="text-[13px] font-bold text-slate-800">Invoiced (MTR invoice amount)</span>
-              <span className="text-[13px] tabular-nums font-bold text-slate-800">₹{inr(r.invoicedValue)}</span>
+              <span className="text-[13px] tabular-nums font-bold text-slate-800">₹{inr(R.invoicedValue)}</span>
             </div>
-            {Math.abs(r.unexplained || 0) > 1 && (
+            {Math.abs(R.other || 0) > 1 && (
               <div className="px-4 py-2 border-t flex justify-between"
                    style={{ background: '#FFFBEB', borderColor: '#FDE68A' }}>
                 <span className="text-[13px] font-bold" style={{ color: '#78350F' }}>Still unexplained</span>
                 <span className="text-[13px] tabular-nums font-bold" style={{ color: '#78350F' }}>
-                  ₹{inr(Math.abs(r.unexplained))}
+                  ₹{inr(Math.abs(R.other))}
                 </span>
               </div>
             )}
@@ -1008,9 +1066,9 @@ function InvoicingView({ inv, shown, onDrill }) {
             and they are equal.</strong> Everything above and below them is one file counting orders the
             other does not have, or the invoice carrying something the item price never did. On the
             matched orders the two files agree exactly: the order report&rsquo;s item price totals{' '}
-            <strong>₹{inr(r.matchedOrderValue, 0)}</strong> and the MTR&rsquo;s <em>Principal Amount</em>{' '}
-            totals <strong>₹{inr(r.matchedPrincipal, 0)}</strong>
-            {Math.abs(r.principalDiff || 0) < 1 ? ' — the same number' : ''}. Everything above is the
+            <strong>₹{inr(R.matchedOrderValue, 0)}</strong> and the MTR&rsquo;s <em>Principal Amount</em>{' '}
+            totals <strong>₹{inr(R.matchedPrincipal, 0)}</strong>
+            {Math.abs(r2(R.matchedOrderValue - R.matchedPrincipal)) < 1 ? ' — the same number' : ''}. Everything above is the
             difference between <em>principal</em> and <em>invoice value</em>, not a discrepancy.
           </p>
         </div>
