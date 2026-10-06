@@ -60,6 +60,10 @@ const STATUS = {
   SETTLED_LATER: 'Settled in a later month',
   RETURNED: 'Returned / refunded',
   CANCELLED: 'Cancelled',
+  /* Amazon has RECORDED the sale and is HOLDING the money — it has not paid
+     and it has not refused. That is a receivable, not a settlement, and it has
+     to be visible as one rather than blend into "outstanding". */
+  DEFERRED: 'Held by Amazon (deferred)',
   OUTSTANDING: 'Outstanding',
 };
 
@@ -339,11 +343,18 @@ function buildLedger(src, months, opts = {}) {
     if (p.channel && !/^amazon/i.test(p.channel)) status = STATUS.NOT_AMAZON;
     else if (p.cancelled && !i.shipped) status = STATUS.CANCELLED;
     else if (!s) status = STATUS.OUTSTANDING;
+    else if (s.deferred && !s.payout) status = STATUS.DEFERRED;
     else if (i.refunded > 0 || s.refundRows > 0) status = STATUS.RETURNED;
     else if (s.month === m) status = STATUS.SETTLED_IN_MONTH;
     else status = STATUS.SETTLED_LATER;
 
-    const settled = s ? (s.payout || r2(s.sales - s.fees - s.tdsTcs)) : 0;
+    /* `payout` is what Amazon STATED it paid, and the fallback rebuilds it from
+       the parts for a source that carries no `total`. But a DEFERRED row has no
+       payout BY DESIGN — Amazon is holding the money — so rebuilding it from
+       product sales would hand it straight back as received, which is the one
+       thing the deferred rule exists to prevent. */
+    const settled = !s ? 0
+      : (s.payout || (s.deferred ? 0 : r2(s.sales - s.fees - s.tdsTcs)));
     rows.push({
       orderId: id, month: m, status,
       invoiced: i.invoiced, refunded: i.refunded, gst: i.gst,
@@ -472,6 +483,9 @@ function buildLedger(src, months, opts = {}) {
          cash and billings never tie order for order */
       creditsNotAgainstInvoice: { count: billable.filter((r) => Math.abs(r.credits || 0) > 0.01).length,
                                   amount: sum(billable, 'credits') },
+      /* money Amazon has recorded and is still holding — ours, not yet paid */
+      deferred: { count: billable.filter((r) => Math.abs(r.deferred || 0) > 0.01).length,
+                  amount: sum(billable, 'deferred') },
       returnedLater: {
         count: billable.filter((r) => r.refunded > 0 && r.refundMonth && r.refundMonth > m).length,
         amount: returnedLater,

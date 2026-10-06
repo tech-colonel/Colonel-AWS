@@ -118,6 +118,9 @@ const PROV = {
     note: 'An MCF order is neither invoiced nor payable, so it is not outstanding and is not counted here.' },
   mcf: { file: 'order', column: 'sales-channel', filter: 'sales-channel is not Amazon',
     note: 'Sold on another website and only shipped by Amazon, so Amazon raises no tax invoice and pays nothing. Every one carries an item-price of zero.' },
+  deferred: { file: 'settlement', column: 'Transaction Status = Deferred',
+    filter: 'the release-date column is present and empty, so no money has moved',
+    note: 'Amazon has recorded the sale and is holding the money. It has not paid and it has not refused — so it is still owed to us.' },
   money: { file: 'settlement', column: 'total, less selling/FBA/other fees, TDS and TCS',
     filter: 'Order and Refund rows, matched to the MTR by order id',
     note: 'Gross is derived from the stated total plus the deductions, not rebuilt from the GST and '
@@ -2235,7 +2238,9 @@ function MonthStatement({ m, data, onDrill }) {
               ['Less received by the month end', inr(m.received.amount)],
               [m.receivedLater.amount > 0
                 ? `Later: ₹${inr(m.receivedLater.amount, 0)} came in · ₹${inr(m.stillOpen.amount, 0)} open`
-                : 'Nothing has come in since', '']],
+                : 'Nothing has come in since', ''],
+              ...(Math.abs(m.deferred?.amount || 0) > 1
+                ? [[`Of this, Amazon is holding ₹${inr(m.deferred.amount, 0)}`, '']] : [])],
       foot: 'Month by month, in the box below ↓',
       drill: { kind: 'line', line: 'closing' },
     }]),
@@ -2899,6 +2904,17 @@ function CashCycle({ led, data, shown, onDrill }) {
      amount still pending and looks like an error. Named here instead, between
      "Received to date" and "Still pending" and with NO operator, so it never
      reads as a term in the subtraction that produces the pending figure. */
+  /* Amazon has RECORDED these sales and is HOLDING the money — not paid, not
+     refused. That is part of what is still owed to us, so it sits beside
+     "Still pending" as a slice of it, never as a separate pot. */
+  const held = amt('deferred');
+  if (Math.abs(held) > 1) {
+    EQ.push({
+      cap: 'Of which: Amazon is still holding it', v: held, op: '',
+      note: 'Recorded in the settlement as deferred — no release date, so the money has not moved',
+      fg: '#92400E', bg: '#FFFBEB', line: 'deferred', aside: true,
+    });
+  }
   const credits = amt('creditsNotAgainstInvoice');
   if (Math.abs(credits) > 1) {
     EQ.splice(6, 0, {
@@ -3669,6 +3685,7 @@ function drillRows(drill, data, ST) {
     /* every order with a payment against it, in ANY month — the "received to
        date" card's own population, which it did not have before */
     settled: () => mine.filter((r) => r.settled !== 0),
+    deferred: () => mine.filter((r) => Math.abs(r.deferred || 0) > 0.01),
     receivedLater: () => mine.filter((r) => r.settled - recdBy(r, m0) !== 0),
     /* the closing balance: every order not fully paid by the month end — a part
        settlement belongs here just as much as an order with no payment at all */
@@ -3767,6 +3784,7 @@ function DrillPanel({ drill, data, ST, base, onClose }) {
     : `${period} · ${[...LINES, ...AFTER].find((l) => l.key === drill.line)?.label
         || { settled: 'Received to date', received: 'Received by the month end',
              stillOpen: 'Still pending', closing: 'Not received at the month end',
+             deferred: 'Held by Amazon (deferred)',
              creditsNotAgainstInvoice: 'Credits not against an invoice' }[drill.line]
         || drill.line}`;
 

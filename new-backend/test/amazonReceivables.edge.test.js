@@ -139,6 +139,42 @@ T('Feb return is flagged as earlier-month', feb.returned.earlier.amount >= 300, 
 near('prior-period refund captured', (led.priorPeriodRefunds || []).reduce((a, p) => a + p.amount, 0), 99);
 near('genuine repeat payment kept (not de-duped)', byId['DUP-1'] ? byId['DUP-1'].settled : 90, 90);
 
+console.log('--- DEFERRED IS A RECEIVABLE ---');
+/* Amazon records the sale and holds the money. It has not paid and it has not
+   refused, so it is OURS and still owed - it must never read as received. */
+{
+  const O2 = (id, d, st, q, pr) => ({ 'amazon-order-id': id, 'purchase-date': d,
+    'item-status': st, 'order-status': st, quantity: String(q), 'item-price': String(pr),
+    'sales-channel': 'Amazon.in' });
+  const M2 = (id, d, t, amt) => ({ 'Order Id': id, 'Invoice Date': d, 'Shipment Date': d,
+    'Transaction Type': t, 'Invoice Amount': String(amt), 'Total Tax Amount': '0' });
+  /* a settlement row that is DEFERRED: the release column is present and empty.
+     Note it carries product sales and fees, which is exactly what the payout
+     fallback would otherwise rebuild a payment out of. */
+  const S2 = (id, when, total, ps, fee) => ({ __src: 'u', order_id: id, 'date/time': when,
+    'Transaction Release Date': '', type: 'Order', total: String(total),
+    product_sales: String(ps), 'selling fees': String(fee),
+    'TDS (Section 194-O)': '0', 'TCS-CGST': '0' });
+  const src2 = {
+    orders: [O2('DEF-1', '2026-05-04T05:00:00Z', 'Shipped', 1, 1000)],
+    mtr: [M2('DEF-1', '2026-05-04 10:00', 'Shipment', 1000)],
+    settlement: [S2('DEF-1', '5 May 2026 10:00:00 am UTC', 900, 1000, -100)],
+    uploadedMonths: [], files: {},
+  };
+  const l2 = buildLedger(src2, ['2026-05'], { basis: BASIS.ORDER });
+  const m2 = l2.perMonth[0];
+  const row = l2.rows.find((r) => r.orderId === 'DEF-1');
+  near('deferred money is NOT received',      m2.settled.amount, 0);
+  near('deferred money stays outstanding',    m2.stillOpen.amount, m2.expected.amount);
+  near('deferred is reported on its own line', m2.deferred.amount, 900);
+  T('deferred count',                          m2.deferred.count, 1);
+  T('the order says who is holding it',        row.status, 'Held by Amazon (deferred)');
+  /* the payout fallback rebuilds a payment from product sales when a source
+     carries no `total`; on a deferred row that would hand the money straight
+     back as received */
+  near('the payout fallback does not resurrect it', row.settled, 0);
+}
+
 console.log('--- ORDER vs MTR EDGE CASES ---');
 const iv = ovm.build(src, months, {});
 const bk = Object.fromEntries(iv.buckets.map((b) => [b.key, b.count]));
