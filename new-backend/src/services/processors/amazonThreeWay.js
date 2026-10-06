@@ -27,9 +27,12 @@
    Every subtraction names a countable group. Nothing is a balancing figure.
 
    VALUE IS NOT THE RECONCILING MEASURE — the order count is. Each source
-   measures money differently (item-price+item-tax / Invoice Amount / product
-   sales), so the three value totals legitimately differ. Value is carried for
-   context and for sizing what is outstanding, never as proof.
+   measures money differently (item-price / Invoice Amount / product sales), so
+   the three value totals legitimately differ. All three are GST-INCLUSIVE:
+   `item-price` contains its `item-tax`, the MTR's Principal and Invoice Amount
+   contain their Total Tax Amount, and the settlement's `total` is what hit the
+   bank. Value is carried for context and for sizing what is outstanding,
+   never as proof.
    ────────────────────────────────────────────────────────────────────────────── */
 
 const r2 = (n) => Number((n || 0).toFixed(2));
@@ -156,21 +159,40 @@ function foldOrders(rows) {
     let o = byOrder.get(id);
     if (!o) {
       o = { id, month: monthKey(r['purchase-date']), statuses: new Set(),
-            value: 0, shipState: '', lines: 0 };
+            value: 0, tax: 0, gross: 0, grossTax: 0, cancelledValue: 0,
+            channel: '', shipState: '', lines: 0 };
       byOrder.set(id, o);
     }
     o.lines += 1;
-    o.statuses.add(String(r['order-status'] || '').trim());
+    const st = String(r['order-status'] || '').trim();
+    o.statuses.add(st);
     o.shipState = o.shipState || String(r['ship-state'] || '').toUpperCase();
-    /* A cancelled line was never charged, so it carries no value. Counting it
-       would overstate what is outstanding. */
-    if (String(r['order-status'] || '').trim() !== 'Cancelled') {
-      o.value += num(r['item-price']) + num(r['item-tax']);
-    }
+    o.channel = o.channel || String(r['sales-channel'] || '').trim();
+    /* `item-tax` is the GST CONTAINED IN `item-price`, not an addition to it.
+       A line reading item-price 345.00 with item-tax 52.63 is 345 inclusive of
+       18% GST (345 x 18/118 = 52.63), which is also why `item-price` ties to
+       the MTR's Principal Amount to the paisa. Adding the two overstated every
+       order-report amount by about 15%. The tax is carried alongside so a rung
+       can be shown net of GST — never added on top of it. */
+    const price = num(r['item-price']);
+    const tax = num(r['item-tax']);
+    o.gross += price; o.grossTax += tax;
+    /* A cancelled line was never charged, so it carries no value in the live
+       figure. It is kept separately because the gross-to-net walk has to show
+       what was cancelled, and cannot show it out of a field that excludes it. */
+    if (st !== 'Cancelled') { o.value += price; o.tax += tax; }
+    else o.cancelledValue += price;
   }
   for (const o of byOrder.values()) {
-    o.value = r2(o.value);
+    o.value = r2(o.value); o.tax = r2(o.tax);
+    o.gross = r2(o.gross); o.grossTax = r2(o.grossTax);
+    o.cancelledValue = r2(o.cancelledValue);
     o.cancelled = o.statuses.size === 1 && o.statuses.has('Cancelled');
+    /* "Not an Amazon sale" (MCF): Amazon shipped it, but the order was taken on
+       another website, so Amazon never raises a tax invoice for it and never
+       pays for it. It is not a step of the chain — it is a door orders leave
+       by, and every one of them carries an item-price of zero. */
+    o.mcf = !!(o.channel && !/^amazon/i.test(o.channel));
     o.status = [...o.statuses].sort().join(', ');
   }
   return byOrder;
@@ -232,6 +254,12 @@ function foldSettlement(rows) {
  * @param {string[]} months  e.g. ['2026-06','2026-07','2026-08']
  * @param {object} opts  { basis } — 'order' or 'dispatch'; must match the ledger
  */
+const COUNT_KEYS = ['placed', 'cancelled', 'net', 'mcf', 'notInvoicedFree', 'notInvoiced',
+                   'shipped', 'settled', 'unsettled'];
+const VALUE_KEYS = ['valuePlaced', 'valueCancelled', 'valueMcf', 'valueNotInvoicedFree', 'valueNotInvoiced',
+                    'valueInvoiced', 'valueSettled', 'valueNet', 'valueUnsettled',
+                    'taxPlaced', 'taxInvoiced'];
+
 function reconcile(src, months, opts = {}) {
   const basis = opts.basis || 'dispatch';
   const O = foldOrders(src.orders || []);
@@ -261,32 +289,83 @@ function reconcile(src, months, opts = {}) {
      it has no business also deciding whether they were paid. */
   const settled = new Set([...S.values()].map((s) => s.id));
 
+  /* ── THE CHAIN ───────────────────────────────────────────────────────────
+     Every order leaves by exactly one door, so each step subtracts cleanly to
+     the next and nothing sits between two cards unexplained.
+
+         placed - cancelled - notAnAmazonSale - notInvoiced = invoiced
+         invoiced - unsettled = settled
+
+     Before this the screen showed placed, cancelled and invoiced only: 22,191
+     - 1,913 = 20,278 against an invoiced count of 20,157, and the 121 in
+     between were nowhere on the page. They are 107 MCF orders plus 14 Amazon
+     orders that shipped without an invoice ever reaching the MTR.
+
+     "Not an Amazon sale" used to be shown as a sixth card beside the others,
+     which double-counted: 17 of its 124 were already inside Cancelled and the
+     other 107 inside that 121 gap. It is a rung now, at its own level. */
+  const V = (a, k) => r2(a.reduce((x, o) => x + (o[k || 'value'] || 0), 0));
   const perMonth = months.map((month) => {
     const all = [...O.values()].filter((o) => o.month === month);
     const canc = all.filter((o) => o.cancelled);
     const net = all.filter((o) => !o.cancelled);
-    const sh = net.filter((o) => shipped.has(o.id));
-    const se = net.filter((o) => settled.has(o.id));
-    const un = net.filter((o) => !settled.has(o.id));
+    const mcf = net.filter((o) => o.mcf);
+    const rest = net.filter((o) => !o.mcf);
+    const missing = rest.filter((o) => !shipped.has(o.id));
+    /* Two very different things were sitting in one bucket. An order with an
+       item-price of ZERO and no MTR row is a replacement sent at no charge —
+       there is nothing to invoice and nothing to claim. An order with a real
+       price and no MTR row is goods that left the warehouse with no tax
+       invoice behind them, which is the only one of the two worth chasing.
+       On this data the split is 12 free replacements against 2 priced orders,
+       and both of the priced ones are the latest month, whose invoices are in
+       the following month's MTR. */
+    const noInvFree = missing.filter((o) => !o.value);
+    const noInv = missing.filter((o) => o.value > 0);
+    const sh = rest.filter((o) => shipped.has(o.id));
+    /* Settlement is asked of the INVOICED orders, not of every live order.
+       Asking it of the live orders counted the MCF orders as unpaid — they are
+       not unpaid, Amazon was never going to pay for them — and produced a
+       "paid" count of 20,171 sitting directly under an "invoiced" count of
+       20,157, which is how the chain came to show more orders paid than were
+       ever billed. */
+    const se = sh.filter((o) => settled.has(o.id));
+    const un = sh.filter((o) => !settled.has(o.id));
     return {
       month,
       placed: all.length,
       cancelled: canc.length,
       net: net.length,
+      mcf: mcf.length,
+      notInvoicedFree: noInvFree.length,
+      notInvoiced: noInv.length,
       shipped: sh.length,
-      notInvoiced: net.length - sh.length,
       settled: se.length,
       unsettled: un.length,
-      valueNet: r2(net.reduce((a, o) => a + o.value, 0)),
-      valueUnsettled: r2(un.reduce((a, o) => a + o.value, 0)),
+      /* GST-inclusive throughout; the tax contained in each is reported beside
+         it so a rung can be read either way without ever adding the two. */
+      valuePlaced: V(all, 'gross'),
+      valueCancelled: V(canc, 'cancelledValue'),
+      valueMcf: V(mcf),
+      valueNotInvoicedFree: V(noInvFree),
+      valueNotInvoiced: V(noInv),
+      valueInvoiced: V(sh),
+      valueSettled: V(se),
+      valueNet: V(net),
+      valueUnsettled: V(un),
+      taxPlaced: V(all, 'grossTax'),
+      taxInvoiced: V(sh, 'tax'),
       /* a month is clean when everything that could settle, did */
-      clean: un.length === 0 || r2(un.reduce((a, o) => a + o.value, 0)) === 0,
+      clean: un.length === 0 || V(un) === 0,
     };
   });
 
   const net = [...O.values()].filter((o) => inWindow(o.month) && !o.cancelled);
   const netIds = new Set(net.map((o) => o.id));
-  const unsettled = net.filter((o) => !settled.has(o.id))
+  /* Outstanding means INVOICED AND NOT PAID. An MCF order is neither invoiced
+     nor payable, and listing it here is what made 107 orders read as unpaid
+     money when not one rupee of it was ever owed. */
+  const unsettled = net.filter((o) => !o.mcf && shipped.has(o.id) && !settled.has(o.id))
     .map((o) => ({ orderId: o.id, month: o.month, status: o.status,
                    inMtr: shipped.has(o.id), value: o.value, shipState: o.shipState }))
     .sort((a, b) => (a.month === b.month ? b.value - a.value : a.month.localeCompare(b.month)));
@@ -294,15 +373,12 @@ function reconcile(src, months, opts = {}) {
   return {
     months,
     perMonth,
-    totals: perMonth.reduce((t, m) => ({
-      placed: t.placed + m.placed, cancelled: t.cancelled + m.cancelled,
-      net: t.net + m.net, shipped: t.shipped + m.shipped,
-      notInvoiced: t.notInvoiced + m.notInvoiced, settled: t.settled + m.settled,
-      unsettled: t.unsettled + m.unsettled,
-      valueNet: r2(t.valueNet + m.valueNet),
-      valueUnsettled: r2(t.valueUnsettled + m.valueUnsettled),
-    }), { placed: 0, cancelled: 0, net: 0, shipped: 0, notInvoiced: 0, settled: 0,
-          unsettled: 0, valueNet: 0, valueUnsettled: 0 }),
+    totals: perMonth.reduce((t, m) => {
+      const o = { ...t };
+      for (const k of COUNT_KEYS) o[k] = t[k] + m[k];
+      for (const k of VALUE_KEYS) o[k] = r2(t[k] + m[k]);
+      return o;
+    }, Object.fromEntries([...COUNT_KEYS, ...VALUE_KEYS].map((k) => [k, 0]))),
     legs: {
       orderToMtr: {
         both: net.filter((o) => shipped.has(o.id)).length,
@@ -334,8 +410,9 @@ function reconcile(src, months, opts = {}) {
        the settlement. */
     orderRows: [...O.values()].filter((o) => inWindow(o.month)).map((o) => ({
       orderId: o.id, month: o.month, status: o.status, cancelled: !!o.cancelled,
+      mcf: !!o.mcf, channel: o.channel,
       invoiced: shipped.has(o.id), settled: settled.has(o.id),
-      value: o.value, shipState: o.shipState, lines: o.lines,
+      value: o.value, tax: o.tax, gross: o.gross, shipState: o.shipState, lines: o.lines,
     })).sort((a, b) => (a.month === b.month ? b.value - a.value
                                             : a.month.localeCompare(b.month))),
     counts: { orderRows: (src.orders || []).length, mtrRows: (src.mtr || []).length,

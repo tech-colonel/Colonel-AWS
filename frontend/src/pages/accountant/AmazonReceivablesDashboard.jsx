@@ -105,8 +105,18 @@ const PROV = {
   cancelled: { file: 'order', column: 'order-status', filter: 'order-status = Cancelled on every line' },
   net: { file: 'derived', column: 'Orders placed − cancelled' },
   chainInvoiced: { file: 'mtr', column: 'Order Id', filter: 'the order has at least one Shipment row' },
-  chainSettled: { file: 'settlement', column: 'order id', filter: 'the order appears in any settlement' },
-  chainUnsettled: { file: 'derived', column: 'Net orders with no payment at all' },
+  chainSettled: { file: 'settlement', column: 'order id',
+    filter: 'an INVOICED order that appears in a settlement',
+    note: 'Asked of the invoiced orders only. Asked of every live order it counted the MCF orders as unpaid and returned more paid orders than were ever billed.' },
+  chainUnsettled: { file: 'derived', column: 'Invoiced orders with no payment at all',
+    note: 'An MCF order is neither invoiced nor payable, so it is not outstanding and is not counted here.' },
+  mcf: { file: 'order', column: 'sales-channel', filter: 'sales-channel is not Amazon',
+    note: 'Sold on another website and only shipped by Amazon, so Amazon raises no tax invoice and pays nothing. Every one carries an item-price of zero.' },
+  notInvoicedFree: { file: 'order', column: 'item-price', filter: 'item-price is nil and the order is in no MTR',
+    note: 'A replacement sent at no charge. There is nothing to invoice and nothing to claim from Amazon.' },
+  notInvoiced: { file: 'derived', column: 'order report minus MTR',
+    filter: 'an Amazon order, not cancelled, with no Shipment row in any MTR',
+    note: 'Goods left the warehouse but no tax invoice reached the MTR.' },
   status: { file: 'derived', column: 'order status + MTR presence + settlement presence' },
 };
 
@@ -1608,27 +1618,90 @@ function ReturnsView({ m, data, ret, onDrill }) {
   );
 }
 
+/* ── the order chain, as a ladder ─────────────────────────────────────────
+   Every order leaves by exactly one door, so the rungs subtract to the next
+   one and nothing sits between two cards unexplained. The screen used to show
+   six side-by-side cards with no operators between them: 22,191 placed less
+   1,913 cancelled is 20,278, the next card read 20,157, and the 121 orders in
+   between were on no card at all. "Not an Amazon sale" sat alongside as a
+   sixth number although 17 of its 124 were already counted inside Cancelled
+   and the other 107 inside that gap — so the row could not be added up in any
+   order without double-counting.
+
+   Counts AND amounts on every rung, because "22,191 orders" is not a figure an
+   accountant can tie to anything. Amounts are the order report's `item-price`,
+   which is GST-INCLUSIVE — its `item-tax` is the tax already inside it, not an
+   addition to it. */
+const chainRungs = (t = {}) => [
+  { key: 'placed', op: '', cap: 'Orders placed', n: t.placed, v: t.valuePlaced, src: 'order',
+    note: 'Every order in the period, counted once each' },
+  { key: 'cancelled', op: '−', cap: 'Cancelled', n: t.cancelled, v: t.valueCancelled, src: 'order',
+    fg: T.amberText, note: 'Cancelled on every line — no invoice, no payment' },
+  { key: 'mcf', op: '−', cap: 'Not an Amazon sale', n: t.mcf, v: t.valueMcf, src: 'order', fg: '#5B6472',
+    note: 'Ordered on another website, only shipped by Amazon. Carries no price.' },
+  { key: 'notInvoicedFree', op: '−', cap: 'Replaced at no charge', n: t.notInvoicedFree,
+    v: t.valueNotInvoicedFree, src: 'order', fg: '#5B6472',
+    note: 'Priced at nil, so there is nothing to invoice' },
+  { key: 'notInvoiced', op: '−', cap: 'Shipped, never invoiced', n: t.notInvoiced, v: t.valueNotInvoiced,
+    src: 'derived', fg: T.red, note: 'Goods went out with a price, no tax invoice in the MTR' },
+  { key: 'invoiced', op: '=', cap: 'Invoiced', n: t.shipped, v: t.valueInvoiced, src: 'mtr', strong: true,
+    note: 'A tax invoice for it exists in the MTR' },
+  { key: 'unsettled', op: '−', cap: 'Invoiced, not paid', n: t.unsettled, v: t.valueUnsettled,
+    src: 'settlement', fg: T.red, note: 'No payment at all, in any settlement' },
+  { key: 'settled', op: '=', cap: 'Paid by Amazon', n: t.settled, v: t.valueSettled, src: 'settlement',
+    fg: T.green, strong: true, note: 'Payment received, in this month or a later one' },
+];
+
+function ChainLadder({ t, months, onDrill, title, sub }) {
+  const rungs = chainRungs(t);
+  return (
+    <Card title={title} sub={sub}>
+      <div className="flex flex-wrap items-stretch">
+        {rungs.map((r) => {
+          const f = FILES[r.src]; const Icon = f.icon;
+          return (
+            <React.Fragment key={r.key}>
+              {r.op && (
+                <div className="flex items-center justify-center w-7 shrink-0 text-[17px] font-semibold text-slate-300 select-none">
+                  {r.op}
+                </div>
+              )}
+              <button onClick={() => onDrill({ kind: 'chain', step: r.key, months })}
+                      className={`flex-1 min-w-[186px] p-4 text-left border transition-colors hover:bg-slate-50
+                                  ${r.strong ? 'border-slate-300 bg-slate-50/60' : 'border-slate-200 bg-white'}`}>
+                <div className="text-[10.5px] font-bold uppercase tracking-wider text-slate-400">{r.cap}</div>
+                <div className="text-[27px] font-bold tracking-tight mt-1 tabular-nums leading-none"
+                     style={{ color: r.fg || '#111927' }}>
+                  {int(r.n || 0)}
+                </div>
+                <div className="text-[14px] font-semibold text-slate-700 mt-1.5 tabular-nums">
+                  {inr(r.v || 0)}
+                </div>
+                <p className="text-[11px] text-slate-500 mt-1.5 leading-snug">{r.note}</p>
+                <div className="flex items-center gap-1 mt-2 text-[10px] font-bold" style={{ color: f.tone }}>
+                  <Icon className="h-3 w-3" /> {f.short}
+                </div>
+              </button>
+            </React.Fragment>
+          );
+        })}
+      </div>
+      <p className="text-[11.5px] text-slate-500 mt-3 leading-relaxed">
+        Amounts are the order report&rsquo;s <span className="font-semibold">item-price</span>, which is
+        <span className="font-semibold"> inclusive of GST</span> — {inr(t?.taxPlaced || 0)} of the
+        {' '}{inr(t?.valuePlaced || 0)} placed is GST. Cancelled and &ldquo;not an Amazon sale&rdquo; orders are
+        shown at the price the customer would have paid; an MCF order carries no price at all, which is why
+        that rung reads nil. Click any rung for the orders behind it.
+      </p>
+    </Card>
+  );
+}
+
 /* ── the whole period: volume, summary, cash cycle ───────────────────────── */
 function PeriodOverview({ led, data, shown, onDrill, ST }) {
   const t = data?.three?.totals || {};
   const amt = (k) => led.reduce((a, m) => a + (m[k]?.amount || 0), 0);
   const cnt = (k) => led.reduce((a, m) => a + (m[k]?.count || 0), 0);
-  const VOL = [
-    { cap: 'Orders placed', v: t.placed, src: 'order', note: 'All orders in the period, counted once each',
-      drill: { kind: 'chain', step: 'placed' } },
-    { cap: 'Cancelled', v: t.cancelled, src: 'order', note: 'Cancelled before dispatch — no invoice, no payment', fg: T.amberText,
-      drill: { kind: 'chain', step: 'cancelled' } },
-    { cap: 'Invoiced', v: t.shipped, src: 'mtr', note: 'Invoice raised in the MTR sales report',
-      drill: { kind: 'chain', step: 'invoiced' } },
-    { cap: 'Paid by Amazon', v: t.settled, src: 'settlement', note: 'Payment received, in any month', fg: T.green,
-      drill: { kind: 'chain', step: 'settled' } },
-    { cap: 'Not paid yet', v: t.unsettled, src: 'settlement', note: 'No payment received at all', fg: T.red,
-      drill: { kind: 'chain', step: 'unsettled' } },
-    { cap: 'Not an Amazon sale', v: (led[0]?.byStatus || []).length
-        ? led.reduce((a, m) => a + (m.byStatus.find((b) => /MCF/.test(b.status))?.count || 0), 0) : 0,
-      src: 'order', note: 'Sold on another website, only shipped by Amazon', fg: '#5B6472',
-      drill: { kind: 'status', status: ST.NOT_AMAZON } },
-  ];
   const EQ = [
     { cap: 'Net sales', v: amt('netBillable'), note: 'Sales after customer returns', op: '−', line: 'netBillable' },
     { cap: 'Amazon charges', v: amt('fees'), note: 'Commission, closing fee, FBA and storage', op: '−', fg: T.amberText, bg: '#FFFBF4', line: 'fees' },
@@ -1655,28 +1728,9 @@ function PeriodOverview({ led, data, shown, onDrill, ST }) {
   }
   return (
     <>
-      <Card title="Order Cycle — Volume" sub="What happened to every order in this period. Click any number to see the orders.">
-        <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-px bg-slate-100">
-          {VOL.map((v) => {
-            const f = FILES[v.src]; const Icon = f.icon;
-            /* the card said "click any number" and was a div — it is a button now */
-            return (
-              <button key={v.cap} onClick={() => v.drill && onDrill({ ...v.drill, months: shown })}
-                      disabled={!v.drill}
-                      className={`bg-white p-4 text-left w-full transition-colors ${v.drill ? 'hover:bg-slate-50 cursor-pointer' : ''}`}>
-                <div className="text-[10.5px] font-bold uppercase tracking-wider text-slate-400">{v.cap}</div>
-                <div className="text-[29px] font-bold tracking-tight mt-1 tabular-nums" style={{ color: v.fg || '#111927' }}>
-                  {int(v.v)}
-                </div>
-                <p className="text-[11.5px] text-slate-500 mt-1.5 leading-snug">{v.note}</p>
-                <div className="flex items-center gap-1 mt-2 text-[10px] font-bold" style={{ color: f.tone }}>
-                  <Icon className="h-3 w-3" /> {f.short}
-                </div>
-              </button>
-            );
-          })}
-        </div>
-      </Card>
+      <ChainLadder t={t} months={shown} onDrill={onDrill}
+        title="Order Cycle — what happened to every order"
+        sub="Each step subtracts to the next, so the row adds up with nothing left over." />
 
       <Card title="Cash Cycle" sub="How much of the net sales has actually been received">
         <div className="p-5">
@@ -2354,11 +2408,15 @@ function drillRows(drill, data, ST) {
     const pick = {
       placed: () => rows, cancelled: () => rows.filter((r) => r.cancelled),
       net: () => rows.filter((r) => !r.cancelled),
-      invoiced: () => rows.filter((r) => !r.cancelled && r.invoiced),
-      settled: () => rows.filter((r) => !r.cancelled && r.settled),
-      unsettled: () => rows.filter((r) => !r.cancelled && !r.settled),
+      mcf: () => rows.filter((r) => !r.cancelled && r.mcf),
+      notInvoicedFree: () => rows.filter((r) => !r.cancelled && !r.mcf && !r.invoiced && !r.value),
+      notInvoiced: () => rows.filter((r) => !r.cancelled && !r.mcf && !r.invoiced && r.value > 0),
+      invoiced: () => rows.filter((r) => !r.cancelled && !r.mcf && r.invoiced),
+      settled: () => rows.filter((r) => !r.cancelled && !r.mcf && r.invoiced && r.settled),
+      unsettled: () => rows.filter((r) => !r.cancelled && !r.mcf && r.invoiced && !r.settled),
     }[drill.step] || (() => rows);
     const pk = { placed: 'placed', cancelled: 'cancelled', net: 'net', invoiced: 'chainInvoiced',
+                 mcf: 'mcf', notInvoiced: 'notInvoiced', notInvoicedFree: 'notInvoicedFree',
                  settled: 'chainSettled', unsettled: 'chainUnsettled' }[drill.step] || 'placed';
     return { kind: 'chain', rows: pick(), prov: PROV[pk] };
   }
@@ -2402,9 +2460,11 @@ const CHAIN_COLS = [
   { key: 'orderId', label: 'Order ID', mono: true, w: 22 },
   { key: 'month', label: 'Sale month', fmt: fmtMonth },
   { key: 'status', label: 'Order status' },
+  { key: 'channel', label: 'Sales channel' },
   { key: 'invoiced', label: 'Invoiced?', bool: true },
   { key: 'settled', label: 'Paid?', bool: true },
   { key: 'value', label: 'Order value', num: true },
+  { key: 'tax', label: 'GST within it', num: true },
   { key: 'shipState', label: 'Ship state' },
 ];
 
@@ -2434,7 +2494,9 @@ function DrillPanel({ drill, data, ST, base, onClose }) {
     : drill.kind === 'invoicing' ? `${period} · ${drill.label || drill.bucket}`
     : drill.kind === 'chain' ? `${period} · ${{
         placed: 'Orders placed', cancelled: 'Cancelled', net: 'Net orders',
-        invoiced: 'Invoiced', settled: 'Paid by Amazon', unsettled: 'Not paid yet',
+        mcf: 'Not an Amazon sale', notInvoiced: 'Shipped, never invoiced',
+        notInvoicedFree: 'Replaced at no charge',
+        invoiced: 'Invoiced', settled: 'Paid by Amazon', unsettled: 'Invoiced but not paid',
       }[drill.step] || drill.step}`
     : `${period} · ${[...LINES, ...AFTER].find((l) => l.key === drill.line)?.label || drill.line}`;
 

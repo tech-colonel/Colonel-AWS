@@ -252,15 +252,23 @@ function foldPlaced(orderRows) {
     let o = byOrder.get(id);
     if (!o) o = { id, month: monthKey(r['purchase-date']), date: isoDay(r['purchase-date']),
                   statuses: new Set(),
-                  charged: 0, channel: '' }, byOrder.set(id, o);
-    o.statuses.add(String(r['order-status'] || '').trim());
+                  charged: 0, cancelledValue: 0, tax: 0, channel: '' }, byOrder.set(id, o);
+    const st = String(r['order-status'] || '').trim();
+    o.statuses.add(st);
     o.channel = o.channel || String(r['sales-channel'] || '').trim();
-    if (String(r['order-status'] || '').trim() !== 'Cancelled') {
-      o.charged += num(r['item-price']) + num(r['item-tax']);
-    }
+    /* `item-tax` is the GST ALREADY INSIDE `item-price` (345.00 carries 52.63
+       of 18% GST), which is why item-price ties to the MTR Principal exactly.
+       Adding them overstated every order-report figure by about 15%. */
+    if (st !== 'Cancelled') { o.charged += num(r['item-price']); o.tax += num(r['item-tax']); }
+    /* A fully cancelled order has no non-cancelled line, so `charged` stayed at
+       zero for precisely the orders the "cancelled" figure is made of — it
+       reported Rs 0.00 cancelled however many were. Kept on its own field. */
+    else o.cancelledValue += num(r['item-price']);
   }
   for (const o of byOrder.values()) {
     o.charged = r2(o.charged);
+    o.cancelledValue = r2(o.cancelledValue);
+    o.tax = r2(o.tax);
     o.cancelled = o.statuses.size === 1 && o.statuses.has('Cancelled');
   }
   return byOrder;
@@ -298,7 +306,7 @@ function buildLedger(src, months, opts = {}) {
 
   for (const id of ids) {
     const i = inv.get(id) || { invoiced: 0, refunded: 0, gst: 0, shipped: false };
-    const p = placed.get(id) || { cancelled: false, charged: 0 };
+    const p = placed.get(id) || { cancelled: false, charged: 0, cancelledValue: 0, tax: 0 };
     const s = sett.get(id) || null;
     const m = monthOf(id);
 
@@ -345,7 +353,7 @@ function buildLedger(src, months, opts = {}) {
       creditsBy: s ? (s.creditsBy || {}) : {},
       settledMonth: s ? s.month : '',
       settledBy: s ? s.byMonth : {},
-      charged: p.charged,
+      charged: p.charged, cancelledValue: p.cancelledValue, orderTax: p.tax,
     });
   }
 
@@ -431,7 +439,7 @@ function buildLedger(src, months, opts = {}) {
       opening: { count: openingCnt, amount: openingAmt },
       invoiced: { count: billable.length, amount: invoiced },
       cancelled: { count: mine.length - billable.length,
-                   amount: sum(mine.filter((r) => r.status === STATUS.CANCELLED), 'charged') },
+                   amount: sum(mine.filter((r) => r.status === STATUS.CANCELLED), 'cancelledValue') },
       /* `returned` = credit notes RAISED this month, whatever month was sold.
          `own` is this month's own sales coming back, `earlier` is the part that
          belongs to an earlier month's sales — the same split card 2 makes for
