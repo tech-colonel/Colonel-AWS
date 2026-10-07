@@ -27,6 +27,7 @@ BACKEND_FILES=(
   new-backend/src/controllers/tallyController.js
   new-backend/src/controllers/tallyReportsController.js
   new-backend/src/routes/tallyRoutes.js
+  new-backend/src/services/tallyBrandMatch.js
   new-backend/seed-tally-connector.js
 )
 
