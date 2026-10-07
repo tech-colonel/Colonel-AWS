@@ -294,4 +294,15 @@ function verifyBalance(result) {
   };
 }
 
-module.exports = { pivotSettlementRows, verifyBalance, bucketFor, parseAmazonDate, WIDE_COLUMNS };
+/* The column order a wide row is emitted in, which is the column order of the
+   Settlement sheet. Exported so the Summary can address those columns by letter
+   in its formulas and cannot drift out of step if a column is ever inserted. */
+const ROW_COLUMNS = [
+  'settlement_id', 'date_time', 'type', 'order_id', 'sku', 'description',
+  'quantity', 'marketplace', 'account_type', 'fulfillment',
+  'order_city', 'order_state', 'order_postal',
+  ...WIDE_COLUMNS, 'total',
+];
+
+module.exports = { pivotSettlementRows, verifyBalance, bucketFor, parseAmazonDate,
+                   WIDE_COLUMNS, ROW_COLUMNS, groupKey };

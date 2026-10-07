@@ -3,7 +3,7 @@ const router = express.Router();
 const multer = require('multer');
 const { authenticateToken, authorize } = require('../middleware/authMiddleware');
 const { UserAgent, Agent } = require('../models/master');
-const { runReco, exportReco, openInSheets, checkHealth, getLedgerStatus, deleteRecoJob, detectZeptoFiles, purgeSessionMaster } = require('../controllers/recoController');
+const { runReco, exportReco, openInSheets, checkHealth, getLedgerStatus, deleteRecoJob, detectZeptoFiles, purgeSessionMaster, confirmGstr2bFormat } = require('../controllers/recoController');
 const { routeDriveFiles } = require('../controllers/driveRouteController');
 const { listDriveFiles, getDriveFileContent } = require('../controllers/driveFetchController');
 
@@ -77,6 +77,15 @@ router.post(
 );
 
 // Export Excel result — supports demo mode
+// New GSTR-2B layout: the accountant confirms (or rejects) the output it produced.
+router.post(
+  '/reco/gstr2b-format/confirm',
+  flexibleAuth,
+  flexibleAuthorizeExec,
+  express.json(),
+  confirmGstr2bFormat
+);
+
 router.get(
   '/reco/export/:jobId',
   flexibleAuth,

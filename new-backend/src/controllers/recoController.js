@@ -1126,8 +1126,20 @@ const runReco = async (req, res) => {
       try { states = JSON.parse(req.body.drive_states); } catch (_) { states = null; }
       if (Array.isArray(states) && states.length) {
         req.files = req.files || [];
+        // A state's GSTR-2B may be several monthly portal files (gstr2b = [..]). They
+        // are all sent, in order, and gstr2b_counts tells the engine how many belong to
+        // each state so it can combine them (recon/gstr2b_combine.py). One file per
+        // state sends no counts — exactly the request it always was.
+        const gstr2bCounts = [];
         for (const st of states) {
+          const many = Array.isArray(st && st.gstr2b) ? st.gstr2b.filter((x) => x && x.fileId) : null;
+          gstr2bCounts.push(many ? many.length : (st && st.gstr2b && st.gstr2b.fileId ? 1 : 0));
+          for (const it of (many || [])) {
+            const buffer = await drive.downloadFile(it.fileId);
+            req.files.push({ fieldname: 'gstr2b', originalname: it.name || 'gstr2b.xlsx', buffer, size: buffer.length });
+          }
           for (const key of ['gstr2b', 'purchase', 'debit']) {
+            if (key === 'gstr2b' && many) continue;
             const item = st && st[key];
             if (item && item.fileId) {
               const buffer = await drive.downloadFile(item.fileId);
@@ -1138,6 +1150,7 @@ const runReco = async (req, res) => {
             }
           }
         }
+        if (gstr2bCounts.some((n) => n > 1)) req.body.gstr2b_counts = JSON.stringify(gstr2bCounts);
       }
     }
 
@@ -1822,6 +1835,18 @@ const runReco = async (req, res) => {
     if (recoType === 'gstr_2b_books_multistate' && req.body.books_combined) {
       form.append('books_combined', String(req.body.books_combined));
     }
+    // Several monthly GSTR-2B files per state: how many belong to each state, in state
+    // order, so the engine combines each state's months into one 2B first.
+    if (recoType === 'gstr_2b_books_multistate' && req.body.gstr2b_counts) {
+      form.append('gstr2b_counts', String(req.body.gstr2b_counts));
+    }
+
+    // GSTR-1 vs Books combined mode: one Sales Register for every state + any number
+    // of return files (GSTR-1 OCTA/portal PDF, GSTR-3B PDF), sorted by GSTIN in the
+    // engine. Without this flag the single-file GSTR-1 flow runs exactly as before.
+    if (recoType === 'gstr_1_vs_books' && req.body.gstr1_mode) {
+      form.append('gstr1_mode', String(req.body.gstr1_mode));
+    }
 
     // GSTR-2B vs Books: the portal export leaves Trade/Legal Name blank for every
     // row but the first in a supplier's block (merged cell). The engine flags any
@@ -1833,6 +1858,9 @@ const runReco = async (req, res) => {
     if (pythonRecoType === 'gstr_2b_books' || pythonRecoType === 'gstr_2b_books_multistate') {
       if (req.body.proceedWithoutNames) form.append('proceedWithoutNames', String(req.body.proceedWithoutNames));
       if (req.body.nameCorrections) form.append('nameCorrections', String(req.body.nameCorrections));
+      // A NEW GSTR-2B layout the accountant said was read wrong: their corrected
+      // column mapping, applied (and saved as pending) by the engine before reading.
+      if (req.body.gstr2bColumnOverride) form.append('gstr2bColumnOverride', String(req.body.gstr2bColumnOverride));
     }
 
     // Receivable Cycle: forward the selected period so the engine's Receivable
@@ -1906,7 +1934,10 @@ const runReco = async (req, res) => {
         // are instant — give that build headroom for larger multi-state jobs.
         // Raised to 10 min: on the small EC2 box heavy recos run slower but DO complete;
         // 180s was cutting them off mid-build (engine still returned 200 afterwards).
-        timeout: 600000
+        // Multi-State with a full year of monthly 2B files per state (combined by the
+        // engine) takes ~13 min on the t3.large, so that agent alone gets 30 min.
+        // Interim until big runs become background jobs; every other agent stays at 10.
+        timeout: recoType === 'gstr_2b_books_multistate' ? 1800000 : 600000
       });
     } finally {
       enginePool.releaseEngine(mainEngine);
@@ -2162,6 +2193,25 @@ const openInSheets = async (req, res) => {
 /**
  * GET /api/reco/health
  */
+// The accountant's answer on a NEW GSTR-2B layout ("is this output right?").
+// accept=true keeps the engine's column mapping for that layout for good; false
+// drops a pending one. Templates live on disk shared by every engine process, so
+// any engine can answer.
+const confirmGstr2bFormat = async (req, res) => {
+  const signature = String(req.body?.signature || '');
+  if (!/^[0-9a-f]{20}$/.test(signature)) return res.status(400).json({ error: 'signature required' });
+  const engine = enginePool.acquireEngine();
+  try {
+    const r = await axios.post(`${engine}/api/gstr2b-format/confirm`,
+      { signature, accept: !!req.body?.accept }, { timeout: 30000 });
+    return res.json(r.data);
+  } catch (err) {
+    return res.status(err.response?.status || 500).json({ error: err.response?.data?.error || err.message });
+  } finally {
+    enginePool.releaseEngine(engine);
+  }
+};
+
 const checkHealth = async (req, res) => {
   try {
     // Python server serves index.html on GET / — use that as health probe.
@@ -2255,4 +2305,4 @@ const purgeSessionMaster = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
-module.exports = { runReco, exportReco, openInSheets, checkHealth, getLedgerStatus, deleteRecoJob, detectZeptoFiles, purgeSessionMaster };
+module.exports = { runReco, exportReco, openInSheets, checkHealth, getLedgerStatus, deleteRecoJob, detectZeptoFiles, purgeSessionMaster, confirmGstr2bFormat };

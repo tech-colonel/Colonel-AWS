@@ -290,7 +290,7 @@ function getSheets() {
  * the service account).
  * @returns {Promise<boolean>} true if a matching row was found and updated.
  */
-async function findAndUpdateRow(spreadsheetId, sheetName, matchColIdx, matchValues, newRowValues) {
+async function findAndUpdateRow(spreadsheetId, sheetName, matchColIdx, matchValues, newRowValues, valueInputOption = 'RAW') {
   const sheets = getSheets();
   const lastCol = String.fromCharCode('A'.charCodeAt(0) + newRowValues.length - 1);
   const range = `${sheetName}!A2:${lastCol}100000`;
@@ -311,10 +311,35 @@ async function findAndUpdateRow(spreadsheetId, sheetName, matchColIdx, matchValu
   await sheets.spreadsheets.values.update({
     spreadsheetId,
     range: `${sheetName}!A${sheetRow}:${lastCol}${sheetRow}`,
-    valueInputOption: 'RAW',
+    valueInputOption,
     requestBody: { values: [newRowValues] },
   });
   return true;
+}
+
+/**
+ * Overwrite one tab of a spreadsheet with `rows` (header row first), creating
+ * the tab if it does not exist yet. Used to mirror app-managed master data into
+ * a Sheet so formulas there (e.g. XLOOKUP) can read it. Same sharing
+ * requirement as findAndUpdateRow (service account as Editor).
+ */
+async function replaceTabValues(spreadsheetId, tabName, rows) {
+  const sheets = getSheets();
+  const meta = await sheets.spreadsheets.get({ spreadsheetId, fields: 'sheets.properties.title' });
+  const exists = (meta.data.sheets || []).some((sh) => sh.properties && sh.properties.title === tabName);
+  if (!exists) {
+    await sheets.spreadsheets.batchUpdate({
+      spreadsheetId,
+      requestBody: { requests: [{ addSheet: { properties: { title: tabName } } }] },
+    });
+  }
+  await sheets.spreadsheets.values.clear({ spreadsheetId, range: `${tabName}!A:Z` });
+  await sheets.spreadsheets.values.update({
+    spreadsheetId,
+    range: `${tabName}!A1`,
+    valueInputOption: 'RAW',
+    requestBody: { values: rows },
+  });
 }
 
 /** True if `childId` is `rootId` or nested under it (parent walk, capped). Used
@@ -354,5 +379,6 @@ module.exports = {
   getOAuthClient,
   getSheets,
   findAndUpdateRow,
+  replaceTabValues,
   hasOutputFolder: () => !!OUTPUT_FOLDER_ID,
 };

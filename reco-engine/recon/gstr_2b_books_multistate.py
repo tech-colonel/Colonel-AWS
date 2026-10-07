@@ -31,6 +31,8 @@ from .gstr_2b_books import (
     _append_rcm_rows,
     _find_octa_sheet_name,
     _resolve_missing_supplier_names,
+    _new_layout_sheet_names,
+    _apply_probable_matches,
 )
 
 
@@ -169,6 +171,8 @@ def reconcile_gstr2b_vs_books_multistate(
     # Tally state allocation". Skip Phase 2 entirely in that case; Passes 1-5 already
     # matched these rows correctly on their own merits.
     if books_shared:
+        # LAST step: vendor + amount pass over what is still unmatched.
+        results = _apply_probable_matches(results)
         if return_missing:
             return all_gstr2b, all_books, results, missing_list
         return all_gstr2b, all_books, results
@@ -267,6 +271,9 @@ def reconcile_gstr2b_vs_books_multistate(
                         )
                         break
 
+    # LAST step — after the cross-state Remark 3 above: vendor + amount pass over what
+    # is still unmatched (rows with a Remark 3 are left alone).
+    results = _apply_probable_matches(results)
     if return_missing:
         return all_gstr2b, all_books, results, missing_list
     return all_gstr2b, all_books, results
@@ -309,12 +316,18 @@ def _merge_state_into_sheets(wb, file_bytes: bytes, label_prefix: str) -> None:
         # OCTA 2B exports carry their data on one flat sheet — copy it as-is, don't
         # filter to B2B tabs. Portal exports keep the ALLOWED_SHEETS filter below.
         octa_sheet = _find_octa_sheet_name(xlsx_bytes) if label_prefix == "2B" else None
+        new_layout_sheets = (_new_layout_sheet_names(xlsx_bytes)
+                             if label_prefix == "2B" and octa_sheet is None else None)
         src_wb = openpyxl.load_workbook(BytesIO(xlsx_bytes), read_only=True, data_only=True)
 
         for src_sheet_name in src_wb.sheetnames:
             # For 2B only copy the same sheets the base engine copies
             if label_prefix == "2B":
-                if octa_sheet is not None:
+                if new_layout_sheets:
+                    # New (learned) layout: the sheets its saved mapping reads.
+                    if src_sheet_name not in new_layout_sheets:
+                        continue
+                elif octa_sheet is not None:
                     # OCTA: only the data sheet. This path APPENDS rows into an existing
                     # output tab, so letting the "Overview" cover sheet through would
                     # inject its metadata rows into state 2-N invoice data.
@@ -473,4 +486,67 @@ def build_gstr2b_books_multistate_workbook(
             else:
                 ws_vs.cell(row=row_idx, column=REMARK3_VS_COL).border = border
 
+    # Months combined per state (several monthly 2B files uploaded for one state).
+    _add_2b_months_sheet(wb, (payload or {}).get("gstr2b_months") or [])
     return wb
+
+
+def _add_2b_months_sheet(wb, states: list) -> None:
+    """'2B Months' — what went into each state's combined GSTR-2B: one row per month
+    (file, rows per tab, taxable, tax) and a state total that ties to the combined
+    file. Additive and best-effort: never costs the workbook its real content."""
+    if not states:
+        return
+    try:
+        from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+        ws = wb.create_sheet(title="2B Months")
+        thin = Side(style="thin", color="B0B0B0")
+        border = Border(left=thin, right=thin, top=thin, bottom=thin)
+        hdr_fill = PatternFill("solid", fgColor="1F4E78")
+        tot_fill = PatternFill("solid", fgColor="D9E1F2")
+        cols = ["State", "GSTIN", "Month", "Source file", "B2B", "B2B-CDNR", "B2BA",
+                "B2B-CDNRA", "Records", "Taxable Value (₹)", "Tax (₹)"]
+        ws.append(["GSTR-2B months combined per state — each state's total ties to the 2B the reconciliation used"])
+        ws["A1"].font = Font(bold=True, size=12)
+        ws.append([])
+        ws.append(cols)
+        for c in range(1, len(cols) + 1):
+            cell = ws.cell(row=3, column=c)
+            cell.font = Font(bold=True, color="FFFFFF")
+            cell.fill = hdr_fill
+            cell.border = border
+            cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        for st in states:
+            label = f"State {st.get('state')}"
+            for m in st.get("months") or []:
+                t = m.get("tabs") or {}
+                ws.append([label, st.get("gstin", ""), m.get("period", ""), m.get("file", ""),
+                           t.get("B2B", 0), t.get("B2B-CDNR", 0), t.get("B2BA", 0), t.get("B2B-CDNRA", 0),
+                           m.get("records", 0), m.get("taxable", 0), m.get("tax", 0)])
+                for c in range(1, len(cols) + 1):
+                    ws.cell(row=ws.max_row, column=c).border = border
+            ws.append([label, st.get("gstin", ""), f"{st.get('from', '')} to {st.get('to', '')}",
+                       f"TOTAL — {st.get('files', 0)} months → {st.get('file', '')}",
+                       None, None, None, None, st.get("records", 0), st.get("taxable", 0), st.get("tax", 0)])
+            for c in range(1, len(cols) + 1):
+                cell = ws.cell(row=ws.max_row, column=c)
+                cell.font = Font(bold=True)
+                cell.fill = tot_fill
+                cell.border = border
+            notes = []
+            if st.get("missing_months"):
+                notes.append("No file for: " + ", ".join(st["missing_months"]))
+            if st.get("skipped"):
+                notes.append("Used once (uploaded twice): " + "; ".join(st["skipped"]))
+            for n in notes:
+                ws.append([label, "", "", n])
+                ws.cell(row=ws.max_row, column=4).font = Font(italic=True, color="C00000")
+            ws.append([])
+        for col, w in zip("ABCDEFGHIJK", [9, 18, 22, 52, 8, 10, 8, 11, 9, 18, 16]):
+            ws.column_dimensions[col].width = w
+        for row in ws.iter_rows(min_row=4, min_col=10, max_col=11):
+            for cell in row:
+                cell.number_format = "#,##0.00"
+        ws.freeze_panes = "A4"
+    except Exception as e:  # noqa: BLE001
+        print(f"2B Months sheet skipped: {e}")

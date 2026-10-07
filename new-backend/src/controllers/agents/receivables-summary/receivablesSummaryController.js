@@ -24,7 +24,7 @@ const { getDynamicModel } = require('../../../models/brand');
 const { parseReceivablesFile } = require('../../../services/processors/offdutyReceivablesParser');
 const { buildReceivables, buildMonthlyStatements } = require('../../../services/processors/offdutyReceivablesLedger');
 const { buildWorkbook, yearSummarySheet, WRITE_OPTS } = require('../../../services/processors/offdutyReceivablesWorkbook');
-const { buildOverview, decorateLimits } = require('../../../services/processors/offdutyReceivablesOverview');
+const { buildOverview, decorateLimits, slim, label } = require('../../../services/processors/offdutyReceivablesOverview');
 const AdmZip = require('adm-zip');
 const drive = require('../../../services/driveService');
 
@@ -297,9 +297,34 @@ const resetAll = async (req, res, next) => {
     await ensureTable(ctx.Model);
     const [[before]] = await ctx.Model.sequelize.query(
       'SELECT count(*)::int AS n, count(DISTINCT filename)::int AS f FROM receivables_summary');
+
+    /* The uploaded workbooks go with the records they were read into. They are
+       the bulk of what this agent leaves on disk — sixty megabytes each, and
+       nothing reads them again once the rows are in the table. */
+    const [files] = await ctx.Model.sequelize.query(
+      'SELECT DISTINCT filename FROM receivables_summary WHERE filename IS NOT NULL');
+    let freed = 0;
+    for (const { filename } of files) {
+      const f = path.join(OUTPUT_DIR, filename);
+      try {
+        const st = await fs.stat(f);
+        await fs.remove(f);
+        freed += st.size;
+      } catch { /* already gone */ }
+    }
+
     const removed = await ctx.Model.destroy({ where: {} });
+
+    /* The STATEMENTS stay.
+     *
+     * Reset clears the run — the records read in and the workbooks they were
+     * read from. It does not throw away the reports made from them. Those are
+     * finished work; an accountant may have filed them, and they are still
+     * downloadable because each one remembers the file it was written to.
+     * Deleting a report is its own button, on its own row. */
     invalidateOverview(ctx.brand.id);
-    res.json({ success: true, removedRows: removed, heldRows: before.n, heldFiles: before.f });
+    res.json({ success: true, removedRows: removed, heldRows: before.n, heldFiles: before.f,
+               freedBytes: freed, statementsKept: true });
   } catch (error) { console.error('Receivables reset error:', error); next(error); }
 };
 
@@ -352,110 +377,321 @@ function monthList(rows) {
   });
 }
 
-/* The year takes ~20s to build over a million and a half rows, and nothing in
-   it changes until a file is added or removed. Built once, kept until the row
-   count or the newest row changes, so the page is instant every time after the
-   first. */
-const OVERVIEW_CACHE = new Map();
-/* Kept on disk as well as in memory. The build is deterministic — the same rows
-   give the same year — so a backend restart has no reason to spend twenty
-   seconds rebuilding it, and a restart used to leave the page on a spinner. */
-const overviewFile = (brandId) => path.join(OUTPUT_DIR, `.overview-${brandId}.json`);
-/* Asked of the database, not of a million rows in memory. Reading every row
-   just to decide whether the cached year was still good cost eight seconds on
-   every page load — longer than most of the work the page does. */
-const overviewKeyFromDb = async (Model) => {
+/* ── BUILT STATEMENTS ARE ARTIFACTS, NOT A CACHE ──────────────────────────
+   Opening this agent used to REBUILD the year from the raw rows — 1.3 million
+   of them, twelve statements, twenty to sixty seconds and about a gigabyte of
+   heap on the shared backend, every time the cache missed. It missed often: it
+   lived in a file under outputs/ and its key included the mtimes of the
+   processor files, so every deploy threw it away and the next person to open
+   the page paid for it, competing with every other agent for the same node
+   process.
+
+   The Order Cycle agent already solved this — compute once, write the result to
+   the brand database, and afterwards opening a saved output is a read. Same
+   shape here: the FINISHED statement is stored in receivables_statements, the
+   page reads it, and a build only happens when somebody asks for one.
+
+   Staleness is known without recomputing, by comparing the fingerprint of the
+   records now against the fingerprint they had when the statement was built.
+   Different means the records moved — the page says so and offers a rebuild,
+   rather than either serving a stale figure silently or silently spending a
+   minute making a new one. */
+
+const STATEMENTS_TABLE = 'receivables_statements';
+
+/* Count and newest row of the records — asked of the database, never by
+   reading a million rows into memory. */
+const fingerprint = async (Model) => {
   const [[k]] = await Model.sequelize.query(
     'SELECT count(*)::text AS n, coalesce(max(created_at)::text, \'-\') AS t FROM receivables_summary');
-  return `${k.n}|${k.t}|${CODE_STAMP}`;
+  return { rows: Number(k.n), fp: `${k.n}|${k.t}` };
 };
 
-/* The cache is keyed on the CODE as well as the rows. The same rows give a
-   different year after the ledger changes, and a cache that only watched the
-   rows would have gone on serving figures the code no longer produces. */
-const CODE_STAMP = [
-  '../../../services/processors/offdutyReceivablesLedger',
-  '../../../services/processors/offdutyReceivablesOverview',
-  '../../../services/processors/offdutyReceivablesParser',
-].map((m) => { try { return fs.statSync(require.resolve(m)).mtimeMs; } catch { return 0; } }).join('.');
-const invalidateOverview = (brandId) => {
-  OVERVIEW_CACHE.delete(brandId);
-  fs.remove(overviewFile(brandId)).catch(() => {});
+/* The built statement as the page renders it. scope 'YEAR' has no period. */
+async function readStatement(Model, brandId, scope, period = null) {
+  const [rows] = await Model.sequelize.query(
+    `SELECT payload, source_rows, source_fingerprint, built_ms, built_at, workbook_file
+       FROM ${STATEMENTS_TABLE}
+      WHERE brand_id = :b AND scope = :s AND COALESCE(period,'') = COALESCE(:p,'')
+      LIMIT 1`,
+    { replacements: { b: brandId, s: scope, p: period } });
+  return rows[0] || null;
+}
+
+/* Remember the workbook a statement was written to.
+ *
+ * The file is the only place the order-by-order detail survives — the statement
+ * payload deliberately does not carry it. Pointing at the file is what lets the
+ * download outlive the records it was cast from. */
+async function rememberWorkbook(Model, brandId, scope, period, filename) {
+  await Model.sequelize.query(
+    `UPDATE ${STATEMENTS_TABLE} SET workbook_file = :f
+      WHERE brand_id = :b AND scope = :s AND COALESCE(period,'') = COALESCE(:p,'')`,
+    { replacements: { b: brandId, s: scope, p: period || null, f: filename } });
+}
+
+/** The saved workbook for a statement, if one was produced and still exists. */
+async function savedWorkbook(Model, brandId, scope, period) {
+  const st = await readStatement(Model, brandId, scope, period);
+  if (!st || !st.workbook_file) return null;
+  return (await fs.pathExists(path.join(OUTPUT_DIR, st.workbook_file))) ? st.workbook_file : null;
+}
+
+async function writeStatement(Model, brandId, scope, period, payload, fp, rowCount, ms, userId) {
+  await Model.sequelize.query(
+    `INSERT INTO ${STATEMENTS_TABLE}
+       (brand_id, scope, period, payload, source_rows, source_fingerprint, built_ms, built_by)
+     VALUES (:b, :s, :p, CAST(:payload AS JSONB), :rows, :fp, :ms, :who)
+     ON CONFLICT (brand_id, scope, COALESCE(period, ''))
+     DO UPDATE SET payload = EXCLUDED.payload,
+                   source_rows = EXCLUDED.source_rows,
+                   source_fingerprint = EXCLUDED.source_fingerprint,
+                   built_ms = EXCLUDED.built_ms,
+                   built_by = EXCLUDED.built_by,
+                   built_at = NOW(),
+                   /* a rebuilt statement is not the one the old file was
+                      written from — forget it rather than serve a workbook
+                      that disagrees with the figures on screen */
+                   workbook_file = NULL`,
+    { replacements: { b: brandId, s: scope, p: period, payload: JSON.stringify(payload),
+                      rows: rowCount, fp, ms, who: userId || null } });
+}
+
+/* Build the year AND every month, and store all of them.
+ *
+ * ONE MONTH AT A TIME. Reading the whole table and holding twelve full results
+ * alive is what cost a gigabyte and took the backend down mid-build — the same
+ * fault the zip builder already avoids. Each month is queried on its own, built,
+ * REDUCED to the totals the year needs (slim), stored, and dropped. Only the
+ * slim months survive the loop, and they are small.
+ */
+async function buildAndStore(ctx, userId, onProgress) {
+  const say = (stage, detail, done, total) => onProgress && onProgress(stage, detail, done, total);
+  const { rows: rowCount, fp } = await fingerprint(ctx.Model);
+  if (!rowCount) return { empty: true };
+
+  const t0 = Date.now();
+
+  /* the month list and the file count, without reading a single order row */
+  const [meta] = await ctx.Model.sequelize.query(
+    `SELECT period, count(*)::int AS n,
+            bool_or(source_kind = 'PAYMENT') AS has_payment
+       FROM receivables_summary WHERE period IS NOT NULL
+      GROUP BY period ORDER BY period`);
+  const [[fileRow]] = await ctx.Model.sequelize.query(
+    'SELECT count(DISTINCT filename)::int AS f FROM receivables_summary');
+
+  const months = monthList(
+    await ctx.Model.findAll({ attributes: ['period', 'source_kind'], raw: true }));
+  const pad2 = (n) => String(n).padStart(2, '0');
+  const endOf = (p) => { const [y, m] = p.split('-').map(Number);
+                         return `${y}-${pad2(m)}-${pad2(new Date(Date.UTC(y, m, 0)).getUTCDate())}`; };
+
+  const slimStatements = [];
+  for (let i = 0; i < meta.length; i++) {
+    const period = meta[i].period;
+    say('month', `${period} — building the statement`, i, meta.length);
+
+    let rows = await ctx.Model.findAll({ where: { period }, raw: true, order: READ_ORDER });
+    const asAt = endOf(period);
+    const hasPayment = rows.some((r) => r.source_kind === 'PAYMENT');
+    const result = buildReceivables(rows, asAt);
+
+    /* store the month exactly as the page will render it */
+    await writeStatement(ctx.Model, ctx.brand.id, 'MONTH', period,
+      summaryPayload(result, period, asAt, hasPayment, months),
+      fp, result.totals.orders, null, userId);
+
+    /* keep only what the year reads, then let the month go */
+    slimStatements.push({
+      month: period, asAt, hasPayment,
+      receivableNote: hasPayment ? null
+        : 'No payment reconciliation was produced for this month, so no receivable is reported. '
+        + 'The sales, RTO and return figures below are complete.',
+      result: slim(result),
+    });
+    rows = null;
+    say('month', `${period} — stored`, i + 1, meta.length);
+  }
+
+  say('consolidating', 'building the year from the months');
+  const overview = buildOverview(slimStatements, {
+    empty: false,
+    brand: ctx.brand.name,
+    rows: rowCount,
+    files: fileRow.f,
+    builtInMs: 0,
+  });
+  overview.builtInMs = Date.now() - t0;
+
+  await writeStatement(ctx.Model, ctx.brand.id, 'YEAR', null, overview, fp, rowCount,
+                       overview.builtInMs, userId);
+
+  return { built: true, months: slimStatements.length, ms: overview.builtInMs, rows: rowCount };
+}
+
+/* Records changed, so the built statements no longer describe what is held.
+   They are LEFT IN PLACE and marked stale by the fingerprint comparison — an
+   accountant who has already produced a statement should not lose it because
+   a file was added. */
+const invalidateOverview = () => {};
+
+/**
+ * The reports that have been produced, newest first — the list the agent opens
+ * on. Reads the statements table only: no payload, no order rows, so this is a
+ * few rows of metadata however large the year is.
+ */
+const listStatements = async (req, res, next) => {
+  try {
+    const ctx = await resolve(req, res); if (!ctx) return;
+    await ensureTable(ctx.Model);
+    const { rows: heldRows, fp } = await fingerprint(ctx.Model);
+
+    const [rows] = await ctx.Model.sequelize.query(
+      `SELECT scope, period, source_rows, source_fingerprint, built_ms, built_at,
+              workbook_file, length(payload::text) AS bytes
+         FROM ${STATEMENTS_TABLE}
+        WHERE brand_id = :b
+        ORDER BY CASE scope WHEN 'YEAR' THEN 0 ELSE 1 END, period`,
+      { replacements: { b: ctx.brand.id } });
+
+    /* Cleared records are not the same as changed records. After a reset every
+       report would read "records changed", which is true and useless — what
+       matters is whether it can still be downloaded. */
+    const cleared = heldRows === 0;
+
+    const reports = [];
+    for (const r of rows) {
+      const saved = r.workbook_file
+        && await fs.pathExists(path.join(OUTPUT_DIR, r.workbook_file));
+      reports.push({
+        scope: r.scope,
+        period: r.period,
+        label: r.scope === 'YEAR' ? 'The year' : label(r.period),
+        orders: Number(r.source_rows) || 0,
+        builtAt: r.built_at,
+        builtMs: r.built_ms,
+        bytes: Number(r.bytes) || 0,
+        /* built from records that are no longer what is held */
+        stale: !cleared && r.source_fingerprint !== fp,
+        recordsCleared: cleared,
+        /* rebuildable from the records, or already written to a file */
+        downloadable: !cleared || !!saved,
+        savedFile: saved ? r.workbook_file : null,
+      });
+    }
+
+    res.json({ heldRows, recordsCleared: cleared, brand: ctx.brand.name, reports });
+  } catch (error) { next(error); }
+};
+
+/** Remove one produced report. The records it was built from are untouched. */
+const deleteStatement = async (req, res, next) => {
+  try {
+    const ctx = await resolve(req, res); if (!ctx) return;
+    const { scope } = req.params;
+    const period = req.params.period || null;
+
+    /* The workbook goes with the report. Nothing else points at it, and these
+       run to sixty megabytes each — left behind they would quietly fill the
+       disk with files no screen lists. */
+    const gone = await readStatement(ctx.Model, ctx.brand.id, scope, period);
+    if (gone && gone.workbook_file) {
+      await fs.remove(path.join(OUTPUT_DIR, gone.workbook_file)).catch(() => {});
+    }
+
+    const [, meta] = await ctx.Model.sequelize.query(
+      `DELETE FROM ${STATEMENTS_TABLE}
+        WHERE brand_id = :b AND scope = :s AND COALESCE(period,'') = COALESCE(:p,'')`,
+      { replacements: { b: ctx.brand.id, s: scope, p: period } });
+    res.json({ success: true, removed: (meta && meta.rowCount) || 0 });
+  } catch (error) { next(error); }
 };
 
 /**
- * The whole year on one screen: a row per month, and every finding across the
- * year ranked by what it costs. This is what the workspace opens on — building
- * a single position over a year of rows took two minutes and told the reader
- * less than the twelve rows do.
+ * The whole year on one screen — SERVED, never built. If no statement has been
+ * built yet, or the records have moved since it was, that is said plainly and
+ * the page offers a build instead of starting one.
  */
 const getOverview = async (req, res, next) => {
   try {
     const ctx = await resolve(req, res); if (!ctx) return;
     await ensureTable(ctx.Model);
 
-    /* Decide on the cache BEFORE reading anything. */
-    const key = await overviewKeyFromDb(ctx.Model);
-    if (key.startsWith('0|')) return res.json({ empty: true });
-    let hit = OVERVIEW_CACHE.get(ctx.brand.id);
-    if (!hit && !req.query.refresh) {
-      hit = await fs.readJson(overviewFile(ctx.brand.id)).catch(() => null);
-      if (hit) OVERVIEW_CACHE.set(ctx.brand.id, hit);
-    }
-    if (hit && hit.key === key && !req.query.refresh) {
-      return res.json({ ...hit.payload, cached: true });
-    }
+    const { rows: rowCount, fp } = await fingerprint(ctx.Model);
+    const saved = await readStatement(ctx.Model, ctx.brand.id, 'YEAR');
 
-    const rows = await ctx.Model.findAll({ raw: true, order: READ_ORDER });
-    if (!rows.length) return res.json({ empty: true });
-    const t0 = Date.now();
-    const statements = buildMonthlyStatements(rows);
-    const payload = buildOverview(statements, {
-      empty: false,
-      brand: ctx.brand.name,
-      rows: rows.length,
-      files: new Set(rows.map((r) => r.filename).filter(Boolean)).size,
-      builtInMs: 0,
+    /* No records AND no statement is genuinely empty. No records but a
+       statement built earlier is a finished report, and it is still shown —
+       the reset cleared the run, not the work. */
+    if (!rowCount && !saved) return res.json({ empty: true });
+
+    if (!saved) {
+      return res.json({ empty: false, needsBuild: true, stale: false,
+                        heldRows: rowCount,
+                        reason: 'No statement has been built for these records yet.' });
+    }
+    const cleared = rowCount === 0;
+    const stale = !cleared && saved.source_fingerprint !== fp;
+    res.json({
+      ...saved.payload,
+      served: true,
+      stale,
+      builtAt: saved.built_at,
+      builtInMs: saved.built_ms,
+      builtFromRows: saved.source_rows,
+      heldRows: rowCount,
+      recordsCleared: cleared,
+      ...(cleared ? { reason: `The records were cleared. This is the statement built from the `
+                            + `${Number(saved.source_rows).toLocaleString('en-IN')} lines held at the time.` } : {}),
+      ...(stale ? { reason: `Built from ${Number(saved.source_rows).toLocaleString('en-IN')} lines; `
+                          + `${rowCount.toLocaleString('en-IN')} are held now.` } : {}),
     });
-    payload.builtInMs = Date.now() - t0;
-    OVERVIEW_CACHE.set(ctx.brand.id, { key, payload });
-    await ensureDir();
-    fs.writeJson(overviewFile(ctx.brand.id), { key, payload }).catch(() => {});
-    res.json({ ...payload, cached: false });
   } catch (error) { console.error('Receivables overview error:', error); next(error); }
 };
 
-/** Header numbers for the workspace — cheap, no workbook written. */
-const getSummary = async (req, res, next) => {
+/** Build the year and every month, and store them. The only path that computes. */
+const buildStatements = async (req, res, next) => {
   try {
     const ctx = await resolve(req, res); if (!ctx) return;
     await ensureTable(ctx.Model);
-    /* Only the month asked for. Reading the year to throw eleven twelfths of it
-       away cost twelve seconds per month opened. */
-    const rows = await ctx.Model.findAll(req.query.month
-      ? { where: { period: req.query.month }, raw: true, order: READ_ORDER }
-      : { raw: true, order: READ_ORDER });
-    if (!rows.length) return res.json({ empty: true, month: req.query.month || null });
+    const job = newJob(`${ctx.brand.name} — building the year`);
+    res.json({ jobId: job.id });
 
-    /* One statement per month is what the user files. `month` picks one; with
-       no `month` the behaviour is unchanged, which is what a single-month
-       upload wants. */
-    const sc = scope(rows, req.query.month);
-    if (req.query.month && !sc.rows.length) {
-      return res.json({ empty: true, month: req.query.month, reason: 'no records for that month' });
-    }
-    const b = buildReceivables(sc.rows, req.query.asAt || sc.asAt);
-    res.json({
+    (async () => {
+      try {
+        step(job, 'month', 'reading the records held');
+        const out = await buildAndStore(ctx, req.user && req.user.id,
+          (stage, detail, done, total) => step(job, stage, detail, done, total));
+        job.result = out;
+        job.state = 'done';
+        step(job, 'done', out.empty ? 'nothing held'
+          : `${out.months} months built in ${Math.round(out.ms / 1000)}s`);
+      } catch (e) {
+        job.state = 'failed'; job.error = e.message;
+        step(job, 'failed', e.message);
+        console.error('Receivables build failed:', e);
+      }
+    })();
+  } catch (error) { next(error); }
+};
+
+/* One month's statement, in the shape the page renders. Extracted so that a
+   month STORED by buildAndStore and a month built live are the same object by
+   construction — two code paths producing "the same" statement is how they
+   drift. */
+function summaryPayload(b, month, asAt, hasPayment, months) {
+    return {
       empty: false,
-      month: req.query.month || null,
+      month: month || null,
       /* Every month held, so the page can offer one statement per month. One
          pass over the rows — this used to build a full statement per month just
          to draw a row of buttons, which is a year of work for a month picker. */
-      months: monthList(await ctx.Model.findAll({ attributes: ['period', 'source_kind'], raw: true })),
+      months,
       spansMultipleMonths: b.spansMultipleMonths,
       /* Stated, never implied: a month with no payment reconciliation has no
          receivable, and a blank or a zero would read as "nothing is owed". */
-      receivableNote: req.query.month && sc.hasPayment === false
+      receivableNote: month && hasPayment === false
         ? 'No payment reconciliation was produced for this month, so no receivable is reported. '
           + 'The sales, RTO and return figures are complete.'
         : null,
@@ -503,7 +739,59 @@ const getSummary = async (req, res, next) => {
         { key: 'taxedNowhere', label: 'Not in GSTR-1', rows: b.exceptions.taxedNowhere.length },
         { key: 'noDeposit', label: 'Bank date not recorded', rows: b.exceptions.noDeposit.length },
       ],
-    });
+    };
+}
+
+/**
+ * One month — SERVED from the stored statement when there is one, and only
+ * built live when there is not. Building a month live still costs seconds and
+ * holds the rows in memory; the store exists so that opening a month the user
+ * has already produced costs a read.
+ */
+const getSummary = async (req, res, next) => {
+  try {
+    const ctx = await resolve(req, res); if (!ctx) return;
+    await ensureTable(ctx.Model);
+    const month = req.query.month || null;
+
+    const { rows: rowCount, fp } = await fingerprint(ctx.Model);
+
+    /* stored first — this is the whole point. It is also what keeps a month
+       readable after the records are cleared: the report stands on its own. */
+    if (month && !req.query.refresh) {
+      const saved = await readStatement(ctx.Model, ctx.brand.id, 'MONTH', month);
+      if (saved) {
+        return res.json({ ...saved.payload, served: true,
+                          stale: rowCount > 0 && saved.source_fingerprint !== fp,
+                          recordsCleared: rowCount === 0,
+                          builtAt: saved.built_at });
+      }
+    }
+
+    if (!rowCount) return res.json({ empty: true, month });
+
+    /* No month means the whole year in one position, which is a million and a
+       half lines in heap and the thing that used to take the backend down. The
+       year is served by /overview from the store; there is no reason to build
+       it here and every reason not to. */
+    if (!month) {
+      return res.status(400).json({
+        error: 'Ask for a month. The year is served by the overview.',
+        hint: 'GET …/receivables-summary/overview',
+      });
+    }
+
+    /* nothing stored for this month: build just this one, which is bounded */
+    const rows = await ctx.Model.findAll({ where: { period: month }, raw: true, order: READ_ORDER });
+    if (!rows.length) return res.json({ empty: true, month });
+
+    const sc = scope(rows, month);
+    if (month && !sc.rows.length) {
+      return res.json({ empty: true, month, reason: 'no records for that month' });
+    }
+    const b = buildReceivables(sc.rows, req.query.asAt || sc.asAt);
+    const months = monthList(await ctx.Model.findAll({ attributes: ['period', 'source_kind'], raw: true }));
+    res.json({ ...summaryPayload(b, month, sc.asAt, sc.hasPayment, months), served: false });
   } catch (error) { next(error); }
 };
 
@@ -513,12 +801,33 @@ const generateWorkbook = async (req, res, next) => {
     const ctx = await resolve(req, res); if (!ctx) return;
     const { brand, Model } = ctx;
     await ensureTable(Model);
-    const rows = await Model.findAll({ raw: true, order: READ_ORDER });
-    if (!rows.length) return res.status(400).json({ error: 'Nothing uploaded yet' });
 
     const month = req.body && req.body.month;
+    /* One workbook for the whole year would mean holding the whole year. The
+       bundle already produces every month plus a consolidated sheet, and it
+       does it a month at a time. */
+    if (!month) {
+      return res.status(400).json({
+        error: 'Name a month. A whole-year workbook is produced by the bundle, which builds it a month at a time.',
+        hint: 'POST …/receivables-summary/bundle',
+      });
+    }
+
+    const rows = await Model.findAll({ where: { period: month }, raw: true, order: READ_ORDER });
+
+    /* The records have been cleared but the workbook was produced while they
+       were here. Hand back the file — a statement already issued should not
+       stop being downloadable because the run it came from was reset. */
+    if (!rows.length) {
+      const saved = await savedWorkbook(Model, brand.id, 'MONTH', month);
+      if (saved) return res.json({ success: true, filename: saved, served: true, sheets: [] });
+      return res.status(400).json({
+        error: `Nothing held for ${month}, and no workbook was produced for it before the records were cleared.`,
+      });
+    }
+
     const sc = scope(rows, month);
-    if (month && !sc.rows.length) return res.status(400).json({ error: `Nothing held for ${month}` });
+    if (!sc.rows.length) return res.status(400).json({ error: `Nothing held for ${month}` });
     const b = buildReceivables(sc.rows, (req.body && req.body.asAt) || sc.asAt);
 
     /* Rebuild the "what was read" table from what is actually stored, so the
@@ -549,6 +858,8 @@ const generateWorkbook = async (req, res, next) => {
     /* the month's own name is in the file name via asAt, so a year of statements
        sorts correctly in a folder */
     XLSXStyle.writeFile(wb, path.join(OUTPUT_DIR, filename), WRITE_OPTS);
+    /* so the download survives a reset of the records */
+    await rememberWorkbook(Model, brand.id, 'MONTH', month, filename).catch(() => {});
 
     res.json({
       success: true, filename,
@@ -618,6 +929,12 @@ async function buildBundle(Model, brandName, wantedIn, onProgress) {
   });
   const all = periods.map((p) => p.period).filter(Boolean).sort();
   const wanted = (wantedIn && wantedIn.length) ? wantedIn.filter((m) => all.includes(m)) : all;
+  /* Without this the zip is named "undefined to undefined" and holds nothing. */
+  if (!wanted.length) {
+    const e = new Error('No records are held, so there is nothing to build a workbook from.');
+    e.noRecords = true;
+    throw e;
+  }
   if (!wanted.length) throw new Error('Nothing held for those months');
 
   await ensureDir();
@@ -678,12 +995,37 @@ async function buildBundle(Model, brandName, wantedIn, onProgress) {
            statements: monthly.length + (monthly.length > 1 ? 1 : 0) };
 }
 
+/* The year's zip, saved against the YEAR statement so it outlives a reset.
+   Asking for a subset of months is a one-off download, not the year, so only a
+   full bundle is remembered. */
+async function bundleAndRemember(ctx, months, onProgress) {
+  const out = await buildBundle(ctx.Model, ctx.brand.name, months, onProgress);
+  if (!months || !months.length) {
+    await rememberWorkbook(ctx.Model, ctx.brand.id, 'YEAR', null, out.filename).catch(() => {});
+  }
+  return out;
+}
+
+/** The saved zip, when the records it would be rebuilt from are gone. */
+async function bundleFallback(ctx, months) {
+  if (months && months.length) return null;
+  return savedWorkbook(ctx.Model, ctx.brand.id, 'YEAR', null);
+}
+
 const generateBundle = async (req, res, next) => {
   try {
     const ctx = await resolve(req, res); if (!ctx) return;
     await ensureTable(ctx.Model);
-    const out = await buildBundle(ctx.Model, ctx.brand.name, req.body && req.body.months, null);
-    res.json({ success: true, ...out });
+    const months = req.body && req.body.months;
+    try {
+      const out = await bundleAndRemember(ctx, months, null);
+      return res.json({ success: true, ...out });
+    } catch (e) {
+      if (!e.noRecords) throw e;
+      const saved = await bundleFallback(ctx, months);
+      if (saved) return res.json({ success: true, filename: saved, served: true, months: [] });
+      return res.status(400).json({ error: `${e.message} No workbook was produced before they were cleared.` });
+    }
   } catch (error) { console.error('Receivables bundle error:', error); next(error); }
 };
 
@@ -830,13 +1172,23 @@ const bundleJob = async (req, res, next) => {
     await ensureTable(ctx.Model);
     const job = newJob(`${ctx.brand.name} — statements`);
     res.json({ jobId: job.id });
+    const months = req.body && req.body.months;
     (async () => {
       try {
-        const out = await buildBundle(ctx.Model, ctx.brand.name, req.body && req.body.months,
+        const out = await bundleAndRemember(ctx, months,
           (p) => step(job, p.stage, p.detail, p.done, p.total));
         job.result = out; job.state = 'done';
         step(job, 'done', `${out.statements} statements`, out.months.length, out.months.length);
-      } catch (e) { job.state = 'failed'; job.error = e.message; step(job, 'failed', e.message); }
+      } catch (e) {
+        /* records cleared, but the zip was produced while they were here */
+        const saved = e.noRecords ? await bundleFallback(ctx, months).catch(() => null) : null;
+        if (saved) {
+          job.result = { filename: saved, served: true, months: [] }; job.state = 'done';
+          step(job, 'done', 'served the workbook produced earlier', 1, 1);
+          return;
+        }
+        job.state = 'failed'; job.error = e.message; step(job, 'failed', e.message);
+      }
     })();
   } catch (error) { next(error); }
 };
@@ -849,34 +1201,72 @@ const download = async (req, res, next) => {
   } catch (error) { next(error); }
 };
 
-/** A slice of the ledger, for the on-screen table. */
+/* The position lists are not in `exceptions` — they are the ledger sliced by
+   where each order fell at the cut-off. */
+const POSITION_LISTS = {
+  receivable: (l) => l.position === 'RECEIVABLE_LATE' || l.position === 'RECEIVABLE_UNPAID',
+  uncertain:  (l) => l.uncertain > 0,
+  inTransit:  (l) => l.position === 'IN_TRANSIT',
+};
+
+/** The rows behind one figure, for one month. */
+function ledgerSlice(rows, month, asAt, worklist) {
+  const sc = scope(rows, month);
+  if (!sc.rows.length) return [];
+  const b = buildReceivables(sc.rows, asAt || sc.asAt);
+  if (POSITION_LISTS[worklist]) return b.ledger.filter(POSITION_LISTS[worklist]);
+  if (worklist && b.exceptions[worklist]) return b.exceptions[worklist];
+  return b.ledger;
+}
+
+/**
+ * A slice of the ledger, for the on-screen table.
+ *
+ * Drilling into a figure used to read the entire table — every month, a million
+ * and a half lines — to hand back two hundred rows. It is read a month at a
+ * time now, so the cost of opening a schedule is one month regardless of how
+ * many years are held.
+ */
 const getLedger = async (req, res, next) => {
   try {
     const ctx = await resolve(req, res); if (!ctx) return;
     await ensureTable(ctx.Model);
-    const rows = await ctx.Model.findAll({ raw: true, order: READ_ORDER });
-    if (!rows.length) return res.json({ rows: [], total: 0 });
+    const { worklist, asAt, month } = req.query;
+    const limit = Number(req.query.limit || 200);
+    const offset = Number(req.query.offset || 0);
 
-    const sc2 = scope(rows, req.query.month);
-    const b = buildReceivables(sc2.rows, req.query.asAt || sc2.asAt);
-    const { worklist, limit = 200, offset = 0 } = req.query;
-    /* The position lists are not in `exceptions` — they are the ledger sliced by
-       where each order fell at the cut-off. */
-    const POSITION_LISTS = {
-      receivable: (l) => l.position === 'RECEIVABLE_LATE' || l.position === 'RECEIVABLE_UNPAID',
-      uncertain:  (l) => l.uncertain > 0,
-      inTransit:  (l) => l.position === 'IN_TRANSIT',
-    };
-    const source = POSITION_LISTS[worklist] ? b.ledger.filter(POSITION_LISTS[worklist])
-                 : (worklist && b.exceptions[worklist]) ? b.exceptions[worklist]
-                 : b.ledger;
-    res.json({
-      total: source.length,
-      rows: source.slice(Number(offset), Number(offset) + Number(limit)),
+    if (month) {
+      const rows = await ctx.Model.findAll({ where: { period: month }, raw: true, order: READ_ORDER });
+      if (!rows.length) return res.json({ rows: [], total: 0 });
+      const source = ledgerSlice(rows, month, asAt, worklist);
+      return res.json({ total: source.length, rows: source.slice(offset, offset + limit) });
+    }
+
+    /* No month: walk the months in order and keep only the page being asked
+       for. `total` still counts the year, but one month is ever in hand. */
+    const periods = await ctx.Model.findAll({
+      attributes: [[ctx.Model.sequelize.fn('DISTINCT', ctx.Model.sequelize.col('period')), 'period']],
+      raw: true,
     });
+    const months = periods.map((p) => p.period).filter(Boolean).sort();
+    if (!months.length) return res.json({ rows: [], total: 0 });
+
+    let total = 0;
+    const page = [];
+    for (const m of months) {
+      const rows = await ctx.Model.findAll({ where: { period: m }, raw: true, order: READ_ORDER });
+      const source = ledgerSlice(rows, m, asAt, worklist);
+      /* where this month's rows sit in the year-long list */
+      const from = Math.max(0, offset - total);
+      if (page.length < limit && from < source.length) {
+        page.push(...source.slice(from, from + (limit - page.length)));
+      }
+      total += source.length;
+    }
+    res.json({ total, rows: page });
   } catch (error) { next(error); }
 };
 
-module.exports = { uploadFiles, listFiles, deleteFile, resetAll, getSummary, getOverview, generateWorkbook,
+module.exports = { uploadFiles, listFiles, deleteFile, resetAll, getSummary, getOverview, buildStatements, listStatements, deleteStatement, generateWorkbook,
                    generateBundle, buildBundle, ingestDrive, bundleJob, getJob,
                    download, getLedger, COLUMNS };

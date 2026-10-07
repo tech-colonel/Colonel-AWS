@@ -2303,6 +2303,22 @@ def load_bank_statement(filepath: str) -> tuple:
                 ["chq", "cheque", "ref no", "reference no", "chq/ref", "chq / ref", "instrument no", "utr/ref"]):
             col_map["chq_ref"] = c
 
+    # Axis names its DR/CR indicator column "Debit/Credit", so the keyword scan above
+    # claims it as the debit AMOUNT column and the real "Amount(INR)" is never read
+    # (0 rows classified). A column whose values are nothing but DR/CR tokens is a
+    # direction indicator, not an amount — release it so the combined Amount +
+    # indicator path below handles it. Value-checked, so a bank with a genuine
+    # numeric Debit column never reaches this.
+    _dir_override = None
+    for _k in ("debit", "credit"):
+        _c = col_map.get(_k)
+        if not _c:
+            continue
+        _vals = {str(v).strip().upper() for v in df[_c] if pd.notna(v) and str(v).strip()}
+        if _vals and _vals <= {"DR", "CR", "D", "C", "DEBIT", "CREDIT"}:
+            col_map.pop(_k)
+            _dir_override = _c
+
     # Handle combined Amount + direction-indicator column (e.g. Kotak: "Amount" + "Dr / Cr")
     if "debit" not in col_map and "credit" not in col_map:
         amt_col = next(
@@ -2316,7 +2332,7 @@ def load_bank_statement(filepath: str) -> tuple:
              and 'balance' not in str(c).strip().lower()),
             None
         )
-        dir_col = next(
+        dir_col = _dir_override or next(
             (c for c in df.columns
              if str(c).strip().lower() in ('dr / cr', 'dr/cr', 'type', 'txn type', 'dr.cr', 'cr/dr')),
             None
@@ -2337,6 +2353,14 @@ def load_bank_statement(filepath: str) -> tuple:
             )
             col_map['debit'] = '__debit'
             col_map['credit'] = '__credit'
+            # Axis writes the balance as Indian-grouped text ("-1,13,21,330.04"), which the
+            # row loop's float() blanks to 0. Parse it here, only on this indicator-column
+            # path: balance is part of bank_reco_results' dedup key, so changing how an
+            # existing layout's balance parses would duplicate that brand's saved rows.
+            if _dir_override and col_map.get('balance'):
+                _bc = col_map['balance']
+                df['__balance'] = df[_bc].map(_to_num)
+                col_map['balance'] = '__balance'
 
     return df, col_map, target
 

@@ -1,5 +1,24 @@
 # PO Extractor — n8n workflow
 
+> **2026-10-01 — read this first.** `po-extract.workflow.json` is now an export of the
+> **live** Koparo workflow (`GRhKAtvwBozyxaJQ`: Drive search → AI Agent + Gemini chat model →
+> native Sheets append → feed), patched for master data by
+> [`po-extract-patch-master-columns.js`](./po-extract-patch-master-columns.js). The node-flow
+> description further down is the ORIGINAL template and no longer matches the live nodes.
+>
+> **Master-data layout (16 cols)** — defined once in
+> `src/controllers/agents/po-extract/poSheetLayout.js`: Gemini also extracts `material_code`
+> + `qty`; *Vendor Name as per Tally* and *FG* are XLOOKUPs into the `Vendor_Master` /
+> `SKU_Master` tabs (mirrored from the app's Master Data modal — DB tables
+> `po_vendor_master` / `po_sku_master`, migration `035`); *Taxable/IGST/CGST/SGST* are
+> formulas (same state = first 2 chars of Supplier & Buyer GSTIN match → CGST+SGST at half
+> rate each, else IGST). The DB mirrors the same maths (`computeTaxes`).
+>
+> Re-patching after someone edits the live workflow in n8n:
+> `GET /api/v1/workflows/<id>` → `node po-extract-patch-master-columns.js live.json out.json` →
+> `PUT /api/v1/workflows/<id>` with `out.json`. One-time Sheet upgrade (insert columns,
+> create master tabs): `node scripts/po-sheet-add-master-columns.js <spreadsheetId> [--apply]`.
+
 Scans **Purchase Order** PDFs from a per‑brand Google Drive folder, extracts the
 header + every line item with **Google Gemini**, appends **one row per line item**
 to that brand's **master Google Sheet** (the 8‑column *PO Data for Automation*

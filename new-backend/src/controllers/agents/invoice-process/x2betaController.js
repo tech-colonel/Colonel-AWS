@@ -124,10 +124,25 @@ exports.build = async (req, res) => {
       repl.month = Number(q.month);
       repl.year = Number(q.year);
     }
-    if (q.from && q.to) {
+    // from/to -> an explicit window the accountant picked. Matches on
+    // processed_on, the same clock "Latest run" and "Today" use, so the three
+    // scopes never disagree about which day an invoice belongs to. from == to
+    // is a single day and is the common case (yesterday's handover).
+    let customRange = null;
+    if (q.from || q.to) {
+      const ymd = /^\d{4}-\d{2}-\d{2}$/;
+      if (!q.from || !q.to || !ymd.test(q.from) || !ymd.test(q.to)) {
+        return res.status(400).json({
+          error: 'A custom range needs both from and to as YYYY-MM-DD dates',
+        });
+      }
+      if (q.from > q.to) {
+        return res.status(400).json({ error: 'The "from" date is after the "to" date' });
+      }
       where.push('processed_on::date BETWEEN :from AND :to');
       repl.from = q.from;
       repl.to = q.to;
+      customRange = { from: q.from, to: q.to };
     }
     // Rows that never parsed carry no ledger/amount — they would emit empty
     // vouchers, so they are excluded rather than silently exported.
@@ -144,7 +159,11 @@ exports.build = async (req, res) => {
       return res.status(404).json({
         error: isToday
           ? 'No invoices have been processed today yet. Use "All data" for earlier invoices.'
-          : 'No invoice rows matched the selection',
+          : customRange
+            ? (customRange.from === customRange.to
+                ? `No invoices were processed on ${customRange.from}`
+                : `No invoices were processed between ${customRange.from} and ${customRange.to}`)
+            : 'No invoice rows matched the selection',
       });
     }
 
@@ -173,7 +192,13 @@ exports.build = async (req, res) => {
     const slug = (brand.name || 'Brand').replace(/[^A-Za-z0-9]+/g, '');
     const scopeTag = runId
       ? `Run${String(runId).replace(/[^A-Za-z0-9]+/g, '')}`
-      : (inferredRun ? 'LatestRun' : (isToday ? 'Today' : 'All'));
+      : inferredRun ? 'LatestRun'
+      : isToday ? 'Today'
+      : customRange
+        ? (customRange.from === customRange.to
+            ? customRange.from.replace(/-/g, '')
+            : `${customRange.from.replace(/-/g, '')}_${customRange.to.replace(/-/g, '')}`)
+        : 'All';
     res.setHeader('Content-Type',
       'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.setHeader('Content-Disposition',

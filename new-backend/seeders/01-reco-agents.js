@@ -50,6 +50,14 @@ const RECO_AGENTS = [
     updatedAt: new Date(),
   },
   {
+    id: 'cf70c278-80d7-403f-b9bb-ce8ce90acf4c',
+    name: 'gstr_3b_vs_books',
+    description: 'GSTR-3B table 3.1 vs Tally Sales Register — every state, every month (portal PDF or OCTA)',
+    columns: JSON.stringify([]),
+    createdAt: new Date(),
+    updatedAt: new Date(),
+  },
+  {
     id: 'f3a91c47-0d62-4b8e-9a5d-6c2e83417bd9',
     name: 'credit_card_booking',
     description: 'Credit card statement (PDF or Excel) → Tally booking entries, mapped to the brand chart of accounts',
@@ -132,6 +140,7 @@ module.exports = {
         'gstr_2b_books',
         'gstr_2b_books_multistate',
         'gstr_1_vs_books',
+        'gstr_3b_vs_books',
         'gstr_3b_tally_entry',
         'universal_bank_statement',
         'amazon_mtr_consolidator',

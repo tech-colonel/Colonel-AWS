@@ -10,6 +10,7 @@ const { Brand, Agent } = require('../../../models/master');
 const { getBrandConnection } = require('../../../config/database');
 const { markProcessing, resetRun, getState } = require('../../../utils/invoiceEvents');
 const drive = require('../../../services/driveService');
+const { sheetRowFor, computeTaxes, colIdx } = require('./poSheetLayout');
 
 let setExecution, getExecution, clearExecution;
 try { ({ setExecution, getExecution, clearExecution } = require('../../../utils/executionStore')); } catch (_) { /* optional */ }
@@ -47,12 +48,20 @@ const parseSpreadsheetId = (urlOrId) => {
   return /^[a-zA-Z0-9_-]{20,}$/.test(String(urlOrId).trim()) ? urlOrId.trim() : null;
 };
 
-// PO_Data sheet's 8 columns, in order — same order everywhere they're touched
-// (the n8n workflow's Append node, and here for edits).
-const PO_SHEET_COLUMNS = [
-  'po_number', 'po_date', 'supplier_gstin', 'buyer_gstin',
-  'billing_address', 'product_description', 'unit_cost', 'gst_rate',
-];
+// PO_Data sheet layout (16 columns, incl. XLOOKUP/tax formulas) lives in
+// poSheetLayout.js — shared with the n8n workflow's "Build Rows" node.
+
+// Vendor Name as per Tally + FG are looked up live from the brand's masters
+// (like the Sheet's XLOOKUPs), never stored on the PO row.
+const PO_ROW_SELECT = `
+  SELECT p.id, p.run_id, p.source_file, p.po_pdf_link, p.po_number, p.po_date,
+         p.supplier_gstin, p.buyer_gstin, v.vendor_name_tally, p.billing_address,
+         p.product_description, p.material_code, s.fg_name AS fg,
+         p.unit_cost, p.gst_rate, p.qty, p.taxable_value, p.igst, p.cgst, p.sgst,
+         p.status, p.created_at
+  FROM po_extractor p
+  LEFT JOIN po_vendor_master v ON UPPER(TRIM(v.buyer_gstin))  = UPPER(TRIM(p.buyer_gstin))
+  LEFT JOIN po_sku_master    s ON UPPER(TRIM(s.material_code)) = UPPER(TRIM(p.material_code))`;
 
 // ─── POST /api/brands/:brandId/agents/:agentId/po/process ────────────────────
 async function processPO(req, res, next) {
@@ -220,12 +229,9 @@ async function listPORows(req, res) {
   if (!conn) return res.json([]);
   try {
     const [rows] = await conn.query(
-      `SELECT id, run_id, source_file, po_pdf_link, po_number, po_date,
-              supplier_gstin, buyer_gstin, billing_address, product_description,
-              unit_cost, gst_rate, status, created_at
-       FROM po_extractor
-       WHERE agent_id = :aid OR agent_id IS NULL
-       ORDER BY created_at DESC, po_number, id
+      `${PO_ROW_SELECT}
+       WHERE p.agent_id = :aid OR p.agent_id IS NULL
+       ORDER BY p.created_at DESC, p.po_number, p.id
        LIMIT 5000`,
       { replacements: { aid: agentId } });
     return res.json(rows);
@@ -241,10 +247,14 @@ async function listPORows(req, res) {
 // same composite key the n8n feed dedupes on) — so the Sheet a human reads
 // stays in sync with a correction made in the app. Sheet sync failing (e.g.
 // not shared with the service account) never blocks the DB save.
+// Taxable/IGST/CGST/SGST are not editable — they are recomputed from the
+// merged row on every save, so they can never disagree with QTY/cost/GSTINs.
 const PO_ROW_ALLOWED = [
   'po_number', 'po_date', 'supplier_gstin', 'buyer_gstin',
-  'billing_address', 'product_description', 'unit_cost', 'gst_rate', 'status',
+  'billing_address', 'product_description', 'material_code',
+  'unit_cost', 'gst_rate', 'qty', 'status',
 ];
+const PO_ROW_NUMERIC = new Set(['unit_cost', 'gst_rate', 'qty']);
 async function updatePORow(req, res, next) {
   const { brandId, rowId } = req.params;
   const conn = await brandConn(brandId);
@@ -256,15 +266,23 @@ async function updatePORow(req, res, next) {
 
     const updates = {};
     for (const key of PO_ROW_ALLOWED) {
-      if (req.body[key] !== undefined) updates[key] = req.body[key];
+      if (req.body[key] === undefined) continue;
+      let v = req.body[key];
+      if (PO_ROW_NUMERIC.has(key)) {
+        v = (v === '' || v === null) ? null : Number(v);
+        if (v !== null && !Number.isFinite(v)) return res.status(400).json({ error: `${key} must be a number.` });
+      } else if (typeof v === 'string') v = v.trim();
+      updates[key] = v;
     }
     if (!Object.keys(updates).length) return res.status(400).json({ error: 'No editable fields in the request body.' });
+    Object.assign(updates, computeTaxes({ ...existing, ...updates }));
 
     const setSql = Object.keys(updates).map((k) => `${k} = :${k}`).join(', ');
     await conn.query(
       `UPDATE po_extractor SET ${setSql}, updated_at = now() WHERE id = :id`,
       { replacements: { ...updates, id: rowId } });
-    const merged = { ...existing, ...updates };
+    const [mergedRows] = await conn.query(`${PO_ROW_SELECT} WHERE p.id = :id`, { replacements: { id: rowId } });
+    const merged = mergedRows[0] || { ...existing, ...updates };
 
     // Best-effort Sheet sync — matched on the row's values BEFORE this edit.
     let sheetSynced = false, sheetError = null;
@@ -273,8 +291,8 @@ async function updatePORow(req, res, next) {
       const sheetId = parseSpreadsheetId(sheetUrlFor(brand));
       if (sheetId) {
         const matchValues = [existing.po_number, existing.product_description, existing.unit_cost];
-        const newRow = PO_SHEET_COLUMNS.map((c) => merged[c] ?? '');
-        sheetSynced = await drive.findAndUpdateRow(sheetId, 'PO_Data', [0, 5, 6], matchValues, newRow);
+        const matchCols = [colIdx('po_number'), colIdx('product_description'), colIdx('unit_cost')];
+        sheetSynced = await drive.findAndUpdateRow(sheetId, 'PO_Data', matchCols, matchValues, sheetRowFor(merged), 'USER_ENTERED');
       }
     } catch (e) {
       sheetError = e.message;

@@ -9,6 +9,10 @@ const {
   listPORows, updatePORow, deletePORow, deleteAllPO,
 } = require('../controllers/agents/po-extract/poController');
 const { feedPOFromN8n } = require('../controllers/agents/po-extract/n8n-po-feed-db');
+const {
+  getMaster, saveMasterRow, updateMasterRow, deleteMasterRow, uploadMaster, syncMasters,
+} = require('../controllers/agents/po-extract/poMasterController');
+const masterUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
 const { addSseClient, removeSseClient, getState } = require('../utils/invoiceEvents');
 
 // ── Authenticated app endpoints ───────────────────────────────────────────
@@ -21,6 +25,15 @@ router.get('/brands/:brandId/agents/:agentId/po-rows',          authenticateToke
 router.patch('/brands/:brandId/agents/:agentId/po-rows/:rowId', authenticateToken, updatePORow);
 router.delete('/brands/:brandId/agents/:agentId/po-rows/:rowId', authenticateToken, deletePORow);
 router.delete('/brands/:brandId/agents/:agentId/po-rows',       authenticateToken, deleteAllPO);
+
+// ── Master data (Vendor: Buyer GSTIN -> Tally name; SKU: Material code -> FG) ──
+// `sync` is declared before `:kind` so it is not captured as a kind.
+router.post('/brands/:brandId/po/master/sync',               authenticateToken, syncMasters);
+router.get('/brands/:brandId/po/master/:kind',               authenticateToken, getMaster);
+router.post('/brands/:brandId/po/master/:kind',              authenticateToken, saveMasterRow);
+router.post('/brands/:brandId/po/master/:kind/upload',       authenticateToken, masterUpload.single('file'), uploadMaster);
+router.patch('/brands/:brandId/po/master/:kind/:id',         authenticateToken, updateMasterRow);
+router.delete('/brands/:brandId/po/master/:kind/:id',        authenticateToken, deleteMasterRow);
 
 // ── SSE: live "Scanning X of N" (shares the invoiceEvents store) ───────────
 router.get('/brands/:brandId/agents/:agentId/po/status', authenticateToken, (req, res) => {

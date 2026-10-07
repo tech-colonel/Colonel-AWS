@@ -43,6 +43,11 @@ const RECO_AGENT_META = {
     color: '#D97706', bg: '#FFFBEB', border: '#FDE68A', accuracy: '99.3%',
     fields: ['Tally Sales Export', 'GSTR-1 File', 'Amazon RTF (Optional)'],
   },
+  gstr_3b_vs_books: {
+    displayName: 'GSTR-3B vs Books', icon: '⚖️', category: 'GST Reconciliation',
+    color: '#0F766E', bg: '#F0FDFA', border: '#99F6E4', accuracy: null,
+    fields: ['Sales Register (all states)', 'Credit Note Register (optional)', 'GSTR-3B × states × months'],
+  },
   einvoice_reco: {
     displayName: 'E-Invoice Reco', icon: '🧾', category: 'GST Reconciliation',
     color: '#0284C7', bg: '#F0F9FF', border: '#BAE6FD', accuracy: '99.6%',

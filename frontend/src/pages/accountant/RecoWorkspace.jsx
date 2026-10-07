@@ -22,6 +22,7 @@ import ZeptoFilePicker from './ZeptoFilePicker';
 import DriveOrUpload from '../../components/DriveOrUpload';
 import OpenInSheetsButton from '../../components/OpenInSheetsButton';
 import MissingTradeNameModal from '../../components/reco/MissingTradeNameModal';
+import Gstr2bFormatReview from '../../components/reco/Gstr2bFormatReview';
 
 const HISTORY_MONTHS_SHORT = ['', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
@@ -823,6 +824,8 @@ const RecoWorkspace = ({ agentTypeProp } = {}) => {
         formData.append('nameCorrections', JSON.stringify(overrides.nameCorrections));
       }
       if (overrides.proceedWithoutNames) formData.append('proceedWithoutNames', 'true');
+      // New GSTR-2B layout the accountant said was read wrong: their corrected columns.
+      if (overrides.gstr2bColumnOverride) formData.append('gstr2bColumnOverride', JSON.stringify(overrides.gstr2bColumnOverride));
       const response = await api.post('/api/reco/run', formData, {
         headers: { 'Content-Type': 'multipart/form-data' },
         onUploadProgress: (evt) => {
@@ -857,7 +860,9 @@ const RecoWorkspace = ({ agentTypeProp } = {}) => {
         setMissingTradeNames(missing);
         setShowMissingTradeNamesModal(true);
       } else {
-        toast.error(err.response?.data?.error || 'Reconciliation failed');
+        // Engine messages about the 2B file's layout are long and actionable — keep them up.
+        const msg = err.response?.data?.error || 'Reconciliation failed';
+        toast.error(msg, msg.length > 120 ? { duration: 15000 } : undefined);
       }
     } finally { setRunning(false); }
   };
@@ -1591,6 +1596,34 @@ const RecoWorkspace = ({ agentTypeProp } = {}) => {
           </div>
         )}
 
+        {/* ── GSTR-1: switch to combined mode (all states / all months) ── */}
+        {agentType === 'gstr_1_vs_books' && !result && (
+          <div className="glass-card" style={{
+            display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16,
+            padding: '13px 18px', marginBottom: 20,
+          }}>
+            <div style={{ minWidth: 0 }}>
+              <p style={{ fontSize: 13, fontWeight: 700, fontFamily: 'Barlow', color: 'var(--text-heading)', margin: 0, marginBottom: 2 }}>
+                Combined Sales Register — all states, all months
+              </p>
+              <p style={{ fontSize: 11.5, color: 'var(--text-muted)', margin: 0, lineHeight: 1.5 }}>
+                One register for every state, with every month's GSTR-1 (OCTA or portal PDF) and GSTR-3B PDFs.
+              </p>
+            </div>
+            <button
+              data-testid="gstr1-combined-mode"
+              onClick={() => navigate(`/brands/${effectiveBrandId || brandId}/agents/8b8d0876-3169-4511-96d8-2a7467478007?mode=combined`)}
+              style={{
+                flexShrink: 0, padding: '8px 14px', borderRadius: 8, fontSize: 12, fontWeight: 700,
+                background: config.bg, border: `1px solid ${config.border}`, color: config.color,
+                cursor: 'pointer', fontFamily: 'Barlow',
+              }}
+            >
+              Open combined mode
+            </button>
+          </div>
+        )}
+
         {/* ── Upload Form ─────────────────────────────────────────────── */}
         {!result && isReceivableCycle && (
           <div className="glass-card" style={{ padding: 24, marginBottom: 28 }}>
@@ -2085,6 +2118,14 @@ const RecoWorkspace = ({ agentTypeProp } = {}) => {
         {/* ── Results ─────────────────────────────────────────────────── */}
         {result && !is3b && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+
+            {/* GSTR-2B vs Books: which layout the 2B was read as; a NEW one asks for confirmation */}
+            <Gstr2bFormatReview
+              formats={result.gstr2b_formats}
+              accent={config.color}
+              running={running}
+              onRerunWithColumns={(override) => handleRun({ gstr2bColumnOverride: override })}
+            />
 
             {/* Monthly Summary */}
             {result.monthly_summary?.length > 0 && (

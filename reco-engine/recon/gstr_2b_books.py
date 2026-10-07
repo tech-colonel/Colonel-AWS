@@ -210,12 +210,69 @@ def _find_header_band_end(raw: Any) -> int:
     return 6
 
 
+def _row_is_data(row: Any) -> bool:
+    """A 2B data row carries a GSTIN, a date or an amount; a header row only labels."""
+    for v in row:
+        s = str(v).strip()
+        if not s or s.lower() == "nan":
+            continue
+        if _GSTIN_RE.match(s.upper()) or _DATE_CELL_RE.match(s) or _MONEY_CELL_RE.match(s):
+            return True
+    return False
+
+
+def _read_flat_2b_sheet(raw: Any, sheet_name: str) -> list[dict[str, Any]]:
+    """COMBINED-layout tab: find the one header row (the row naming the supplier GSTIN
+    and the document number, directly above the first data row) and read under it.
+    Column names get the same '_1' de-duplication as the portal path, so B2BA's two
+    'Invoice number' columns resolve exactly as they do on a portal B2BA tab."""
+    gstin_labels = {"gstin of supplier", "gstin"}
+    doc_labels = {_norm(a) for a in GSTR2B_COL_MAP["doc_no"]}
+    header_idx = None
+    for i in range(0, min(len(raw) - 1, 12)):
+        labels = {_norm(v) for v in raw.iloc[i] if str(v) != "nan"}
+        if labels & gstin_labels and labels & doc_labels and _row_is_data(raw.iloc[i + 1]):
+            header_idx = i
+            break
+    if header_idx is None:
+        return []
+    names, seen = [], {}
+    for j, v in enumerate(raw.iloc[header_idx]):
+        name = str(v).strip() if str(v) != "nan" else ""
+        name = name or f"Column {j + 1}"
+        count = seen.get(name, 0)
+        seen[name] = count + 1
+        names.append(f"{name}_{count}" if count else name)
+    keep = [i for i in range(header_idx + 1, len(raw)) if _row_is_data(raw.iloc[i])]
+    data_rows = raw.iloc[keep].copy()
+    data_rows.columns = names
+    data_rows = data_rows.dropna(how="all")
+    for col in data_rows.columns:
+        if _norm(col) in gstin_labels:
+            data_rows[col] = data_rows[col].replace("", pd.NA).ffill()
+    rows = data_rows.fillna("").to_dict(orient="records")
+    for row in rows:
+        row["_sheet"] = sheet_name
+        row["_flat"] = True
+    return rows
+
+
 def _read_gstr2b_sheet(data: bytes, sheet_name: str) -> list[dict[str, Any]]:
     """
     GSTR-2B sheets carry a merged header band starting at row index 4 — two rows on
     the ordinary tabs, three on the amendment tabs. Data starts after it.
     """
     raw = pd.read_excel(BytesIO(data), sheet_name=sheet_name, header=None, dtype=object)
+
+    # COMBINED layout (several months merged into one workbook, same tab names):
+    # ONE header row with data straight under it, plus a leading "Month" column.
+    # Its header sits above row 5, so the portal logic below would take the first
+    # invoice as the header and lose every column but the GSTIN. It is recognised
+    # only when row 5 is already data — the one case the portal path cannot read —
+    # so every file the portal path read before still goes through it unchanged.
+    if len(raw) > 4 and _row_is_data(raw.iloc[4]):
+        return _read_flat_2b_sheet(raw, sheet_name)
+
     if len(raw) < 7:
         return []
 
@@ -470,13 +527,113 @@ def _parse_gstr2b_octa(data: bytes) -> list[NormalizedInvoice]:
     return records
 
 
+# Which layout each 2B file was read as, keyed by the file's hash, so the server can
+# tell the UI (and ask about a new layout) without re-reading. Filled on the FIRST
+# parse of a file in a run — forget_gstr2b_format() clears it before each run.
+_FORMAT_INFO: dict[str, dict] = {}
+
+
+def _digest(data: bytes) -> str:
+    import hashlib
+    return hashlib.sha256(data).hexdigest()
+
+
+def forget_gstr2b_format(data: bytes) -> None:
+    _FORMAT_INFO.pop(_digest(_ensure_xlsx(data)), None)
+
+
+def gstr2b_format_info(data: bytes) -> dict:
+    """{'format': 'portal'|'combined'|'octa'|'new', ...} for a 2B file (parses it if
+    this process has not yet). For 'new' it carries the column mapping, whether the
+    layout is confirmed, and how many AI calls this run made."""
+    data = _ensure_xlsx(data)
+    key = _digest(data)
+    if key not in _FORMAT_INFO:
+        try:
+            parse_gstr2b(data)
+        except Exception:
+            pass
+    return dict(_FORMAT_INFO.get(key) or {"format": "unknown"})
+
+
+def _known_layout_problem(data: bytes, records: list[NormalizedInvoice]) -> str | None:
+    """None when the portal/combined reading is trustworthy; otherwise why not.
+
+    Records that came out with neither a document number nor any amount mean the
+    header was not understood (the Combined file produced 3,204 of those). A file
+    with no records at all is only a problem when it DOES hold a GSTIN table and is
+    not a portal/IMS workbook — a portal file with nothing in B2B is a genuinely
+    empty month, and its ISD/ECO tabs carry GSTINs that are not invoices."""
+    if records:
+        unread = sum(1 for r in records if not r.doc_no or
+                     (not r.taxable_value and not r.igst and not r.cgst and not r.sgst and not r.invoice_value))
+        if unread / len(records) > 0.5:
+            return (f"{unread} of {len(records)} rows came out without an invoice number or amounts "
+                    "— the column headings were not recognised")
+        # A heading band shifted by hand-merging keeps the invoice number and value but
+        # loses the Taxable Value column: every row then reads Rs 0 taxable against a
+        # real invoice value, and the reconciliation would quietly be all mismatches.
+        zero_taxable = sum(1 for r in records if not r.taxable_value and r.invoice_value)
+        if zero_taxable / len(records) > 0.5:
+            return (f"{zero_taxable} of {len(records)} rows have an invoice value but Rs 0 taxable value "
+                    "— the Taxable Value column was not recognised")
+        return None
+    try:
+        import openpyxl
+        names = {str(n).strip().upper() for n in openpyxl.load_workbook(
+            BytesIO(data), read_only=True).sheetnames}
+    except Exception:
+        return None
+    if names & {s.upper() for s in ALLOWED_SHEETS | IMS_SHEETS}:
+        return None
+    from .gstr2b_formats import workbook_has_unread_gstin_table
+    if workbook_has_unread_gstin_table(data):
+        return "it holds supplier GSTINs in sheets we do not recognise"
+    return None
+
+
 def parse_gstr2b(data: bytes) -> list[NormalizedInvoice]:
     data = _ensure_xlsx(data)
+    key = _digest(data)
     # OCTA flat-format export uses a single sheet with inline columns — detect and
     # route to its dedicated parser. The GST portal multi-sheet logic below is
     # left completely unchanged.
     if _is_octa_format(data):
+        _FORMAT_INFO.setdefault(key, {"format": "octa"})
         return _parse_gstr2b_octa(data)
+
+    # Portal and Combined layouts: read deterministically, no API.
+    flat_tabs: list[str] = []
+
+    def _reader(d, sheet):
+        rows = _read_gstr2b_sheet(d, sheet)
+        if rows and rows[0].get("_flat"):
+            flat_tabs.append(sheet)
+        return rows
+
+    records = _parse_gstr2b_tabs(data, _reader)
+    problem = _known_layout_problem(data, records)
+    if problem is None:
+        if key not in _FORMAT_INFO:
+            _FORMAT_INFO[key] = {"format": "combined" if flat_tabs else "portal"}
+        return records
+
+    # A NEW layout: saved template -> accountant's correction -> Gemini (map, check,
+    # verify). Raises Gstr2bFormatError with a message for the accountant when the
+    # file cannot be read reliably, instead of reconciling half-read rows.
+    from .gstr2b_formats import resolve_new_layout
+
+    def _parse_rows(rows, label):
+        return _parse_gstr2b_tabs(data, lambda _d, sheet: rows if sheet == label else [])
+
+    _template, by_label, info = resolve_new_layout(data, _parse_rows, reason=f"({problem}.)")
+    _FORMAT_INFO.setdefault(key, info)
+    return _parse_gstr2b_tabs(data, lambda _d, sheet: by_label.get(sheet, []))
+
+
+def _parse_gstr2b_tabs(data: bytes, reader) -> list[NormalizedInvoice]:
+    """The portal tab loop. ``reader(data, sheet)`` supplies each tab's rows:
+    _read_gstr2b_sheet for portal/Combined files, or a new layout's re-keyed rows."""
     records: list[NormalizedInvoice] = []
     index = 0
 
@@ -485,7 +642,7 @@ def parse_gstr2b(data: bytes) -> list[NormalizedInvoice]:
     # failed lookup and change nothing for either.
     for sheet in ALLOWED_SHEETS_ORDER + IMS_SHEETS_ORDER:
         try:
-            rows = _read_gstr2b_sheet(data, sheet)
+            rows = reader(data, sheet)
         except Exception:
             continue
 
@@ -608,6 +765,33 @@ def _is_discount_col(c: str) -> bool:
     amount. Matched on the word alone so any rate/wording variant is covered, with
     spaces collapsed the same way as Round Off."""
     return "discount" in str(c).lower().replace(" ", "")
+
+
+# Columns that describe a voucher rather than post money to it. A register WITH a
+# "Gross Total" lists its ledgers after it, so these never reach the amount scan;
+# a simplified register WITHOUT one (Date … Narration, Taxable Value, IGST …) is
+# scanned from its first column, and a voucher number like "676" then read as an
+# amount — the Books taxable became Voucher No. + Supplier Invoice No. (676 + 676)
+# instead of its own Taxable Value. Matched on the header, never on the values.
+_ID_EXACT = {
+    "date", "particulars", "supplier", "buyer", "party", "party name", "ledger",
+    "voucher type", "narration", "gstin", "gstin/uin", "gstin uin", "pan", "pan no",
+    "hsn", "hsn/sac", "sac", "place of supply", "state", "address", "consignee",
+    "quantity", "qty", "rate", "uom", "unit", "units", "s no", "s.no", "sr no",
+    "sr. no", "sl no", "serial no", "remarks", "remark",
+}
+_ID_PATTERN = re.compile(
+    r"(\bno\.?$|\bnumber$|\bnum$|\bref\b|reference|\bdate$|\bgstin|\bnarration"
+    r"|\bvoucher type|\bhsn|\bquantity|\bqty\b)"
+)
+
+
+def _is_identifier_col(c: str) -> bool:
+    """True for a descriptive column (number, reference, date, GSTIN, narration,
+    party, quantity …) that holds text or IDs, never money. Used only when a register
+    has no "Gross Total" column to start the ledger scan after."""
+    n = _norm(c)
+    return n in _ID_EXACT or bool(_ID_PATTERN.search(n))
 
 
 def _is_summary_col(c: str) -> bool:
@@ -828,6 +1012,8 @@ def audit_row_figures(row: dict[str, Any], default_type: str) -> dict[str, float
         ks = str(k)
         if _is_tax_col(ks) or _is_tds_col(ks) or _is_round_off_col(ks):
             continue
+        if gt_pos < 0 and _is_identifier_col(ks):
+            continue
         amt = round_money(row.get(k))
         if not amt:
             continue
@@ -999,6 +1185,10 @@ def parse_books(purchase_data: bytes, debit_data: bytes) -> list[NormalizedInvoi
                 if ks.startswith("_"):
                     continue
                 if _is_tax_col(ks) or _is_tds_col(ks) or _is_round_off_col(ks):
+                    continue
+                # No "Gross Total" → the scan starts at the first column; voucher /
+                # invoice numbers, GSTIN, narration etc. must not be read as money.
+                if gt_pos < 0 and _is_identifier_col(ks):
                     continue
                 amt = round_money(row.get(k))
                 if not amt:
@@ -1719,6 +1909,9 @@ def _populate_workbook(ws, results: list[Any]) -> None:
     fill_only_books = PatternFill("solid", fgColor="FCE4D6")
     fill_mismatch = PatternFill("solid", fgColor="F4B942")
     fill_partial  = PatternFill("solid", fgColor="D6EAF8")  # light blue — CN↔DN partial match
+    # Last-step vendor + amount pairs (recon/probable_match.py) — colours used nowhere else
+    fill_probable    = PatternFill("solid", fgColor="E4DFEC")  # light purple — Probable Match
+    fill_probable_ai = PatternFill("solid", fgColor="CCF2EF")  # light teal   — Probable Match (AI)
 
     # Scan for dup types: "dup" (same sign), "cross_ref" (opposite signs), "" (unique)
     def _wb_dup_type(vals: list) -> str:
@@ -1880,6 +2073,10 @@ def _populate_workbook(ws, results: list[Any]) -> None:
             fill = fill_matched
         elif category == "Partially Matched":
             fill = fill_partial
+        elif category == "Probable Match":
+            fill = fill_probable
+        elif category == "Probable Match (AI)":
+            fill = fill_probable_ai
         elif category == "Amount Mismatch":
             fill = fill_mismatch
         elif category == "In GSTR-2B not in Books" or category == "In GSTR-2B not in PR":
@@ -2290,6 +2487,17 @@ def build_excel_output(
     return bio.read()
 
 
+def _new_layout_sheet_names(src_bytes: bytes) -> set[str] | None:
+    """Sheets a new (learned) 2B layout reads, or None for portal/Combined/OCTA files."""
+    try:
+        info = gstr2b_format_info(src_bytes)
+    except Exception:
+        return None
+    if info.get("format") != "new":
+        return None
+    return {s.get("sheet") for s in info.get("sheets") or [] if s.get("sheet")}
+
+
 def _copy_workbook_sheets(src_bytes: bytes, target_wb: Any, title_prefix: str) -> None:
     src_bytes = _ensure_xlsx(src_bytes)
     import openpyxl
@@ -2298,12 +2506,17 @@ def _copy_workbook_sheets(src_bytes: bytes, target_wb: Any, title_prefix: str) -
     # OCTA 2B exports carry their data on one flat sheet (e.g. "Purchase"), not the
     # portal B2B/B2BA/CDNR tabs — copy that sheet as-is instead of filtering it out.
     octa_sheet = _find_octa_sheet_name(src_bytes) if title_prefix == "2B" else None
+    new_layout_sheets = _new_layout_sheet_names(src_bytes) if title_prefix == "2B" and octa_sheet is None else None
     try:
         src_wb = openpyxl.load_workbook(BytesIO(src_bytes), data_only=True)
         for name in src_wb.sheetnames:
             # ONLY copy the allowed 2B sheets (case-insensitive checking) if prefix is 2B
             if title_prefix == "2B":
-                if octa_sheet is not None:
+                if new_layout_sheets:
+                    # New (learned) layout: copy exactly the sheets its mapping reads.
+                    if name not in new_layout_sheets:
+                        continue
+                elif octa_sheet is not None:
                     # OCTA: copy only the data sheet. Newer exports also ship an
                     # "Overview" cover sheet and an "ISD" sheet, which are not 2B
                     # invoice data and must not become source tabs.
@@ -2544,6 +2757,13 @@ def _count_2b_rows_per_tab(blob: bytes) -> dict[str, int]:
         except Exception:
             pass
         return counts
+    # A new (learned) layout: count the rows its saved mapping reads, under the same
+    # tab labels its records carry. Reads the saved template only — never the API.
+    if gstr2b_format_info(blob).get("format") == "new":
+        from .gstr2b_formats import saved_rows_for
+        saved = saved_rows_for(_ensure_xlsx(blob))
+        if saved:
+            return {label: len(rows) for label, rows in saved[1].items() if rows}
     for tab in ALLOWED_SHEETS_ORDER + IMS_SHEETS_ORDER:
         try:
             rows = _read_gstr2b_sheet(blob, tab)
@@ -3244,4 +3464,22 @@ def reconcile_gstr2b_vs_books(
                 b.supplier_gstin = name_to_gstin[name_clean]
 
     results = reconcile_by_invoice_no(gstr2b_records, books_records, tolerance=tolerance)
+    # LAST step: pair what is still unmatched by vendor + amount (never touches rows
+    # an earlier pass settled). See recon/probable_match.py.
+    results = _apply_probable_matches(results)
     return gstr2b_records, books_records, results, list(missing_names.values())
+
+
+def _apply_probable_matches(results: list) -> list:
+    """Run the vendor + amount pass over the final results. Best-effort: any failure
+    returns the results exactly as the earlier passes left them."""
+    try:
+        from .probable_match import apply_probable_matches
+        out, stats = apply_probable_matches(results, _party_sim)
+        import logging as _lg
+        _lg.getLogger(__name__).info("Probable-match pass: %s", stats)
+        return out
+    except Exception as e:  # noqa: BLE001
+        import logging as _lg
+        _lg.getLogger(__name__).warning("Probable-match pass skipped: %s", e)
+        return results

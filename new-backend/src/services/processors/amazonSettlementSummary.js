@@ -19,7 +19,7 @@
    label and its GST sits on its own line.
    ────────────────────────────────────────────────────────────────────────────── */
 
-const { parseAmazonDate } = require('./amazonSettlementPivot');
+const { parseAmazonDate, ROW_COLUMNS } = require('./amazonSettlementPivot');
 
 /* Amazon stamps everything UTC. An Indian accountant reads IST, and a period
    ending "30.01.2026 09:10 UTC" is the 30th either way — but the deposit date
@@ -84,6 +84,32 @@ function feeGroup(amountType, amountDescription) {
  * Amounts are returned POSITIVE for fees (they read as deductions in the sheet,
  * exactly as Myntra presents them) and signed for everything else.
  */
+/* The Summary line each bucket appears on. The Workings sheet writes this exact
+   text beside every ledger row, and the Summary's formulas match on it — so the
+   label a reader sees and the label the formula matches are the same string and
+   cannot drift apart. */
+const LINE = {
+  commission: 'Commission',
+  fixedFee: 'Fixed Fee',
+  logistics: 'Logistics / Fulfilment',
+  storage: 'Storage Fee',
+  advertising: 'Advertising',
+  otherCharges: 'Other Charges',
+  gstOnFees: 'GST on Amazon Fees',
+  grossSales: 'Gross Sales (Orders)',
+  refunds: 'Less: Returns / Refunds',
+  cancellations: 'Less: Cancellations',
+  otherSales: 'Other Sales Adjustments',
+  shipping: 'Shipping Charged',
+  promotions: 'Promotions / Discounts',
+  gstCollected: 'GST Collected from Buyers',
+  tds: 'TDS (Section 194-O)',
+  tcs: 'TCS (CGST+SGST+IGST)',
+  debtAdjustment: 'Debt Adjustment (prior period)',
+  header: '(settlement header — not a figure)',
+  none: 'Not used in the summary',
+};
+
 function collect(ledgerRows) {
   const f = { commission: 0, fixedFee: 0, logistics: 0, storage: 0, advertising: 0, otherCharges: 0, gstOnFees: 0 };
   let productSales = 0, shipping = 0, promotions = 0, gstCollected = 0;
@@ -122,12 +148,15 @@ function collect(ledgerRows) {
        and not the other leaves the settlement out by exactly that amount. */
     if (has(type, 'debt') || has(desc, 'debt adjustment') || has(desc, 'payable to amazon')) {
       debtAdjustment += amt;
+     
       continue;
     }
     if (has(type, 'itemtds') || has(desc, '194-o', '194o')) { tds += amt; continue; }
     if (has(type, 'itemtcs') || has(desc, 'tcs-')) { tcs += amt; continue; }
 
-    if (has(type, 'promotion') || has(desc, 'discount')) { promotions += amt; bump(txn, 'promo', amt); continue; }
+    if (has(type, 'promotion') || has(desc, 'discount')) {
+      promotions += amt; bump(txn, 'promo', amt); continue;
+    }
     if (has(type, 'itemprice')) {
       if (has(desc, 'tax')) { gstCollected += amt; bump(txn, 'gst', amt); }
       else if (has(desc, 'shipping')) { shipping += amt; bump(txn, 'ship', amt); }
@@ -160,6 +189,74 @@ function collect(ledgerRows) {
                         .reduce((a, [, v]) => a + (v.principal || 0), 0)),
     byType: [...byType.entries()].map(([label, v]) => ({ label, orders: v.orders.size, amount: r2(v.amount) })),
   };
+}
+
+/* ── the fee breakdown, carried on the Settlement sheet itself ──────────────
+   The Settlement sheet already holds sales, shipping, promotions, GST, TDS and
+   TCS in columns the Summary can point a formula at. What it does NOT hold is
+   the fee SPLIT: its `selling_fees` lumps commission, closing fee and the GST
+   on both into one number, so "Commission" has nowhere to point.
+
+   These columns close that gap. One per Summary fee line, on the same wide row,
+   so every figure on the Summary is a plain SUM or SUMIFS over a column of the
+   settlement report — click the amount, and the cells it came from highlight.
+
+   They are built by grouping the ledger with the pivot's own `groupKey`, in the
+   pivot's own first-seen order, so row N here is row N there. The caller checks
+   that alignment before writing anything. */
+/* summary fee key -> the settlement-sheet column that carries it */
+const FEE_COL_FOR = {
+  commission: 'commission', fixedFee: 'fixed_fee', logistics: 'logistics_fee',
+  storage: 'storage_fee', advertising: 'advertising_fee',
+  otherCharges: 'other_charges', gstOnFees: 'gst_on_fees',
+};
+
+const FEE_COLUMNS = [
+  ['commission',      'commission'],
+  ['fixed_fee',       'fixedFee'],
+  ['logistics_fee',   'logistics'],
+  ['storage_fee',     'storage'],
+  ['advertising_fee', 'advertising'],
+  ['other_charges',   'otherCharges'],
+  ['gst_on_fees',     'gstOnFees'],
+  ['debt_adjustment', 'debtAdjustment'],
+];
+
+function feeSplitRows(ledgerRows) {
+  const { groupKey } = require('./amazonSettlementPivot');
+  const groups = new Map();                       // insertion order == pivot order
+
+  for (const row of ledgerRows) {
+    const txn = String(row['transaction-type'] || '').trim();
+    const isHeader = !txn && !row['amount-type'] && row['total-amount'] !== '' && row['total-amount'] != null;
+    if (isHeader) continue;
+
+    const key = groupKey(row);
+    let g = groups.get(key);
+    if (!g) {
+      g = { _order: row['order-id'] || row['adjustment-id'] || null, _sku: row['sku'] || null };
+      for (const [col] of FEE_COLUMNS) g[col] = 0;
+      groups.set(key, g);
+    }
+
+    const amt = Number(row['amount'] || 0) || 0;
+    const type = row['amount-type'], desc = row['amount-description'];
+
+    if (has(type, 'debt') || has(desc, 'debt adjustment') || has(desc, 'payable to amazon')) {
+      g.debt_adjustment += amt;
+      continue;
+    }
+    const grp = feeGroup(type, desc);
+    if (!grp) continue;
+    const col = (FEE_COLUMNS.find(([, k]) => k === grp) || [])[0];
+    if (col) g[col] += amt;
+  }
+
+  return [...groups.values()].map((g) => {
+    const out = { _order: g._order, _sku: g._sku };
+    for (const [col] of FEE_COLUMNS) out[col] = r2(g[col]);
+    return out;
+  });
 }
 
 /**
@@ -206,6 +303,54 @@ function buildSummaryAoA(ledgerRows, settlement, wideRowCount = null) {
   const A  = (v) => ({ t: 'n', v: Number(v) || 0, z: FMT_AMT });     // money
   const I  = (v) => ({ t: 'n', v: Number(v) || 0, z: FMT_INT });     // a count
 
+  /* ── a TRACED amount ──────────────────────────────────────────────────────
+     The figure already computed, written as a SUMIFS over the Workings sheet
+     that reproduces it. Two things matter about the pair:
+
+       • the cached `v` stays the value `collect` computed, so the number in the
+         file is exactly what it was before this existed — Excel recalculating
+         can only confirm it, never change it;
+       • the formula is the ANSWER to "where did this come from". Clicking the
+         cell shows it; Trace Precedents highlights the rows on Workings.
+
+     The two are checked against each other before the workbook is written
+     (`traceChecks` below). A disagreement means the classification and the
+     filter have drifted, and it is reported rather than shipped quietly. */
+  const traceChecks = [];
+
+  /* Column letters are looked up by NAME from the settlement sheet's own column
+     order, never hardcoded. Insert a column in the pivot and these follow it;
+     hardcoding "N" would silently start summing the wrong thing. */
+  const SHEET_COLS = [...ROW_COLUMNS, ...FEE_COLUMNS.map(([c]) => c)];
+  const colLetter = (name) => {
+    const i = SHEET_COLS.indexOf(name);
+    if (i < 0) throw new Error(`settlement sheet has no column "${name}"`);
+    let n = i, s = '';
+    do { s = String.fromCharCode(65 + (n % 26)) + s; n = Math.floor(n / 26) - 1; } while (n >= 0);
+    return s;
+  };
+  const C = (name) => `Settlement!$${colLetter(name)}:$${colLetter(name)}`;
+
+  /* A TRACED amount: the figure already computed, written as the SUM over the
+     settlement report that reproduces it.
+
+     The cached `v` stays exactly what `collect` computed, so recalculating can
+     only confirm the number, never move it. The formula is the answer to "where
+     did this come from" — clicking it highlights the settlement columns it came
+     from. The two are checked against each other before the workbook is written. */
+  const T = (value, formula, verify) => {
+    traceChecks.push({ formula, expected: Number(value) || 0, verify });
+    return { t: 'n', v: Number(value) || 0, f: formula, z: FMT_AMT };
+  };
+  /* every row of one column */
+  const Tsum = (value, col, { abs = false } = {}) =>
+    T(value, abs ? `ABS(SUM(${C(col)}))` : `SUM(${C(col)})`,
+      (rows) => { const s = rows.reduce((a, r) => a + (Number(r[col]) || 0), 0); return abs ? Math.abs(s) : s; });
+  /* one column, only the rows of a given transaction type */
+  const Tif = (value, col, type) =>
+    T(value, `SUMIFS(${C(col)},${C('type')},"${type}")`,
+      (rows) => rows.filter((r) => r.type === type).reduce((a, r) => a + (Number(r[col]) || 0), 0));
+
   const push = (...cells) => {
     aoa.push(cells.map((c) => (c && typeof c === 'object' && c.f && c.t === undefined ? F(c.f) : c)));
     return aoa.length;
@@ -237,22 +382,26 @@ function buildSummaryAoA(ledgerRows, settlement, wideRowCount = null) {
      see the return rate, and so every percentage below sits on a base that
      matches how Amazon actually charges: TDS and TCS on gross, fees on the
      orders that generated them. */
-  const rSales    = push('Gross Sales (Orders)', A(d.grossSales));   // the % base
-  const rRefunds  = push('Less: Returns / Refunds', A(d.refunds),
+  const rSales    = push('Gross Sales (Orders)', Tif(d.grossSales, 'product_sales', 'Order'));   // the % base
+  const rRefunds  = push('Less: Returns / Refunds', Tif(d.refunds, 'product_sales', 'Refund'),
                          Fp(`IFERROR(B${aoa.length + 1}/$B$${rSales},0)`));
-  const rCancels  = push('Less: Cancellations', A(d.cancellations),
+  const rCancels  = push('Less: Cancellations', Tif(d.cancellations, 'product_sales', 'Cancellation'),
                          Fp(`IFERROR(B${aoa.length + 1}/$B$${rSales},0)`));
   const rOther    = d.otherSales
-    ? push('Other Sales Adjustments', A(d.otherSales), Fp(`IFERROR(B${aoa.length + 1}/$B$${rSales},0)`))
+    ? push('Other Sales Adjustments', T(d.otherSales, `SUM(${C('product_sales')})-SUMIFS(${C('product_sales')},${C('type')},"Order")`
+                               + `-SUMIFS(${C('product_sales')},${C('type')},"Refund")`
+                               + `-SUMIFS(${C('product_sales')},${C('type')},"Cancellation")`,
+                               (rows) => rows.filter((r) => !['Order','Refund','Cancellation'].includes(r.type))
+                                             .reduce((a, r) => a + (Number(r.product_sales) || 0), 0)), Fp(`IFERROR(B${aoa.length + 1}/$B$${rSales},0)`))
     : null;
   const rNet      = push('Net Sales',
                          Fa(`B${rSales}+B${rRefunds}+B${rCancels}${rOther ? `+B${rOther}` : ''}`),
                          Fp(`IFERROR(B${aoa.length + 1}/$B$${rSales},0)`));
-  const rShipping = push('Shipping Charged', A(d.shipping),
+  const rShipping = push('Shipping Charged', Tsum(d.shipping, 'shipping_credits'),
                          Fp(`IFERROR(B${aoa.length + 1}/$B$${rSales},0)`));
-  const rPromos   = push('Promotions / Discounts', A(d.promotions),
+  const rPromos   = push('Promotions / Discounts', Tsum(d.promotions, 'promotional_rebates'),
                          Fp(`IFERROR(B${aoa.length + 1}/$B$${rSales},0)`));
-  const rGst      = push('GST Collected from Buyers', A(d.gstCollected),
+  const rGst      = push('GST Collected from Buyers', Tsum(d.gstCollected, 'gst_before_tcs'),
                          Fp(`IFERROR(B${aoa.length + 1}/$B$${rSales},0)`));
   const rGross    = push('Total Seller Price With GST',
                          Fa(`B${rNet}+B${rShipping}+B${rPromos}+B${rGst}`));
@@ -270,7 +419,7 @@ function buildSummaryAoA(ledgerRows, settlement, wideRowCount = null) {
     ['GST on Amazon Fees',      'gstOnFees'],
   ];
   for (const [label, key] of feeLines) {
-    feeRows[key] = push(label, A(d.fees[key]), Fp(`IFERROR(B${aoa.length + 1}/$B$${rSales},0)`));
+    feeRows[key] = push(label, Tsum(d.fees[key], FEE_COL_FOR[key], { abs: true }), Fp(`IFERROR(B${aoa.length + 1}/$B$${rSales},0)`));
   }
   const rTotalFees = push('Total Amazon Fees',
                           Fa(`SUM(B${feeRows.commission}:B${feeRows.gstOnFees})`),
@@ -289,11 +438,13 @@ function buildSummaryAoA(ledgerRows, settlement, wideRowCount = null) {
      TDS also runs slightly above 0.1% because Amazon computes it per order and
      rounds up to the paisa — across 398 orders that accumulates. The variance
      line makes that visible instead of leaving it to be discovered. */
-  const rTds = push('TDS (Section 194-O)', A(d.tds), Fp3(`IFERROR(B${aoa.length + 1}/$B$${rSales},0)`));
+  const rTds = push('TDS (Section 194-O)', Tsum(d.tds, 'tds_194o', { abs: true }), Fp3(`IFERROR(B${aoa.length + 1}/$B$${rSales},0)`));
   const rTdsExp = push('    Expected @ 0.1% of Gross Sales', Fa(`B${rSales}*0.001`));
   push('    Variance (Amazon rounds each order up)', Fa(`B${rTds}-B${rTdsExp}`));
 
-  const rTcs = push('TCS (CGST+SGST+IGST)', A(d.tcs), Fp3(`IFERROR(B${aoa.length + 1}/$B$${rNet},0)`));
+  const rTcs = push('TCS (CGST+SGST+IGST)', T(d.tcs, `ABS(SUM(${C('tcs_cgst')})+SUM(${C('tcs_sgst')})+SUM(${C('tcs_igst')}))`,
+                             (rows) => Math.abs(rows.reduce((a, r) =>
+                               a + (Number(r.tcs_cgst) || 0) + (Number(r.tcs_sgst) || 0) + (Number(r.tcs_igst) || 0), 0))), Fp3(`IFERROR(B${aoa.length + 1}/$B$${rNet},0)`));
   const rTcsExp = push('    Expected @ 0.5% of Net Sales', Fa(`B${rNet}*0.005`));
   push('    Variance', Fa(`B${rTcs}-B${rTcsExp}`));
 
@@ -305,7 +456,7 @@ function buildSummaryAoA(ledgerRows, settlement, wideRowCount = null) {
      One catches a mis-read fee; the other catches a mis-read transaction. */
   push();
   push('RECONCILIATION');
-  const rDebt     = push('Debt Adjustment (prior period)', A(d.debtAdjustment),
+  const rDebt     = push('Debt Adjustment (prior period)', Tsum(d.debtAdjustment, 'debt_adjustment'),
                          Fp(`IFERROR(B${aoa.length + 1}/$B$${rSales},0)`));
   const rExpected = push('Expected Settlement',
                          Fa(`B${rGross}-B${rTotalFees}-B${rTds}-B${rTcs}+B${rDebt}`));
@@ -373,7 +524,29 @@ function buildSummaryAoA(ledgerRows, settlement, wideRowCount = null) {
     payout: r2(d.byType.reduce((a, t) => a + t.amount, 0) - statedAmt),
   };
 
-  return { aoa, checks, colWidths: [{ wch: 34 }, { wch: 16 }, { wch: 13 }, { wch: 11 }] };
+  /* ── does each formula actually reproduce its figure? ─────────────────────
+     Every traced cell carries a `verify` that performs, in JS, what its Excel
+     formula performs over the settlement rows. Run it here and compare against
+     the figure `collect` computed. A disagreement means the summary's
+     classification and the pivot's columns have drifted apart, and the caller
+     is told which line and by how much — rather than the sheet opening with a
+     formula that quietly contradicts the number beside it. */
+  const verifyAgainst = (settlementRows) => {
+    const bad = [];
+    for (const c of traceChecks) {
+      const got = r2(c.verify(settlementRows));
+      if (Math.abs(got - r2(c.expected)) > 0.01) {
+        bad.push({ formula: c.formula, computed: r2(c.expected), fromSheet: got });
+      }
+    }
+    return bad;
+  };
+
+  return {
+    aoa, checks, verifyAgainst,
+    feeColumns: FEE_COLUMNS.map(([c]) => c),
+    colWidths: [{ wch: 34 }, { wch: 16 }, { wch: 13 }, { wch: 11 }],
+  };
 }
 
 /* ──────────────────────────────────────────────────────────────────────────────
@@ -480,5 +653,6 @@ function styleSummarySheet(ws, aoa, checks) {
   return ws;
 }
 
-module.exports = { buildSummaryAoA, styleSummarySheet, collect, feeGroup };
+module.exports = { buildSummaryAoA, styleSummarySheet, collect, feeGroup,
+                   feeSplitRows, FEE_COLUMNS };
 
