@@ -36,6 +36,7 @@ import { toast } from 'sonner';
 import api from '../../lib/api';
 import DashboardLayout from '../../components/layout/DashboardLayout';
 import { sidebarFor } from '../../lib/adminNav';
+import FeeInvoicesView from './FeeInvoicesView';
 
 /* ── formatting ─────────────────────────────────────────────────────────── */
 const inr = (n, dp = 2) => (n === null || n === undefined || Number.isNaN(n) ? '—'
@@ -701,7 +702,8 @@ function ReportView({ data, status, months, shown, sel, setSel, onDrill, base, o
       <div className="flex items-center gap-1.5 mb-4 border-b border-slate-200">
         {[['receivables', 'Receivables', 'what Amazon owes us'],
           ['invoicing', 'Order vs MTR', 'did every order reach the MTR'],
-          ['money', 'MTR vs Settlement', 'was every invoice paid']].map(([k, label, sub]) => (
+          ['money', 'MTR vs Settlement', 'was every invoice paid'],
+          ['fees', 'Fee invoices', 'is every rupee Amazon took invoiced']].map(([k, label, sub]) => (
           <button key={k} onClick={() => setLayer(k)}
                   className="px-4 py-2.5 text-sm font-semibold -mb-px border-b-2 transition-colors text-left"
                   style={layer === k
@@ -716,7 +718,9 @@ function ReportView({ data, status, months, shown, sel, setSel, onDrill, base, o
       <Motion />
       <RangeBar months={months} sel={sel} setSel={setSel} all={all} />
 
-      {layer === 'money'
+      {layer === 'fees'
+        ? <FeeInvoicesView fees={data?.fees} />
+        : layer === 'money'
         ? <MoneyMatchView mm={data?.moneyMatch} shown={shown} onDrill={onDrill} />
         : layer === 'invoicing'
         ? <InvoicingView inv={data?.invoicing} shown={shown} onDrill={onDrill} />

@@ -36,6 +36,8 @@ const amazonReports = require('../../../services/amazonReports');
 const { reconcile, monthKey, num } = require('../../../services/processors/amazonThreeWay');
 const orderVsMtr = require('../../../services/processors/amazonOrderVsMtr');
 const mtrVsSettlement = require('../../../services/processors/amazonMtrVsSettlement');
+const feeInvoices = require('../../../services/processors/amazonFeeInvoices');
+const feeInvoiceCache = require('../../../services/amazonFeeInvoiceCache');
 const { buildLedger, BASIS } = require('../../../services/processors/amazonReceivablesLedger');
 const { auditLedger, drillFor } = require('../../../services/processors/amazonReceivablesAudit');
 const { buildWorkbook, buildDrillWorkbook } = require('../../../services/processors/amazonReceivablesWorkbook');
@@ -234,8 +236,8 @@ const uploadSources = async (req, res, next) => {
   try {
     const ctx = await resolve(req, res); if (!ctx) return;
     const kind = String(req.params.kind || '').toLowerCase();
-    if (!['mtr', 'settlement', 'orders'].includes(kind)) {
-      return res.status(400).json({ error: 'kind must be mtr, settlement or orders' });
+    if (!['mtr', 'settlement', 'orders', 'invoices'].includes(kind)) {
+      return res.status(400).json({ error: 'kind must be mtr, settlement, orders or invoices' });
     }
     if (!req.files || !req.files.length) return res.status(400).json({ error: 'No files' });
     const dir = brandDir(ctx.brand, kind);
@@ -385,6 +387,19 @@ const runReco = async (req, res, next) => {
 
     const sourceKind = {};
     for (const m of months) sourceKind[m] = src.uploadedMonths.includes(m) ? 'unified' : 'ledger';
+
+    /* Fee invoices vs the settlement. The PDFs are an OPTIONAL leg - a brand
+       that has not uploaded any still gets the settlement side and a page that
+       says so, which is why the parse failing is swallowed the same way the
+       two legs above are. */
+    let fees = null;
+    try {
+      const parsed = await feeInvoiceCache.load(brandDir(ctx.brand, 'invoices'));
+      fees = feeInvoices.build(src, months, { invoices: feeInvoiceCache.slim(parsed.months), sourceKind });
+      fees.source = { documents: parsed.documents, parsedAt: parsed.parsedAt,
+                      fromCache: parsed.fromCache, error: parsed.error };
+    } catch (e) { fees = null; }
+
     const audit = auditLedger(ledger, { sources: sourceKind,
                                         priorPeriodRefunds: ledger.priorPeriodRefunds });
     const drills = {};
@@ -413,7 +428,7 @@ const runReco = async (req, res, next) => {
     });
 
     const result = { three, ledger, audit, drills, sources: perSource, sourceKind, basis,
-                     basisCompare, invoicing, moneyMatch };
+                     basisCompare, invoicing, moneyMatch, fees };
     const ms = Date.now() - t0;
     const fp = `${src.orders.length}|${src.mtr.length}|${src.settlement.length}`;
 
