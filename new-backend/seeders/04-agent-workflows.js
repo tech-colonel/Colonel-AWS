@@ -1,12 +1,13 @@
 /**
  * 04-agent-workflows.js
  *
- * Agent-workflow delta seeder — adds the 4 workflows built locally in the
+ * Agent-workflow delta seeder — adds the 5 workflows built locally in the
  * admin Workflow Manager to colonel-master's agent_workflows table:
  *   - Shopify urban        (agent: Sales-Shopify)
  *   - Firstcry M Brands    (agent: Sales-FirstCry)
  *   - shopify-koparo       (agent: Sales-Shopify)
  *   - koparo-cread         (agent: Sales-cread)
+ *   - shopify-shumee       (agent: Sales-Shopify)
  *
  * Idempotent: ON CONFLICT (id) DO NOTHING — safe to re-run.
  *
@@ -2900,6 +2901,981 @@ const AGENT_WORKFLOWS = [
     ],
     createdAt: "2026-08-14T11:42:02.683Z",
     updatedAt: "2026-08-14T11:51:04.771Z",
+  },
+  {
+    id: "0aca45b7-25c7-4586-848b-6c0ea6d094db",
+    agentName: "Sales-Shopify",
+    name: "shopify-shumee",
+    description: "Shumee Shopify Sales Breakdown report -> Tally-ready working (Working / Pivot / After Pivot / x2beta working / x2beta-shipping). Built from the SOP sheet of \"Total sales breakdown working.xlsx\". FG and GST rate come from the brand SKU Master (fields: Sales Portal SKU, Tally New SKU, GST rate); Party Name and invoice prefix from the Ledger Master (fields: State, Ledger, Invoice No.). Lines with no SKU, product title or product ID are Shipping Income at 5%. Taxable = Total sales / (1 + GST rate); Haryana buyers get CGST+SGST, every other state IGST. State is the Billing region, falling back to the Shipping region when the billing address is not a state in the master. Invoice Number = <master prefix>[-SH for shipping]-<state code>-<month picked on Apply>; After Pivot drops lines that net to zero and marks net-negative lines as credit notes (-CN-). x2beta working / x2beta-shipping lay the After Pivot lines out in the Tally X2Beta import template used by the Sales-Amazon agent: product lines in the first, shipping-charge lines (ledger-only, no stock item) in the second.",
+    sample_columns: [
+      "Day",
+      "Product variant SKU",
+      "Product variant ID",
+      "Product variant title",
+      "Shipping region",
+      "Billing region",
+      "Customer name",
+      "Order fulfillment status",
+      "Product ID",
+      "Product title",
+      "Order ID",
+      "Billing city",
+      "Shipping city",
+      "Gross sales",
+      "Discounts",
+      "Returns",
+      "Net sales",
+      "Shipping charges",
+      "Return fees",
+      "Taxes",
+      "Total sales",
+      "Quantity returned",
+      "Quantity ordered",
+      "Quantity ordered per order"
+    ],
+    columns: [],
+    sheets: [
+      {
+        "id": "sheet_working",
+        "name": "Working",
+        "order": 0,
+        "sourceType": "raw",
+        "rawSheetName": "Main File",
+        "prevSheetName": null,
+        "fileInputId": "file_0",
+        "filters": [],
+        "groupBy": {
+          "enabled": false,
+          "columns": [],
+          "aggregations": {}
+        },
+        "columns": [
+          {
+            "id": "c_0",
+            "order": 0,
+            "label": "Day",
+            "type": "source",
+            "key": "Day"
+          },
+          {
+            "id": "c_1",
+            "order": 1,
+            "label": "Product variant SKU",
+            "type": "source",
+            "key": "Product variant SKU"
+          },
+          {
+            "id": "w_fg",
+            "order": 2,
+            "label": "FG",
+            "type": "master_lookup",
+            "masterType": "sku",
+            "lookupColumn": "Product variant SKU",
+            "matchField": "Sales Portal SKU",
+            "returnField": "Tally New SKU"
+          },
+          {
+            "id": "w_fg_ship",
+            "order": 2.5,
+            "label": "FG",
+            "type": "excel",
+            "formula": "({Product variant SKU} === 0 && {Product title} === 0 && {Product ID} === 0) ? '11. Shipping Charges (Sales) Haryana' : ({Product variant SKU} === 0 ? '' : (VLOOKUP({Product variant ID}, 'Product variant ID', 'FG') || VLOOKUP({Product variant SKU}, 'Product variant SKU', 'FG')))"
+          },
+          {
+            "id": "c_3",
+            "order": 3,
+            "label": "Product variant ID",
+            "type": "source",
+            "key": "Product variant ID"
+          },
+          {
+            "id": "c_4",
+            "order": 4,
+            "label": "Product variant title",
+            "type": "source",
+            "key": "Product variant title"
+          },
+          {
+            "id": "c_5",
+            "order": 5,
+            "label": "Shipping region",
+            "type": "source",
+            "key": "Shipping region"
+          },
+          {
+            "id": "c_6",
+            "order": 6,
+            "label": "Billing region",
+            "type": "source",
+            "key": "Billing region"
+          },
+          {
+            "id": "w_party",
+            "order": 7,
+            "label": "Party Name",
+            "type": "master_lookup",
+            "masterType": "ledger",
+            "lookupColumn": "Billing region",
+            "matchField": "State",
+            "returnField": "Ledger"
+          },
+          {
+            "id": "w_state",
+            "order": 7.2,
+            "label": "Tally state name",
+            "type": "excel",
+            "formula": "{Party Name} === 0 && VLOOKUP({Shipping region}, 'Billing region', 'Party Name') !== '' ? String({Shipping region}).toLowerCase().replace(/\\b[a-z]/g, c => c.toUpperCase()).replace(/ And /g, ' & ') : ({Billing region} === 0 ? '' : String({Billing region}).toLowerCase().replace(/\\b[a-z]/g, c => c.toUpperCase()).replace(/ And /g, ' & '))"
+          },
+          {
+            "id": "w_party_fb",
+            "order": 7.5,
+            "label": "Party Name",
+            "type": "excel",
+            "formula": "{Party Name} !== 0 ? {Party Name} : VLOOKUP({Shipping region}, 'Billing region', 'Party Name')"
+          },
+          {
+            "id": "w_ledger",
+            "order": 9,
+            "label": "Sales Ledger",
+            "type": "computed",
+            "formula": "({Product variant SKU} === 0 && {Product title} === 0 && {Product ID} === 0) ? '11. Shipping Charges (Sales) Haryana' : 'Sales Shopify'"
+          },
+          {
+            "id": "w_inv",
+            "order": 10,
+            "label": "Invoice Number",
+            "type": "master_lookup",
+            "masterType": "ledger",
+            "lookupColumn": "Billing region",
+            "matchField": "State",
+            "returnField": "Invoice No."
+          },
+          {
+            "id": "w_inv_full",
+            "order": 10.5,
+            "label": "Invoice Number",
+            "type": "excel",
+            "formula": "(b => b === '' ? '' : (({Product variant SKU} === 0 && {Product title} === 0 && {Product ID} === 0) ? b.replace('-', '-SH-') : b) + '-' + String({MonthNumber}).padStart(2, '0'))(String({Invoice Number} !== 0 ? {Invoice Number} : VLOOKUP({Shipping region}, 'Billing region', 'Invoice Number')))"
+          },
+          {
+            "id": "c_11",
+            "order": 11,
+            "label": "Customer name",
+            "type": "source",
+            "key": "Customer name"
+          },
+          {
+            "id": "c_12",
+            "order": 12,
+            "label": "Order fulfillment status",
+            "type": "source",
+            "key": "Order fulfillment status"
+          },
+          {
+            "id": "c_13",
+            "order": 13,
+            "label": "Product ID",
+            "type": "source",
+            "key": "Product ID"
+          },
+          {
+            "id": "c_14",
+            "order": 14,
+            "label": "Product title",
+            "type": "source",
+            "key": "Product title"
+          },
+          {
+            "id": "c_15",
+            "order": 15,
+            "label": "Order ID",
+            "type": "source",
+            "key": "Order ID"
+          },
+          {
+            "id": "c_16",
+            "order": 16,
+            "label": "Billing city",
+            "type": "source",
+            "key": "Billing city"
+          },
+          {
+            "id": "c_17",
+            "order": 17,
+            "label": "Shipping city",
+            "type": "source",
+            "key": "Shipping city"
+          },
+          {
+            "id": "c_18",
+            "order": 18,
+            "label": "Gross sales",
+            "type": "source",
+            "key": "Gross sales"
+          },
+          {
+            "id": "c_19",
+            "order": 19,
+            "label": "Discounts",
+            "type": "source",
+            "key": "Discounts"
+          },
+          {
+            "id": "c_20",
+            "order": 20,
+            "label": "Returns",
+            "type": "source",
+            "key": "Returns"
+          },
+          {
+            "id": "c_21",
+            "order": 21,
+            "label": "Net sales",
+            "type": "source",
+            "key": "Net sales"
+          },
+          {
+            "id": "c_22",
+            "order": 22,
+            "label": "Shipping charges",
+            "type": "source",
+            "key": "Shipping charges"
+          },
+          {
+            "id": "c_23",
+            "order": 23,
+            "label": "Return fees",
+            "type": "source",
+            "key": "Return fees"
+          },
+          {
+            "id": "c_24",
+            "order": 24,
+            "label": "Taxes",
+            "type": "source",
+            "key": "Taxes"
+          },
+          {
+            "id": "c_25",
+            "order": 25,
+            "label": "Total sales",
+            "type": "source",
+            "key": "Total sales"
+          },
+          {
+            "id": "c_26",
+            "order": 26,
+            "label": "Quantity returned",
+            "type": "source",
+            "key": "Quantity returned"
+          },
+          {
+            "id": "c_27",
+            "order": 27,
+            "label": "Quantity ordered",
+            "type": "source",
+            "key": "Quantity ordered"
+          },
+          {
+            "id": "c_28",
+            "order": 28,
+            "label": "Quantity ordered per order",
+            "type": "source",
+            "key": "Quantity ordered per order"
+          },
+          {
+            "id": "w_qty",
+            "order": 29,
+            "label": "Final qty",
+            "type": "computed",
+            "formula": "{Quantity ordered} + {Quantity returned}"
+          },
+          {
+            "id": "w_rate",
+            "order": 30,
+            "label": "Gst rate",
+            "type": "master_lookup",
+            "masterType": "sku",
+            "lookupColumn": "Product variant SKU",
+            "matchField": "Sales Portal SKU",
+            "returnField": "GST rate"
+          },
+          {
+            "id": "w_rate_pct",
+            "order": 30.5,
+            "label": "Gst rate",
+            "type": "computed",
+            "formula": "({Product variant SKU} === 0 && {Product title} === 0 && {Product ID} === 0) ? 5 : (r => r > 0 && r < 1 ? r * 100 : r)({Gst rate})"
+          },
+          {
+            "id": "w_taxable",
+            "order": 31,
+            "label": "Taxable Value",
+            "type": "computed",
+            "formula": "{Total sales} / (1 + {Gst rate} / 100)"
+          },
+          {
+            "id": "w_igst",
+            "order": 32,
+            "label": "IGST",
+            "type": "computed",
+            "formula": "{Tally state name} === 'Haryana' ? 0 : {Taxable Value} * {Gst rate} / 100"
+          },
+          {
+            "id": "w_cgst",
+            "order": 33,
+            "label": "CGST",
+            "type": "computed",
+            "formula": "{Tally state name} === 'Haryana' ? {Taxable Value} * {Gst rate} / 200 : 0"
+          },
+          {
+            "id": "w_sgst",
+            "order": 34,
+            "label": "SGST",
+            "type": "computed",
+            "formula": "{Tally state name} === 'Haryana' ? {Taxable Value} * {Gst rate} / 200 : 0"
+          },
+          {
+            "id": "w_remarks",
+            "order": 35,
+            "label": "Remarks",
+            "type": "computed",
+            "formula": "[({Product variant SKU} === 0 && {Product title} === 0 && {Product ID} === 0) || {FG} !== 0 ? '' : ({Product variant SKU} === 0 ? 'SKU blank on a product line - map FG manually' : 'SKU not found in SKU master'), {Party Name} === 0 ? 'State not found in state master' : ''].filter(Boolean).join('; ')"
+          }
+        ]
+      },
+      {
+        "id": "sheet_pivot",
+        "name": "Pivot",
+        "order": 1,
+        "sourceType": "prev_sheet",
+        "rawSheetName": null,
+        "prevSheetName": "Working",
+        "fileInputId": null,
+        "filters": [],
+        "groupBy": {
+          "enabled": true,
+          "columns": [
+            "Invoice Number",
+            "Party Name",
+            "Sales Ledger",
+            "FG",
+            "Tally state name"
+          ],
+          "aggregations": {
+            "Sum of Final qty": "sum",
+            "Sum of Taxable Value": "sum",
+            "Sum of IGST": "sum",
+            "Sum of CGST": "sum",
+            "Sum of SGST": "sum"
+          }
+        },
+        "columns": [
+          {
+            "id": "p_0",
+            "order": 0,
+            "label": "Invoice Number",
+            "type": "source",
+            "key": "Invoice Number"
+          },
+          {
+            "id": "p_1",
+            "order": 1,
+            "label": "Party Name",
+            "type": "source",
+            "key": "Party Name"
+          },
+          {
+            "id": "p_2",
+            "order": 2,
+            "label": "Sales Ledger",
+            "type": "source",
+            "key": "Sales Ledger"
+          },
+          {
+            "id": "p_3",
+            "order": 3,
+            "label": "FG",
+            "type": "source",
+            "key": "FG"
+          },
+          {
+            "id": "p_4",
+            "order": 4,
+            "label": "Tally state name",
+            "type": "source",
+            "key": "Tally state name"
+          },
+          {
+            "id": "p_5",
+            "order": 5,
+            "label": "Sum of Final qty",
+            "type": "source",
+            "key": "Final qty"
+          },
+          {
+            "id": "p_6",
+            "order": 6,
+            "label": "Sum of Taxable Value",
+            "type": "source",
+            "key": "Taxable Value"
+          },
+          {
+            "id": "p_7",
+            "order": 7,
+            "label": "Sum of IGST",
+            "type": "source",
+            "key": "IGST"
+          },
+          {
+            "id": "p_8",
+            "order": 8,
+            "label": "Sum of CGST",
+            "type": "source",
+            "key": "CGST"
+          },
+          {
+            "id": "p_9",
+            "order": 9,
+            "label": "Sum of SGST",
+            "type": "source",
+            "key": "SGST"
+          }
+        ]
+      },
+      {
+        "id": "sheet_after_pivot",
+        "name": "After Pivot",
+        "order": 2,
+        "sourceType": "prev_sheet",
+        "rawSheetName": null,
+        "prevSheetName": "Pivot",
+        "fileInputId": null,
+        "filters": [
+          {
+            "column": "Sum of Taxable Value",
+            "operator": "not_equals",
+            "value": "0"
+          },
+          {
+            "column": "Sum of Taxable Value",
+            "operator": "not_contains",
+            "value": "e-"
+          }
+        ],
+        "groupBy": {
+          "enabled": false,
+          "columns": [],
+          "aggregations": {}
+        },
+        "columns": [
+          {
+            "order": 0,
+            "label": "Date",
+            "type": "computed",
+            "formula": "new Date({Year}, {MonthNumber}, 0)",
+            "id": "a_0"
+          },
+          {
+            "id": "a_1",
+            "order": 1,
+            "label": "Invoice Number",
+            "type": "source",
+            "key": "Invoice Number"
+          },
+          {
+            "order": 1.5,
+            "label": "Invoice Number",
+            "type": "computed",
+            "formula": "{Invoice Number} === 0 ? '' : ({Sum of Taxable Value} < 0 ? String({Invoice Number}).replace('-', '-CN-') : {Invoice Number})",
+            "id": "a_1_5"
+          },
+          {
+            "order": 2,
+            "label": "voucher type",
+            "type": "computed",
+            "formula": "'Sales Haryana'",
+            "id": "a_2"
+          },
+          {
+            "id": "a_3",
+            "order": 3,
+            "label": "Party Name",
+            "type": "source",
+            "key": "Party Name"
+          },
+          {
+            "order": 4,
+            "label": "Sales Ledger",
+            "type": "computed",
+            "formula": "'Sales Shopify'",
+            "id": "a_4"
+          },
+          {
+            "order": 5,
+            "label": "cr note",
+            "type": "computed",
+            "formula": "{Sum of Taxable Value} < 0 ? 'Yes' : ''",
+            "id": "a_5"
+          },
+          {
+            "id": "a_6",
+            "order": 6,
+            "label": "FG",
+            "type": "source",
+            "key": "FG"
+          },
+          {
+            "id": "a_7",
+            "order": 7,
+            "label": "Tally state name",
+            "type": "source",
+            "key": "Tally state name"
+          },
+          {
+            "id": "a_8",
+            "order": 8,
+            "label": "Sum of Final qty",
+            "type": "source",
+            "key": "Sum of Final qty"
+          },
+          {
+            "id": "a_9",
+            "order": 9,
+            "label": "Sum of Taxable Value",
+            "type": "source",
+            "key": "Sum of Taxable Value"
+          },
+          {
+            "order": 10,
+            "label": "Rate",
+            "type": "computed",
+            "formula": "{Sum of Final qty} !== 0 ? {Sum of Taxable Value} / {Sum of Final qty} : ''",
+            "id": "a_10"
+          },
+          {
+            "id": "a_11",
+            "order": 11,
+            "label": "Sum of IGST",
+            "type": "source",
+            "key": "Sum of IGST"
+          },
+          {
+            "id": "a_12",
+            "order": 12,
+            "label": "Sum of CGST",
+            "type": "source",
+            "key": "Sum of CGST"
+          },
+          {
+            "id": "a_13",
+            "order": 13,
+            "label": "Sum of SGST",
+            "type": "source",
+            "key": "Sum of SGST"
+          },
+          {
+            "order": 14,
+            "label": "Unit",
+            "type": "computed",
+            "formula": "{Sum of Final qty} !== 0 ? 'Nos' : ''",
+            "id": "a_14"
+          },
+          {
+            "order": 15,
+            "label": "Narration",
+            "type": "computed",
+            "formula": "'Booked as per Shopify breakdown report'",
+            "id": "a_15"
+          },
+          {
+            "order": 16,
+            "label": "Country",
+            "type": "computed",
+            "formula": "'India'",
+            "id": "a_16"
+          },
+          {
+            "order": 17,
+            "label": "Registration Type",
+            "type": "computed",
+            "formula": "'Unregistered/Consumer'",
+            "id": "a_17"
+          }
+        ]
+      },
+      {
+        "id": "sheet_x2beta",
+        "name": "x2beta working",
+        "order": 3,
+        "sourceType": "prev_sheet",
+        "rawSheetName": null,
+        "prevSheetName": "After Pivot",
+        "fileInputId": null,
+        "outputTemplate": "x2beta",
+        "filters": [
+          {
+            "column": "FG",
+            "operator": "not_equals",
+            "value": "11. Shipping Charges (Sales) Haryana"
+          }
+        ],
+        "groupBy": {
+          "enabled": false,
+          "columns": [],
+          "aggregations": {}
+        },
+        "columns": [
+          {
+            "id": "x_0",
+            "order": 0,
+            "label": "Vch. Date*",
+            "type": "source",
+            "key": "Date"
+          },
+          {
+            "id": "x_1",
+            "order": 1,
+            "label": "Vch. Type*",
+            "type": "source",
+            "key": "voucher type"
+          },
+          {
+            "id": "x_2",
+            "order": 2,
+            "label": "Vch. No.*",
+            "type": "source",
+            "key": "Invoice Number"
+          },
+          {
+            "id": "x_3",
+            "order": 3,
+            "label": "Ref. No.",
+            "type": "source",
+            "key": "Invoice Number"
+          },
+          {
+            "id": "x_4",
+            "order": 4,
+            "label": "Ref. Date",
+            "type": "source",
+            "key": "Date"
+          },
+          {
+            "id": "x_5",
+            "order": 5,
+            "label": "Is CN?",
+            "type": "source",
+            "key": "cr note"
+          },
+          {
+            "id": "x_6",
+            "order": 6,
+            "label": "Party Ledger*",
+            "type": "source",
+            "key": "Party Name"
+          },
+          {
+            "id": "x_7",
+            "order": 7,
+            "label": "Sales Ledger*",
+            "type": "source",
+            "key": "Sales Ledger"
+          },
+          {
+            "id": "x_8",
+            "order": 8,
+            "label": "Stock Item",
+            "type": "source",
+            "key": "FG"
+          },
+          {
+            "id": "x_9",
+            "order": 9,
+            "label": "Description",
+            "type": "source",
+            "key": "FG"
+          },
+          {
+            "id": "x_10",
+            "order": 10,
+            "label": "Godown",
+            "type": "computed",
+            "formula": "'HARYANA'"
+          },
+          {
+            "id": "x_11",
+            "order": 11,
+            "label": "Quantity",
+            "type": "source",
+            "key": "Sum of Final qty"
+          },
+          {
+            "id": "x_12",
+            "order": 12,
+            "label": "Amount*",
+            "type": "source",
+            "key": "Sum of Taxable Value"
+          },
+          {
+            "id": "x_13",
+            "order": 13,
+            "label": "Quantity",
+            "type": "computed",
+            "formula": "{Amount*} < 0 ? Math.abs({Quantity}) : {Quantity}"
+          },
+          {
+            "id": "x_14",
+            "order": 14,
+            "label": "Rate",
+            "type": "computed",
+            "formula": "{Quantity} !== 0 ? Math.abs({Amount*} / {Quantity}) : ''"
+          },
+          {
+            "id": "x_15",
+            "order": 15,
+            "label": "Unit",
+            "type": "source",
+            "key": "Unit"
+          },
+          {
+            "id": "x_16",
+            "order": 16,
+            "label": "IGST",
+            "type": "source",
+            "key": "Sum of IGST"
+          },
+          {
+            "id": "x_17",
+            "order": 17,
+            "label": "CGST",
+            "type": "source",
+            "key": "Sum of CGST"
+          },
+          {
+            "id": "x_18",
+            "order": 18,
+            "label": "SGST",
+            "type": "source",
+            "key": "Sum of SGST"
+          },
+          {
+            "id": "x_19",
+            "order": 19,
+            "label": "Tax Rate",
+            "type": "computed",
+            "formula": "{Amount*} !== 0 ? Math.round(({IGST} + {CGST} + {SGST}) / {Amount*} * 10000) / 100 : 0"
+          },
+          {
+            "id": "x_20",
+            "order": 20,
+            "label": "Seller State Code",
+            "type": "computed",
+            "formula": "'HR'"
+          },
+          {
+            "id": "x_21",
+            "order": 21,
+            "label": "Narration",
+            "type": "source",
+            "key": "Narration"
+          },
+          {
+            "id": "x_22",
+            "order": 22,
+            "label": "State",
+            "type": "source",
+            "key": "Tally state name"
+          },
+          {
+            "id": "x_23",
+            "order": 23,
+            "label": "Country",
+            "type": "source",
+            "key": "Country"
+          },
+          {
+            "id": "x_24",
+            "order": 24,
+            "label": "Place of Supply",
+            "type": "source",
+            "key": "Tally state name"
+          },
+          {
+            "id": "x_25",
+            "order": 25,
+            "label": "GST Type",
+            "type": "source",
+            "key": "Registration Type"
+          }
+        ]
+      },
+      {
+        "id": "sheet_x2beta_shipping",
+        "name": "x2beta-shipping",
+        "order": 4,
+        "sourceType": "prev_sheet",
+        "rawSheetName": null,
+        "prevSheetName": "After Pivot",
+        "fileInputId": null,
+        "outputTemplate": "x2beta",
+        "filters": [
+          {
+            "column": "FG",
+            "operator": "equals",
+            "value": "11. Shipping Charges (Sales) Haryana"
+          }
+        ],
+        "groupBy": {
+          "enabled": false,
+          "columns": [],
+          "aggregations": {}
+        },
+        "columns": [
+          {
+            "id": "xs_0",
+            "order": 0,
+            "label": "Vch. Date*",
+            "type": "source",
+            "key": "Date"
+          },
+          {
+            "id": "xs_1",
+            "order": 1,
+            "label": "Vch. Type*",
+            "type": "source",
+            "key": "voucher type"
+          },
+          {
+            "id": "xs_2",
+            "order": 2,
+            "label": "Vch. No.*",
+            "type": "source",
+            "key": "Invoice Number"
+          },
+          {
+            "id": "xs_3",
+            "order": 3,
+            "label": "Ref. No.",
+            "type": "source",
+            "key": "Invoice Number"
+          },
+          {
+            "id": "xs_4",
+            "order": 4,
+            "label": "Ref. Date",
+            "type": "source",
+            "key": "Date"
+          },
+          {
+            "id": "xs_5",
+            "order": 5,
+            "label": "Is CN?",
+            "type": "source",
+            "key": "cr note"
+          },
+          {
+            "id": "xs_6",
+            "order": 6,
+            "label": "Party Ledger*",
+            "type": "source",
+            "key": "Party Name"
+          },
+          {
+            "id": "xs_7",
+            "order": 7,
+            "label": "Sales Ledger*",
+            "type": "source",
+            "key": "FG"
+          },
+          {
+            "id": "xs_8",
+            "order": 8,
+            "label": "Amount*",
+            "type": "source",
+            "key": "Sum of Taxable Value"
+          },
+          {
+            "id": "xs_9",
+            "order": 9,
+            "label": "IGST",
+            "type": "source",
+            "key": "Sum of IGST"
+          },
+          {
+            "id": "xs_10",
+            "order": 10,
+            "label": "CGST",
+            "type": "source",
+            "key": "Sum of CGST"
+          },
+          {
+            "id": "xs_11",
+            "order": 11,
+            "label": "SGST",
+            "type": "source",
+            "key": "Sum of SGST"
+          },
+          {
+            "id": "xs_12",
+            "order": 12,
+            "label": "Tax Rate",
+            "type": "computed",
+            "formula": "{Amount*} !== 0 ? Math.round(({IGST} + {CGST} + {SGST}) / {Amount*} * 10000) / 100 : 0"
+          },
+          {
+            "id": "xs_13",
+            "order": 13,
+            "label": "Seller State Code",
+            "type": "computed",
+            "formula": "'HR'"
+          },
+          {
+            "id": "xs_14",
+            "order": 14,
+            "label": "Narration",
+            "type": "source",
+            "key": "Narration"
+          },
+          {
+            "id": "xs_15",
+            "order": 15,
+            "label": "State",
+            "type": "source",
+            "key": "Tally state name"
+          },
+          {
+            "id": "xs_16",
+            "order": 16,
+            "label": "Country",
+            "type": "source",
+            "key": "Country"
+          },
+          {
+            "id": "xs_17",
+            "order": 17,
+            "label": "Place of Supply",
+            "type": "source",
+            "key": "Tally state name"
+          },
+          {
+            "id": "xs_18",
+            "order": 18,
+            "label": "GST Type",
+            "type": "source",
+            "key": "Registration Type"
+          }
+        ]
+      }
+    ],
+    file_inputs: [
+      {
+        "id": "file_0",
+        "label": "Shopify Sales Breakdown Report (Main File)"
+      }
+    ],
+    createdAt: "2026-10-05T08:01:18.192Z",
+    updatedAt: "2026-10-05T08:01:18.192Z",
   }
 ];
 

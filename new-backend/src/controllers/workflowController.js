@@ -6,6 +6,7 @@ const { AgentWorkflow, Agent, Brand, BrandAgent } = require('../models/master');
 const { getBrandConnection } = require('../config/database');
 const { getBrandAgentModel } = require('../models/brand');
 const { createMissingMasterTracker } = require('../utils/missingMasterTracker');
+const { buildX2betaSheet } = require('../utils/x2betaTemplate');
 
 const upload = multer({ storage: multer.memoryStorage() });
 
@@ -566,7 +567,12 @@ function applyMultiSheetWorkflow(sheets, fileBufferOrMap, masterData = {}, fileI
 
     const finalRows = applyGroupBy(outputRows, wfSheet.groupBy);
     sheetOutputs.push(finalRows); // this sheet's actual output rows, for downstream prev_sheet sourcing
-    XLSX.utils.book_append_sheet(outBook, XLSX.utils.json_to_sheet(finalRows), safeSheetName);
+    // outputTemplate 'x2beta': the sheet's rows are laid out in the Tally X2Beta import
+    // template instead of being written column-for-column (see utils/x2betaTemplate.js).
+    const outSheet = wfSheet.outputTemplate === 'x2beta'
+      ? buildX2betaSheet(finalRows, wfSheet.x2beta)
+      : XLSX.utils.json_to_sheet(finalRows);
+    XLSX.utils.book_append_sheet(outBook, outSheet, safeSheetName);
   }
 
   XLSX.utils.book_append_sheet(outBook, buildFormulaReferenceSheet(sheets), 'Formula Reference');

@@ -1,8 +1,9 @@
 /**
  * seed-agent-workflows.js — Agent-workflow delta seeder runner
  *
- * Adds the 4 workflows built locally in the admin Workflow Manager
- * (Shopify urban, Firstcry M Brands, shopify-koparo, koparo-cread) to
+ * Adds the 5 workflows built locally in the admin Workflow Manager
+ * (Shopify urban, Firstcry M Brands, shopify-koparo, koparo-cread,
+ * shopify-shumee) to
  * colonel-master's agent_workflows table. Independent of seed.js / other
  * seed-*.js scripts so it can be run on its own — e.g. on AWS — without
  * touching anything else.
@@ -59,10 +60,11 @@ const { masterSequelize } = require('./src/config/database');
         '231e59e7-f217-4805-b728-5511ee513512',
         '8a220322-c633-4abd-8d83-5951affa9ac7',
         '61608940-dad5-4be0-a697-5f77c35eff66',
-        'dd36cbf8-9995-4b1a-b8ba-4a54d9915181'
+        'dd36cbf8-9995-4b1a-b8ba-4a54d9915181',
+        '0aca45b7-25c7-4586-848b-6c0ea6d094db'
       )
     `);
-    console.log(`[SEED] ${rows.length}/4 target workflow(s) present:`);
+    console.log(`[SEED] ${rows.length}/5 target workflow(s) present:`);
     rows.forEach(r => console.log(`  - ${r.workflow}  (agent: ${r.agent})`));
   } catch (_) { /* non-fatal */ }
 
