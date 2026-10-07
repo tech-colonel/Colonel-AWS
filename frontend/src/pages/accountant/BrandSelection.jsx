@@ -5,6 +5,7 @@ import { Button } from '../../components/ui/button';
 import { Building2, ArrowRight, LogOut } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import api from '../../lib/api';
+import { openBrand } from '../../lib/openBrand';
 import { toast } from 'sonner';
 
 const BrandSelection = () => {
@@ -83,7 +84,7 @@ const BrandSelection = () => {
               <Card
                 key={brand.id}
                 className="hover:shadow-lg transition-shadow cursor-pointer"
-                onClick={() => navigate(`/brands/${brand.id}/dashboard`)}
+                onClick={() => openBrand(navigate, brand.id)}
                 data-testid={`brand-card-${brand.id}`}
               >
                 <CardHeader>

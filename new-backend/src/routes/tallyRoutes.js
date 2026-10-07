@@ -51,6 +51,7 @@ for (const [path, handler] of REPORTS) {
   router.get(`/brands/:brandId/tally/companies/:id/${path}`, ...ofBrand, handler);
 }
 
+router.post('/tally/auto-link', ...adminOnly, c.autoLinkAll);
 router.put('/brands/:brandId/tally/companies/:id/link',       ...adminOnly, validBrand, validId, c.linkCompany);
 router.delete('/brands/:brandId/tally/companies/:id/link',    ...adminOnly, validBrand, validId, c.unlinkCompany);
 

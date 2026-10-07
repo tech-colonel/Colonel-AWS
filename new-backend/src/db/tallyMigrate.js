@@ -16,6 +16,7 @@
  */
 
 const { masterSequelize } = require('../config/database');
+const { autoLinkCompanies } = require('../services/tallyBrandMatch');
 
 const SQL = `
 CREATE TABLE IF NOT EXISTS tally_connectors (
@@ -139,12 +140,70 @@ CREATE TABLE IF NOT EXISTS tally_bills (
   sync_run_id    BIGINT
 );
 CREATE INDEX IF NOT EXISTS idx_tally_bills_company ON tally_bills (company_id, sync_run_id, party);
+
+-- ── v3: brand_id on every data table ────────────────────────────────────────
+-- A company belongs to a brand (tally_companies.brand_id, set by name match or by
+-- an admin). Every row below carries that brand_id too, so a brand's data can be
+-- read directly by brand_id. Triggers keep it correct: new rows copy it from their
+-- company, and linking/unlinking a company re-stamps its rows.
+ALTER TABLE tally_companies ADD COLUMN IF NOT EXISTS auto_link_off BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE tally_ledgers   ADD COLUMN IF NOT EXISTS brand_id UUID;
+ALTER TABLE tally_vouchers  ADD COLUMN IF NOT EXISTS brand_id UUID;
+ALTER TABLE tally_masters   ADD COLUMN IF NOT EXISTS brand_id UUID;
+ALTER TABLE tally_bills     ADD COLUMN IF NOT EXISTS brand_id UUID;
+ALTER TABLE tally_sync_runs ADD COLUMN IF NOT EXISTS brand_id UUID;
+CREATE INDEX IF NOT EXISTS idx_tally_companies_brand ON tally_companies (brand_id);
+CREATE INDEX IF NOT EXISTS idx_tally_ledgers_brand   ON tally_ledgers  (brand_id, name);
+CREATE INDEX IF NOT EXISTS idx_tally_vouchers_brand  ON tally_vouchers (brand_id, voucher_date DESC);
+CREATE INDEX IF NOT EXISTS idx_tally_masters_brand   ON tally_masters  (brand_id, kind, name);
+CREATE INDEX IF NOT EXISTS idx_tally_bills_brand     ON tally_bills    (brand_id, party);
+CREATE INDEX IF NOT EXISTS idx_tally_sync_runs_brand ON tally_sync_runs (brand_id, started_at DESC);
+
+CREATE OR REPLACE FUNCTION tally_stamp_brand() RETURNS trigger AS $fn$
+BEGIN
+  NEW.brand_id := (SELECT brand_id FROM tally_companies WHERE id = NEW.company_id);
+  RETURN NEW;
+END $fn$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION tally_cascade_brand() RETURNS trigger AS $fn$
+BEGIN
+  IF NEW.brand_id IS DISTINCT FROM OLD.brand_id THEN
+    UPDATE tally_ledgers   SET brand_id = NEW.brand_id WHERE company_id = NEW.id;
+    UPDATE tally_vouchers  SET brand_id = NEW.brand_id WHERE company_id = NEW.id;
+    UPDATE tally_masters   SET brand_id = NEW.brand_id WHERE company_id = NEW.id;
+    UPDATE tally_bills     SET brand_id = NEW.brand_id WHERE company_id = NEW.id;
+    UPDATE tally_sync_runs SET brand_id = NEW.brand_id WHERE company_id = NEW.id;
+  END IF;
+  RETURN NEW;
+END $fn$ LANGUAGE plpgsql;
+
+DO $do$
+DECLARE t TEXT;
+BEGIN
+  FOREACH t IN ARRAY ARRAY['tally_ledgers','tally_vouchers','tally_masters','tally_bills','tally_sync_runs'] LOOP
+    EXECUTE format('DROP TRIGGER IF EXISTS trg_%s_brand ON %I', t, t);
+    EXECUTE format('CREATE TRIGGER trg_%s_brand BEFORE INSERT ON %I FOR EACH ROW EXECUTE FUNCTION tally_stamp_brand()', t, t);
+  END LOOP;
+END $do$;
+DROP TRIGGER IF EXISTS trg_tally_companies_brand ON tally_companies;
+CREATE TRIGGER trg_tally_companies_brand AFTER UPDATE OF brand_id ON tally_companies
+  FOR EACH ROW EXECUTE FUNCTION tally_cascade_brand();
+
+-- one-time backfill of rows that pre-date v3
+UPDATE tally_ledgers   x SET brand_id = c.brand_id FROM tally_companies c WHERE c.id = x.company_id AND x.brand_id IS NULL AND c.brand_id IS NOT NULL;
+UPDATE tally_vouchers  x SET brand_id = c.brand_id FROM tally_companies c WHERE c.id = x.company_id AND x.brand_id IS NULL AND c.brand_id IS NOT NULL;
+UPDATE tally_masters   x SET brand_id = c.brand_id FROM tally_companies c WHERE c.id = x.company_id AND x.brand_id IS NULL AND c.brand_id IS NOT NULL;
+UPDATE tally_bills     x SET brand_id = c.brand_id FROM tally_companies c WHERE c.id = x.company_id AND x.brand_id IS NULL AND c.brand_id IS NOT NULL;
+UPDATE tally_sync_runs x SET brand_id = c.brand_id FROM tally_companies c WHERE c.id = x.company_id AND x.brand_id IS NULL AND c.brand_id IS NOT NULL;
 `;
 
 async function migrateTally() {
   try {
     await masterSequelize.query(SQL);
     console.log('[TALLY MIGRATE] ✅ Tally mirror tables ready (master DB)');
+    // Companies already synced: link any whose name equals a brand's name.
+    const { linked, unmatched } = await autoLinkCompanies();
+    if (linked.length || unmatched.length) console.log(`[TALLY MIGRATE] brand match: linked ${linked.length}, unmatched ${unmatched.length}`);
   } catch (e) {
     console.error('[TALLY MIGRATE] ❌', e.message);
   }

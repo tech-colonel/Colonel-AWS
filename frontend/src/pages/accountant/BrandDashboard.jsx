@@ -13,6 +13,7 @@ import { Button } from '../../components/ui/button';
 import BrandLogo from '../../components/BrandLogos';
 import MeetingDetailModal from '../../components/MeetingDetailModal';
 import api from '../../lib/api';
+import { openBrand } from '../../lib/openBrand';
 import { toast } from 'sonner';
 import { sidebarFor, isBrandExecutiveUser } from '../../lib/adminNav';
 import { useAuth } from '../../context/AuthContext';
@@ -499,7 +500,7 @@ const BrandDashboard = () => {
                 {showBrandMenu && myBrands.length > 0 && (
                   <div className="glass-card" style={{ position: 'absolute', top: '110%', right: 0, zIndex: 40, padding: 6, minWidth: 220, maxHeight: 280, overflowY: 'auto' }}>
                     {myBrands.map((b) => (
-                      <button key={b.id} onClick={() => { setShowBrandMenu(false); if (b.id !== brandId) navigate(`/brands/${b.id}/dashboard`); }}
+                      <button key={b.id} onClick={() => { setShowBrandMenu(false); if (b.id !== brandId) openBrand(navigate, b.id); }}
                         style={{ width: '100%', textAlign: 'left', padding: '8px 10px', borderRadius: 8, border: 'none', cursor: 'pointer', fontSize: 13, fontWeight: b.id === brandId ? 700 : 500, color: b.id === brandId ? '#0748EE' : 'var(--text-heading)', background: b.id === brandId ? '#EFF6FF' : 'transparent' }}>
                         {b.name}
                       </button>

@@ -278,6 +278,17 @@ export function TallyData({ base = '/api/tally', brandMode = false }) {
     } catch (e) { toast.error(e.response?.data?.error || 'Failed to update the link'); }
   };
 
+  // Admin page: link every Tally company to the brand with the same name.
+  const matchBrands = async () => {
+    try {
+      const { data } = await api.post('/api/tally/auto-link');
+      const n = data.linked.length, m = data.unmatched.length;
+      toast.success(n ? `Linked ${n}: ${data.linked.map((l) => `${l.company} → ${l.brand}`).join(', ')}` : 'Nothing new to link');
+      if (m) toast.message(`${m} not matched (no brand with the same name): ${data.unmatched.map((u) => u.company).join(', ')}`);
+      refresh();
+    } catch (e) { toast.error(e.response?.data?.error || 'Failed to match brands'); }
+  };
+
   const connectors = overview?.connectors || [];
   const companies = overview?.companies || [];
   const unlinked = overview?.unlinked || [];
@@ -293,9 +304,16 @@ export function TallyData({ base = '/api/tally', brandMode = false }) {
             </h1>
             <p style={{ fontSize: 14, color: MUTED, marginTop: 4, marginBottom: 18 }}>Books synced from Tally by the Colonel Tally Connector every 15 minutes.</p>
           </div>
-          <button type="button" onClick={refresh} style={{ ...inputStyle, display: 'inline-flex', alignItems: 'center', gap: 7, cursor: 'pointer', fontWeight: 700 }}>
-            <RefreshCw size={14} /> Refresh
-          </button>
+          <div style={{ display: 'flex', gap: 8 }}>
+            {!brandMode && (
+              <button type="button" onClick={matchBrands} data-testid="tally-match-brands" style={{ ...inputStyle, cursor: 'pointer', fontWeight: 700, color: V, borderColor: V }}>
+                Match brands by name
+              </button>
+            )}
+            <button type="button" onClick={refresh} style={{ ...inputStyle, display: 'inline-flex', alignItems: 'center', gap: 7, cursor: 'pointer', fontWeight: 700 }}>
+              <RefreshCw size={14} /> Refresh
+            </button>
+          </div>
         </div>
 
         {overview && !connectors.length && !companies.length && !unlinked.length && <SetupSteps />}

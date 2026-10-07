@@ -18,6 +18,7 @@ const crypto = require('crypto');
 const bcrypt = require('bcryptjs');
 const { masterSequelize } = require('../config/database');
 const { User } = require('../models/master');
+const { autoLinkCompanies } = require('../services/tallyBrandMatch');
 
 const q = (sql, bind) => masterSequelize.query(sql, { bind, type: masterSequelize.QueryTypes.SELECT });
 const exec = (sql, bind) => masterSequelize.query(sql, { bind });
@@ -139,6 +140,8 @@ const syncStart = async (req, res, next) => {
        RETURNING id, last_voucher_alter_id, last_alt_vch_id, last_alt_mst_id, last_reconcile_at, last_sync_status, data_version`,
       [key, req.connector.id, name, date(c.books_from), JSON.stringify(c.raw || {}), obj(c.profile) ? JSON.stringify(c.profile) : null]
     );
+    // Same name as a brand → show it on that brand (no-op once linked).
+    await autoLinkCompanies(company.id).catch((e) => console.error('[TALLY] auto-link', e.message));
     const dataVersion = Math.min(bigint(c.data_version) || 1, 1000);
 
     let watermark = Number(company.last_voucher_alter_id) || 0;
@@ -509,6 +512,14 @@ const getBrandOverview = async (req, res, next) => {
   } catch (e) { next(e); }
 };
 
+/* POST /tally/auto-link — admin: link every unlinked company to the brand with the same name. */
+const autoLinkAll = async (req, res, next) => {
+  try {
+    await exec(`UPDATE tally_companies SET auto_link_off = false WHERE brand_id IS NULL`);
+    res.json(await autoLinkCompanies());
+  } catch (e) { next(e); }
+};
+
 /* Middleware: :id must be a Tally company linked to :brandId. */
 const brandCompany = async (req, res, next) => {
   try {
@@ -525,7 +536,7 @@ const linkCompany = async (req, res, next) => {
     const [brand] = await q(`SELECT 1 AS ok FROM brands WHERE id = $1`, [req.params.brandId]);
     if (!brand) return bad(res, 'Brand not found', 404);
     const [, r] = await exec(
-      `UPDATE tally_companies SET brand_id = $2, updated_at = now() WHERE id = $1 AND brand_id IS NULL`,
+      `UPDATE tally_companies SET brand_id = $2, auto_link_off = false, updated_at = now() WHERE id = $1 AND brand_id IS NULL`,
       [req.params.id, req.params.brandId]
     );
     if (!r || !r.rowCount) return bad(res, 'Tally company not found, or already linked to a brand', 404);
@@ -536,7 +547,7 @@ const linkCompany = async (req, res, next) => {
 /* DELETE /brands/:brandId/tally/companies/:id/link — admin: take it off this brand (data is kept). */
 const unlinkCompany = async (req, res, next) => {
   try {
-    await exec(`UPDATE tally_companies SET brand_id = NULL, updated_at = now() WHERE id = $1 AND brand_id = $2`, [req.params.id, req.params.brandId]);
+    await exec(`UPDATE tally_companies SET brand_id = NULL, auto_link_off = true, updated_at = now() WHERE id = $1 AND brand_id = $2`, [req.params.id, req.params.brandId]);
     res.json({ ok: true });
   } catch (e) { next(e); }
 };
@@ -545,5 +556,5 @@ module.exports = {
   connectorLogin, connectorAuth, heartbeat,
   syncStart, syncLedgers, syncMasters, syncBills, syncVouchers, syncFinish,
   getOverview, getLedgers, getVouchers, getRuns, revokeConnector,
-  getBrandOverview, brandCompany, linkCompany, unlinkCompany,
+  getBrandOverview, brandCompany, linkCompany, unlinkCompany, autoLinkAll,
 };
