@@ -21,20 +21,28 @@ TDL, so the connector only needs Tally's host and port.
 3. **Firewall:** port 9002 must be allowed only if the connector runs on a *different*
    PC than Tally (same office LAN). Nothing needs opening on the internet or on AWS,
    because the connector only makes outbound HTTPS calls to agent.accountant.
-4. Run `ColonelTallyConnector.exe`. On first run it asks for:
-   - agent.accountant URL (default `https://agent.accountant`)
-   - an **admin** email + password (exchanged for a connector token; the password is not stored)
-   - Tally host (`localhost`, or the Tally PC's IP from Help → About → Network Adapters) and port (`9002`)
-   - which companies to sync (Enter = all open companies)
-5. Leave the window open. It syncs now and every 15 minutes. After every sync it shows a
-   status box (agent.accountant ✔/✘, Tally ✔/✘, one line per company), and the window
-   title says Connected / NOT connected.
+4. Double-click `ColonelTallyConnector.exe`. The app window opens. In it:
+   - **Tally:** enter the host (`localhost`, or the IP of the PC/server Tally runs on) and
+     port (`9002`), then *Test and save*. The open companies appear below.
+   - **agent.accountant:** log in with an **admin** email + password (exchanged for a
+     connector token; the password is not stored).
+   - **Companies to sync:** untick any company you don't want (default = all open companies).
+5. It syncs now and every 15 minutes (*Sync now* forces one). The window shows
+   agent.accountant / Tally status, one line per company, and the live log.
+   **Closing the window does not stop syncing**; start the exe again to reopen the window,
+   and use *Quit connector* in the window to stop it.
+
+The app window is a browser in app mode (Edge, else Chrome) talking to the connector on
+`127.0.0.1:47615` (this PC only). `Start-Connector.bat` runs the same app but keeps a
+console open with the log, which is useful when something fails at startup.
 
 ## Commands
 
 ```
-ColonelTallyConnector.exe            first run: setup, then keep syncing
-ColonelTallyConnector.exe setup      log in again / change host, port, companies
+ColonelTallyConnector.exe            the desktop app (window)
+ColonelTallyConnector.exe app        same; --foreground keeps the console, --no-window skips the window
+ColonelTallyConnector.exe run        console only: sync now and every N minutes (after setup)
+ColonelTallyConnector.exe setup      console: log in again / change host, port, companies
 ColonelTallyConnector.exe test       check the Tally AND agent.accountant connections
 ColonelTallyConnector.exe dry-run    read everything from Tally, run checks, save a report (sends nothing)
 ColonelTallyConnector.exe once       one sync, then exit
@@ -72,6 +80,7 @@ npm install
 npm run mock-tally          # fake Tally on :9002; type add | edit | del in its terminal
 node src/index.js setup     # point at http://localhost:8001, host localhost, port 9002
 node src/index.js once --debug
-npm test                    # parser unit tests
+node src/index.js app       # the desktop app window (src/app.js + src/ui.js)
+npm test                    # parser + app-window unit tests
 npm run build:exe           # → dist/ColonelTallyConnector.exe (Windows x64)
 ```

@@ -10,6 +10,7 @@ const path = require('path');
 
 let logDir = null;
 let debugOn = false;
+const listeners = [];   // the app window shows the same lines the console does
 
 // Local time: these logs are read by the person sitting at the Tally PC.
 const pad = (n, w = 2) => String(n).padStart(w, '0');
@@ -25,7 +26,10 @@ function init(home, { debug = false } = {}) {
 
 function write(level, msg) {
   const line = `${stamp()} [${level}] ${msg}`;
-  if (level !== 'DBG' || debugOn) (level === 'ERR' ? console.error : console.log)(line);
+  if (level !== 'DBG' || debugOn) {
+    (level === 'ERR' ? console.error : console.log)(line);
+    for (const fn of listeners) { try { fn(line, level); } catch (_) { /* a listener must never break logging */ } }
+  }
   if (!logDir) return;
   try { fs.appendFileSync(path.join(logDir, `connector-${day()}.log`), line + '\n'); } catch (_) { /* disk full etc. */ }
 }
@@ -53,6 +57,8 @@ function pruneOld() {
 
 module.exports = {
   init, raw,
+  onLine: (fn) => { listeners.push(fn); },
+  get dir() { return logDir; },
   info: (m) => write('INF', m),
   warn: (m) => write('WRN', m),
   error: (m) => write('ERR', m),

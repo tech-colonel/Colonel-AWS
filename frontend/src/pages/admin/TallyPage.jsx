@@ -81,7 +81,7 @@ function useDebounced(value, ms = 300) {
   return v;
 }
 
-function VouchersTab({ companyId, refreshKey }) {
+function VouchersTab({ companyId, refreshKey, base }) {
   const [search, setSearch] = useState('');
   const [type, setType] = useState('');
   const [offset, setOffset] = useState(0);
@@ -92,11 +92,11 @@ function VouchersTab({ companyId, refreshKey }) {
   useEffect(() => { setOffset(0); }, [q, type, companyId]);
   useEffect(() => {
     let live = true;
-    api.get(`/api/tally/companies/${companyId}/vouchers`, { params: { search: q, type, limit: PAGE, offset } })
+    api.get(`${base}/companies/${companyId}/vouchers`, { params: { search: q, type, limit: PAGE, offset } })
       .then((r) => { if (live) setData(r.data); })
       .catch(() => { if (live) toast.error('Failed to load vouchers'); });
     return () => { live = false; };
-  }, [companyId, q, type, offset, refreshKey]);
+  }, [base, companyId, q, type, offset, refreshKey]);
 
   return (
     <>
@@ -154,7 +154,7 @@ function VouchersTab({ companyId, refreshKey }) {
   );
 }
 
-function LedgersTab({ companyId, refreshKey }) {
+function LedgersTab({ companyId, refreshKey, base }) {
   const [search, setSearch] = useState('');
   const [offset, setOffset] = useState(0);
   const [data, setData] = useState(null);
@@ -163,11 +163,11 @@ function LedgersTab({ companyId, refreshKey }) {
   useEffect(() => { setOffset(0); }, [q, companyId]);
   useEffect(() => {
     let live = true;
-    api.get(`/api/tally/companies/${companyId}/ledgers`, { params: { search: q, limit: PAGE, offset } })
+    api.get(`${base}/companies/${companyId}/ledgers`, { params: { search: q, limit: PAGE, offset } })
       .then((r) => { if (live) setData(r.data); })
       .catch(() => { if (live) toast.error('Failed to load ledgers'); });
     return () => { live = false; };
-  }, [companyId, q, offset, refreshKey]);
+  }, [base, companyId, q, offset, refreshKey]);
 
   return (
     <>
@@ -201,15 +201,15 @@ function LedgersTab({ companyId, refreshKey }) {
   );
 }
 
-function RunsTab({ companyId, refreshKey }) {
+function RunsTab({ companyId, refreshKey, base }) {
   const [rows, setRows] = useState(null);
   useEffect(() => {
     let live = true;
-    api.get(`/api/tally/companies/${companyId}/runs`)
+    api.get(`${base}/companies/${companyId}/runs`)
       .then((r) => { if (live) setRows(r.data); })
       .catch(() => { if (live) toast.error('Failed to load sync history'); });
     return () => { live = false; };
-  }, [companyId, refreshKey]);
+  }, [base, companyId, refreshKey]);
   const secs = (r) => (r.finished_at ? `${Math.max(0, Math.round((new Date(r.finished_at) - new Date(r.started_at)) / 1000))}s` : '—');
   const statusPill = (s) => (s === 'ok' ? <Pill c="#047857" bg="#ECFDF5">OK</Pill>
     : s === 'running' ? <Pill c={V} bg="#F1EEFC">Running</Pill> : <Pill c="#B91C1C" bg="#FEF2F2">Error</Pill>);
@@ -240,20 +240,23 @@ function RunsTab({ companyId, refreshKey }) {
   );
 }
 
-export default function TallyPage() {
+/* The Tally data view. Used as the admin page (every company) and, with
+   `brandMode` and a brand-scoped `base`, as the Tally Connector agent, which
+   shows only the companies an admin has linked to that brand. */
+export function TallyData({ base = '/api/tally', brandMode = false }) {
   const [overview, setOverview] = useState(null);
   const [companyId, setCompanyId] = useState(null);
   const [tab, setTab] = useState('vouchers');
   const [refreshKey, setRefreshKey] = useState(0);
 
   const load = useCallback(() => {
-    api.get('/api/tally/overview')
+    api.get(`${base}/overview`)
       .then((r) => {
         setOverview(r.data);
         setCompanyId((cur) => (cur && r.data.companies.some((c) => c.id === cur) ? cur : r.data.companies[0]?.id || null));
       })
       .catch(() => toast.error('Failed to load Tally data'));
-  }, []);
+  }, [base]);
 
   useEffect(() => { load(); const t = setInterval(load, 60000); return () => clearInterval(t); }, [load]);
 
@@ -265,17 +268,28 @@ export default function TallyPage() {
     catch { toast.error('Failed to disconnect'); }
   };
 
+  // Brand side: an admin chooses which Tally company this brand shows.
+  const setLink = async (c, on) => {
+    if (!on && !window.confirm(`Remove "${c.name}" from this brand? Its Tally data is kept and can be linked again.`)) return;
+    try {
+      await api[on ? 'put' : 'delete'](`${base}/companies/${c.id}/link`);
+      toast.success(on ? `${c.name} linked to this brand` : `${c.name} removed from this brand`);
+      refresh();
+    } catch (e) { toast.error(e.response?.data?.error || 'Failed to update the link'); }
+  };
+
   const connectors = overview?.connectors || [];
   const companies = overview?.companies || [];
+  const unlinked = overview?.unlinked || [];
+  const canLink = brandMode && !!overview?.can_link;
   const company = companies.find((c) => c.id === companyId);
 
   return (
-    <DashboardLayout sidebarItems={ADMIN_SIDEBAR}>
-      <div style={{ padding: '28px 28px 48px', maxWidth: 1320, margin: '0 auto' }}>
+      <div style={{ padding: brandMode ? '0 0 48px' : '28px 28px 48px', maxWidth: 1320, margin: '0 auto' }}>
         <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 16, flexWrap: 'wrap' }}>
           <div>
             <h1 style={{ fontFamily: 'Manrope, sans-serif', fontWeight: 800, fontSize: 28, color: INK, letterSpacing: '-0.02em', margin: 0, display: 'flex', alignItems: 'center', gap: 10 }}>
-              <Cable size={24} color={V} /> Tally
+              <Cable size={24} color={V} /> {brandMode ? 'Tally Connector' : 'Tally'}
             </h1>
             <p style={{ fontSize: 14, color: MUTED, marginTop: 4, marginBottom: 18 }}>Books synced from Tally by the Colonel Tally Connector every 15 minutes.</p>
           </div>
@@ -284,7 +298,31 @@ export default function TallyPage() {
           </button>
         </div>
 
-        {overview && !connectors.length && !companies.length && <SetupSteps />}
+        {overview && !connectors.length && !companies.length && !unlinked.length && <SetupSteps />}
+
+        {/* Brand side: Tally companies that have synced but belong to no brand yet (admins only) */}
+        {canLink && unlinked.length > 0 && (
+          <div className="glass-card" style={{ padding: '16px 18px', marginBottom: 18 }}>
+            <div style={{ fontWeight: 800, fontSize: 14, color: INK }}>Tally companies not linked to a brand</div>
+            <div style={{ fontSize: 12.5, color: MUTED, margin: '2px 0 10px' }}>Link one to show its books on this brand. Only admins see this list.</div>
+            {unlinked.map((c) => (
+              <div key={c.id} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '8px 0', borderTop: '1px solid #F3F5FA', flexWrap: 'wrap' }}>
+                <div style={{ flex: 1, minWidth: 200 }}>
+                  <div style={{ fontWeight: 700, fontSize: 13.5, color: INK }}>{c.name}</div>
+                  <div style={{ fontSize: 12, color: FAINT }}>Books from {fmtDate(c.books_from)} · last sync {ago(c.last_sync_at)}</div>
+                </div>
+                <button type="button" onClick={() => setLink(c, true)} data-testid="tally-link-company"
+                  style={{ ...inputStyle, cursor: 'pointer', fontWeight: 700, color: V, borderColor: V }}>Link to this brand</button>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {brandMode && overview && !companies.length && !(canLink && unlinked.length) && (connectors.length > 0 || !canLink) && (
+          <div className="glass-card" style={{ padding: '22px 24px', color: MUTED, fontSize: 13.5, marginBottom: 18 }}>
+            No Tally company is linked to this brand yet. {canLink ? 'It appears here to link after its first sync.' : 'Ask an admin to link it.'}
+          </div>
+        )}
 
         {/* Connectors */}
         {connectors.length > 0 && (
@@ -300,8 +338,10 @@ export default function TallyPage() {
                       <div style={{ fontSize: 12, color: FAINT }}>Tally at {c.tally_host || '?'}:{c.tally_port || '?'} · seen {ago(c.last_seen_at)}</div>
                     </div>
                     <Pill c={st.c} bg={st.bg}>{st.label}</Pill>
-                    <button type="button" title="Disconnect this connector" onClick={() => revoke(c)}
-                      style={{ border: 'none', background: 'transparent', cursor: 'pointer', color: FAINT, padding: 4, display: 'inline-flex' }}><Trash2 size={15} /></button>
+                    {!brandMode && (
+                      <button type="button" title="Disconnect this connector" onClick={() => revoke(c)}
+                        style={{ border: 'none', background: 'transparent', cursor: 'pointer', color: FAINT, padding: 4, display: 'inline-flex' }}><Trash2 size={15} /></button>
+                    )}
                   </div>
                   {c.last_error && c.last_status !== 'ok' && (
                     <div style={{ marginTop: 8, fontSize: 12, color: '#B45309', display: 'flex', gap: 6 }}><CircleAlert size={14} style={{ flexShrink: 0, marginTop: 1 }} />{c.last_error}</div>
@@ -360,19 +400,34 @@ export default function TallyPage() {
                       color: tab === k ? V : MUTED, borderBottom: `2px solid ${tab === k ? V : 'transparent'}`, marginBottom: -1 }}>{label}</button>
                 ))}
               </div>
-              {tab === 'vouchers' && <VouchersTab companyId={company.id} refreshKey={refreshKey} />}
-              {tab === 'ledgers' && <LedgersTab companyId={company.id} refreshKey={refreshKey} />}
-              {tab === 'runs' && <RunsTab companyId={company.id} refreshKey={refreshKey} />}
+              {tab === 'vouchers' && <VouchersTab base={base} companyId={company.id} refreshKey={refreshKey} />}
+              {tab === 'ledgers' && <LedgersTab base={base} companyId={company.id} refreshKey={refreshKey} />}
+              {tab === 'runs' && <RunsTab base={base} companyId={company.id} refreshKey={refreshKey} />}
             </div>
+            {canLink && (
+              <div style={{ marginTop: 10, textAlign: 'right' }}>
+                <button type="button" onClick={() => setLink(company, false)}
+                  style={{ border: 'none', background: 'transparent', cursor: 'pointer', color: FAINT, fontSize: 12.5, textDecoration: 'underline' }}>
+                  Remove {company.name} from this brand
+                </button>
+              </div>
+            )}
           </>
         )}
 
-        {overview && connectors.length > 0 && !companies.length && (
+        {!brandMode && overview && connectors.length > 0 && !companies.length && (
           <div className="glass-card" style={{ padding: '22px 24px', color: MUTED, fontSize: 13.5 }}>
             The connector is running but no company has synced yet. Make sure the company is open in Tally.
           </div>
         )}
       </div>
+  );
+}
+
+export default function TallyPage() {
+  return (
+    <DashboardLayout sidebarItems={ADMIN_SIDEBAR}>
+      <TallyData />
     </DashboardLayout>
   );
 }

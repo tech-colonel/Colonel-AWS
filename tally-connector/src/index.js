@@ -2,9 +2,10 @@
 /**
  * Colonel Tally Connector — keeps agent.accountant in sync with Tally.
  *
- *   colonel-tally-connector            first run: setup, then keep syncing
- *   colonel-tally-connector setup      log in, set Tally host/port, pick companies
- *   colonel-tally-connector run        sync now and every N minutes (default 15)
+ *   colonel-tally-connector            the desktop app: a window to log in, connect Tally and sync
+ *   colonel-tally-connector app        same (add --no-window to run it without opening the window)
+ *   colonel-tally-connector setup      console: log in, set Tally host/port, pick companies
+ *   colonel-tally-connector run        console: sync now and every N minutes (default 15)
  *   colonel-tally-connector once       a single sync, then exit
  *   colonel-tally-connector test       check the Tally AND agent.accountant connections
  *   colonel-tally-connector dry-run    read everything from Tally, run checks, save a report — sends nothing
@@ -54,6 +55,7 @@ const { TallyClient } = require('./tally');
 const { CloudClient } = require('./cloud');
 const { runCycle } = require('./sync');
 const { dryRun } = require('./dryrun');
+const { runApp } = require('./app');
 const { version } = require('../package.json');
 
 const args = process.argv.slice(2);
@@ -243,11 +245,21 @@ async function main() {
     case 'dry-run': return dryRunCmd();
     case 'status': return status();
     case 'logout': return logout();
+    case 'app':
     case 'default':
-      if (!config.load().token) await setup();
-      return run({ loop: true });
+      // The double-clicked .exe hands over to a hidden copy of itself, so no console
+      // window sits beside the app window. --foreground keeps it in this console.
+      // (PKG_EXECPATH='' makes the copy start the app, not act as a bare node.)
+      if (process.pkg && process.platform === 'win32' && !flag('foreground') && !process.env.COLONEL_CONNECTOR_CHILD) {
+        require('child_process').spawn(process.execPath, ['app', ...args.filter((a) => a.startsWith('--'))], {
+          detached: true, windowsHide: true, stdio: 'ignore',
+          env: { ...process.env, COLONEL_CONNECTOR_CHILD: '1', PKG_EXECPATH: '' },
+        }).unref();
+        return 0;
+      }
+      return runApp({ debug: flag('debug'), open: !flag('no-window') });
     default:
-      console.log(`Unknown command "${command}". Use: setup | run | once | test | dry-run | status | logout`);
+      console.log(`Unknown command "${command}". Use: app | setup | run | once | test | dry-run | status | logout`);
       return 1;
   }
 }
@@ -255,7 +267,10 @@ async function main() {
 main().then((code) => {
   // Double-clicked .exe: keep the window open so the user can read the error.
   if (code && command === 'default') pauseBeforeExit();
-  process.exit(code || 0);
+  // Set the code and let Node exit by itself: process.exit() straight after a
+  // fetch trips a libuv assertion on Windows (async.c, UV_HANDLE_CLOSING) and
+  // turns a successful run into a crash exit code.
+  process.exitCode = code || 0;
 }).catch((e) => {
   try { log.error(e.stack || e.message); } catch (_) { /* logger not initialised */ }
   crashOut(e);

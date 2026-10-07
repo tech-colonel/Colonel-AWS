@@ -34,6 +34,9 @@ const num = (v) => { const n = Number(v); return Number.isFinite(n) ? n : null; 
 const bigint = (v) => { const n = parseInt(v, 10); return Number.isFinite(n) && n >= 0 ? n : null; };
 const date = (v) => (typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : null);
 const bool = (v) => v === true || v === 'true' || v === 'Yes';
+// A JSON detail blob from the connector: an object, and not an unbounded one.
+const obj = (v) => (v && typeof v === 'object' && !Array.isArray(v) && JSON.stringify(v).length <= 200000 ? v : null);
+const MASTER_KINDS = ['group', 'voucher_type', 'stock_group', 'stock_item', 'godown', 'unit', 'currency', 'cost_centre'];
 
 const dedupeByGuid = (rows) => {
   const m = new Map();
@@ -128,20 +131,24 @@ const syncStart = async (req, res, next) => {
     const altMst = bigint(c.alt_mst_id);
 
     const [company] = await q(
-      `INSERT INTO tally_companies (company_key, connector_id, name, books_from, raw)
-       VALUES ($1, $2, $3, $4, $5::jsonb)
+      `INSERT INTO tally_companies (company_key, connector_id, name, books_from, raw, profile)
+       VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb)
        ON CONFLICT (company_key) DO UPDATE SET connector_id = EXCLUDED.connector_id, name = EXCLUDED.name,
               books_from = COALESCE(EXCLUDED.books_from, tally_companies.books_from),
-              raw = EXCLUDED.raw, updated_at = now()
-       RETURNING id, last_voucher_alter_id, last_alt_vch_id, last_alt_mst_id, last_reconcile_at, last_sync_status`,
-      [key, req.connector.id, name, date(c.books_from), JSON.stringify(c.raw || {})]
+              raw = EXCLUDED.raw, profile = COALESCE(EXCLUDED.profile, tally_companies.profile), updated_at = now()
+       RETURNING id, last_voucher_alter_id, last_alt_vch_id, last_alt_mst_id, last_reconcile_at, last_sync_status, data_version`,
+      [key, req.connector.id, name, date(c.books_from), JSON.stringify(c.raw || {}), obj(c.profile) ? JSON.stringify(c.profile) : null]
     );
+    const dataVersion = Math.min(bigint(c.data_version) || 1, 1000);
 
     let watermark = Number(company.last_voucher_alter_id) || 0;
     // Tally's AlterID counter went BACKWARDS → the company was restored/rebuilt
     // on the PC. Our watermark is meaningless now: start over and reconcile.
     let reset = false;
     if (altVch !== null && watermark > altVch) { watermark = 0; reset = true; }
+    // A newer connector sends more per record than what is stored: take every
+    // voucher again so the older rows get the new detail too.
+    if (dataVersion > Number(company.data_version)) { watermark = 0; reset = true; }
 
     const reconcile = reset || !company.last_reconcile_at ||
       (Date.now() - new Date(company.last_reconcile_at).getTime() > RECONCILE_EVERY_MS);
@@ -165,7 +172,7 @@ const syncStart = async (req, res, next) => {
     const [run] = await q(
       `INSERT INTO tally_sync_runs (company_id, connector_id, status, counts)
        VALUES ($1, $2, 'running', $3::jsonb) RETURNING id`,
-      [company.id, req.connector.id, JSON.stringify({ ledgers: 0, vouchers: 0, from_alter_id: watermark, alt_vch_id: altVch, alt_mst_id: altMst })]
+      [company.id, req.connector.id, JSON.stringify({ ledgers: 0, vouchers: 0, from_alter_id: watermark, alt_vch_id: altVch, alt_mst_id: altMst, data_version: dataVersion })]
     );
     res.json({ company_id: company.id, run_id: run.id, last_voucher_alter_id: watermark, reconcile, unchanged: false });
   } catch (e) { next(e); }
@@ -180,17 +187,18 @@ const syncLedgers = async (req, res, next) => {
     const rows = dedupeByGuid(input.map((l) => ({
       guid: str(l.guid, 200), name: str(l.name, 500), parent: str(l.parent, 500),
       opening_balance: num(l.opening_balance), closing_balance: num(l.closing_balance),
-      gstin: str(l.gstin, 20), alter_id: bigint(l.alter_id),
+      gstin: str(l.gstin, 20), alter_id: bigint(l.alter_id), details: obj(l.details),
     })));
     if (rows.length) {
       await exec(
-        `INSERT INTO tally_ledgers (company_id, guid, name, parent, opening_balance, closing_balance, gstin, alter_id, sync_run_id, synced_at)
-         SELECT $1, x.guid, x.name, x.parent, x.opening_balance, x.closing_balance, x.gstin, x.alter_id, $3, now()
+        `INSERT INTO tally_ledgers (company_id, guid, name, parent, opening_balance, closing_balance, gstin, alter_id, details, sync_run_id, synced_at)
+         SELECT $1, x.guid, x.name, x.parent, x.opening_balance, x.closing_balance, x.gstin, x.alter_id, x.details, $3, now()
            FROM jsonb_to_recordset($2::jsonb) AS x(guid text, name text, parent text, opening_balance numeric,
-                closing_balance numeric, gstin text, alter_id bigint)
+                closing_balance numeric, gstin text, alter_id bigint, details jsonb)
          ON CONFLICT (company_id, guid) DO UPDATE SET name = EXCLUDED.name, parent = EXCLUDED.parent,
                 opening_balance = EXCLUDED.opening_balance, closing_balance = EXCLUDED.closing_balance,
-                gstin = EXCLUDED.gstin, alter_id = EXCLUDED.alter_id, sync_run_id = EXCLUDED.sync_run_id, synced_at = now()`,
+                gstin = EXCLUDED.gstin, alter_id = EXCLUDED.alter_id, details = EXCLUDED.details,
+                sync_run_id = EXCLUDED.sync_run_id, synced_at = now()`,
         [run.company_id, JSON.stringify(rows), run.id]
       );
     }
@@ -216,21 +224,22 @@ const syncVouchers = async (req, res, next) => {
       ledger_entries: Array.isArray(v.ledger_entries)
         ? v.ledger_entries.slice(0, 500).map((e) => ({ ledger: str(e.ledger, 500), amount: num(e.amount) }))
         : [],
+      details: obj(v.details),
     })));
     if (rows.length) {
       await exec(
         `INSERT INTO tally_vouchers (company_id, guid, voucher_date, voucher_type, voucher_number, party_name, amount,
-                                     narration, is_cancelled, is_optional, alter_id, ledger_entries, synced_at)
+                                     narration, is_cancelled, is_optional, alter_id, ledger_entries, details, synced_at)
          SELECT $1, x.guid, x.voucher_date, x.voucher_type, x.voucher_number, x.party_name, x.amount,
-                x.narration, x.is_cancelled, x.is_optional, x.alter_id, x.ledger_entries, now()
+                x.narration, x.is_cancelled, x.is_optional, x.alter_id, x.ledger_entries, x.details, now()
            FROM jsonb_to_recordset($2::jsonb) AS x(guid text, voucher_date date, voucher_type text, voucher_number text,
                 party_name text, amount numeric, narration text, is_cancelled boolean, is_optional boolean,
-                alter_id bigint, ledger_entries jsonb)
+                alter_id bigint, ledger_entries jsonb, details jsonb)
          ON CONFLICT (company_id, guid) DO UPDATE SET voucher_date = EXCLUDED.voucher_date,
                 voucher_type = EXCLUDED.voucher_type, voucher_number = EXCLUDED.voucher_number,
                 party_name = EXCLUDED.party_name, amount = EXCLUDED.amount, narration = EXCLUDED.narration,
                 is_cancelled = EXCLUDED.is_cancelled, is_optional = EXCLUDED.is_optional,
-                alter_id = EXCLUDED.alter_id, ledger_entries = EXCLUDED.ledger_entries, synced_at = now()`,
+                alter_id = EXCLUDED.alter_id, ledger_entries = EXCLUDED.ledger_entries, details = EXCLUDED.details, synced_at = now()`,
         [run.company_id, JSON.stringify(rows)]
       );
     }
@@ -242,12 +251,60 @@ const syncVouchers = async (req, res, next) => {
   } catch (e) { next(e); }
 };
 
+/* POST /tally/connector/sync/masters  { run_id, kind, rows: [{guid, name, parent, data}] } */
+const syncMasters = async (req, res, next) => {
+  try {
+    const run = await loadRun(req, res); if (!run) return;
+    const kind = String(req.body.kind || '');
+    if (!MASTER_KINDS.includes(kind)) return bad(res, `Unknown master kind "${kind}"`);
+    const input = Array.isArray(req.body.rows) ? req.body.rows : [];
+    if (input.length > MAX_CHUNK) return bad(res, `At most ${MAX_CHUNK} rows per request`);
+    const rows = dedupeByGuid(input.map((m) => ({
+      guid: str(m.guid, 300), name: str(m.name, 500), parent: str(m.parent, 500), data: obj(m.data) || {},
+    })));
+    if (rows.length) {
+      await exec(
+        `INSERT INTO tally_masters (company_id, kind, guid, name, parent, data, sync_run_id, synced_at)
+         SELECT $1, $2, x.guid, x.name, x.parent, x.data, $4, now()
+           FROM jsonb_to_recordset($3::jsonb) AS x(guid text, name text, parent text, data jsonb)
+         ON CONFLICT (company_id, kind, guid) DO UPDATE SET name = EXCLUDED.name, parent = EXCLUDED.parent,
+                data = EXCLUDED.data, sync_run_id = EXCLUDED.sync_run_id, synced_at = now()`,
+        [run.company_id, kind, JSON.stringify(rows), run.id]
+      );
+    }
+    res.json({ ok: true, received: rows.length });
+  } catch (e) { next(e); }
+};
+
+/* POST /tally/connector/sync/bills  { run_id, bills: [{party, name, bill_date, credit_period, closing, is_advance}] } */
+const syncBills = async (req, res, next) => {
+  try {
+    const run = await loadRun(req, res); if (!run) return;
+    const input = Array.isArray(req.body.bills) ? req.body.bills : [];
+    if (input.length > MAX_CHUNK) return bad(res, `At most ${MAX_CHUNK} bills per request`);
+    const rows = input.map((b) => ({
+      party: str(b.party, 500), name: str(b.name, 300), bill_date: date(b.bill_date),
+      credit_period: str(b.credit_period, 100), closing: num(b.closing), is_advance: bool(b.is_advance),
+    })).filter((b) => b.party && b.closing !== null);
+    if (rows.length) {
+      await exec(
+        `INSERT INTO tally_bills (company_id, party, name, bill_date, credit_period, closing, is_advance, sync_run_id)
+         SELECT $1, x.party, x.name, x.bill_date, x.credit_period, x.closing, x.is_advance, $3
+           FROM jsonb_to_recordset($2::jsonb) AS x(party text, name text, bill_date date, credit_period text,
+                closing numeric, is_advance boolean)`,
+        [run.company_id, JSON.stringify(rows), run.id]
+      );
+    }
+    res.json({ ok: true, received: rows.length });
+  } catch (e) { next(e); }
+};
+
 /* POST /tally/connector/sync/finish
      { run_id, status: 'ok'|'error', error?, max_voucher_alter_id?, ledgers_complete?, voucher_guids? } */
 const syncFinish = async (req, res, next) => {
   try {
     const run = await loadRun(req, res); if (!run) return;
-    const { status, error, ledgers_complete, voucher_guids } = req.body;
+    const { status, error, ledgers_complete, voucher_guids, masters_complete, bills_complete } = req.body;
 
     if (status !== 'ok') {
       const msg = str(error, 4000) || 'Connector reported an error';
@@ -272,6 +329,21 @@ const syncFinish = async (req, res, next) => {
         );
         removedLedgers = (r && r.rowCount) || 0;
       }
+      // Same rule per master kind: only a kind the connector read in full is pruned.
+      const kinds = (Array.isArray(masters_complete) ? masters_complete : []).filter((k) => MASTER_KINDS.includes(k));
+      if (kinds.length) {
+        await masterSequelize.query(
+          `DELETE FROM tally_masters WHERE company_id = $1 AND kind = ANY($2::text[]) AND sync_run_id IS DISTINCT FROM $3`,
+          { bind: [run.company_id, kinds, run.id], transaction: t }
+        );
+      }
+      // Bills are a snapshot: this run's set replaces the previous one.
+      if (bills_complete === true) {
+        await masterSequelize.query(`DELETE FROM tally_bills WHERE company_id = $1 AND sync_run_id IS DISTINCT FROM $2`,
+          { bind: [run.company_id, run.id], transaction: t });
+        await masterSequelize.query(`UPDATE tally_companies SET bills_run_id = $2 WHERE id = $1`,
+          { bind: [run.company_id, run.id], transaction: t });
+      }
       // Reconcile: the full list of voucher GUIDs still present in Tally.
       if (Array.isArray(voucher_guids)) {
         const [, r] = await masterSequelize.query(
@@ -285,10 +357,11 @@ const syncFinish = async (req, res, next) => {
             last_voucher_alter_id = CASE WHEN $2::bigint IS NOT NULL THEN $2::bigint
                                          ELSE last_voucher_alter_id END,
             last_alt_vch_id = $3, last_alt_mst_id = $4,
+            data_version = GREATEST(data_version, $6::int),
             last_reconcile_at = CASE WHEN $5 THEN now() ELSE last_reconcile_at END,
             last_sync_at = now(), last_sync_status = 'ok', last_error = NULL, updated_at = now()
           WHERE id = $1`,
-        { bind: [run.company_id, maxAlter, bigint(counts.alt_vch_id), bigint(counts.alt_mst_id), Array.isArray(voucher_guids)], transaction: t }
+        { bind: [run.company_id, maxAlter, bigint(counts.alt_vch_id), bigint(counts.alt_mst_id), Array.isArray(voucher_guids), bigint(counts.data_version) || 1], transaction: t }
       );
       await masterSequelize.query(
         `UPDATE tally_sync_runs SET status = 'ok', finished_at = now(),
@@ -345,7 +418,7 @@ const getLedgers = async (req, res, next) => {
   } catch (e) { next(e); }
 };
 
-/* GET /tally/companies/:id/vouchers?search=&type=&from=&to=&limit=&offset= */
+/* GET /tally/companies/:id/vouchers?search=&type=&from=&to=&ledger=&item=&limit=&offset= */
 const getVouchers = async (req, res, next) => {
   try {
     const { limit, offset, search } = page(req);
@@ -355,13 +428,18 @@ const getVouchers = async (req, res, next) => {
       AND ($2 = '' OR party_name ILIKE '%' || $2 || '%' OR voucher_number ILIKE '%' || $2 || '%' OR narration ILIKE '%' || $2 || '%')
       AND ($3 = '' OR voucher_type = $3)
       AND ($4::date IS NULL OR voucher_date >= $4::date)
-      AND ($5::date IS NULL OR voucher_date <= $5::date)`;
-    const bind = [req.params.id, search, type, from, to];
+      AND ($5::date IS NULL OR voucher_date <= $5::date)
+      AND ($6::jsonb IS NULL OR ledger_entries @> $6::jsonb)
+      AND ($7::jsonb IS NULL OR details->'inventory' @> $7::jsonb)`;
+    // Drill-downs: only vouchers that touch this ledger / carry this stock item.
+    const ledger = (req.query.ledger || '').trim(); const item = (req.query.item || '').trim();
+    const bind = [req.params.id, search, type, from, to,
+      ledger ? JSON.stringify([{ ledger }]) : null, item ? JSON.stringify([{ item }]) : null];
     const rows = await q(
       `SELECT id, guid, voucher_date, voucher_type, voucher_number, party_name, amount, narration,
               is_cancelled, is_optional, ledger_entries
          FROM tally_vouchers WHERE ${where}
-        ORDER BY voucher_date DESC NULLS LAST, alter_id DESC LIMIT $6 OFFSET $7`,
+        ORDER BY voucher_date DESC NULLS LAST, alter_id DESC LIMIT $8 OFFSET $9`,
       [...bind, limit, offset]
     );
     const [{ total }] = await q(`SELECT count(*)::int AS total FROM tally_vouchers WHERE ${where}`, bind);
@@ -395,8 +473,77 @@ const revokeConnector = async (req, res, next) => {
   } catch (e) { next(e); }
 };
 
+// ═════════════════════════════════════════════════════════════════════════════
+// Brand side — the "Tally Connector" agent
+// ═════════════════════════════════════════════════════════════════════════════
+// A brand sees only the Tally companies an admin has linked to it
+// (tally_companies.brand_id). The tables have no RLS, so every brand route goes
+// through brandCompany, which refuses a company that is not this brand's.
+
+/* GET /brands/:brandId/tally/overview — this brand's companies + their connectors.
+   Admins also get the companies not linked to any brand yet, so they can link one. */
+const getBrandOverview = async (req, res, next) => {
+  try {
+    const isAdmin = req.user.role === 'admin';
+    const companies = await q(
+      `SELECT co.id, co.name, co.books_from, co.brand_id, co.connector_id, co.last_sync_at, co.last_sync_status,
+              co.last_error, co.last_voucher_alter_id, co.created_at,
+              (SELECT count(*)::int FROM tally_ledgers l WHERE l.company_id = co.id) AS ledger_count,
+              (SELECT count(*)::int FROM tally_vouchers v WHERE v.company_id = co.id) AS voucher_count
+         FROM tally_companies co WHERE co.brand_id = $1 ORDER BY co.name`,
+      [req.params.brandId]
+    );
+    const connectors = await q(
+      `SELECT c.id, c.machine_name, c.connector_version, c.tally_host, c.tally_port, c.last_status, c.last_error,
+              c.last_seen_at, c.created_at, u.name AS user_name, u.email AS user_email
+         FROM tally_connectors c LEFT JOIN users u ON u.id = c.user_id
+        WHERE c.revoked_at IS NULL
+          AND c.id IN (SELECT connector_id FROM tally_companies WHERE brand_id = $1)
+        ORDER BY c.last_seen_at DESC NULLS LAST`,
+      [req.params.brandId]
+    );
+    const unlinked = isAdmin
+      ? await q(`SELECT id, name, books_from, last_sync_at FROM tally_companies WHERE brand_id IS NULL ORDER BY name`)
+      : [];
+    res.json({ connectors, companies, unlinked, can_link: isAdmin });
+  } catch (e) { next(e); }
+};
+
+/* Middleware: :id must be a Tally company linked to :brandId. */
+const brandCompany = async (req, res, next) => {
+  try {
+    const [c] = await q(`SELECT 1 AS ok FROM tally_companies WHERE id = $1 AND brand_id = $2`, [req.params.id, req.params.brandId]);
+    if (!c) return bad(res, 'Tally company not found for this brand', 404);
+    next();
+  } catch (e) { next(e); }
+};
+
+/* PUT /brands/:brandId/tally/companies/:id/link — admin: show this Tally company on this brand.
+   Only an unlinked company can be taken, so one brand can never pull another's books. */
+const linkCompany = async (req, res, next) => {
+  try {
+    const [brand] = await q(`SELECT 1 AS ok FROM brands WHERE id = $1`, [req.params.brandId]);
+    if (!brand) return bad(res, 'Brand not found', 404);
+    const [, r] = await exec(
+      `UPDATE tally_companies SET brand_id = $2, updated_at = now() WHERE id = $1 AND brand_id IS NULL`,
+      [req.params.id, req.params.brandId]
+    );
+    if (!r || !r.rowCount) return bad(res, 'Tally company not found, or already linked to a brand', 404);
+    res.json({ ok: true });
+  } catch (e) { next(e); }
+};
+
+/* DELETE /brands/:brandId/tally/companies/:id/link — admin: take it off this brand (data is kept). */
+const unlinkCompany = async (req, res, next) => {
+  try {
+    await exec(`UPDATE tally_companies SET brand_id = NULL, updated_at = now() WHERE id = $1 AND brand_id = $2`, [req.params.id, req.params.brandId]);
+    res.json({ ok: true });
+  } catch (e) { next(e); }
+};
+
 module.exports = {
   connectorLogin, connectorAuth, heartbeat,
-  syncStart, syncLedgers, syncVouchers, syncFinish,
+  syncStart, syncLedgers, syncMasters, syncBills, syncVouchers, syncFinish,
   getOverview, getLedgers, getVouchers, getRuns, revokeConnector,
+  getBrandOverview, brandCompany, linkCompany, unlinkCompany,
 };

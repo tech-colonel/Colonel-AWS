@@ -3,7 +3,7 @@
 > **Read this first** for anything about the Tally integration. It's the single status doc:
 > why it exists, how it works, what's done and verified, what's blocked, and what's next.
 > Branch: **`tally-connector`** (not merged to `main`, **not deployed to AWS**).
-> Last updated: 2026-09-30.
+> Last updated: 2026-10-06.
 
 ## 1. Purpose
 
@@ -96,15 +96,31 @@ Settings and logs: `%APPDATA%\ColonelTallyConnector\` (`config.json`, `logs\conn
 | Admin Tally page | ✅ | Headless-browser screenshots of all tabs, no console errors. |
 | Parser unit tests (dates, amounts incl. forex, UTF-16, invoice-mode lines) | ✅ | `cd tally-connector && npm test`, 6/6 pass. |
 | Windows `.exe` starts | ✅ | 1st build crashed ("V8 rejected the bytecode cache": cross-built on a Mac). Fixed with `--no-bytecode --public`. The 2nd build runs on Windows. |
-| **Against a real Tally** | ❌ **not yet** | Blocked, see section 6. |
+| **Against a real Tally** | ✅ 2026-10-06 | TallyPrime Edit Log on Webtel WAH (RemoteApp), host `160.187.250.98:9002`, one company: 1,936 ledgers, 4,946 vouchers. `dry-run`: no FAIL; `$AlterID` filter honoured; voucher count = GUID count. Only WARN: 9 **cancelled** vouchers have no lines/amount (expected). Full read takes 3–5 min; one 5,000-AlterID window returns a **107 MB** response. Counts not yet compared with Tally's Statistics / Trial Balance. |
+| **Desktop app** (`src/app.js`, `src/ui.js`) | ✅ 2026-10-06 | Window with login, Tally host/port, company picker, Sync now, live log. Driven end to end against real Tally + a stand-in for the cloud API: login, full sync, unchanged skip, logout, quit. Built `.exe` launches with no console; second launch reopens the window. |
+| **"Tally Connector" agent** (brand side) | ✅ local, 2026-10-06 | Agent seeded with `node seed-tally-connector.js "<Brand>"`; its page is the same Tally view (`TallyData` in `TallyPage.jsx`, rendered from `AgentWorkspace.jsx`), scoped to the brand by `/api/brands/:brandId/tally/*`. A brand sees only companies an **admin** links to it on that page (`tally_companies.brand_id`); admins + accountants can read. Verified in a browser against the real synced data (company, ledgers, vouchers with lines, sync history) and for isolation (another brand gets 404). |
+| **Real Tally → local backend → DB → UI** | ✅ local, 2026-10-06 | Desktop app logged in to `http://localhost:8001`, full sync stored 1,936 ledgers / 4,946 vouchers in 246 s; next cycle "up to date". |
+| **Full company data (connector v2)** | ✅ local, 2026-10-06 | The connector now also sends: company profile + GST registrations (`TaxUnit`), groups, voucher types, stock items/groups, godowns, units, currencies, cost centres (`tally_masters`), bill-wise outstanding (`tally_bills`, collection `Bills`, row tag `BILL`), ledger master details, and per-voucher detail Tally already returned but we ignored — item lines, GST rate/HSN, bill allocations, bank details, party GSTIN, place of supply (`tally_vouchers.details`). `DATA_VERSION` in `sync.js` makes the server re-take every voucher once after such a change. Real company: 162 groups, 54 voucher types, 647 items, 1,227 bills; full sync 313 s. |
+| **Tally Dashboard** (`frontend/src/pages/tally/`, `tallyReportsController.js`) | ✅ local, 2026-10-06 | Side-nav "Tally Dashboard" (admin: `/admin/tally-dashboard`, brand: `/brands/:id/tally-dashboard`). Tabs: Overview, P&L, Balance Sheet, Trial Balance, Receivables, Payables, Inventory, GST, Day Book, Masters, Company & Sync; every figure drills group → ledger → voucher → item in a side drawer. Statements are computed from stored voucher lines for any period. **Check:** balances rebuilt from vouchers equal Tally's closing on 1,935 of 1,936 ledgers (the other is Tally's own P&L A/c), and net profit comes to −₹49,66,344.89 vs Tally's −₹49,66,345.09. Closing stock is taken from the Stock-in-Hand ledgers and is only known as at today, so a single FY shows profit *before* stock adjustment. Bill ageing is counted to the last voucher date, not today. |
+| Dev-only Babel plugin | ⚠️ note | `@emergentbase/visual-edits` (dev server only) overflows the stack on a component that renders itself; the statement tree is therefore rendered from a flat list. Keep new components non-recursive. |
+| Narration line breaks | ✅ fixed | Tally sends `&#13;&#10;` as literal text; the connector now decodes numeric character references (251 narrations affected in the test company). |
+| Windows exit crash | ✅ fixed | `process.exit()` right after a fetch tripped a libuv assertion on Windows and returned a crash code after a successful run; now sets `process.exitCode`. |
 | Deployed to agent.accountant (AWS) | ❌ | Needs explicit human permission (CLAUDE.md golden rule 1). |
 
 Local dev leftovers (the Mac dev DB only): company "Demo Traders Pvt Ltd" and a connector
 named `local-test` in the `tally_*` tables.
 
-## 6. Current blocker (as of 2026-09-30)
+## 6. Current blocker (as of 2026-10-06)
 
-On the user's test PC, **Tally is a web RemoteApp**: there's no `tally.exe` locally, and the
+**Resolved: the server Tally is reachable** at `160.187.250.98:9002` (Webtel WAH's public
+address; `10.10.21.206` was its private one and is not routable from the PC). What blocks
+the goal now is section 7 step 3: **the backend is not deployed to agent.accountant**, so the
+app cannot log in there yet.
+
+⚠️ That port answers from the open internet with no password, so anyone who finds it can read
+(and import into) the company's books. Raise with Webtel: restrict 9002 to known IPs.
+
+History (2026-09-30): on the user's test PC, **Tally is a web RemoteApp**: there's no `tally.exe` locally, and the
 window is Remote Desktop showing Tally running on a **server**. So `localhost:9002` is
 refused, and `Diagnose.bat` reports "Tally is NOT running".
 
@@ -142,13 +158,17 @@ Instructions for the Windows-side Claude: `tally-connector/WINDOWS-TEST-HANDOFF.
    - `new-backend/src/db/tallyMigrate.js`
    - `new-backend/src/controllers/tallyController.js`
    - `new-backend/src/routes/tallyRoutes.js`
-   - a frontend build containing `TallyPage.jsx` / `adminNav.js` / `App.js`
+   - `new-backend/src/controllers/tallyReportsController.js`
+   - `new-backend/seed-tally-connector.js` (then run it once on the box for the brand)
+   - a frontend build containing `TallyPage.jsx` / `adminNav.js` / `App.js` /
+     `AgentWorkspace.jsx` / `BrandAgentsInventory.jsx` / `pages/tally/*`
 
    Then `pm2 restart` the backend (the tables self-create on boot). Then Phase 2 of the handoff
    doc: `setup` → `once` → check `/admin/tally`.
 4. **Make it client-ready:**
-   - run as a Windows service or at startup (currently a console window that must stay open);
-   - a tray icon or small GUI like Riko's;
+   - start with Windows (the app window exists now and keeps syncing when closed, but it
+     must be started by hand after a reboot);
+   - a tray icon;
    - a **code-signing certificate** (unsigned exes trigger SmartScreen/Defender);
    - auto-update.
 5. **Link Tally companies to brands** (`tally_companies.brand_id`), then decide whether

@@ -100,6 +100,45 @@ CREATE TABLE IF NOT EXISTS tally_sync_runs (
   error         TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_tally_sync_runs_company ON tally_sync_runs (company_id, started_at DESC);
+
+-- ── v2: everything else Tally knows about the company ──────────────────────
+-- profile/details are JSONB: Tally's shape varies by version and feature set.
+ALTER TABLE tally_companies ADD COLUMN IF NOT EXISTS profile       JSONB;
+ALTER TABLE tally_companies ADD COLUMN IF NOT EXISTS data_version  INT NOT NULL DEFAULT 1;
+ALTER TABLE tally_companies ADD COLUMN IF NOT EXISTS bills_run_id  BIGINT;
+ALTER TABLE tally_ledgers   ADD COLUMN IF NOT EXISTS details       JSONB;
+ALTER TABLE tally_vouchers  ADD COLUMN IF NOT EXISTS details       JSONB;
+CREATE INDEX IF NOT EXISTS idx_tally_vouchers_lines ON tally_vouchers USING GIN (ledger_entries jsonb_path_ops);
+
+-- Groups, voucher types, stock items/groups, godowns, units, currencies, cost centres.
+CREATE TABLE IF NOT EXISTS tally_masters (
+  id           BIGSERIAL PRIMARY KEY,
+  company_id   UUID NOT NULL,
+  kind         TEXT NOT NULL,
+  guid         TEXT NOT NULL,
+  name         TEXT,
+  parent       TEXT,
+  data         JSONB,
+  sync_run_id  BIGINT,
+  synced_at    TIMESTAMPTZ DEFAULT now(),
+  CONSTRAINT tally_masters_uq UNIQUE (company_id, kind, guid)
+);
+CREATE INDEX IF NOT EXISTS idx_tally_masters_kind ON tally_masters (company_id, kind, name);
+
+-- Outstanding bills. Replaced in full each sync; the set in force is the one
+-- from tally_companies.bills_run_id, so a half-finished sync is never shown.
+CREATE TABLE IF NOT EXISTS tally_bills (
+  id             BIGSERIAL PRIMARY KEY,
+  company_id     UUID NOT NULL,
+  party          TEXT NOT NULL,
+  name           TEXT,
+  bill_date      DATE,
+  credit_period  TEXT,
+  closing        NUMERIC(18,2),          -- negative = receivable (Dr), positive = payable (Cr)
+  is_advance     BOOLEAN DEFAULT false,
+  sync_run_id    BIGINT
+);
+CREATE INDEX IF NOT EXISTS idx_tally_bills_company ON tally_bills (company_id, sync_run_id, party);
 `;
 
 async function migrateTally() {

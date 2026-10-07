@@ -21,6 +21,7 @@ import PlansPage         from './pages/admin/PlansPage';
 import PlanEditor        from './pages/admin/PlanEditor';
 import IntegrationsPage  from './pages/admin/IntegrationsPage';
 import TallyPage         from './pages/admin/TallyPage';
+import { AdminTallyDashboardPage, BrandTallyDashboardPage } from './pages/tally/TallyDashboardPage';
 import MeetingsPage      from './pages/accountant/MeetingsPage';
 import ZohoBooksPage     from './pages/accountant/ZohoBooksPage';
 import FeedbackPage      from './pages/developer/FeedbackPage';
@@ -88,6 +89,7 @@ function App() {
                   <Route path="/plans/:id"   element={<PlanEditor />} />
                   <Route path="/integrations" element={<IntegrationsPage />} />
                   <Route path="/tally"       element={<TallyPage />} />
+                  <Route path="/tally-dashboard" element={<AdminTallyDashboardPage />} />
                   <Route path="/feedback"    element={<FeedbackPage />} />
                   <Route path="/assignments" element={<AssignmentsPage />} />
                 </Routes>
@@ -254,6 +256,14 @@ function App() {
             element={
               <ProtectedRoute allowedRoles={['accountant', 'admin', 'brand_executive']}>
                 <BrandAgentsInventory />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/brands/:brandId/tally-dashboard"
+            element={
+              <ProtectedRoute allowedRoles={['accountant', 'admin']}>
+                <BrandTallyDashboardPage />
               </ProtectedRoute>
             }
           />

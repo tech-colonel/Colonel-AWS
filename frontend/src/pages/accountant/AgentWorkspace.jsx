@@ -22,6 +22,7 @@ import InvoiceAgentWorkspace from './InvoiceAgentWorkspace';
 import OrderCycleShopifyWorkspace from './OrderCycleShopifyWorkspace';
 import SettlementAmazonWorkspace from './SettlementAmazonWorkspace';
 import ReceivablesSummaryWorkspace from './ReceivablesSummaryWorkspace';
+import { TallyData } from '../admin/TallyPage';
 import TotalSalesAnalyzerModal from './TotalSalesAnalyzerModal';
 import NykaaWorkspace from './NykaaWorkspace';
 import MeeshoWorkspace from './MeeshoWorkspace';
@@ -143,6 +144,13 @@ const AgentWorkspace = () => {
   const fetchData = async () => {
     try {
       const agentType = await detectAgentType();
+      // Tally Connector loads its own data and has no SKU/ledger master or working files.
+      if (agentType === 'tally_connector') {
+        const agentRes = await api.get(`/api/agents`);
+        setAllAgents(agentRes.data);
+        setAgent(agentRes.data.find(a => a.id.toString() === agentId.toString()));
+        return;
+      }
       const [agentRes, masterRes, filesRes] = await Promise.all([
         api.get(`/api/agents`),
         api.get(`/api/brands/${brandId}/agents/${agentId}/${agentType}/master`),
@@ -189,6 +197,7 @@ const AgentWorkspace = () => {
       if (currentAgent?.agentType) return currentAgent.agentType;
       // Fallback: name-based detection
       const name = currentAgent?.name?.toLowerCase() || '';
+      if (name.includes('tally connector')) return 'tally_connector';
       if (name.includes('amazon')) return 'amazon';
       if (name.includes('flipkart')) return 'flipkart';
       if (name.includes('myntra')) return 'myntra';
@@ -669,6 +678,7 @@ const AgentWorkspace = () => {
   /* Matched on the full phrase, not on 'receivable' — 'Receivable Cycle' and
      'Zepto Receivables' are different agents and must keep their own pages. */
   const isReceivablesSummary = agent?.name?.toLowerCase().includes('receivables summary');
+  const isTallyConnector = agent?.name?.toLowerCase().includes('tally connector');
   const isTotalSalesAnalyzer = agent?.name?.toLowerCase().includes('total-sales');
   const isNykaa = agent?.name?.toLowerCase().includes('nykaa');
   const isMeesho = agent?.name?.toLowerCase().includes('meesho');
@@ -712,6 +722,27 @@ const AgentWorkspace = () => {
           cfoConfig={cfoConfig}
           setCfoConfig={setCfoConfig}
         />
+      ) : isTallyConnector ? (
+        <div className="p-6" data-testid="tally-connector-workspace">
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => navigate(`/brands/${brandId}/agents`)}
+            className="mb-4"
+            data-testid="back-button"
+          >
+            ← Back to Agents
+          </Button>
+          <Button
+            size="sm"
+            onClick={() => navigate(`/brands/${brandId}/tally-dashboard`)}
+            className="mb-4 ml-2"
+            data-testid="open-tally-dashboard"
+          >
+            Open Tally Dashboard →
+          </Button>
+          <TallyData base={`/api/brands/${brandId}/tally`} brandMode />
+        </div>
       ) : isInvoice ? (
         <div className="p-6" data-testid="invoice-agent-workspace">
           <div className="mb-8 flex justify-between items-start">

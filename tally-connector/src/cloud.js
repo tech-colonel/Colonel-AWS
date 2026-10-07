@@ -53,6 +53,8 @@ class CloudClient {
   heartbeat(body) { return this.call('/tally/connector/heartbeat', body, { retries: 1 }); }
   start(company) { return this.call('/tally/connector/sync/start', { company }); }
   ledgers(runId, ledgers) { return this.call('/tally/connector/sync/ledgers', { run_id: runId, ledgers }); }
+  masters(runId, kind, rows) { return this.call('/tally/connector/sync/masters', { run_id: runId, kind, rows }); }
+  bills(runId, bills) { return this.call('/tally/connector/sync/bills', { run_id: runId, bills }); }
   vouchers(runId, vouchers) { return this.call('/tally/connector/sync/vouchers', { run_id: runId, vouchers }); }
   finish(runId, body) { return this.call('/tally/connector/sync/finish', { run_id: runId, ...body }, { timeoutMs: 300000 }); }
 }

@@ -13,7 +13,12 @@ const { TallyClient } = require('./tally');
 const { CloudClient, CloudError } = require('./cloud');
 const { version } = require('../package.json');
 
+const { MASTER_KINDS } = require('./tally');
+
 const UPLOAD_CHUNK = 500;
+// Bump when the connector starts sending more per record: the server then asks
+// for every voucher again, so rows synced by an older version get the new detail.
+const DATA_VERSION = 2;
 const ALTER_WINDOW = 5000;   // vouchers per Tally request, by AlterID range
 
 const chunks = (arr, n) => { const out = []; for (let i = 0; i < arr.length; i += n) out.push(arr.slice(i, i + n)); return out; };
@@ -28,9 +33,13 @@ function period(company) {
 async function syncCompany(tally, cloud, company) {
   const t0 = Date.now();
   log.info(`[${company.name}] ── sync start (Tally AltVchID=${company.alt_vch_id ?? '?'}, AltMstID=${company.alt_mst_id ?? '?'})`);
+  let profile = null;
+  try { profile = await tally.companyProfile(company.name); }
+  catch (e) { log.warn(`[${company.name}] company profile not read: ${e.message}`); }
   const start = await cloud.start({
     guid: company.guid, name: company.name, books_from: company.books_from,
     alt_vch_id: company.alt_vch_id, alt_mst_id: company.alt_mst_id, raw: company,
+    profile, data_version: DATA_VERSION,
   });
   if (start.unchanged) {
     log.info(`[${company.name}] nothing changed in Tally since the last sync — skipped`);
@@ -48,6 +57,32 @@ async function syncCompany(tally, cloud, company) {
     for (const [i, part] of chunks(ledgers, UPLOAD_CHUNK).entries()) {
       await cloud.ledgers(runId, part);
       log.debug(`[${company.name}] uploaded ledger chunk ${i + 1} (${part.length})`);
+    }
+
+    // ── 2b. other masters + outstanding bills (full lists, like ledgers) ─────
+    // A kind this Tally cannot answer is skipped, not fatal: it is left out of
+    // `mastersComplete`, so the server keeps whatever it already has for it.
+    const mastersComplete = [];
+    for (const kind of Object.keys(MASTER_KINDS)) {
+      try {
+        const rows = await tally.masters(kind, company.name, range);
+        for (const part of chunks(rows, UPLOAD_CHUNK)) await cloud.masters(runId, kind, part);
+        mastersComplete.push(kind);
+        log.info(`[${company.name}] ${kind}: ${rows.length}`);
+      } catch (e) {
+        if (e instanceof CloudError) throw e;
+        log.warn(`[${company.name}] ${kind} not read: ${e.message}`);
+      }
+    }
+    let billsComplete = false;
+    try {
+      const bills = await tally.bills(company.name, range);
+      for (const part of chunks(bills, UPLOAD_CHUNK)) await cloud.bills(runId, part);
+      billsComplete = true;
+      log.info(`[${company.name}] outstanding bills: ${bills.length}`);
+    } catch (e) {
+      if (e instanceof CloudError) throw e;
+      log.warn(`[${company.name}] outstanding bills not read: ${e.message}`);
     }
 
     // ── 3. vouchers ───────────────────────────────────────────────────────
@@ -88,6 +123,7 @@ async function syncCompany(tally, cloud, company) {
     const fin = await cloud.finish(runId, {
       status: 'ok', max_voucher_alter_id: newWatermark,
       ledgers_complete: ledgers.length > 0, voucher_guids: voucherGuids,
+      masters_complete: mastersComplete, bills_complete: billsComplete,
     });
     log.info(`[${company.name}] ── sync OK in ${((Date.now() - t0) / 1000).toFixed(1)}s: ${ledgers.length} ledgers, ${total} new/changed vouchers`
       + `${fin.removed_ledgers ? `, ${fin.removed_ledgers} ledgers removed` : ''}${fin.removed_vouchers ? `, ${fin.removed_vouchers} vouchers removed` : ''}`
