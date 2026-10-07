@@ -238,6 +238,8 @@ function build(src, months, opts = {}) {
       invoiceGst: inv ? r2(inv.gst) : null,
       invoiced,
       byKind: inv ? inv.byKind : {},
+      docs: inv ? (inv.docs || []) : [],
+      unreadable: inv ? (inv.unreadable || 0) : 0,
       /* the settlement side */
       settlementRows: p.rows,
       settlementOrders: p.orders.size,

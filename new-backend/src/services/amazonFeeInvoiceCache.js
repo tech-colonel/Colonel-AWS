@@ -106,7 +106,11 @@ async function load(invoiceDir, { force = false } = {}) {
   return { ...payload, fromCache: false, error: null };
 }
 
-/* What the report needs - no per-document detail. */
+/* What the report needs. The per-document DETAIL (every service line of every
+   PDF) is the bulk of the parse and stays on disk; what comes back is each
+   document's identity and its signed total, which is what the drill-down
+   lists - an accountant checking a month wants the invoice numbers, not the
+   line items twice. */
 const slim = (months) => (months || []).map((m) => ({
   month: m.month,
   documents: m.documents,
@@ -116,6 +120,11 @@ const slim = (months) => (months || []).map((m) => ({
   gst: m.gst,
   total: m.total,
   byKind: m.byKind || {},
+  docs: (m.docs || []).filter((d) => !d.error).map((d) => ({
+    number: d.number, date: d.date, state: d.state,
+    creditNote: !!d.creditNote, total: d.total,
+  })).sort((a, b) => Math.abs(b.total) - Math.abs(a.total)),
+  unreadable: (m.docs || []).filter((d) => d.error).length,
 }));
 
 module.exports = { load, slim, CACHE_NAME };

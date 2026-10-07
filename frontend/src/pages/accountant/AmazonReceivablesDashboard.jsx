@@ -37,6 +37,7 @@ import api from '../../lib/api';
 import DashboardLayout from '../../components/layout/DashboardLayout';
 import { sidebarFor } from '../../lib/adminNav';
 import FeeInvoicesView from './FeeInvoicesView';
+import BankView from './BankView';
 
 /* ── formatting ─────────────────────────────────────────────────────────── */
 const inr = (n, dp = 2) => (n === null || n === undefined || Number.isNaN(n) ? '—'
@@ -703,14 +704,21 @@ function ReportView({ data, status, months, shown, sel, setSel, onDrill, base, o
         {[['receivables', 'Receivables', 'what Amazon owes us'],
           ['invoicing', 'Order vs MTR', 'did every order reach the MTR'],
           ['money', 'MTR vs Settlement', 'was every invoice paid'],
+          ['bank', 'Bank', 'when the money actually arrived'],
           ['fees', 'Fee invoices', 'is every rupee Amazon took invoiced']].map(([k, label, sub]) => (
+          /* The unselected tabs were #94A3B8 on white with the sub-label at 70%
+             opacity on top of that — legible as a shape, not as words. Every
+             tab name is BOLD now and the inactive ones sit at #334155, which
+             reads; the selected one is separated by weight, a 2.5px rule and a
+             tinted pill rather than by being the only readable thing. */
           <button key={k} onClick={() => setLayer(k)}
-                  className="px-4 py-2.5 text-sm font-semibold -mb-px border-b-2 transition-colors text-left"
+                  className="px-4 py-2.5 text-sm font-bold -mb-px transition-colors text-left rounded-t-lg"
                   style={layer === k
-                    ? { borderColor: T.ink, color: T.ink }
-                    : { borderColor: 'transparent', color: '#94A3B8' }}>
+                    ? { borderBottom: `2.5px solid ${T.amber}`, color: T.ink, background: '#FFF8EC' }
+                    : { borderBottom: '2.5px solid transparent', color: '#334155' }}>
             {label}
-            <span className="ml-1.5 text-[11px] font-medium opacity-70">{sub}</span>
+            <span className="ml-1.5 text-[11px] font-semibold"
+                  style={{ color: layer === k ? T.amberText : '#64748B' }}>{sub}</span>
           </button>
         ))}
       </div>
@@ -718,8 +726,10 @@ function ReportView({ data, status, months, shown, sel, setSel, onDrill, base, o
       <Motion />
       <RangeBar months={months} sel={sel} setSel={setSel} all={all} />
 
-      {layer === 'fees'
-        ? <FeeInvoicesView fees={data?.fees} />
+      {layer === 'bank'
+        ? <BankView bank={data?.bank} shown={shown} />
+        : layer === 'fees'
+        ? <FeeInvoicesView fees={data?.fees} shown={shown} />
         : layer === 'money'
         ? <MoneyMatchView mm={data?.moneyMatch} shown={shown} onDrill={onDrill} />
         : layer === 'invoicing'

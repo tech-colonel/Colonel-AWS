@@ -38,6 +38,7 @@ const orderVsMtr = require('../../../services/processors/amazonOrderVsMtr');
 const mtrVsSettlement = require('../../../services/processors/amazonMtrVsSettlement');
 const feeInvoices = require('../../../services/processors/amazonFeeInvoices');
 const feeInvoiceCache = require('../../../services/amazonFeeInvoiceCache');
+const amazonBank = require('../../../services/processors/amazonBank');
 const { buildLedger, BASIS } = require('../../../services/processors/amazonReceivablesLedger');
 const { auditLedger, drillFor } = require('../../../services/processors/amazonReceivablesAudit');
 const { buildWorkbook, buildDrillWorkbook } = require('../../../services/processors/amazonReceivablesWorkbook');
@@ -400,6 +401,18 @@ const runReco = async (req, res, next) => {
                       fromCache: parsed.fromCache, error: parsed.error };
     } catch (e) { fees = null; }
 
+    /* Bank — when the money actually arrived. Deliberately ONE month: the
+       question is asked of a statement period, and only the retained ledgers
+       carry a deposit date, so it is built for the last month of the window
+       and says so for any month whose ledgers are not held. */
+    let bank = null;
+    try {
+      bank = amazonBank.buildAll(src, months, {
+        ledgerDir: path.join(OUTPUT_DIR, 'amazon-ledgers', safe(ctx.brand.name)),
+        perMonth: ledger.perMonth,
+      });
+    } catch (e) { bank = null; }
+
     const audit = auditLedger(ledger, { sources: sourceKind,
                                         priorPeriodRefunds: ledger.priorPeriodRefunds });
     const drills = {};
@@ -428,7 +441,7 @@ const runReco = async (req, res, next) => {
     });
 
     const result = { three, ledger, audit, drills, sources: perSource, sourceKind, basis,
-                     basisCompare, invoicing, moneyMatch, fees };
+                     basisCompare, invoicing, moneyMatch, fees, bank };
     const ms = Date.now() - t0;
     const fp = `${src.orders.length}|${src.mtr.length}|${src.settlement.length}`;
 
