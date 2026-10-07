@@ -1,18 +1,21 @@
 import { useState, useEffect, useMemo, useCallback } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
 import DashboardLayout from '../../components/layout/DashboardLayout';
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer,
 } from 'recharts';
 import {
   ArrowLeft, Wallet, TrendingUp, TrendingDown, RotateCcw, AlertTriangle,
-  LayoutDashboard, Bot, Loader2, X, ChevronLeft, ChevronRight, Info, HandCoins,
+  LayoutDashboard, Bot, Loader2, X, ChevronLeft, ChevronRight, Info, HandCoins, Search, CalendarDays,
 } from 'lucide-react';
 import api from '../../lib/api';
 import { sidebarFor } from '../../lib/adminNav';
 import ReceivableSheetBrowser from '../../components/reco/ReceivableSheetBrowser';
 
 const MONTHS = ['', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+// This dashboard is locked to Shopify only — every other portal (Amazon, Flipkart,
+// Pepperfry, etc.) is excluded from every figure below, no picker to change it.
+const RECEIVABLE_CHANNEL = 'Shopify';
 const MONTH_NAMES = ['', 'January', 'February', 'March', 'April', 'May', 'June',
   'July', 'August', 'September', 'October', 'November', 'December'];
 
@@ -34,6 +37,19 @@ const cardStyle = {
 const fmt = (n) => (n == null ? '—' : Number(n).toLocaleString('en-IN', { maximumFractionDigits: 0 }));
 const money = (n) => `₹${fmt(n)}`;
 const pct = (n, d) => (d ? `${((n / d) * 100).toFixed(1)}%` : '—');
+
+// Crore/Lakh shorthand alongside the exact rupee figure in the detail modals'
+// tables & bridges (e.g. "₹4,98,39,276 (₹4.98 Cr)") — the precise figure stays
+// primary (it's what the formula footnotes reconcile against), this is just a
+// faster read for anything a human would otherwise have to count commas on.
+// Left out below ₹1 lakh, where the plain figure is already quick to read.
+const shortIndian = (n) => {
+  if (n == null) return null;
+  const abs = Math.abs(Number(n));
+  if (!Number.isFinite(abs) || abs < 100000) return null;
+  if (abs < 10000000) return `₹${(Number(n) / 100000).toFixed(2)} L`;
+  return `₹${(Number(n) / 10000000).toFixed(2)} Cr`;
+};
 
 const currentDate = new Date();
 
@@ -373,20 +389,26 @@ const ReceivedBreakdownModal = ({ data, period, onOpenJourney, onClose }) => {
 
 // A bigger, more legible stat block than a plain KPI chip — used for the "how it's
 // calculated" arithmetic view (Carried forward + This month's own = Total).
-const SummaryStat = ({ label, value, color, big, onClick }) => (
-  <div
-    className="flex-1 min-w-[11rem] px-4 py-3.5 rounded-xl"
-    style={{ background: `${color}0a`, border: `1px solid ${color}35`, cursor: onClick ? 'pointer' : 'default' }}
-    onClick={onClick}
-    role={onClick ? 'button' : undefined}
-  >
-    <div className="flex items-center justify-between gap-2">
-      <p className="text-[11px] font-bold uppercase tracking-wide" style={{ color: 'var(--text-muted)' }}>{label}</p>
-      {onClick && <span className="text-[10px] font-bold flex-shrink-0" style={{ color }}>Details →</span>}
+const SummaryStat = ({ label, value, color, big, onClick }) => {
+  const short = shortIndian(value);
+  return (
+    <div
+      className="flex-1 min-w-[11rem] px-4 py-3.5 rounded-xl"
+      style={{ background: `${color}0a`, border: `1px solid ${color}35`, cursor: onClick ? 'pointer' : 'default' }}
+      onClick={onClick}
+      role={onClick ? 'button' : undefined}
+    >
+      <div className="flex items-center justify-between gap-2">
+        <p className="text-[11px] font-bold uppercase tracking-wide" style={{ color: 'var(--text-muted)' }}>{label}</p>
+        {onClick && <span className="text-[10px] font-bold flex-shrink-0" style={{ color }}>Details →</span>}
+      </div>
+      <p className={big ? 'text-2xl font-black mt-1' : 'text-xl font-black mt-1'} style={{ color, fontFamily: 'Barlow' }}>
+        {money(value)}
+        {short && <span className="font-semibold ml-1.5" style={{ opacity: 0.6, fontSize: '0.6em' }}>({short})</span>}
+      </p>
     </div>
-    <p className={big ? 'text-2xl font-black mt-1' : 'text-xl font-black mt-1'} style={{ color, fontFamily: 'Barlow' }}>{money(value)}</p>
-  </div>
-);
+  );
+};
 
 // Backs the reconciliation strip's "Settled to date" box — of THIS MONTH'S OWN
 // sales, how much has settled and from where (courier / prepaid), regardless of
@@ -509,7 +531,20 @@ const MovementBridge = ({ title, rows, resultLabel, resultValue, resultColor, re
 // Generic "by origin month" breakdown — reused by both the "Total receivable" card
 // (arithmetic summary + a by-partner table, no month table) and the "Carried forward"
 // card (just the by-month table for earlier months, no summary, no partner table).
-const ReceivableByMonthModal = ({ title, subtitle, rows, total, summary, showMonthTable = true, partnerRows, bridges, onOpenJourney, onClose }) => (
+const ReceivableByMonthModal = ({ title, subtitle, rows = [], total, summary, showMonthTable = true, partnerRows, bridges, onOpenJourney, onClose }) => {
+  // `rows` only ever covers COD orders (receivableByMonth is a
+  // payment_method = 'COD' query — see dashboardController.js), but `total` is
+  // COD + Prepaid combined (a Prepaid order stays "receivable" until a
+  // delivery_status upload confirms it). So the two don't sum to the same
+  // number on their own — the gap is exactly the Prepaid slice, which isn't
+  // tracked per origin month. Surfacing it as its own row (instead of a silent
+  // gap between the table and the Total underneath it) is what actually makes
+  // "Total" reconcile to the rupee against what's on screen.
+  const codPendingSum = rows.reduce((s, r) => s + Number(r.pending || 0), 0);
+  const prepaidPending = Number(total || 0) - codPendingSum;
+  const showPrepaidRow = showMonthTable && Math.abs(prepaidPending) >= 1;
+
+  return (
   <div
     className="fixed inset-0 z-50 flex items-center justify-center p-4"
     style={{ background: 'rgba(15,23,42,0.45)' }}
@@ -550,7 +585,7 @@ const ReceivableByMonthModal = ({ title, subtitle, rows, total, summary, showMon
               <table className="w-full text-sm">
                 <thead>
                   <tr style={{ background: 'var(--page-bg)', borderBottom: '1.5px solid var(--card-border)' }}>
-                    {['Month', 'COD sales', 'Settled', 'Returned', 'Still pending', '% pending'].map((h) => (
+                    {['Month', 'COD sales', 'Settled', 'Returned', 'Still pending', '% of that month', 'Share of total'].map((h) => (
                       <th key={h} className="px-2 py-2 text-left text-xs font-bold uppercase tracking-wide whitespace-nowrap" style={{ color: 'var(--text-muted)' }}>{h}</th>
                     ))}
                   </tr>
@@ -567,11 +602,23 @@ const ReceivableByMonthModal = ({ title, subtitle, rows, total, summary, showMon
                         <td className="px-2 py-2.5 whitespace-nowrap"><Num value={r.returned_amount} color={Number(r.returned_amount) > 0 ? COLOR_RETURNED : 'var(--text-muted)'} onClick={j('returned_of_own', `${MONTHS[r.month]} ${r.year} — returned`, COLOR_RETURNED)} /></td>
                         <td className="px-2 py-2.5 whitespace-nowrap font-semibold"><Num value={r.pending} color={Number(r.pending) > 0 ? COLOR_PENDING : 'var(--text-muted)'} onClick={j('this_month_own_receivable', `${MONTHS[r.month]} ${r.year} — still pending`, COLOR_PENDING)} /></td>
                         <td className="px-2 py-2.5" style={{ color: 'var(--text-muted)' }}>{pct(r.pending, r.cod_sales)}</td>
+                        <td className="px-2 py-2.5 font-semibold" style={{ color: 'var(--text-muted)' }}>{pct(r.pending, total)}</td>
                       </tr>
                     );
                   })}
-                  {!rows.length && (
-                    <tr><td colSpan={6} className="px-2 py-6 text-center text-xs" style={{ color: 'var(--text-muted)' }}>No COD data yet.</td></tr>
+                  {showPrepaidRow && (
+                    <tr style={{ borderBottom: '1px solid var(--card-border)', background: `${COLOR_PENDING}08` }}>
+                      <td className="px-2 py-2.5 font-semibold italic whitespace-nowrap" style={{ color: 'var(--text-muted)' }}>Prepaid (all months)</td>
+                      <td className="px-2 py-2.5 text-xs italic" style={{ color: 'var(--text-muted)' }}>not tracked by month</td>
+                      <td className="px-2 py-2.5" style={{ color: 'var(--text-muted)' }}>—</td>
+                      <td className="px-2 py-2.5" style={{ color: 'var(--text-muted)' }}>—</td>
+                      <td className="px-2 py-2.5 font-semibold"><Num value={prepaidPending} color={COLOR_PENDING} /></td>
+                      <td className="px-2 py-2.5" style={{ color: 'var(--text-muted)' }}>—</td>
+                      <td className="px-2 py-2.5 font-semibold" style={{ color: 'var(--text-muted)' }}>{pct(prepaidPending, total)}</td>
+                    </tr>
+                  )}
+                  {!rows.length && !showPrepaidRow && (
+                    <tr><td colSpan={7} className="px-2 py-6 text-center text-xs" style={{ color: 'var(--text-muted)' }}>No COD data yet.</td></tr>
                   )}
                 </tbody>
                 <tfoot>
@@ -584,8 +631,11 @@ const ReceivableByMonthModal = ({ title, subtitle, rows, total, summary, showMon
                     <td className="px-2 py-3 font-black whitespace-nowrap" style={{ color: COLOR_RETURNED }}>
                       {money(rows.reduce((s, r) => s + Number(r.returned_amount || 0), 0))}
                     </td>
-                    <td className="px-2 py-3 font-black whitespace-nowrap" style={{ color: COLOR_PENDING }}>{money(total)}</td>
+                    <td className="px-2 py-3 font-black whitespace-nowrap" style={{ color: COLOR_PENDING }}>
+                      <Num value={total} color={COLOR_PENDING} bold />
+                    </td>
                     <td />
+                    <td className="px-2 py-3 font-black" style={{ color: 'var(--text-muted)' }}>100%</td>
                   </tr>
                 </tfoot>
               </table>
@@ -597,6 +647,11 @@ const ReceivableByMonthModal = ({ title, subtitle, rows, total, summary, showMon
               returned by then (even if a courier had briefly remitted it first — that cash is not real revenue once
               the item comes back); and <strong>Still pending</strong> only if it's neither yet. A settlement or
               return that happens after the selected month's close doesn't count until that later month is selected.
+              {showPrepaidRow && (
+                <> The <strong>Prepaid (all months)</strong> row is the gap between this COD-only table and the
+                combined COD+Prepaid Total above it — a Prepaid order stays "still receivable" until a
+                delivery_status upload confirms delivery, but isn't itemized by origin month the way COD is.</>
+              )}
             </FormulaNote>
           </>
         )}
@@ -638,7 +693,8 @@ const ReceivableByMonthModal = ({ title, subtitle, rows, total, summary, showMon
       </div>
     </div>
   </div>
-);
+  );
+};
 
 const ThisMonthByCourierModal = ({ rows, period, total, onOpenJourney, onClose }) => {
   const codSales = rows.reduce((s, r) => s + Number(r.total_amount || 0), 0);
@@ -859,16 +915,15 @@ const ReturnsByMonthTable = ({ rows, period, total }) => (
       By origin month — which month's sale is actually being returned
     </p>
     <p className="text-[11px] mb-2" style={{ color: 'var(--text-muted)' }}>
-      A "carried forward" row's returns split into orders that were <strong>still open</strong> (not yet settled,
-      still part of that month's carried-forward balance) vs orders the courier had <strong>already settled</strong> and
-      only got reversed this month — only the "still open" amount is what the Carried Forward card's "Returned"
-      movement shows, since the other bucket had already left that balance.
+      A "carried forward" row's returns can include orders the courier had <strong>already settled</strong> and only
+      got reversed this month — those already left the carried-forward balance before this return happened, so only
+      the still-open portion is what the Carried Forward card's "Returned" movement shows.
     </p>
     <div className="overflow-x-auto rounded-lg" style={{ border: '1px solid var(--card-border)' }}>
       <table className="w-full text-sm">
         <thead>
           <tr style={{ background: 'var(--page-bg)', borderBottom: '1.5px solid var(--card-border)' }}>
-            {['Origin month', 'Returns', 'Still open', 'Already settled', 'Amount', 'Share'].map((h) => (
+            {['Origin month', 'Returns', 'Already settled', 'Amount', 'Share'].map((h) => (
               <th key={h} className="px-2 py-2 text-left text-xs font-bold uppercase tracking-wide whitespace-nowrap" style={{ color: 'var(--text-muted)' }}>{h}</th>
             ))}
           </tr>
@@ -888,10 +943,6 @@ const ReturnsByMonthTable = ({ rows, period, total }) => (
                 </td>
                 <td className="px-2 py-2.5" style={{ color: 'var(--text-body)' }}>{Number(r.count).toLocaleString('en-IN')}</td>
                 <td className="px-2 py-2.5 whitespace-nowrap">
-                  <div className="font-semibold" style={{ color: COLOR_PENDING }}>{money(r.still_open_amount)}</div>
-                  <div className="text-[10px] mt-0.5" style={{ color: 'var(--text-muted)' }}>{Number(r.still_open_count).toLocaleString('en-IN')} orders</div>
-                </td>
-                <td className="px-2 py-2.5 whitespace-nowrap">
                   <div className="font-semibold" style={{ color: 'var(--text-body)' }}>{money(r.already_settled_amount)}</div>
                   <div className="text-[10px] mt-0.5" style={{ color: 'var(--text-muted)' }}>{Number(r.already_settled_count).toLocaleString('en-IN')} orders</div>
                 </td>
@@ -901,7 +952,7 @@ const ReturnsByMonthTable = ({ rows, period, total }) => (
             );
           })}
           {!rows.length && (
-            <tr><td colSpan={6} className="px-2 py-6 text-center text-xs" style={{ color: 'var(--text-muted)' }}>No returns this month.</td></tr>
+            <tr><td colSpan={5} className="px-2 py-6 text-center text-xs" style={{ color: 'var(--text-muted)' }}>No returns this month.</td></tr>
           )}
         </tbody>
         <tfoot>
@@ -909,9 +960,6 @@ const ReturnsByMonthTable = ({ rows, period, total }) => (
             <td className="px-2 py-3 font-black" style={{ color: 'var(--text-heading)' }}>Total</td>
             <td className="px-2 py-3 font-black whitespace-nowrap" style={{ color: 'var(--text-body)' }}>
               {rows.reduce((s, r) => s + Number(r.count || 0), 0).toLocaleString('en-IN')}
-            </td>
-            <td className="px-2 py-3 font-black whitespace-nowrap" style={{ color: COLOR_PENDING }}>
-              {money(rows.reduce((s, r) => s + Number(r.still_open_amount || 0), 0))}
             </td>
             <td className="px-2 py-3 font-black whitespace-nowrap" style={{ color: 'var(--text-body)' }}>
               {money(rows.reduce((s, r) => s + Number(r.already_settled_amount || 0), 0))}
@@ -937,17 +985,14 @@ const ReturnsByMonthTable = ({ rows, period, total }) => (
 );
 
 // A return only creates a refund liability on the Payables Dashboard if cash had
-// already landed before the return — courier remittance for COD; for non-Shopify
-// Prepaid, cash is always considered collected, unconditionally (exact same
+// already landed before the return — courier remittance for COD (exact same
 // predicate as PAYABLE_LEDGER_COLLECTED_THEN_RETURNED in dashboardController.js).
-// A plain RTO
-// before collection never touches Payables, by design. Without this strip a
-// return can look like it "vanished" between the two dashboards; this makes the
-// split (and the link to where the collected slice actually shows up) explicit
-// instead of leaving it to be discovered by digging into the data. Covers every
-// source here — COD couriers AND non-Shopify Prepaid (Amazon/Flipkart/Zepto/etc,
-// which flow to Payables as 'Marketplace Prepaid') — Shopify Prepaid is a
-// separate leg entirely, tracked in shopify_order_cycle, not this table.
+// A plain RTO before collection never touches Payables, by design. Without this
+// strip a return can look like it "vanished" between the two dashboards; this
+// makes the split (and the link to where the collected slice actually shows up)
+// explicit instead of leaving it to be discovered by digging into the data.
+// Covers COD couriers here — Shopify Prepaid is a separate leg entirely, tracked
+// in shopify_order_cycle (Payables' "Prepaid Gateway" source), not this table.
 const ReturnsPayablesBridge = ({ rows, brandId, period, onOpenJourney }) => {
   const navigate = useNavigate();
   const collected = rows.reduce((s, r) => s + Number(r.collected_amount || 0), 0);
@@ -978,7 +1023,7 @@ const ReturnsPayablesBridge = ({ rows, brandId, period, onOpenJourney }) => {
         <Operator symbol="+" />
         <SummaryStat label="RTO before collection — no liability" value={rto} color="var(--text-muted)" />
         <Operator symbol="=" />
-        <SummaryStat label="Total returns (COD + Marketplace Prepaid)" value={collected + rto} color={COLOR_RETURNED} big />
+        <SummaryStat label="Total COD returns" value={collected + rto} color={COLOR_RETURNED} big />
       </div>
       {collected > 0 && (
         <p className="text-[11px]" style={{ color: 'var(--text-muted)' }}>
@@ -1009,9 +1054,9 @@ const ReturnsPayablesBridge = ({ rows, brandId, period, onOpenJourney }) => {
 };
 
 // Same "By source" table as before, plus a Collected/RTO split per row so a
-// courier's (or non-Shopify Prepaid channel's) returns are legible without
-// opening the bridge strip's aggregate — "Collected" links straight through to
-// that same source's slice on Payables (as 'COD' or 'Marketplace Prepaid' there).
+// courier's returns are legible without opening the bridge strip's aggregate —
+// "Collected" links straight through to that same courier's slice on Payables
+// (the 'COD' source there).
 const ReturnsBySourceTable = ({ rows, brandId, period, total, onOpenJourney }) => {
   const navigate = useNavigate();
   return (
@@ -1119,17 +1164,23 @@ const TrendTooltip = ({ active, payload, label }) => {
 
 // Any rupee figure on this dashboard, made clickable — opens that figure's
 // month-by-month journey (see NumberJourneyModal). Plain text when no onClick.
-const Num = ({ value, color, onClick, bold, className = '' }) => (
-  <span
-    onClick={onClick}
-    className={`${className} ${onClick ? 'cursor-pointer hover:underline underline-offset-2' : ''}`}
-    style={{ color, fontWeight: bold ? 900 : undefined }}
-    role={onClick ? 'button' : undefined}
-    title={onClick ? 'Click for the complete month-by-month journey' : undefined}
-  >
-    {money(value)}
-  </span>
-);
+const Num = ({ value, color, onClick, bold, className = '' }) => {
+  const short = shortIndian(value);
+  return (
+    <span
+      onClick={onClick}
+      className={`${className} ${onClick ? 'cursor-pointer hover:underline underline-offset-2' : ''}`}
+      style={{ color, fontWeight: bold ? 900 : undefined }}
+      role={onClick ? 'button' : undefined}
+      title={onClick ? 'Click for the complete month-by-month journey' : undefined}
+    >
+      {money(value)}
+      {short && (
+        <span className="font-medium" style={{ opacity: 0.62, fontSize: '0.82em', marginLeft: '0.35em' }}>({short})</span>
+      )}
+    </span>
+  );
+};
 
 // Ledger-mode journey field name -> origin-mode's equivalent field name (origin
 // mode fixes the ORDER population to one specific month and only tracks that
@@ -1176,6 +1227,9 @@ const NumberJourneyModal = ({ brandId, period, cycleStart, metricKey, label, col
       params.set('originYear', String(origin.year));
     }
     if (dimension) params.set(dimension.type, dimension.value);
+    // Dashboard is locked to Shopify — keep the drill-down scoped the same way
+    // even when the row clicked didn't carry its own channel dimension.
+    if (!dimension || dimension.type !== 'channel') params.set('channel', RECEIVABLE_CHANNEL);
     api.get(`/api/dashboard/receivables/${brandId}/journey?${params.toString()}`)
       .then((res) => { if (!cancelled) setResp(res.data); })
       .catch((e) => { if (!cancelled) setError(e.response?.data?.error || 'Failed to load journey'); })
@@ -1290,14 +1344,46 @@ const NumberJourneyModal = ({ brandId, period, cycleStart, metricKey, label, col
 const ReceivableDashboard = () => {
   const { brandId } = useParams();
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
 
-  const [month, setMonth] = useState(currentDate.getMonth() + 1);
-  const [year, setYear] = useState(currentDate.getFullYear());
+  // Seeded from the URL if present (e.g. returning via the Back button from
+  // Advance Amount / Payables, which push a URL that already carries the range
+  // this dashboard was on) — otherwise today's month, and the first load below
+  // still lets the backend pick the actual latest month with data.
+  const [month, setMonth] = useState(() => parseInt(searchParams.get('month'), 10) || currentDate.getMonth() + 1);
+  const [year, setYear] = useState(() => parseInt(searchParams.get('year'), 10) || currentDate.getFullYear());
   // Optional "cycle start" — null means no lower bound (today's default behavior).
   // When set, every figure on the dashboard treats anything sold before this month
   // as if it never existed, not just excludes it from carried-forward.
-  const [startMonth, setStartMonth] = useState(null);
-  const [startYear, setStartYear] = useState(null);
+  const [startMonth, setStartMonth] = useState(() => parseInt(searchParams.get('startMonth'), 10) || null);
+  const [startYear, setStartYear] = useState(() => parseInt(searchParams.get('startYear'), 10) || null);
+  // Locked to Shopify — see RECEIVABLE_CHANNEL. Applied inside every query behind
+  // the period above, same as the old picker used to do, just no longer editable.
+  const channel = RECEIVABLE_CHANNEL;
+
+  // Draft picker values — what the dropdowns show and edit. Deliberately decoupled
+  // from month/year/startMonth/startYear (the "committed" values that actually
+  // drive the fetch + URL): picking a 4-field range one dropdown at a time used to fire a
+  // fetch (and a URL update) after EVERY single field, so a reload landing between
+  // two of those picks — or even just the normal in-between renders — could catch an
+  // incomplete/mismatched combination. Now nothing commits until Search is clicked;
+  // the effect below keeps draft in sync whenever committed changes some other way
+  // (first load's backend-picked period, the prev/next chevrons, Clear).
+  const [draftMonth, setDraftMonth] = useState(month);
+  const [draftYear, setDraftYear] = useState(year);
+  const [draftStartMonth, setDraftStartMonth] = useState(startMonth);
+  const [draftStartYear, setDraftStartYear] = useState(startYear);
+  useEffect(() => {
+    setDraftMonth(month); setDraftYear(year);
+    setDraftStartMonth(startMonth); setDraftStartYear(startYear);
+  }, [month, year, startMonth, startYear]);
+  const isDirty = draftMonth !== month || draftYear !== year
+    || draftStartMonth !== startMonth || draftStartYear !== startYear;
+  const applyDraft = () => {
+    setMonth(draftMonth); setYear(draftYear);
+    setStartMonth(draftStartMonth); setStartYear(draftStartYear);
+  };
+
   const [initialized, setInitialized] = useState(false);
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -1324,13 +1410,14 @@ const ReceivableDashboard = () => {
     return years.sort((a, b) => b - a);
   }, []);
 
-  const load = useCallback(async (m, y, sm, sy) => {
+  const load = useCallback(async (m, y, sm, sy, ch) => {
     setLoading(true);
     setError(null);
     try {
       const params = new URLSearchParams();
       if (m && y) { params.set('month', m); params.set('year', y); }
       if (sm && sy) { params.set('startMonth', sm); params.set('startYear', sy); }
+      if (ch) params.set('channel', ch);
       const qs = params.toString();
       const res = await api.get(`/api/dashboard/receivables/${brandId}${qs ? `?${qs}` : ''}`);
       setData(res.data);
@@ -1346,16 +1433,76 @@ const ReceivableDashboard = () => {
     }
   }, [brandId]);
 
-  // First load: no month/year params, let the backend pick the latest month with data.
-  useEffect(() => { load(); }, [load]);
+  // First load: if the URL already carries a range (e.g. arriving via Back with a
+  // previously-visited URL), load it directly; otherwise no month/year params, let
+  // the backend pick the latest month with data.
+  useEffect(() => {
+    if (searchParams.get('month') && searchParams.get('year')) load(month, year, startMonth, startYear, channel);
+    else load(undefined, undefined, undefined, undefined, channel);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [load]);
 
   // Subsequent loads: user changed either picker.
   useEffect(() => {
     if (!initialized) return;
-    load(month, year, startMonth, startYear);
+    load(month, year, startMonth, startYear, channel);
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [month, year, startMonth, startYear, channel]);
+
+  // Mirror the picker into the URL as it changes, so navigating away and back
+  // (the Advance Amount / Payables "← Back" button, a browser refresh, anything)
+  // restores this exact range instead of resetting to the backend's own default.
+  useEffect(() => {
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev);
+      if (month && year) { next.set('month', month); next.set('year', year); } else { next.delete('month'); next.delete('year'); }
+      if (startMonth && startYear) { next.set('startMonth', startMonth); next.set('startYear', startYear); } else { next.delete('startMonth'); next.delete('startYear'); }
+      if (channel) next.set('channel', channel); else next.delete('channel');
+      return next;
+    }, { replace: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [month, year, startMonth, startYear, channel]);
+
+  // Same range as this dashboard's own picker (cycle start -> "as of" month) reused
+  // to both total up and link to the Advance Amount / Payables dashboards' cards below,
+  // so the figure shown and the dashboard it opens always agree on what range it covers.
+  const crossRangeParams = useCallback(() => {
+    const params = new URLSearchParams();
+    if (startMonth && startYear) { params.set('fromMonth', startMonth); params.set('fromYear', startYear); }
+    if (month && year) { params.set('toMonth', month); params.set('toYear', year); }
+    return params;
   }, [month, year, startMonth, startYear]);
 
+  const [advancePayable, setAdvancePayable] = useState({ advanceAmount: null, payableAmount: null, loading: true });
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      setAdvancePayable((s) => ({ ...s, loading: true }));
+      const qs = crossRangeParams().toString();
+      try {
+        const [advRes, payRes] = await Promise.all([
+          api.get(`/api/dashboard/advance-amount/${brandId}${qs ? `?${qs}` : ''}`),
+          api.get(`/api/dashboard/payables/${brandId}${qs ? `?${qs}` : ''}`),
+        ]);
+        if (cancelled) return;
+        setAdvancePayable({
+          advanceAmount: advRes.data?.kpis?.total_advance_amount ?? 0,
+          advanceOrders: advRes.data?.kpis?.total_orders ?? 0,
+          payableAmount: payRes.data?.kpis?.total_payable_amount ?? 0,
+          payableOrders: payRes.data?.kpis?.total_orders ?? 0,
+          loading: false,
+        });
+      } catch (e) {
+        if (!cancelled) setAdvancePayable((s) => ({ ...s, loading: false }));
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [brandId, crossRangeParams]);
+
+  // Prev/next is a single unambiguous step (unlike the multi-field range picker), so
+  // it still applies immediately — no Search needed — and keeps draft in lockstep so
+  // the Search button doesn't read as "dirty" right after using it.
   const shiftMonth = (delta) => {
     let m = month + delta;
     let y = year;
@@ -1363,6 +1510,8 @@ const ReceivableDashboard = () => {
     if (m > 12) { m = 1; y += 1; }
     setMonth(m);
     setYear(y);
+    setDraftMonth(m);
+    setDraftYear(y);
   };
 
   const trend = (data?.monthlyTrend || []).map((r) => ({
@@ -1374,7 +1523,6 @@ const ReceivableDashboard = () => {
   }));
 
   const courierAging = data?.courierAging || [];
-  const dq = data?.dataQuality || { unmatched_count: 0, unmatched_amount: 0, bySource: [] };
   const k = data?.kpis || {};
   const netSalesThisMonth = Number(k.sales_this_month || 0) - Number(k.returned_of_this_months_sales || 0);
   const prevPeriod = data?.previousPeriod;
@@ -1422,137 +1570,136 @@ const ReceivableDashboard = () => {
           Back
         </button>
 
-        {/* Cycle start picker — sits above the "as of" month/year picker. Setting this
-            makes every figure on the dashboard treat anything sold before that month as
-            if it never existed (not just excluded from carried-forward) — useful when
-            data before a certain point is known-incomplete (e.g. a missing settlement file). */}
-        <div
-          className="flex items-center justify-between flex-wrap gap-3 px-4 py-3 rounded-2xl"
-          style={{ background: `${COLOR_PRIMARY}08`, border: `1px solid ${COLOR_PRIMARY}25` }}
-        >
-          <div className="flex items-center gap-2.5">
-            <RotateCcw className="w-4 h-4 flex-shrink-0" style={{ color: COLOR_PRIMARY }} />
-            <div>
-              <p className="text-xs font-bold" style={{ color: 'var(--text-heading)' }}>Receivable cycle starts from</p>
-              <p className="text-[11px]" style={{ color: 'var(--text-muted)' }}>
-                Sales before this month are treated as if they don't exist — no carried-forward from earlier data
-              </p>
-            </div>
+        <div className="flex items-center gap-4">
+          <div
+            className="w-12 h-12 rounded-2xl flex items-center justify-center flex-shrink-0"
+            style={{ background: `${COLOR_PRIMARY}15`, border: `1px solid ${COLOR_PRIMARY}30` }}
+          >
+            <Wallet className="w-5 h-5" style={{ color: COLOR_PRIMARY }} />
           </div>
-          <div className="flex items-center gap-1.5">
-            <select
-              value={startMonth ?? ''}
-              onChange={(e) => {
-                const v = e.target.value;
-                setStartMonth(v === '' ? null : Number(v));
-                if (v !== '' && !startYear) setStartYear(year);
-              }}
-              className="text-sm font-semibold px-3 py-2 rounded-lg"
-              style={{ background: 'var(--surface)', border: '1px solid var(--card-border)', color: 'var(--text-heading)' }}
-            >
-              <option value="">No start (use all data)</option>
-              {MONTH_NAMES.slice(1).map((name, i) => (
-                <option key={name} value={i + 1}>{name}</option>
-              ))}
-            </select>
-            <select
-              value={startYear ?? ''}
-              onChange={(e) => {
-                const v = e.target.value;
-                setStartYear(v === '' ? null : Number(v));
-                if (v !== '' && !startMonth) setStartMonth(1);
-              }}
-              className="text-sm font-semibold px-3 py-2 rounded-lg"
-              style={{ background: 'var(--surface)', border: '1px solid var(--card-border)', color: 'var(--text-heading)' }}
-            >
-              <option value="">—</option>
-              {uniqueYears.map((y) => <option key={y} value={y}>{y}</option>)}
-            </select>
-            {(startMonth || startYear) && (
-              <button
-                onClick={() => { setStartMonth(null); setStartYear(null); }}
-                className="text-xs font-bold px-3 py-2 rounded-lg"
-                style={{ background: 'var(--surface)', border: '1px solid var(--card-border)', color: 'var(--text-muted)' }}
-              >
-                Clear
-              </button>
-            )}
+          <div>
+            <h1 className="text-xl font-black" style={{ color: 'var(--text-heading)', fontFamily: 'Barlow', letterSpacing: '-0.02em' }}>
+              Receivable Dashboard
+            </h1>
+            <p className="text-xs mt-0.5" style={{ color: 'var(--text-muted)' }}>
+              Shopify-only receivable position — every figure below excludes every other portal (Amazon, Flipkart, Pepperfry, etc.)
+            </p>
           </div>
         </div>
 
-        <div className="flex items-start justify-between flex-wrap gap-4">
-          <div className="flex items-center gap-4">
-            <div
-              className="w-12 h-12 rounded-2xl flex items-center justify-center"
-              style={{ background: `${COLOR_PRIMARY}15`, border: `1px solid ${COLOR_PRIMARY}30` }}
-            >
-              <Wallet className="w-5 h-5" style={{ color: COLOR_PRIMARY }} />
+        {/* Unified range picker — cycle start (optional floor) + as-of month, one bar.
+            Every field here edits a local draft only; nothing fetches or touches the
+            URL until Search is clicked, so a selection in progress can never be caught
+            half-done by a reload or re-render. Prev/next and Clear are single,
+            unambiguous actions and still apply immediately (see shiftMonth). */}
+        <div
+          className="flex items-center justify-between flex-wrap gap-4 px-5 py-4 rounded-2xl"
+          style={{ background: `${COLOR_PRIMARY}08`, border: `1px solid ${COLOR_PRIMARY}25` }}
+        >
+          <div className="flex items-center flex-wrap gap-x-6 gap-y-3">
+            <div className="flex items-center gap-2.5">
+              <RotateCcw className="w-4 h-4 flex-shrink-0" style={{ color: COLOR_PRIMARY }} />
+              <div>
+                <p className="text-xs font-bold whitespace-nowrap" style={{ color: 'var(--text-heading)' }}>Cycle starts from</p>
+                <p className="text-[10px] whitespace-nowrap" style={{ color: 'var(--text-muted)' }}>optional — excludes earlier sales entirely</p>
+              </div>
+              <div className="flex items-center gap-1.5 ml-1">
+                <select
+                  value={draftStartMonth ?? ''}
+                  onChange={(e) => {
+                    const v = e.target.value;
+                    setDraftStartMonth(v === '' ? null : Number(v));
+                    if (v !== '' && !draftStartYear) setDraftStartYear(draftYear);
+                  }}
+                  className="text-sm font-semibold px-3 py-2 rounded-lg"
+                  style={{ background: 'var(--surface)', border: '1px solid var(--card-border)', color: 'var(--text-heading)' }}
+                >
+                  <option value="">No start (use all data)</option>
+                  {MONTH_NAMES.slice(1).map((name, i) => (
+                    <option key={name} value={i + 1}>{name}</option>
+                  ))}
+                </select>
+                <select
+                  value={draftStartYear ?? ''}
+                  onChange={(e) => {
+                    const v = e.target.value;
+                    setDraftStartYear(v === '' ? null : Number(v));
+                    if (v !== '' && !draftStartMonth) setDraftStartMonth(1);
+                  }}
+                  className="text-sm font-semibold px-3 py-2 rounded-lg"
+                  style={{ background: 'var(--surface)', border: '1px solid var(--card-border)', color: 'var(--text-heading)' }}
+                >
+                  <option value="">—</option>
+                  {uniqueYears.map((y) => <option key={y} value={y}>{y}</option>)}
+                </select>
+                {(startMonth || startYear || draftStartMonth || draftStartYear) && (
+                  <button
+                    onClick={() => { setStartMonth(null); setStartYear(null); setDraftStartMonth(null); setDraftStartYear(null); }}
+                    className="text-xs font-bold px-3 py-2 rounded-lg"
+                    style={{ background: 'var(--surface)', border: '1px solid var(--card-border)', color: 'var(--text-muted)' }}
+                  >
+                    Clear
+                  </button>
+                )}
+              </div>
             </div>
-            <div>
-              <h1 className="text-xl font-black" style={{ color: 'var(--text-heading)', fontFamily: 'Barlow', letterSpacing: '-0.02em' }}>
-                Receivable Dashboard
-              </h1>
-              <p className="text-xs mt-0.5" style={{ color: 'var(--text-muted)' }}>
-                Global receivable position across every Receivable Cycle file loaded for this brand
-              </p>
+
+            <div className="w-px h-9 hidden sm:block" style={{ background: 'var(--card-border)' }} />
+
+            <div className="flex items-center gap-2.5">
+              <CalendarDays className="w-4 h-4 flex-shrink-0" style={{ color: COLOR_PRIMARY }} />
+              <p className="text-xs font-bold whitespace-nowrap" style={{ color: 'var(--text-heading)' }}>As of</p>
+              <div className="flex items-center gap-1.5 ml-1">
+                <button
+                  onClick={() => shiftMonth(-1)}
+                  aria-label="Previous month"
+                  className="p-2 rounded-lg"
+                  style={{ background: 'var(--surface)', border: '1px solid var(--card-border)', color: 'var(--text-muted)' }}
+                >
+                  <ChevronLeft className="w-4 h-4" />
+                </button>
+                <select
+                  value={draftMonth}
+                  onChange={(e) => setDraftMonth(Number(e.target.value))}
+                  className="text-sm font-semibold px-3 py-2 rounded-lg"
+                  style={{ background: 'var(--surface)', border: '1px solid var(--card-border)', color: 'var(--text-heading)' }}
+                >
+                  {MONTH_NAMES.slice(1).map((name, i) => (
+                    <option key={name} value={i + 1}>{name}</option>
+                  ))}
+                </select>
+                <select
+                  value={draftYear}
+                  onChange={(e) => setDraftYear(Number(e.target.value))}
+                  className="text-sm font-semibold px-3 py-2 rounded-lg"
+                  style={{ background: 'var(--surface)', border: '1px solid var(--card-border)', color: 'var(--text-heading)' }}
+                >
+                  {uniqueYears.map((y) => <option key={y} value={y}>{y}</option>)}
+                </select>
+                <button
+                  onClick={() => shiftMonth(1)}
+                  aria-label="Next month"
+                  className="p-2 rounded-lg"
+                  style={{ background: 'var(--surface)', border: '1px solid var(--card-border)', color: 'var(--text-muted)' }}
+                >
+                  <ChevronRight className="w-4 h-4" />
+                </button>
+              </div>
             </div>
           </div>
 
-          {/* Month/year picker */}
-          <div className="flex items-center gap-3 flex-wrap">
-            <button
-              onClick={() => navigate(`/brands/${brandId}/advance-amount`)}
-              className="flex items-center gap-1.5 text-xs font-bold px-3 py-2 rounded-lg transition-colors"
-              style={{ background: `${COLOR_PENDING}12`, color: COLOR_PENDING, border: `1px solid ${COLOR_PENDING}30` }}
-            >
-              <HandCoins className="w-3.5 h-3.5" />
-              Advance Amount Dashboard →
-            </button>
-            <button
-              onClick={() => navigate(`/brands/${brandId}/payables`)}
-              className="flex items-center gap-1.5 text-xs font-bold px-3 py-2 rounded-lg transition-colors"
-              style={{ background: `${COLOR_RETURNED}12`, color: COLOR_RETURNED, border: `1px solid ${COLOR_RETURNED}30` }}
-            >
-              <RotateCcw className="w-3.5 h-3.5" />
-              Payables Dashboard →
-            </button>
-            <div className="flex items-center gap-1.5">
-            <button
-              onClick={() => shiftMonth(-1)}
-              aria-label="Previous month"
-              className="p-2 rounded-lg"
-              style={{ background: 'var(--surface)', border: '1px solid var(--card-border)', color: 'var(--text-muted)' }}
-            >
-              <ChevronLeft className="w-4 h-4" />
-            </button>
-            <select
-              value={month}
-              onChange={(e) => setMonth(Number(e.target.value))}
-              className="text-sm font-semibold px-3 py-2 rounded-lg"
-              style={{ background: 'var(--surface)', border: '1px solid var(--card-border)', color: 'var(--text-heading)' }}
-            >
-              {MONTH_NAMES.slice(1).map((name, i) => (
-                <option key={name} value={i + 1}>{name}</option>
-              ))}
-            </select>
-            <select
-              value={year}
-              onChange={(e) => setYear(Number(e.target.value))}
-              className="text-sm font-semibold px-3 py-2 rounded-lg"
-              style={{ background: 'var(--surface)', border: '1px solid var(--card-border)', color: 'var(--text-heading)' }}
-            >
-              {uniqueYears.map((y) => <option key={y} value={y}>{y}</option>)}
-            </select>
-            <button
-              onClick={() => shiftMonth(1)}
-              aria-label="Next month"
-              className="p-2 rounded-lg"
-              style={{ background: 'var(--surface)', border: '1px solid var(--card-border)', color: 'var(--text-muted)' }}
-            >
-              <ChevronRight className="w-4 h-4" />
-            </button>
-            </div>
-          </div>
+          <button
+            onClick={applyDraft}
+            disabled={!isDirty}
+            title={isDirty ? 'Apply the selected range' : 'Range already applied'}
+            className="flex items-center gap-1.5 text-sm font-bold px-4 py-2.5 rounded-xl flex-shrink-0 transition-all"
+            style={isDirty
+              ? { background: COLOR_PRIMARY, color: '#fff', boxShadow: `0 2px 8px ${COLOR_PRIMARY}40` }
+              : { background: 'var(--surface)', border: '1px solid var(--card-border)', color: 'var(--text-muted)', cursor: 'default' }}
+          >
+            <Search className="w-4 h-4" />
+            Search
+          </button>
         </div>
 
         {loading && (
@@ -1675,6 +1822,30 @@ const ReceivableDashboard = () => {
               </div>
             </div>
 
+            {/* ── Advance & Payable — related balances outside this cycle's own
+                receivable, below the receivable data cards above ────────── */}
+            <div>
+              <p className="text-xs font-bold uppercase tracking-wide mb-3" style={{ color: 'var(--text-muted)' }}>
+                Related balances
+              </p>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <KpiCard
+                  label="Advance Amount"
+                  value={advancePayable.loading ? '…' : money(advancePayable.advanceAmount)}
+                  sub={`${startMonth && startYear ? `${MONTHS[startMonth]} ${startYear} → ` : ''}${MONTHS[month]} ${year} · ${Number(advancePayable.advanceOrders || 0).toLocaleString('en-IN')} order(s) still open. Click to open the Advance Amount Dashboard →`}
+                  icon={HandCoins} color={COLOR_PENDING}
+                  onClick={() => navigate(`/brands/${brandId}/advance-amount${crossRangeParams().toString() ? `?${crossRangeParams().toString()}` : ''}`)}
+                />
+                <KpiCard
+                  label="Payable Amount"
+                  value={advancePayable.loading ? '…' : money(advancePayable.payableAmount)}
+                  sub={`${startMonth && startYear ? `${MONTHS[startMonth]} ${startYear} → ` : ''}${MONTHS[month]} ${year} · ${Number(advancePayable.payableOrders || 0).toLocaleString('en-IN')} order(s). Click to open the Payables Dashboard →`}
+                  icon={RotateCcw} color={COLOR_RETURNED}
+                  onClick={() => navigate(`/brands/${brandId}/payables${crossRangeParams().toString() ? `?${crossRangeParams().toString()}` : ''}`)}
+                />
+              </div>
+            </div>
+
             {/* ── Trend chart ─────────────────────────────────────────── */}
             <SectionCard title="Sales, collections & pending — last 12 months" icon={TrendingUp}>
               <div style={{ width: '100%', height: 320 }}>
@@ -1752,28 +1923,8 @@ const ReceivableDashboard = () => {
               </FormulaNote>
             </SectionCard>
 
-            {/* ── Data quality ─────────────────────────────────────────── */}
-            {Number(dq.unmatched_count) > 0 && (
-              <SectionCard title="Data quality — unmatched settlements & returns" icon={Info}>
-                <p className="text-xs mb-3" style={{ color: 'var(--text-muted)' }}>
-                  {Number(dq.unmatched_count).toLocaleString('en-IN')} settlement/return row(s) worth {money(dq.unmatched_amount)}{' '}
-                  didn't match any known order — usually because that order's original sale file hasn't been loaded yet
-                  (e.g. a settlement covering a period before the earliest Tally file we have). These amounts are
-                  <strong> excluded</strong> from the figures above rather than guessed at.
-                </p>
-                <div className="flex flex-wrap gap-3">
-                  {(dq.bySource || []).map((s) => (
-                    <div key={s.source} className="px-3 py-2 rounded-lg text-xs" style={{ background: 'var(--page-bg)', border: '1px solid var(--card-border)' }}>
-                      <span className="font-bold capitalize" style={{ color: 'var(--text-heading)' }}>{s.source}</span>
-                      <span style={{ color: 'var(--text-muted)' }}> — {Number(s.count).toLocaleString('en-IN')} rows, {money(s.amount)}</span>
-                    </div>
-                  ))}
-                </div>
-              </SectionCard>
-            )}
-
             {/* ── Sheet data browser ───────────────────────────────────── */}
-            <ReceivableSheetBrowser brandId={brandId} month={month} year={year} />
+            <ReceivableSheetBrowser brandId={brandId} month={month} year={year} channel={RECEIVABLE_CHANNEL} />
           </>
         )}
       </div>

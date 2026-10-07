@@ -44,6 +44,7 @@ import PayablesDashboard     from './pages/accountant/PayablesDashboard';
 import ComplianceTracker     from './pages/accountant/ComplianceTracker';
 import StatutoryTracker      from './pages/accountant/StatutoryTracker';
 import StatutoryRedirect     from './pages/accountant/StatutoryRedirect';
+import ShopifyOrderCycleDashboard from './pages/accountant/ShopifyOrderCycleDashboard';
 
 // ── Colonel AI (Round 3) ──────────────────────────────────────────────────────
 import ColonelChat           from './pages/ColonelChat';
@@ -252,6 +253,15 @@ function App() {
             element={
               <ProtectedRoute allowedRoles={['accountant', 'admin']}>
                 <AgentDispatch />
+              </ProtectedRoute>
+            }
+          />
+          {/* ── Shopify Order Cycle — drill-down analytics dashboard (Operations) ── */}
+          <Route
+            path="/brands/:brandId/agents/:agentId/shopify-dashboard"
+            element={
+              <ProtectedRoute allowedRoles={['accountant', 'admin']}>
+                <ShopifyOrderCycleDashboard />
               </ProtectedRoute>
             }
           />

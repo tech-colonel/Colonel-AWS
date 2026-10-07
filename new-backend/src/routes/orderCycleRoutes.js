@@ -10,6 +10,7 @@ const router = express.Router();
 const multer = require('multer');
 const { authenticateToken } = require('../middleware/authMiddleware');
 const ctrl = require('../controllers/agents/order-cycle-shopify/orderCycleShopifyController');
+const dash = require('../controllers/agents/order-cycle-shopify/shopifyDashboardController');
 
 // Build the multer fields array:
 //  - unicommerceFile       (1)  — Export-Tally GST Report
@@ -33,6 +34,10 @@ const BASE = '/brands/:brandId/agents/:agentId/order-cycle-shopify';
 
 // ─── Two-phase generation ─────────────────────────────────────────────────────
 router.post(`${BASE}/generate/preview`, authenticateToken, uploadMulti, ctrl.generatePreview);
+// authenticateToken was missing here while every sibling route had it. The reply
+// names the brand's connected integrations and its Shopify store domain, so it
+// was readable by anyone holding a brand id.
+router.get(`${BASE}/sources`, authenticateToken, ctrl.getSources);
 router.post(`${BASE}/generate/commit`,  authenticateToken, ctrl.generateCommit);
 router.post(`${BASE}/generate/discard`, authenticateToken, ctrl.generateDiscard);
 
@@ -42,6 +47,20 @@ router.get(`${BASE}/files/:filename/download`,    authenticateToken, ctrl.downlo
 router.get(`${BASE}/files/:filename/report`,       authenticateToken, ctrl.getReportData);
 router.get(`${BASE}/files/:filename/transactions`,          authenticateToken, ctrl.getTransactions);
 router.get(`${BASE}/files/:filename/transactions/download`, authenticateToken, ctrl.downloadTransactions);
+router.get(`${BASE}/files/:filename/overview-transactions`, authenticateToken, ctrl.getOverviewDrill);
 router.delete(`${BASE}/files`,                    authenticateToken, ctrl.deleteFile);
+
+// ─── Shopify Dashboard — drill-down analytics (Operations / Shopify / Marketplaces) ──
+router.get(`${BASE}/shopify-dashboard/operations`,              authenticateToken, dash.getOperationsData);
+router.get(`${BASE}/shopify-dashboard/operations/transactions`, authenticateToken, dash.getOperationsTransactions);
+router.get(`${BASE}/shopify-dashboard/operations/download`,     authenticateToken, dash.downloadOperations);
+
+router.get(`${BASE}/shopify-dashboard/shopify`,                 authenticateToken, dash.shopifyData);
+router.get(`${BASE}/shopify-dashboard/shopify/transactions`,    authenticateToken, dash.shopifyTransactions);
+router.get(`${BASE}/shopify-dashboard/shopify/download`,        authenticateToken, dash.downloadShopify);
+
+router.get(`${BASE}/shopify-dashboard/marketplaces`,              authenticateToken, dash.marketplacesData);
+router.get(`${BASE}/shopify-dashboard/marketplaces/transactions`, authenticateToken, dash.marketplacesTransactions);
+router.get(`${BASE}/shopify-dashboard/marketplaces/download`,     authenticateToken, dash.downloadMarketplaces);
 
 module.exports = router;

@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo, useCallback } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
 import DashboardLayout from '../../components/layout/DashboardLayout';
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend,
@@ -21,7 +21,6 @@ const COLOR_RETURNED = '#E11D48';
 const COLOR_PRIMARY = '#4F46E5';
 const COLOR_SALES = '#0748EE';
 const COLOR_COD = '#0EA5E9';
-const COLOR_MARKETPLACE = '#D97706';
 
 const cardStyle = {
   background: 'var(--surface)',
@@ -283,11 +282,15 @@ const FilteredOrdersModal = ({ brandId, range, filters, title, subtitle, onClose
 const PayablesDashboard = () => {
   const { brandId } = useParams();
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
 
-  const [fromMonth, setFromMonth] = useState(null);
-  const [fromYear, setFromYear] = useState(null);
-  const [toMonth, setToMonth] = useState(null);
-  const [toYear, setToYear] = useState(null);
+  // Seeds from ?fromMonth&fromYear&toMonth&toYear if the link that brought us here
+  // (e.g. the Payable Amount card on the Receivable Dashboard) specified a range —
+  // read once on mount, the picker below takes over from here.
+  const [fromMonth, setFromMonth] = useState(() => parseInt(searchParams.get('fromMonth'), 10) || null);
+  const [fromYear, setFromYear] = useState(() => parseInt(searchParams.get('fromYear'), 10) || null);
+  const [toMonth, setToMonth] = useState(() => parseInt(searchParams.get('toMonth'), 10) || null);
+  const [toYear, setToYear] = useState(() => parseInt(searchParams.get('toYear'), 10) || null);
   const [initialized, setInitialized] = useState(false);
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -323,7 +326,11 @@ const PayablesDashboard = () => {
     }
   }, [brandId]);
 
-  useEffect(() => { load(); }, [load]);
+  // First load: pass through whatever range the URL seeded (see fromMonth's
+  // initializer above); if none, these are all null and the backend defaults to
+  // the full available span.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => { load(fromMonth, fromYear, toMonth, toYear); }, [load]);
 
   useEffect(() => {
     if (!initialized) return;
@@ -346,7 +353,6 @@ const PayablesDashboard = () => {
   const byChannel = data?.byChannel || [];
   const byGatewayChannel = byChannel.filter((r) => r.source === 'Prepaid Gateway');
   const byCourierChannel = byChannel.filter((r) => r.source === 'COD');
-  const byMarketplaceChannel = byChannel.filter((r) => r.source === 'Marketplace Prepaid');
   const aging = data?.aging || [];
   const range = (fromMonth && fromYear && toMonth && toYear) ? { fromMonth, fromYear, toMonth, toYear } : null;
 
@@ -354,7 +360,7 @@ const PayablesDashboard = () => {
     const map = new Map();
     (data?.monthlyTrend || []).forEach((r) => {
       const key = `${r.year}-${r.month}`;
-      const row = map.get(key) || { label: `${MONTHS[r.month]} ${String(r.year).slice(2)}`, month: r.month, year: r.year, 'Prepaid Gateway': 0, COD: 0, 'Marketplace Prepaid': 0 };
+      const row = map.get(key) || { label: `${MONTHS[r.month]} ${String(r.year).slice(2)}`, month: r.month, year: r.year, 'Prepaid Gateway': 0, COD: 0 };
       row[r.source] = Number(r.amount || 0);
       map.set(key, row);
     });
@@ -394,21 +400,33 @@ const PayablesDashboard = () => {
                 Payables Dashboard
               </h1>
               <p className="text-xs mt-0.5" style={{ color: 'var(--text-muted)' }}>
-                Cash already collected for orders that were then returned — a refund liability, not revenue
+                Shopify-only — cash already collected for orders that were then returned — a refund liability, not revenue
               </p>
             </div>
           </div>
 
           <div className="flex items-center gap-1.5 flex-wrap">
             <button
-              onClick={() => navigate(`/brands/${brandId}/receivables`)}
+              onClick={() => {
+                const params = new URLSearchParams();
+                if (fromMonth && fromYear) { params.set('startMonth', fromMonth); params.set('startYear', fromYear); }
+                if (toMonth && toYear) { params.set('month', toMonth); params.set('year', toYear); }
+                const qs = params.toString();
+                navigate(`/brands/${brandId}/receivables${qs ? `?${qs}` : ''}`);
+              }}
               className="flex items-center gap-1.5 text-xs font-bold px-3 py-2 rounded-lg transition-colors"
               style={{ background: `${COLOR_SALES}12`, color: COLOR_SALES, border: `1px solid ${COLOR_SALES}30` }}
             >
               Receivable Dashboard →
             </button>
             <button
-              onClick={() => navigate(`/brands/${brandId}/advance-amount`)}
+              onClick={() => {
+                const params = new URLSearchParams();
+                if (fromMonth && fromYear) { params.set('fromMonth', fromMonth); params.set('fromYear', fromYear); }
+                if (toMonth && toYear) { params.set('toMonth', toMonth); params.set('toYear', toYear); }
+                const qs = params.toString();
+                navigate(`/brands/${brandId}/advance-amount${qs ? `?${qs}` : ''}`);
+              }}
               className="flex items-center gap-1.5 text-xs font-bold px-3 py-2 rounded-lg transition-colors mr-1"
               style={{ background: `${COLOR_PRIMARY}12`, color: COLOR_PRIMARY, border: `1px solid ${COLOR_PRIMARY}30` }}
             >
@@ -468,9 +486,8 @@ const PayablesDashboard = () => {
         {!loading && !error && !data?.kpis && (
           <div className="p-8 text-center" style={cardStyle}>
             <p className="text-sm font-semibold" style={{ color: 'var(--text-muted)' }}>
-              No payable orders found for this brand yet — this needs at least one Prepaid Gateway advance order
-              that was returned, one COD order that was collected and then returned, or one non-Shopify Prepaid
-              (Marketplace) order that was collected and then returned.
+              No payable orders found for this brand yet — this needs at least one Shopify Prepaid Gateway advance
+              order that was returned, or one Shopify COD order that was collected and then returned.
             </p>
           </div>
         )}
@@ -522,7 +539,6 @@ const PayablesDashboard = () => {
                     <Legend wrapperStyle={{ fontSize: 11 }} />
                     <Line type="monotone" dataKey="Prepaid Gateway" stroke={COLOR_PRIMARY} strokeWidth={2.5} dot={{ r: 3 }} />
                     <Line type="monotone" dataKey="COD" stroke={COLOR_COD} strokeWidth={2.5} dot={{ r: 3 }} />
-                    <Line type="monotone" dataKey="Marketplace Prepaid" stroke={COLOR_MARKETPLACE} strokeWidth={2.5} dot={{ r: 3 }} />
                   </LineChart>
                 </ResponsiveContainer>
               </div>
@@ -538,7 +554,7 @@ const PayablesDashboard = () => {
                 total={k.total_payable_amount}
                 emptyLabel="No payable orders in this range."
                 onRowClick={(r) => openOrders({
-                  source: r.source === 'COD' ? 'cod' : r.source === 'Marketplace Prepaid' ? 'marketplace_prepaid' : 'prepaid',
+                  source: r.source === 'COD' ? 'cod' : 'prepaid',
                 }, `${r.source} — payable`)}
               />
               <FormulaNote>
@@ -547,13 +563,10 @@ const PayablesDashboard = () => {
                 <strong> COD</strong>: the courier actually remitted the cash to us on delivery, then the order was
                 returned — only this collected-then-returned subset counts; a COD order returned before it was ever
                 collected (a plain RTO) has zero payable liability and isn't included here.
-                <strong> Marketplace Prepaid</strong>: a non-Shopify channel (Amazon/Flipkart/Zepto/etc.) prepaid
-                order that Tally already booked as settled, then returned — same collected-then-returned rule as
-                COD, just without a courier remittance step in between.
               </FormulaNote>
             </SectionCard>
 
-            <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
               <SectionCard title="By gateway" icon={Wallet}>
                 <BreakdownTable
                   columns={['Gateway', 'Orders', 'Amount', 'Share']}
@@ -570,15 +583,6 @@ const PayablesDashboard = () => {
                   total={byCourierChannel.reduce((s, r) => s + Number(r.amount || 0), 0)}
                   emptyLabel="No COD payables in this range."
                   onRowClick={(r) => openOrders({ source: 'cod', channel: r.channel }, `${r.channel} — payable`)}
-                />
-              </SectionCard>
-              <SectionCard title="By marketplace" icon={Wallet}>
-                <BreakdownTable
-                  columns={['Channel', 'Orders', 'Amount', 'Share']}
-                  rows={byMarketplaceChannel} keyField="channel"
-                  total={byMarketplaceChannel.reduce((s, r) => s + Number(r.amount || 0), 0)}
-                  emptyLabel="No Marketplace Prepaid payables in this range."
-                  onRowClick={(r) => openOrders({ source: 'marketplace_prepaid', channel: r.channel }, `${r.channel} — payable`)}
                 />
               </SectionCard>
             </div>

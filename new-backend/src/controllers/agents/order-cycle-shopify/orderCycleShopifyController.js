@@ -17,6 +17,15 @@ const { getBrandConnection } = require('../../../config/database');
 const { getDynamicModel } = require('../../../models/brand');
 const { orderCycleShopifyProcessor, parseExcelBuffer } = require('../../../services/processors/orderCycleShopifyProcessor');
 const { setPending, getPending, deletePending } = require('../../../services/pendingGenerationsStore');
+const shopifyTokenStore = require('../../../services/shopifyTokenStore');
+const shopifyCombinedSO = require('../../../services/shopifyCombinedSO');
+const cashfreeClient = require('../../../services/cashfreeClient');
+const velocityClient = require('../../../services/velocityClient');
+const shopifyPrimaryMaster = require('../../../services/shopifyPrimaryMaster');
+const velocityReturns = require('../../../services/velocityReturns');
+const eshopboxClient = require('../../../services/eshopboxClient');
+const eshopboxTracking = require('../../../services/eshopboxTracking');
+const returnPrimeClient = require('../../../services/returnPrimeClient');
 
 const path = require('path');
 const fs = require('fs-extra');
@@ -24,6 +33,23 @@ const { v4: uuidv4 } = require('uuid');
 const ExcelJS = require('exceljs');
 
 const OUTPUT_DIR = path.join(__dirname, '../../../../outputs');
+
+/* Brands allowed to build the Order Cycle master from Shopify orders instead of a
+   Tally GST export. Deliberately an explicit allowlist rather than "any brand with
+   a Shopify connection": connecting a store must never silently change how that
+   brand's books are assembled. D'Chicha only — it has no Tally export. */
+/** Brands cleared for the extended Order Cycle report. Empty ⇒ nobody, which is
+    the safe default: every other brand keeps the exact 34-column report and the
+    exact net-sales basis its accountant already signed off on. */
+const orderCycleExtendedForBrand = (brandId) =>
+    !!brandId && String(process.env.ORDER_CYCLE_EXTENDED_BRAND_IDS || '')
+        .split(',').map((x) => x.trim()).filter(Boolean)
+        .includes(String(brandId));
+
+const shopifyPrimaryAllowed = (brandId) =>
+    String(process.env.SHOPIFY_PRIMARY_BRAND_IDS || '')
+        .split(',').map((x) => x.trim()).filter(Boolean)
+        .includes(String(brandId));
 
 async function ensureDir() {
     await fs.ensureDir(OUTPUT_DIR);
@@ -144,15 +170,38 @@ const generatePreview = async (req, res, next) => {
         const unicommerceArr = req.files?.unicommerceFile;       // Export-Tally GST Report
         const returnGSTArr = req.files?.returnGSTFile;           // Return GST Report
         const salesOrderArr = req.files?.salesOrderReportFile;   // Sales Order Combined Report
-        if (!unicommerceArr || !unicommerceArr[0]) {
+        // OPT-IN, BRAND-GATED: build the master from Shopify orders instead of a
+        // Tally GST export. For a brand with no Tally export the agent otherwise
+        // produces zero rows, because Step 1 only ever creates rows from gstJson.
+        const wantsShopifyMaster = String(req.body.masterSource || '').toLowerCase() === 'shopify_primary';
+        const shopifyMasterConn = (wantsShopifyMaster && shopifyPrimaryAllowed(brandId))
+            ? await shopifyTokenStore.getConnection(brandId).catch(() => null) : null;
+        const useShopifyMaster = wantsShopifyMaster && !!shopifyMasterConn;
+        if (wantsShopifyMaster && !shopifyMasterConn) {
+            return res.status(409).json({
+                error: shopifyPrimaryAllowed(brandId)
+                    ? 'Shopify-primary mode needs a connected Shopify store for this brand.'
+                    : 'Shopify-primary mode is not enabled for this brand.',
+            });
+        }
+        if (!useShopifyMaster && (!unicommerceArr || !unicommerceArr[0])) {
             return res.status(400).json({ error: 'Export-Tally GST file is required (field: unicommerceFile)' });
         }
-        if (!salesOrderArr || !salesOrderArr[0]) {
+        // OPT-IN: pull Sales Order Combined from the Shopify API instead of an upload.
+        // Requires an explicit flag AND a live Shopify connection for this brand, so
+        // every existing brand and every existing request behaves exactly as before.
+        const wantsShopifyApi = String(req.body.salesOrderSource || '').toLowerCase() === 'shopify_api';
+        const shopifyConn = wantsShopifyApi ? await shopifyTokenStore.getConnection(brandId).catch(() => null) : null;
+        const useShopifyApi = wantsShopifyApi && !!shopifyConn;
+        if (wantsShopifyApi && !shopifyConn) {
+            return res.status(409).json({ error: 'This brand has no Shopify store connected — connect it on Integrations, or upload the Sales Order Report file.' });
+        }
+        if (!useShopifyApi && (!salesOrderArr || !salesOrderArr[0])) {
             return res.status(400).json({ error: 'Sales Order Report file is required (field: salesOrderReportFile)' });
         }
-        const unicommerceBuffer = unicommerceArr[0].buffer;
+        const unicommerceBuffer = unicommerceArr?.[0]?.buffer || null;
         const returnGSTBuffer = returnGSTArr?.[0]?.buffer || null;
-        const salesOrderBuffer = salesOrderArr[0].buffer;
+        const salesOrderBuffer = salesOrderArr?.[0]?.buffer || null;
 
         // Validate Brand + Agent
         const brand = await Brand.findByPk(brandId);
@@ -172,21 +221,233 @@ const generatePreview = async (req, res, next) => {
         }
 
         // Parse all files to JSON
-        const unicommerceJson = await parseExcelBuffer(unicommerceBuffer, 'Export-Tally GST Report');
-        const returnGSTJson = returnGSTBuffer
+        // Same row shape either way — the processor cannot tell them apart.
+        let unicommerceJson, shopifyMasterStats = null, shopifyReturnRows = null, shopifyDerivedSalesOrder = null;
+        if (useShopifyMaster) {
+            const built = await shopifyPrimaryMaster.buildFromShopify(brandId, {
+                since: req.body.since || undefined,
+                until: req.body.until || undefined,
+            });
+            unicommerceJson = built.master;
+            shopifyReturnRows = built.returns;
+            shopifyDerivedSalesOrder = built.salesOrder;   // same orders, no second pull
+            shopifyMasterStats = built.stats;
+            console.log(`[OrderCycle] master from Shopify — ${built.stats.orders} orders, ` +
+                        `gross ${built.stats.grossSales}, returns ${built.stats.returnValue}, net ${built.stats.netSales}`);
+        } else {
+            unicommerceJson = await parseExcelBuffer(unicommerceBuffer, 'Export-Tally GST Report');
+        }
+        let returnGSTJson = returnGSTBuffer
             ? await parseExcelBuffer(returnGSTBuffer, 'Return GST Report')
-            : [];
-        const salesOrderJson = await parseExcelBuffer(salesOrderBuffer, 'Sales Order Combined Report');
+            : (shopifyReturnRows || []);   // Shopify refunds stand in for the Return GST report
+        // Same row shape either way — the processor cannot tell them apart.
+        let salesOrderJson, salesOrderSourceLabel = 'upload', shopifyPullStats = null;
+        if (useShopifyApi && shopifyDerivedSalesOrder) {
+            salesOrderJson = shopifyDerivedSalesOrder;
+            salesOrderSourceLabel = `shopify_api:${shopifyConn.shop_domain} (derived from master)`;
+        } else if (useShopifyApi) {
+            const pulled = await shopifyCombinedSO.buildSalesOrderRows(brandId, {
+                since: req.body.since || undefined,
+                until: req.body.until || undefined,
+            });
+            salesOrderJson = pulled.rows;
+            shopifyPullStats = pulled.stats;
+            salesOrderSourceLabel = `shopify_api:${shopifyConn.shop_domain}`;
+            console.log(`[OrderCycle] Sales Order from Shopify API — ${pulled.stats.orders} orders, ` +
+                        `payment-ref coverage ${pulled.stats.paymentReferenceCoverage}%`);
+        } else {
+            salesOrderJson = await parseExcelBuffer(salesOrderBuffer, 'Sales Order Combined Report');
+        }
         const gatewayDataJson = {};
         for (const gw of paymentGatewayFiles) {
             gatewayDataJson[gw.name] = await parseExcelBuffer(gw.buffer, `Payment Gateway: ${gw.name}`);
         }
+        // OPT-IN, BRAND-GATED: pull Cashfree settlements from the API instead of a
+        // file. Requires the flag AND the brand to be listed in CASHFREE_BRAND_IDS,
+        // so every other brand keeps uploading its gateway files unchanged.
+        const wantsCashfreeApi = String(req.body.gatewaySource || '').toLowerCase() === 'cashfree_api';
+        let cashfreePullStats = null;
+        if (wantsCashfreeApi) {
+            if (!cashfreeClient.isEnabledForBrand(brandId)) {
+                return res.status(409).json({ error: 'Cashfree API is not enabled for this brand.' });
+            }
+            const recon = await cashfreeClient.fetchSettlementRecon({
+                since: req.body.since || undefined,
+                until: req.body.until || undefined,
+            });
+            gatewayDataJson['Cashfree'] = recon;
+            const byType = recon.reduce((a, r) => {
+                const t = (r.event_details || {}).event_type || 'UNKNOWN';
+                a[t] = (a[t] || 0) + 1; return a;
+            }, {});
+            cashfreePullStats = { events: recon.length, byType };
+            console.log(`[OrderCycle] Cashfree settlements from API — ${recon.length} events`, JSON.stringify(byType));
+        }
+
+        // OPT-IN, BRAND-GATED: pull COD remittance from the shipping platform.
+        // AWBs come from the Tally master (which carries awb_number) — that is the
+        // authoritative set of shipments this period, and Velocity is keyed on AWB.
+        const wantsVelocityApi = String(req.body.logisticsSource || '').toLowerCase() === 'velocity_api';
+        let velocityPullStats = null, velocityRows = [], velocityReturnStats = null;
+        if (wantsVelocityApi) {
+            if (!velocityClient.isEnabledForBrand(brandId)) {
+                return res.status(409).json({ error: 'Velocity API is not enabled for this brand.' });
+            }
+            const awbs = [...new Set(unicommerceJson
+                .map((r) => String(r['AWB num'] ?? r['AWB Number'] ?? r['AWB'] ?? '').trim())
+                .filter(Boolean))];
+            if (awbs.length) {
+                velocityRows = await velocityClient.fetchCodRemittance(awbs);
+                const matched = velocityRows.filter((r) => !r.error);
+                const settled = matched.filter((r) => r.utr_no);
+                const sum = (a) => a.reduce((t, r) => t + Number(r.cod_amount || 0), 0);
+                velocityPullStats = {
+                    awbsQueried: awbs.length,
+                    matched: matched.length,
+                    settled: settled.length,
+                    pending: matched.length - settled.length,
+                    settledValue: Number(sum(settled).toFixed(2)),
+                    pendingValue: Number(sum(matched.filter((r) => !r.utr_no)).toFixed(2)),
+                };
+                console.log('[OrderCycle] Velocity COD remittance —', JSON.stringify(velocityPullStats));
+            }
+
+            // RETURNS — the lane Shopify cannot see. A return only reaches Shopify
+            // if somebody also issued a refund there; the goods move through
+            // Velocity either way. Measured on August 2026: Shopify held 7 refunds
+            // (₹11,478) against Velocity's 285 returns (₹4.26L of live ones), which
+            // is why the report's Returns line was effectively empty.
+            try {
+                const velReturns = await velocityClient.fetchReturns();
+                const merged = velocityReturns.mergeWithShopifyReturns(returnGSTJson, velReturns);
+                returnGSTJson = merged.rows;
+                velocityReturnStats = {
+                    ...merged.summary,
+                    velocityValue: Number(merged.summary.velocityValue.toFixed(2)),
+                    incomplete: velReturns.incomplete || null,
+                };
+                console.log('[OrderCycle] Velocity returns —', JSON.stringify({
+                    fetched: velocityReturnStats.velocityTotal,
+                    mapped: velocityReturnStats.mapped,
+                    value: velocityReturnStats.velocityValue,
+                    supersededShopify: velocityReturnStats.supersededShopify,
+                }));
+            } catch (e) {
+                // A returns failure must not lose the COD remittance already pulled,
+                // which is the expensive half of this call. Surface and carry on.
+                velocityReturnStats = { error: e.message };
+                console.warn(`[OrderCycle] Velocity returns failed (${e.message}) — continuing without them`);
+            }
+        }
+
+        // OPT-IN, BRAND-GATED: Eshopbox shipment tracking. This is the lane
+        // Shopify cannot see — 1,754 rows in the August report carry a
+        // capitalised carrier name with no COD and no UTR, and every one of them
+        // ships through Eshopbox. It is also the ONLY source that can say a
+        // parcel came back (RTO); without it the RTO tile is structurally 0.
+        const wantsEshopboxApi = String(req.body.eshopboxSource || '').toLowerCase() === 'eshopbox_api';
+        let eshopboxPullStats = null, eshopboxRows = [];
+        let eshopboxCodOrders = [], eshopboxPayouts = [], eshopboxCodPullStats = null;
+        if (wantsEshopboxApi) {
+            if (!eshopboxClient.isEnabledForBrand(brandId)) {
+                return res.status(409).json({ error: 'Eshopbox API is not enabled for this brand.' });
+            }
+            const awbs = [...new Set(unicommerceJson
+                .map((r) => String(r['AWB num'] ?? r['AWB Number'] ?? r['AWB'] ?? '').trim())
+                .filter(Boolean))];
+            if (awbs.length) {
+                try {
+                    eshopboxRows = await eshopboxClient.fetchTracking(awbs);
+                    const lookup = eshopboxTracking.buildLookup(eshopboxRows);
+                    // Reverse journeys become return rows, merged the same way
+                    // Velocity's are. They carry no amount (Eshopbox tracking
+                    // reports none), so they mark that a return happened without
+                    // inventing a value.
+                    const esbReturnRows = eshopboxTracking.toReturnRows(lookup);
+                    if (esbReturnRows.length) returnGSTJson = [...returnGSTJson, ...esbReturnRows];
+                    eshopboxPullStats = {
+                        awbsQueried: awbs.length,
+                        tracked: lookup.stats.total,
+                        rto: lookup.stats.rto,
+                        lost: lookup.stats.lost,
+                        failedDelivery: lookup.stats.failed,
+                        reverseJourneys: lookup.stats.reverse,
+                        returnRowsAdded: esbReturnRows.length,
+                        statuses: lookup.stats.statuses,
+                        failedAwbs: (eshopboxRows.failedAwbs || []).length || 0,
+                    };
+                    console.log('[OrderCycle] Eshopbox tracking —', JSON.stringify({
+                        awbsQueried: awbs.length, tracked: lookup.stats.total,
+                        rto: lookup.stats.rto, lost: lookup.stats.lost, reverse: lookup.stats.reverse,
+                    }));
+                } catch (e) {
+                    // Never lose the whole run over a status feed. Everything
+                    // else in the report is still valid without it.
+                    eshopboxPullStats = { error: e.message };
+                    console.warn(`[OrderCycle] Eshopbox tracking failed (${e.message}) — continuing without it`);
+                }
+            }
+
+            // COD money. Separate try/catch from tracking on purpose: delivery
+            // status and cash are independent answers, and losing one should not
+            // cost the other.
+            try {
+                eshopboxCodOrders = await eshopboxClient.fetchCodOrders();
+                eshopboxPayouts = await eshopboxClient.fetchCodPayouts();
+                const paid = eshopboxPayouts.filter((p) => String(p.status || '').toUpperCase() === 'PAID');
+                const n = (v) => Number(String(v ?? '').replace(/[^0-9.-]/g, '')) || 0;
+                eshopboxCodPullStats = {
+                    awaitingOrders: eshopboxCodOrders.length,
+                    awaitingValue: Math.round(eshopboxCodOrders.reduce((t, o) => t + n(o.codAmount), 0)),
+                    payouts: eshopboxPayouts.length,
+                    paidPayouts: paid.length,
+                    paidNet: Math.round(paid.reduce((t, p) => t + n(p.netAmount), 0)),
+                    feesKept: Math.round(paid.reduce((t, p) => t + n(p.paymentAmount) - n(p.netAmount), 0)),
+                };
+                console.log('[OrderCycle] Eshopbox COD —', JSON.stringify(eshopboxCodPullStats));
+            } catch (e) {
+                eshopboxCodPullStats = { error: e.message };
+                console.warn(`[OrderCycle] Eshopbox COD failed (${e.message}) — continuing without it`);
+            }
+        }
+
+        // Return Prime — DISPLAY ONLY. Exchanges and their top-ups, which no other
+        // feed can see. Never merged into returnGSTJson: an exchange is not a
+        // return, and D'Chicha's actual returns already come from Velocity.
+        let returnPrimeRows = [], returnPrimePullStats = null;
+        if (returnPrimeClient.isEnabledForBrand(brandId)) {
+            try {
+                returnPrimeRows = await returnPrimeClient.fetchRequests();
+                const ex = returnPrimeRows.filter((r) => String(r.request_type).toLowerCase() === 'exchange');
+                const topup = returnPrimeRows.reduce((t, r) => {
+                    const pd = r.payment_details || {};
+                    return t + (String(pd.status || '').toLowerCase() === 'successful' ? (Number(pd.amount) || 0) : 0);
+                }, 0);
+                returnPrimePullStats = {
+                    requests: returnPrimeRows.length,
+                    exchanges: ex.length,
+                    returns: returnPrimeRows.length - ex.length,
+                    topupValue: Math.round(topup * 100) / 100,
+                };
+                console.log('[OrderCycle] Return Prime —', JSON.stringify(returnPrimePullStats));
+            } catch (e) {
+                returnPrimePullStats = { error: e.message };
+                console.warn(`[OrderCycle] Return Prime failed (${e.message}) — continuing without it`);
+            }
+        }
+
         const logisticsDataJson = {};
         for (const lp of logisticsFiles) {
             logisticsDataJson[lp.name] = await parseExcelBuffer(lp.buffer, `Logistics: ${lp.name}`);
         }
 
         // Run processor
+        if (velocityRows.length) logisticsDataJson['Velocity'] = velocityRows;
+        if (eshopboxRows.length) logisticsDataJson['Eshopbox'] = eshopboxRows;
+        if (eshopboxCodOrders.length) logisticsDataJson['EshopboxCod'] = eshopboxCodOrders;
+        if (eshopboxPayouts.length) logisticsDataJson['EshopboxPayouts'] = eshopboxPayouts;
+        if (returnPrimeRows.length) logisticsDataJson['ReturnPrime'] = returnPrimeRows;
+
         const result = await orderCycleShopifyProcessor(
             unicommerceJson,
             returnGSTJson,
@@ -194,7 +455,13 @@ const generatePreview = async (req, res, next) => {
             gatewayDataJson,
             logisticsDataJson,
             brand.name,
-            `${month}-${year}`
+            `${month}-${year}`,
+            // Extended report (RTO amount, Gateway refund, Payment type, and the
+            // Gross-excludes-cancelled / Net-minus-RTO basis) is OPT-IN PER BRAND.
+            // Gated on brand ID, never on brand.name — the same brand is called
+            // "D'Chicha" locally and "Dichika" in production, so a name check
+            // would silently switch the wrong brands on in the wrong environment.
+            { extended: orderCycleExtendedForBrand(brandId) }
         );
 
         // Prepare DB model
@@ -209,6 +476,90 @@ const generatePreview = async (req, res, next) => {
         const dbRows = result.summaryRows.map(row =>
             mapRowToSchema(row, month, year, filename)
         );
+
+        // ── GUARDRAILS ──────────────────────────────────────────────────────
+        // Both convert a SILENT under-reconciliation into a visible warning.
+        // This is the failure mode that hid the FLO column-shift bug for months:
+        // a join that matches nothing looks identical to a period with no data.
+        const warnings = [];
+
+        // 1. Coverage floor — a payment-reference rate near zero means the
+        //    Shopify→gateway bridge is broken, so no settlement can ever attach.
+        if (shopifyPullStats && shopifyPullStats.orders > 50 && shopifyPullStats.paymentReferenceCoverage < 10) {
+            warnings.push({
+                level: 'error',
+                message: `Only ${shopifyPullStats.paymentReferenceCoverage}% of pulled orders carry a payment reference. `
+                       + `Gateway settlements cannot be matched — check the Shopify payment-reference field before relying on this run.`,
+            });
+        }
+
+        // 2. Window coverage — how many Tally orders were actually PRESENT in the
+        //    pulled Sales Order set. Deliberately NOT "rows without a delivery
+        //    status": an order inside the window that simply hasn't shipped yet
+        //    also has no status, and that is normal for a recent month. Only a
+        //    Tally order missing from the pull altogether indicates a bad window.
+        const rows = result.summaryRows || [];
+        if (rows.length && Array.isArray(salesOrderJson) && salesOrderJson.length) {
+            const pulled = new Set(salesOrderJson
+                .map((r) => String(r['Order No'] ?? '').replace(/^#/, '').trim())
+                .filter(Boolean));
+            const missing = rows.filter((r) => {
+                const no = String(r.sale_order_number ?? '').replace(/^#/, '').trim();
+                return no && !pulled.has(no);
+            }).length;
+            const pct = Math.round(missing / rows.length * 100);
+            if (pct >= 20) {
+                warnings.push({
+                    level: 'warn',
+                    message: `${missing} of ${rows.length} Tally orders (${pct}%) were not found in the pulled data. `
+                           + `Your window (${req.body.since || 'unset'} → ${req.body.until || 'unset'}) may not cover the Tally period — widen it and re-run.`,
+                });
+            }
+        }
+
+        // 3. Returns feed health. Understating returns overstates net sales, so a
+        //    partial read is reported rather than quietly accepted.
+        if (velocityReturnStats && velocityReturnStats.error) {
+            warnings.push({
+                level: 'warn',
+                message: `Velocity returns could not be read (${velocityReturnStats.error}). `
+                       + `Returns in this report come from Shopify refunds alone, which historically capture only a small fraction of actual returns.`,
+            });
+        } else if (velocityReturnStats && velocityReturnStats.incomplete) {
+            const { fetched, expected } = velocityReturnStats.incomplete;
+            warnings.push({
+                level: 'warn',
+                message: `Only ${fetched} of ${expected} Velocity returns were retrieved. Returns — and therefore net sales — are understated in this run.`,
+            });
+        }
+
+        // 4. Eshopbox status feed. An RTO booked as a receivable is money
+        //    recorded as owed for goods sitting back in the warehouse, so both
+        //    the finding and the absence of the feed are worth saying out loud.
+        if (eshopboxPullStats && eshopboxPullStats.error) {
+            warnings.push({
+                level: 'warn',
+                message: `Eshopbox tracking could not be read (${eshopboxPullStats.error}). `
+                       + `RTO and delivery status are unavailable for Eshopbox shipments in this run — `
+                       + `returned parcels may still be counted as receivable.`,
+            });
+        } else if (eshopboxPullStats && (eshopboxPullStats.rto || eshopboxPullStats.lost)) {
+            warnings.push({
+                level: 'info',
+                message: `Eshopbox reported ${eshopboxPullStats.rto} RTO and ${eshopboxPullStats.lost} lost shipment(s). `
+                       + `These are no longer counted as receivable.`
+                       + (eshopboxPullStats.failedDelivery
+                          ? ` A further ${eshopboxPullStats.failedDelivery} shipment(s) have a failed delivery attempt and may become RTO.`
+                          : ''),
+            });
+        }
+
+        // The preview can take 10+ minutes (Velocity is rate-limited to 5 req/min),
+        // which is long enough for an HTTP client to time out or be killed before
+        // it ever receives this taskId — and without the id the finished run is
+        // unreachable, since the pending store has no listing endpoint. Logging it
+        // costs nothing and makes a completed run recoverable.
+        console.log(`[OrderCycle] preview ready — taskId=${taskId} rows=${result.rowCount}`);
 
         // Stash for commit phase
         setPending(taskId, {
@@ -227,6 +578,19 @@ const generatePreview = async (req, res, next) => {
             taskId,
             rowCount: result.rowCount,
             parseStats: result.parseStats,
+            // Which path produced the Sales Order rows, and — when pulled from the
+            // API — how many carry a payment reference. A coverage near 0% is the
+            // signature of the broken-join failure mode, so it is surfaced, not hidden.
+            salesOrderSource: salesOrderSourceLabel,
+            shopifyPull: shopifyPullStats,
+            cashfreePull: cashfreePullStats,
+            velocityPull: velocityPullStats,
+            velocityReturns: velocityReturnStats,
+            eshopboxPull: eshopboxPullStats,
+            eshopboxCod: eshopboxCodPullStats,
+            returnPrime: returnPrimePullStats,
+            shopifyMaster: shopifyMasterStats,
+            warnings,
             summary: {
                 gstReportRows: result.parseStats.gstReport,
                 returnGSTRows: result.parseStats.returnGST,
@@ -310,7 +674,11 @@ const getGeneratedFiles = async (req, res, next) => {
         await Model.sync();
 
         // Get distinct filenames with metadata
-        // MIN(id::text) because id is UUID — PostgreSQL has no MIN() for UUID natively
+        // MIN(id::text) because id is UUID — PostgreSQL has no MIN() for UUID natively.
+        // MIN/MAX(date) — the underlying orders' own dispatch dates — is the same
+        // real span getReportData exposes as availableRange for one file, surfaced
+        // here per row so the list itself shows what data an entry actually covers
+        // instead of just the single month/year label it was uploaded under.
         const { Sequelize } = require('sequelize');
         const rows = await Model.findAll({
             attributes: [
@@ -318,6 +686,8 @@ const getGeneratedFiles = async (req, res, next) => {
                 [Sequelize.fn('COUNT', Sequelize.col('filename')), 'row_count'],
                 [Sequelize.fn('MIN', Sequelize.col('created_at')), 'created_at'],
                 [Sequelize.literal('MIN(id::text)'), 'id'],
+                [Sequelize.fn('MIN', Sequelize.col('date')), 'data_from'],
+                [Sequelize.fn('MAX', Sequelize.col('date')), 'data_to'],
             ],
             group: ['filename', 'month', 'year'],
             order: [['year', 'DESC'], ['month', 'DESC']],
@@ -326,8 +696,14 @@ const getGeneratedFiles = async (req, res, next) => {
 
         // Postgres COUNT() comes back as a bigint string (e.g. "66560") — cast so
         // downstream numeric use (e.g. summing across files) doesn't silently
-        // concatenate instead of add.
-        const withNumericCounts = rows.map(r => ({ ...r, row_count: Number(r.row_count) }));
+        // concatenate instead of add. data_from/data_to come back as full
+        // timestamps — trim to a plain date so the UI doesn't have to.
+        const withNumericCounts = rows.map(r => ({
+            ...r,
+            row_count: Number(r.row_count),
+            data_from: r.data_from ? new Date(r.data_from).toISOString().slice(0, 10) : null,
+            data_to: r.data_to ? new Date(r.data_to).toISOString().slice(0, 10) : null,
+        }));
 
         res.json(withNumericCounts);
     } catch (error) {
@@ -394,6 +770,289 @@ const deleteFile = async (req, res, next) => {
     }
 };
 
+// ─── Order-Cycle Overview blocks (Volume / Cash / Funnel / Scenario / Package / Cash-Action) ──
+//
+// Extra sections layered onto the reconciliation report, matching the
+// "ORDER CYCLE - DASHBOARD (Page 1 / overview)" spec. Computed from the same
+// per-file, date-filtered rows as the summary — additive only, they never change
+// the reconciliation numbers. Some buckets read 0 by design: the uploaded files
+// carry DELIVERED / partial / blank delivery statuses plus RECONCILED / PENDING
+// RECEIVABLE / OVERPAID / ADVANCE reco statuses — not the granular courier scan
+// states (out-for-delivery, attempt-failed, at-hub) or an AWB-fallback SRN match,
+// so rows that need those signals stay empty until a source file carries them.
+
+const OCV_SCENARIO_ROWS = [
+    { n: 1,  key: 'prepaid_settled_clean',                 payment: 'PREPAID', calc: 'settled same month, never returned' },
+    { n: 2,  key: 'prepaid_settled_then_returned_full',    payment: 'PREPAID', calc: 'settled, later returned in full' },
+    { n: 3,  key: 'prepaid_settled_then_returned_partial', payment: 'PREPAID', calc: 'settled, partial return < order value' },
+    { n: 4,  key: 'cod_settled_clean',                     payment: 'COD',     calc: 'courier remittance present, never returned' },
+    { n: 5,  key: 'cod_settled_late_cross_month',          payment: 'COD',     calc: 'remittance month after the dispatch month' },
+    { n: 6,  key: 'cod_settled_short_remittance',          payment: 'COD',     calc: 'remitted amount < net order value' },
+    { n: 7,  key: 'cod_returned_never_settled',            payment: 'COD',     calc: 'returned, no remittance received' },
+    { n: 8,  key: 'cod_settled_then_returned',             payment: 'COD',     calc: 'remittance received AND later returned (full)' },
+    { n: 9,  key: 'cod_settled_then_returned_partial',     payment: 'COD',     calc: 'remittance received + partial return' },
+    { n: 10, key: 'cod_pending',                           payment: 'COD',     calc: 'no remittance / SRN yet (courier file exists)' },
+    { n: 11, key: 'cod_pending_no_settlement_source',      payment: 'COD',     calc: 'no settlement file loaded for this courier' },
+    { n: 12, key: 'cod_returned_via_awb_fallback',         payment: 'COD',     calc: 'SRN matched on AWB, not invoice number (not detectable in current files)' },
+];
+
+const OCV_PACKAGE_ROWS = [
+    { n: 1, key: 'withBrandNotDispatched', label: 'With brand / warehouse (not dispatched)',          calc: 'no dispatch date, or cancelled before dispatch' },
+    { n: 2, key: 'withCourierTransit',     label: 'With courier (in transit / at hub)',               calc: 'dispatched, not yet delivered or returned' },
+    { n: 3, key: 'withCourierOFD',         label: 'With courier (out for delivery / attempt failed)', calc: 'courier out-for-delivery status (not carried in current files)' },
+    { n: 4, key: 'withCustomer',           label: 'With customer (delivered)',                        calc: 'delivery confirmed, not returned' },
+    { n: 5, key: 'returningToBrand',       label: 'Returning to brand (RTO / return in transit)',     calc: 'RTO or return raised, not yet received back' },
+    { n: 6, key: 'backWithBrand',          label: 'Back with brand (return received)',                calc: 'return received / reconciled after the return' },
+    { n: 7, key: 'lost',                   label: 'Lost / needs investigation',                       calc: 'lost / untraceable / overpaid-investigate' },
+];
+
+const OCV_CASHACTION_ROWS = [
+    { n: 1, key: 'noAction',        label: 'No action (still in transit)', when: 'shipment moving, final outcome not yet known' },
+    { n: 2, key: 'awaitRemittance', label: 'Await courier remittance',     when: 'delivered, waiting on the settlement / gateway file' },
+    { n: 3, key: 'hold',            label: 'Hold (do not refund yet)',     when: 'return / RTO in transit, not yet received back' },
+    { n: 4, key: 'refundNow',       label: 'Refund now',                   when: 'return / RTO confirmed received back at the warehouse' },
+    { n: 5, key: 'investigate',     label: 'Investigate',                  when: 'lost / untraceable / overpaid status' },
+];
+
+const ocvNum = (v) => { const n = Number(v); return isNaN(n) ? 0 : n; };
+const ocvDate = (v) => { if (!v) return null; const d = new Date(v); return isNaN(d.getTime()) ? null : d; };
+const ocvMonthKey = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+const ocvDispatchDate = (r) => ocvDate(r.dispatch_or_cancellation_date) || ocvDate(r.date);
+const ocvDeliveredDate = (r) =>
+    ocvDate(r.delhivery_delivery_date) || ocvDate(r.xpressbees_delivery_date)
+    || ocvDate(r.ekart_actual_remittance_date) || ocvDate(r.ekart_remittance_date);
+const ocvSettlementDate = (r) =>
+    ocvDate(r.ekart_actual_remittance_date) || ocvDate(r.ekart_remittance_date)
+    || ocvDate(r.delhivery_delivery_date) || ocvDate(r.xpressbees_transaction_date) || ocvDate(r.xpressbees_delivery_date)
+    || ocvDate(r.snapmint_settlement_date) || ocvDate(r.bharatx_settlement_timestamp) || ocvDate(r.razorpay_settlement_date);
+
+function ocvPaymentMethod(r) {
+    const sp = (r.shipping_partner || '').toLowerCase();
+    if (/prepaid|\bpre[\s_-]?paid\b/.test(sp)) return 'Prepaid';
+    if (/\bcod\b|cash on delivery/.test(sp)) return 'COD';
+    if (ocvNum(r.snapmint_settlement_value) || ocvNum(r.bharatx_ledger_amount) || ocvNum(r.razorpay_settlement_amount)) return 'Prepaid';
+    if (r.snapmint_settlement_date || r.bharatx_settlement_timestamp || r.razorpay_settlement_date) return 'Prepaid';
+    if (ocvNum(r.ekart_cod_amount) || ocvNum(r.delhivery_cod_amount) || ocvNum(r.xpressbees_net_payment)) return 'COD';
+    if ((r.reconciliation_status || '').toUpperCase().trim() === 'ADVANCE') return 'Prepaid';
+    return 'COD';
+}
+function ocvCourier(r) {
+    const s = (r.shipping_partner || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+    if (!s) return 'Unknown';
+    if (s.includes('delhivery') || /^dlv/.test(s)) return 'Delhivery';
+    if (s.includes('xpressb') || s.includes('busybee') || /^xb/.test(s)) return 'Xpressbees';
+    if (s.includes('ekart') || s.includes('instakart')) return 'Ekart';
+    if (s.includes('bluedart')) return 'Bluedart';
+    if (s.includes('dtdc')) return 'DTDC';
+    if (s.includes('selfship') || s.includes('selfshipping')) return 'Self Ship';
+    if (s === 'ats') return 'ATS';
+    return 'Other';
+}
+function ocvCouriersWithSettlement(rows) {
+    const set = new Set();
+    for (const r of rows) {
+        if (ocvNum(r.ekart_cod_amount) || ocvDate(r.ekart_remittance_date) || ocvDate(r.ekart_actual_remittance_date)) set.add('Ekart');
+        if (ocvNum(r.delhivery_cod_amount) || ocvDate(r.delhivery_delivery_date)) set.add('Delhivery');
+        if (ocvNum(r.xpressbees_net_payment) || ocvDate(r.xpressbees_transaction_date) || ocvDate(r.xpressbees_delivery_date)) set.add('Xpressbees');
+    }
+    return set;
+}
+function ocvFacts(r, asOf) {
+    const ds = (r.delivery_status || '').toUpperCase().trim();
+    const status = (r.reconciliation_status || '').toUpperCase().trim();
+    const dispatchDate = ocvDispatchDate(r);
+    const delDate = ocvDeliveredDate(r);
+    const setDate = ocvSettlementDate(r);
+    const gross = ocvNum(r.total_amount);
+    const ret = ocvNum(r.return_amount);
+    const net = ocvNum(r.net_amount) || (gross - ret);
+    const settledAmt = ocvNum(r.total_settlement_received);
+    const balance = ocvNum(r.balance_amount_receivable);
+
+    const isCancelled = ds === 'CANCELLED' || status === 'CANCELLED';
+    const isRTO = ds === 'RTO' || status === 'RTO';
+    const isLost = /LOST|UNTRACEABLE|ARCHIV/.test(ds) || status === 'OVERPAID / INVESTIGATE';
+    const isAdvance = status === 'ADVANCE';
+    const returned = ret > 0 || !!ocvDate(r.return_date);
+    const partialReturn = returned && ret > 0 && ret < gross - 0.5;
+
+    const dispatched = !!dispatchDate && !isCancelled;
+    const delivered = !isRTO && !isCancelled && (ds === 'DELIVERED' || (!!delDate && (!asOf || delDate <= asOf)));
+    const returnedPostDelivery = returned && (delivered || !!delDate);
+
+    const settled = !isCancelled && (status === 'RECONCILED' || (balance === 0 && settledAmt > 0));
+    const unsettled = dispatched && !isCancelled && !settled;
+    const shortRemittance = settled && settledAmt > 0 && settledAmt < net - 1 && !returned;
+    const crossMonth = !!(setDate && dispatchDate && ocvMonthKey(setDate) !== ocvMonthKey(dispatchDate));
+    const returnReceived = returned && (settled || status === 'RECONCILED' || balance === 0);
+
+    return {
+        gross, ret, net, settledAmt, balance, dispatchDate,
+        isCancelled, isRTO, isLost, isAdvance,
+        returned, partialReturn, returnedPostDelivery, returnReceived,
+        dispatched, delivered, settled, unsettled, shortRemittance, crossMonth,
+        paymentMethod: ocvPaymentMethod(r),
+        courier: ocvCourier(r),
+        srn: !!r.srn,
+        advanceAmount: isAdvance ? gross : 0,
+        payableAmount: (returned && (settled || isAdvance || settledAmt > 0)) ? ret : 0,
+    };
+}
+function ocvScenario(f, courierFileSet) {
+    if (f.paymentMethod === 'Prepaid') {
+        if (f.returned && f.settled) return f.partialReturn ? 'prepaid_settled_then_returned_partial' : 'prepaid_settled_then_returned_full';
+        if (f.settled) return 'prepaid_settled_clean';
+        return null;
+    }
+    if (f.returned && f.settled) return f.partialReturn ? 'cod_settled_then_returned_partial' : 'cod_settled_then_returned';
+    if (f.returned) return 'cod_returned_never_settled';
+    if (f.settled) {
+        if (f.shortRemittance) return 'cod_settled_short_remittance';
+        if (f.crossMonth) return 'cod_settled_late_cross_month';
+        return 'cod_settled_clean';
+    }
+    return courierFileSet.has(f.courier) ? 'cod_pending' : 'cod_pending_no_settlement_source';
+}
+function ocvPackageBucket(f) {
+    if (f.isLost) return 'lost';
+    if (!f.dispatched) return 'withBrandNotDispatched';
+    if (f.returned || f.isRTO) return f.returnReceived ? 'backWithBrand' : 'returningToBrand';
+    if (f.delivered) return 'withCustomer';
+    return 'withCourierTransit';
+}
+function ocvCashAction(f) {
+    if (f.isLost) return 'investigate';
+    if (f.returned || f.isRTO) return f.returnReceived ? 'refundNow' : 'hold';
+    if (f.delivered && f.unsettled) return 'awaitRemittance';
+    if (f.dispatched && !f.delivered) return 'noAction';
+    return null;
+}
+/** Build the overview blocks from the already-filtered report rows. */
+function ocvBuildOverview(rows, asOf) {
+    const courierFileSet = ocvCouriersWithSettlement(rows);
+    const vol = { ordersPlaced: 0, cancelled: 0, dispatched: 0, delivered: 0, rtoLost: 0, returnedPostDelivery: 0 };
+    const cash = { netSales: 0, received: 0, advanceAmount: 0, payableAmount: 0 };
+    const scen = Object.fromEntries(OCV_SCENARIO_ROWS.map(s => [s.key, 0]));
+    const pkg = Object.fromEntries(OCV_PACKAGE_ROWS.map(s => [s.key, 0]));
+    const act = Object.fromEntries(OCV_CASHACTION_ROWS.map(s => [s.key, { prepaid: 0, cod: 0 }]));
+    // Net-amount accumulators, parallel to the count accumulators above — used to
+    // surface an "Amount" + "% share of amount" column beside every order count.
+    const funAmt = { ordersPlaced: 0, cancelledPreDispatch: 0, dispatched: 0, delivered: 0, rtoLost: 0, returnedPostDelivery: 0, netDelivered: 0 };
+    const scenAmt = Object.fromEntries(OCV_SCENARIO_ROWS.map(s => [s.key, 0]));
+    const pkgAmt = Object.fromEntries(OCV_PACKAGE_ROWS.map(s => [s.key, 0]));
+    const actAmt = Object.fromEntries(OCV_CASHACTION_ROWS.map(s => [s.key, { prepaid: 0, cod: 0 }]));
+    let cancelledPreDispatch = 0;
+    for (const r of rows) {
+        const f = ocvFacts(r, asOf);
+        const amt = f.net;
+        vol.ordersPlaced += 1;
+        funAmt.ordersPlaced += amt;
+        if (f.isCancelled) vol.cancelled += 1;
+        if (f.isCancelled && !f.dispatchDate) { cancelledPreDispatch += 1; funAmt.cancelledPreDispatch += amt; }
+        if (f.dispatched) { vol.dispatched += 1; funAmt.dispatched += amt; }
+        if (f.delivered) { vol.delivered += 1; funAmt.delivered += amt; }
+        if (f.isRTO || f.isLost) { vol.rtoLost += 1; funAmt.rtoLost += amt; }
+        if (f.returnedPostDelivery) { vol.returnedPostDelivery += 1; funAmt.returnedPostDelivery += amt; }
+        cash.netSales += f.net;
+        cash.received += f.settledAmt;
+        cash.advanceAmount += f.advanceAmount;
+        cash.payableAmount += f.payableAmount;
+        const sk = ocvScenario(f, courierFileSet);
+        if (sk) { scen[sk] += 1; scenAmt[sk] += amt; }
+        const pb = ocvPackageBucket(f);
+        pkg[pb] += 1;
+        pkgAmt[pb] += amt;
+        const ck = ocvCashAction(f);
+        if (ck) {
+            const pmk = f.paymentMethod === 'COD' ? 'cod' : 'prepaid';
+            act[ck][pmk] += 1;
+            actAmt[ck][pmk] += amt;
+        }
+    }
+    const r2 = (n) => Math.round(n * 100) / 100;
+    const netDelivered = Math.max(0, vol.delivered - vol.returnedPostDelivery);
+    funAmt.netDelivered = funAmt.delivered - funAmt.returnedPostDelivery;
+    // % share helpers: funnel stages are subsets of "Orders Placed" so their share
+    // is measured against that; the other three tables are mutually-exclusive
+    // buckets, so their share is measured against the table's own column total.
+    const pctOf = (part, whole) => (whole ? r2((part / whole) * 100) : 0);
+    const scenAmtTotal = Object.values(scenAmt).reduce((a, b) => a + b, 0);
+    const pkgAmtTotal = Object.values(pkgAmt).reduce((a, b) => a + b, 0);
+    const actAmtTotal = OCV_CASHACTION_ROWS.reduce((t, s) => t + actAmt[s.key].prepaid + actAmt[s.key].cod, 0);
+    return {
+        volume: { ...vol, netDelivered },
+        cash: {
+            netSales: r2(cash.netSales),
+            received: r2(cash.received),
+            balance: r2(cash.netSales - cash.received),
+            advanceAmount: r2(cash.advanceAmount),
+            payableAmount: r2(cash.payableAmount),
+        },
+        funnel: [
+            { n: 1, stage: 'Orders Placed', metric: 'ordersPlaced', count: vol.ordersPlaced, amount: r2(funAmt.ordersPlaced), pctAmount: pctOf(funAmt.ordersPlaced, funAmt.ordersPlaced), calc: 'count of order lines in the Sales Order file (period / brand / channel filter)' },
+            { n: 2, stage: 'Cancelled (pre-dispatch)', metric: 'cancelledPreDispatch', count: cancelledPreDispatch, amount: r2(funAmt.cancelledPreDispatch), pctAmount: pctOf(funAmt.cancelledPreDispatch, funAmt.ordersPlaced), calc: 'reconciliation status CANCELLED with no dispatch date' },
+            { n: 3, stage: 'Dispatched', metric: 'dispatched', count: vol.dispatched, amount: r2(funAmt.dispatched), pctAmount: pctOf(funAmt.dispatched, funAmt.ordersPlaced), calc: 'dispatch date present / status in the Dispatch Scenarios list' },
+            { n: 4, stage: 'Delivered', metric: 'delivered', count: vol.delivered, amount: r2(funAmt.delivered), pctAmount: pctOf(funAmt.delivered, funAmt.ordersPlaced), calc: 'courier status in the Delivered list' },
+            { n: 5, stage: 'RTO / lost in transit', metric: 'rtoLost', count: vol.rtoLost, amount: r2(funAmt.rtoLost), pctAmount: pctOf(funAmt.rtoLost, funAmt.ordersPlaced), calc: 'status RTO_* / LOST / LT-LOST / UNTRACEABLE' },
+            { n: 6, stage: 'Returned after delivery', metric: 'returnedPostDelivery', count: vol.returnedPostDelivery, amount: r2(funAmt.returnedPostDelivery), pctAmount: pctOf(funAmt.returnedPostDelivery, funAmt.ordersPlaced), calc: 'return date present / matched in the SRN-Refunds file' },
+            { n: 7, stage: 'Net delivered (kept)', metric: 'netDelivered', count: netDelivered, amount: r2(funAmt.netDelivered), pctAmount: pctOf(funAmt.netDelivered, funAmt.ordersPlaced), calc: 'Delivered − Returned after delivery' },
+        ],
+        scenarios: OCV_SCENARIO_ROWS.map(s => ({ ...s, count: scen[s.key], amount: r2(scenAmt[s.key]), pctAmount: pctOf(scenAmt[s.key], scenAmtTotal) })),
+        packageStatus: OCV_PACKAGE_ROWS.map(s => ({ ...s, count: pkg[s.key], amount: r2(pkgAmt[s.key]), pctAmount: pctOf(pkgAmt[s.key], pkgAmtTotal) })),
+        cashActions: OCV_CASHACTION_ROWS.map(s => {
+            const amount = actAmt[s.key].prepaid + actAmt[s.key].cod;
+            return { ...s, prepaid: act[s.key].prepaid, cod: act[s.key].cod, amount: r2(amount), pctAmount: pctOf(amount, actAmtTotal) };
+        }),
+    };
+}
+
+/** Volume-strip / funnel drill predicate for one order. */
+function ocvMatchesFunnelMetric(f, metric) {
+    switch (metric) {
+        case 'cancelled':             return f.isCancelled;
+        case 'cancelledPreDispatch':  return f.isCancelled && !f.dispatchDate;
+        case 'dispatched':            return f.dispatched;
+        case 'delivered':             return f.delivered;
+        case 'rtoLost':               return f.isRTO || f.isLost;
+        case 'returnedPostDelivery':  return f.returnedPostDelivery;
+        case 'netDelivered':          return f.delivered && !f.returnedPostDelivery;
+        case 'received':              return f.settledAmt > 0;
+        case 'balance':               return (f.net - f.settledAmt) > 0.5;
+        case 'advanceAmount':         return f.isAdvance;
+        case 'payableAmount':         return f.payableAmount > 0;
+        case 'ordersPlaced':
+        case 'netSales':
+        default:                      return true;
+    }
+}
+
+/** Filter already-loaded report rows to one overview bucket (funnel / scenario / package / cash-action). */
+function ocvFilterRows(allRows, opts) {
+    const { funnelMetric, scenario, pkgBucket, cashAction, payment, search, asOf } = opts;
+    const courierFileSet = ocvCouriersWithSettlement(allRows);
+    const q = (search || '').toLowerCase().trim();
+    const out = [];
+    for (const r of allRows) {
+        const f = ocvFacts(r, asOf);
+        if (scenario) {
+            if (ocvScenario(f, courierFileSet) !== scenario) continue;
+        } else if (pkgBucket) {
+            if (ocvPackageBucket(f) !== pkgBucket) continue;
+        } else if (cashAction) {
+            if (ocvCashAction(f) !== cashAction) continue;
+            if (payment && f.paymentMethod !== payment) continue;
+        } else if (!ocvMatchesFunnelMetric(f, funnelMetric || 'ordersPlaced')) {
+            continue;
+        }
+        if (q) {
+            const hay = `${r.sale_order_number || ''} ${r.invoice_number || ''} ${r.awb_number || ''}`.toLowerCase();
+            if (!hay.includes(q)) continue;
+        }
+        out.push(r);
+    }
+    return out;
+}
+
 // ─── Get Report Visualization Data ───────────────────────────────────────────
 
 const getReportData = async (req, res, next) => {
@@ -415,8 +1074,34 @@ const getReportData = async (req, res, next) => {
             `CREATE INDEX IF NOT EXISTS idx_${tableName}_filename ON \`${tableName}\` (filename)`
         ).catch(() => {}); // ignore if dialect doesn't support IF NOT EXISTS syntax
 
-        const rows = await Model.findAll({ where: { filename: decodedFilename }, raw: true });
-        if (!rows.length) return res.status(404).json({ error: 'No data found for this file' });
+        const allRows = await Model.findAll({ where: { filename: decodedFilename }, raw: true });
+        if (!allRows.length) return res.status(404).json({ error: 'No data found for this file' });
+
+        // The upload is tagged with one month/year, but the underlying orders' own
+        // dates (dispatch_or_cancellation_date, stored as `date`) routinely span a
+        // wider window than that single label (settlement/processing lag). Surface
+        // the real span so the UI can show it instead of the raw filename, and let
+        // the caller narrow the report to a sub-range of it via fromDate/toDate.
+        const rowDates = allRows.map(r => r.date).filter(Boolean).map(d => new Date(d));
+        const availableRange = rowDates.length
+            ? {
+                from: new Date(Math.min(...rowDates)).toISOString().slice(0, 10),
+                to: new Date(Math.max(...rowDates)).toISOString().slice(0, 10),
+            }
+            : { from: null, to: null };
+
+        const fromDate = req.query.fromDate ? new Date(req.query.fromDate) : null;
+        const toDate = req.query.toDate ? new Date(req.query.toDate) : null;
+        const rows = (fromDate || toDate)
+            ? allRows.filter(r => {
+                if (!r.date) return false;
+                const d = new Date(r.date);
+                if (fromDate && d < fromDate) return false;
+                if (toDate && d > toDate) return false;
+                return true;
+            })
+            : allRows;
+        if (!rows.length) return res.status(404).json({ error: 'No data found in this date range', availableRange });
 
         const toNum = v => { const n = Number(v); return isNaN(n) ? 0 : n; };
 
@@ -525,8 +1210,14 @@ const getReportData = async (req, res, next) => {
                 share: totalOrders > 0 ? Math.round((v.orders / totalOrders) * 1000) / 10 : 0,
             }));
 
+        // Order-Cycle Overview (Page-1 spec) — additive sections over the same rows.
+        const _reportDates = rows.map(r => r.date).filter(Boolean).map(d => new Date(d));
+        const overviewAsOf = toDate || (_reportDates.length ? new Date(Math.max(..._reportDates.map(d => d.getTime()))) : new Date());
+        const overview = ocvBuildOverview(rows, overviewAsOf);
+
         res.json({
             totalOrders,
+            availableRange,
             summary: {
                 grossSales: Math.round(grossSales * 100) / 100,
                 totalReturns: Math.round(totalReturns * 100) / 100,
@@ -562,6 +1253,13 @@ const getReportData = async (req, res, next) => {
                 orders: unsettledOrdersCount,
             },
             couriers,
+            // ── Order-Cycle Overview (Page-1 spec) ──
+            volume: overview.volume,
+            cash: overview.cash,
+            funnel: overview.funnel,
+            scenarios: overview.scenarios,
+            packageStatus: overview.packageStatus,
+            cashActions: overview.cashActions,
         });
 
     } catch (error) {
@@ -575,8 +1273,13 @@ const getReportData = async (req, res, next) => {
 /**
  * Build the Sequelize WHERE clause shared by getTransactions and downloadTransactions
  * from the tab/sub/search query params.
- * tab: matched|mismatched|unsettled|all|sales
- * sub (mismatched only): less|more|return|notreturn|advance
+ * tab: matched|mismatched|unsettled|all
+ * sub (matched):    return|notreturn (omit/'all' → every matched order)
+ *   - return        → matched orders whose sale_order_number also matches a Return GST
+ *                     record (return_amount > 0) — reconciled AND was returned; the
+ *                     settlement still lines up against the post-return net_amount.
+ *   - notreturn     → matched orders with no matching return record at all
+ * sub (mismatched): less|more|return|notreturn|advance
  *   - less/more    → PENDING RECEIVABLE / OVERPAID split (by amount direction)
  *   - return       → mismatched orders whose sale_order_number also matches a Return GST record
  *                     (i.e. this order's row was joined to a return — return_amount > 0)
@@ -591,7 +1294,7 @@ const getReportData = async (req, res, next) => {
  * get some money moving against them (a return and/or a settlement) but still
  * don't balance.
  */
-function buildTransactionsWhere(decodedFilename, tab, sub, search) {
+function buildTransactionsWhere(decodedFilename, tab, sub, search, fromDate, toDate) {
     const { Op } = require('sequelize');
     const SETTLED = ['RECONCILED', 'PENDING RECEIVABLE', 'OVERPAID / INVESTIGATE', 'ADVANCE'];
     const MISMATCHED = ['PENDING RECEIVABLE', 'OVERPAID / INVESTIGATE'];
@@ -616,7 +1319,15 @@ function buildTransactionsWhere(decodedFilename, tab, sub, search) {
         };
     } else {
         where = { filename: decodedFilename };
-        if (tab === 'matched')                     where.reconciliation_status = 'RECONCILED';
+        if (tab === 'matched') {
+            where.reconciliation_status = 'RECONCILED';
+            if (sub === 'return')    where.return_amount = { [Op.gt]: 0 };
+            if (sub === 'notreturn') {
+                where[Op.and] = [
+                    { [Op.or]: [{ return_amount: { [Op.lte]: 0 } }, { return_amount: null }] },
+                ];
+            }
+        }
         if (tab === 'mismatched' && sub === 'less') {
             where.reconciliation_status = 'PENDING RECEIVABLE';
             where[Op.and] = [{ [Op.not]: NEVER_TOUCHED }];
@@ -653,6 +1364,17 @@ function buildTransactionsWhere(decodedFilename, tab, sub, search) {
         else                where[Op.and] = [searchCond];
     }
 
+    // Narrows to a sub-range of the file's own order dates (see getReportData's
+    // availableRange) — same `date` column (dispatch_or_cancellation_date), so a
+    // range picked against the report view lines up with what this view shows.
+    if (fromDate || toDate) {
+        const dateCond = { date: {} };
+        if (fromDate) dateCond.date[Op.gte] = fromDate;
+        if (toDate)   dateCond.date[Op.lte] = toDate;
+        if (where[Op.and]) where[Op.and].push(dateCond);
+        else                where[Op.and] = [dateCond];
+    }
+
     return where;
 }
 
@@ -666,6 +1388,8 @@ const getTransactions = async (req, res, next) => {
         const tab      = req.query.tab || 'all';    // matched|mismatched|unsettled|all|sales
         const sub      = req.query.sub || 'less';   // less|more (mismatched only)
         const search   = (req.query.search || '').trim();
+        const fromDate = req.query.fromDate ? new Date(req.query.fromDate) : null;
+        const toDate   = req.query.toDate ? new Date(req.query.toDate) : null;
 
         const brand = await Brand.findByPk(brandId);
         const agent = await Agent.findByPk(agentId);
@@ -676,7 +1400,7 @@ const getTransactions = async (req, res, next) => {
         const Model = getDynamicModel(brandDb, tableName, agent.columns);
         await Model.sync();
 
-        const where = buildTransactionsWhere(decodedFilename, tab, sub, search);
+        const where = buildTransactionsWhere(decodedFilename, tab, sub, search, fromDate, toDate);
 
         const { count: total, rows } = await Model.findAndCountAll({
             where,
@@ -685,12 +1409,52 @@ const getTransactions = async (req, res, next) => {
             raw:    true,
         });
 
+        // Enrich this page's rows with receivable_ledger data on AWB — it's the
+        // trustworthy source for delivery status/payment method/courier/SRN (see
+        // classifyOrderScenario's doc comment below), so the Transaction Data
+        // table reconciles against it rather than shopify_order_cycle's own,
+        // less reliable settlement columns.
+        const { QueryTypes } = require('sequelize');
+        const awbs = [...new Set(rows.map(r => r.awb_number).filter(Boolean))];
+        const ledgerByAwb = {};
+        if (awbs.length) {
+            const ledgerRows = await brandDb.query(
+                `SELECT awb, delivery_status, payment_method, courier, settled_flag,
+                        settled_amount, settled_source, settled_date, srn,
+                        dispatch_or_cancellation_date, return_date
+                 FROM receivable_ledger
+                 WHERE brand_id = $1 AND awb = ANY($2)`,
+                { bind: [brandId, awbs], type: QueryTypes.SELECT }
+            );
+            for (const lr of ledgerRows) ledgerByAwb[lr.awb] = lr;
+        }
+
         const TX_OMIT = new Set(['year', 'month', 'date', 'filename', 'file_type', 'inventory_type', 'created_at']);
         const txRows = rows.map(r => {
+            const ledger = ledgerByAwb[r.awb_number] || null;
+            const scenario = classifyOrderScenario({
+                delivery_status: r.delivery_status,
+                srn: r.srn,
+                dispatch_or_cancellation_date: r.dispatch_or_cancellation_date,
+                return_date: r.return_date,
+                total_amount: r.total_amount,
+                shipping_partner: r.shipping_partner,
+                rl_delivery_status: ledger?.delivery_status ?? null,
+                rl_payment_method: ledger?.payment_method ?? null,
+                rl_courier: ledger?.courier ?? null,
+                settled_flag: ledger?.settled_flag ?? null,
+                settled_amount: ledger?.settled_amount ?? null,
+                settled_source: ledger?.settled_source ?? null,
+                rl_srn: ledger?.srn ?? null,
+                rl_dispatch_date: ledger?.dispatch_or_cancellation_date ?? null,
+                rl_return_date: ledger?.return_date ?? null,
+            });
+
             const out = {};
             for (const k of Object.keys(r)) {
                 if (!TX_OMIT.has(k)) out[k] = r[k];
             }
+            out.scenario = scenario;
             return out;
         });
 
@@ -809,6 +1573,8 @@ const downloadTransactions = async (req, res, next) => {
         const { brandId, agentId, filename } = req.params;
         const decodedFilename = decodeURIComponent(filename);
         const search = (req.query.search || '').trim();
+        const fromDate = req.query.fromDate ? new Date(req.query.fromDate) : null;
+        const toDate   = req.query.toDate ? new Date(req.query.toDate) : null;
 
         const brand = await Brand.findByPk(brandId);
         const agent = await Agent.findByPk(agentId);
@@ -819,7 +1585,7 @@ const downloadTransactions = async (req, res, next) => {
         const Model     = getDynamicModel(brandDb, tableName, agent.columns);
         await Model.sync();
 
-        const where = buildTransactionsWhere(decodedFilename, 'all', null, search);
+        const where = buildTransactionsWhere(decodedFilename, 'all', null, search, fromDate, toDate);
         const rows  = await Model.findAll({ where, raw: true, order: [['id', 'ASC']] });
 
         // A PENDING RECEIVABLE row with no return AND no settlement at all hasn't
@@ -867,7 +1633,192 @@ const downloadTransactions = async (req, res, next) => {
     }
 };
 
+// ─── Order Scenario classification (used inline by getTransactions) ──────────
+
+/**
+ * Classify a shopify_order_cycle row (merged with its matched receivable_ledger
+ * columns) into a fulfilment/cancellation scenario. Surfaced as extra columns on
+ * the Transaction Data table (getTransactions) rather than as a separate report.
+ *
+ * receivable_ledger is the trustworthy source for delivery_status/payment_method/
+ * srn — shopify_order_cycle.delivery_status carries no CANCELLED/RTO values at all
+ * for Flo Mattress, only DELIVERED/partial/blank, because its own courier/gateway
+ * matching never resolved those orders. The rl_* (receivable_ledger) columns are
+ * preferred; shopify_order_cycle's own columns are only used as a fallback for the
+ * rare row with no receivable_ledger match (~1 in 66,560 for Flo Mattress).
+ *
+ * Cancellation reason text and the fine "delivery not accepted" / "not available
+ * for pickup" / "customer return" split aren't captured in any currently uploaded
+ * source file, so cancelled orders only get the 2 buckets derivable from real
+ * fields (return date presence). A third "Not Dispatched" bucket (order cancelled
+ * before ever leaving the warehouse) was tried and dropped — confirmed by direct
+ * query that dispatch_or_cancellation_date is populated on 100% of Flo Mattress's
+ * cancelled orders, so "no dispatch date" can't distinguish that case with the
+ * data available today. Re-add it if a source file ever carries a real signal.
+ */
+function classifyOrderScenario(row) {
+    const effectiveStatus = (row.rl_delivery_status || row.delivery_status || '').toUpperCase().trim();
+    const effectiveSrn    = row.rl_srn || row.srn || null;
+    const dispatchDate    = row.rl_dispatch_date || row.dispatch_or_cancellation_date || null;
+    const returnDate      = row.rl_return_date || row.return_date || null;
+    const paymentMethod   = (row.rl_payment_method || '').toUpperCase().trim() || null;
+
+    let bucket = 'PENDING';
+    let cancelSubScenario = null;
+    let holder = null;
+
+    if (effectiveStatus === 'DELIVERED') {
+        bucket = 'FULFILLED';
+    } else if (effectiveStatus === 'CANCELLED' || effectiveStatus === 'RTO') {
+        bucket = 'CANCELLED';
+        if (returnDate) {
+            cancelSubScenario = 'DELIVERED_RETURNED';
+            holder = 'Customer';
+        } else {
+            cancelSubScenario = 'DISPATCHED_CANCELLED_RTO';
+            holder = 'Delivery Partner';
+        }
+    }
+
+    const srnStatus    = effectiveSrn ? 'Generated' : 'Missing';
+    const totalAmount  = Number(row.total_amount) || 0;
+    const refundDue    = (bucket === 'CANCELLED' && paymentMethod === 'PREPAID') ? totalAmount : 0;
+
+    return {
+        bucket,
+        cancelSubScenario,
+        holder,
+        srnStatus,
+        paymentMethod,
+        courier: row.rl_courier || row.shipping_partner || null,
+        dispatchDate,
+        returnDate,
+        settledFlag: !!row.settled_flag,
+        settledAmount: Number(row.settled_amount) || 0,
+        settledSource: row.settled_source || null,
+        refundDue,
+        reasonAvailable: false, // static placeholder flag — no source file carries this yet
+    };
+}
+
+// ─── Overview drill-down transactions (numbers in the Page-1 tables) ─────────
+//
+// Feeds the "click a number → orders in a modal" flow for the Order Journey
+// Funnel / Scenario Catalog / Package Status / Cash Action tables. Same per-file,
+// date-scoped rows as getReportData; one of funnelMetric | scenario | pkgBucket |
+// cashAction (+ optional payment for the Prepaid/COD split) selects the bucket.
+const getOverviewDrill = async (req, res, next) => {
+    try {
+        const { brandId, agentId, filename } = req.params;
+        const decodedFilename = decodeURIComponent(filename);
+
+        const page     = Math.max(1, parseInt(req.query.page) || 1);
+        const pageSize  = Math.min(200, Math.max(10, parseInt(req.query.pageSize) || 50));
+        const fromDate  = req.query.fromDate ? new Date(req.query.fromDate) : null;
+        const toDate    = req.query.toDate ? new Date(req.query.toDate) : null;
+
+        const brand = await Brand.findByPk(brandId);
+        const agent = await Agent.findByPk(agentId);
+        if (!brand || !agent) return res.status(404).json({ error: 'Brand or Agent not found' });
+
+        const brandDb = getBrandConnection(brand.db_name);
+        const tableName = agent.name.replace(/[^a-zA-Z0-9]/g, '_').toLowerCase();
+        const Model = getDynamicModel(brandDb, tableName, agent.columns);
+        await Model.sync();
+
+        const allRows = await Model.findAll({ where: { filename: decodedFilename }, raw: true });
+        const scoped = (fromDate || toDate)
+            ? allRows.filter(r => {
+                if (!r.date) return false;
+                const d = new Date(r.date);
+                if (fromDate && d < fromDate) return false;
+                if (toDate && d > toDate) return false;
+                return true;
+            })
+            : allRows;
+
+        const _d = scoped.map(r => r.date).filter(Boolean).map(x => new Date(x));
+        const asOf = toDate || (_d.length ? new Date(Math.max(..._d.map(x => x.getTime()))) : new Date());
+
+        const filtered = ocvFilterRows(scoped, {
+            funnelMetric: req.query.funnelMetric || null,
+            scenario: req.query.scenario || null,
+            pkgBucket: req.query.pkgBucket || null,
+            cashAction: req.query.cashAction || null,
+            payment: req.query.payment || null,
+            search: req.query.search || '',
+            asOf,
+        });
+        filtered.sort((a, b) => {
+            const da = ocvDispatchDate(a), db = ocvDispatchDate(b);
+            return (db ? db.getTime() : 0) - (da ? da.getTime() : 0);
+        });
+
+        const total = filtered.length;
+
+        // Column totals across the WHOLE filtered set (not just this page).
+        const r2 = (n) => Math.round(n * 100) / 100;
+        const sumBy = (getter) => filtered.reduce((s, r) => s + (Number(getter(r)) || 0), 0);
+        const totals = {
+            gross: r2(sumBy(r => r.total_amount)),
+            ret: r2(sumBy(r => r.return_amount)),
+            net: r2(sumBy(r => r.net_amount)),
+            settled: r2(sumBy(r => r.total_settlement_received)),
+            balance: r2(sumBy(r => r.balance_amount_receivable)),
+        };
+
+        const TX_OMIT = new Set(['year', 'month', 'filename', 'file_type', 'inventory_type', 'created_at']);
+        const rows = filtered.slice((page - 1) * pageSize, page * pageSize).map(r => {
+            const out = {};
+            for (const k of Object.keys(r)) if (!TX_OMIT.has(k)) out[k] = r[k];
+            out.payment_method = ocvPaymentMethod(r);
+            out.courier_group = ocvCourier(r);
+            return out;
+        });
+
+        res.json({ rows, total, totals, page, pageSize, totalPages: Math.max(1, Math.ceil(total / pageSize)) });
+    } catch (error) {
+        console.error('[OrderCycle] OverviewDrill Error:', error);
+        next(error);
+    }
+};
+
+
+/* ── GET …/order-cycle-shopify/sources ───────────────────────────────────────
+   Which inputs this brand can pull automatically instead of uploading.
+
+   The UI calls this before rendering the upload modal so it never offers a
+   toggle the backend would reject. Any brand without a Shopify connection or
+   without Cashfree enablement gets all-false and sees the unchanged file-only
+   modal — which is every brand except D'Chicha today. */
+const getSources = async (req, res) => {
+    try {
+        const { brandId } = req.params;
+        const conn = await shopifyTokenStore.getConnection(brandId).catch(() => null);
+        res.json({
+            master: {
+                shopify: !!conn && shopifyPrimaryAllowed(brandId),
+            },
+            salesOrder: {
+                shopify: !!conn,
+                shop: conn ? conn.shop_domain : null,
+            },
+            gateways: {
+                cashfree: cashfreeClient.isEnabledForBrand(brandId),
+            },
+            logistics: {
+                velocity: velocityClient.isEnabledForBrand(brandId),
+                eshopbox: eshopboxClient.isEnabledForBrand(brandId),
+            },
+        });
+    } catch (e) {
+        // Never block the workspace on a capability probe — fall back to files.
+        res.json({ master: { shopify: false }, salesOrder: { shopify: false, shop: null }, gateways: { cashfree: false }, logistics: { velocity: false, eshopbox: false } });
+    }
+};
+
 module.exports = {
+    getSources,
     generatePreview,
     generateCommit,
     generateDiscard,
@@ -877,4 +1828,5 @@ module.exports = {
     getReportData,
     getTransactions,
     downloadTransactions,
+    getOverviewDrill,
 };

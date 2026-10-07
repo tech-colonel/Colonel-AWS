@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo, useCallback, Fragment } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
 import DashboardLayout from '../../components/layout/DashboardLayout';
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
@@ -318,7 +318,7 @@ const AdvanceBreakdownModal = ({ data, k, period, onOpenOrders, onClose }) => {
         <div className="flex items-center justify-between px-6 py-4 flex-shrink-0" style={{ borderBottom: '1px solid var(--card-border)' }}>
           <div>
             <h3 className="text-base font-black" style={{ color: 'var(--text-heading)', fontFamily: 'Barlow' }}>
-              Advance received — not yet delivered as of {period}
+              Advance received — not yet dispatched as of {period}
             </h3>
             <p className="text-xs mt-0.5" style={{ color: 'var(--text-muted)' }}>
               Prepaid-gateway cash received for orders not yet resolved in the Sales Order Combined file as of this range's end — by gateway
@@ -359,10 +359,10 @@ const AdvanceBreakdownModal = ({ data, k, period, onOpenOrders, onClose }) => {
             <strong>Formula:</strong> Advance received = Snapmint settlement + BharatX settlement + Razorpay
             settlement, summed for every Shopify Prepaid order whose gateway amount was received in the selected
             range <strong>and</strong> that is still not resolved in the Sales Order Combined file as of this
-            range's end — either no entry was ever found there, or one was found but its own delivery/dispatch/
+            range's end — either no entry was ever found there, or one was found but its own dispatch/
             cancellation date falls after the range you're viewing. Worked example: an order's cash arrives 25 May
-            2024, it's delivered 3 June 2024. Viewing May 2024 → May 2024, it's still Advance (delivery hasn't
-            happened as of the range's end). Viewing May 2024 → June 2024, it's no longer Advance (delivery now
+            2024, it's dispatched 3 June 2024. Viewing May 2024 → May 2024, it's still Advance (dispatch hasn't
+            happened as of the range's end). Viewing May 2024 → June 2024, it's no longer Advance (dispatch now
             falls inside the range) — same order, same data, different as-of date. An order can appear in more
             than one gateway row if more than one gateway shows money against it.
           </FormulaNote>
@@ -474,8 +474,10 @@ const AgingModal = ({ brandId, range, aging, total, period, onOpenOrders, onClos
 // Lookup-by-order/invoice/AWB card for the Advance Amount Dashboard — deliberately
 // NOT scoped to the dashboard's date range or its no-fulfillment-record-found filter
 // (see getAdvanceOrderStatus), so it finds any order that took a gateway advance
-// regardless of whether it was later found in the Sales Order Combined file.
-const OrderTrackerCard = ({ brandId }) => {
+// regardless of whether it was later found in the Sales Order Combined file. Days
+// pending IS anchored to the range's end (`toMonth`/`toYear`), though, so it reads
+// consistently with the range showing above instead of against today's real date.
+const OrderTrackerCard = ({ brandId, range }) => {
   const [inputValue, setInputValue] = useState('');
   const [query, setQuery] = useState('');
   const [results, setResults] = useState(null);
@@ -486,11 +488,16 @@ const OrderTrackerCard = ({ brandId }) => {
     if (!query) { setResults(null); setError(null); return; }
     setLoading(true);
     setError(null);
-    api.get(`/api/dashboard/advance-amount/${brandId}/order-status?${new URLSearchParams({ q: query })}`)
+    const params = { q: query };
+    if (range?.toMonth && range?.toYear) {
+      params.toMonth = range.toMonth;
+      params.toYear = range.toYear;
+    }
+    api.get(`/api/dashboard/advance-amount/${brandId}/order-status?${new URLSearchParams(params)}`)
       .then((res) => setResults(res.data.results || []))
       .catch((e) => setError(e.response?.data?.error || 'Lookup failed'))
       .finally(() => setLoading(false));
-  }, [brandId, query]);
+  }, [brandId, query, range?.toMonth, range?.toYear]);
 
   const submit = () => setQuery(inputValue.trim());
 
@@ -541,9 +548,10 @@ const OrderTrackerCard = ({ brandId }) => {
 
       <FormulaNote>
         This lookup shows every order that ever took a Snapmint/BharatX/Razorpay advance, whether or not it was
-        later resolved in the Sales Order Combined file — it's a general search, not scoped to the selected date
-        range or the Advance list below. To see only the orders still counting as Advance as of a given range, use
-        the order browser instead.
+        later resolved in the Sales Order Combined file — which orders turn up is a general search, not scoped to
+        the selected date range or the Advance list below. Days pending, however, is aged against the selected
+        range's end (not today's real date), so it reads consistently with the range shown above. To see only the
+        orders still counting as Advance as of a given range, use the order browser instead.
       </FormulaNote>
     </SectionCard>
   );
@@ -552,11 +560,15 @@ const OrderTrackerCard = ({ brandId }) => {
 const AdvanceAmountDashboard = () => {
   const { brandId } = useParams();
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
 
-  const [fromMonth, setFromMonth] = useState(null);
-  const [fromYear, setFromYear] = useState(null);
-  const [toMonth, setToMonth] = useState(null);
-  const [toYear, setToYear] = useState(null);
+  // Seeds from ?fromMonth&fromYear&toMonth&toYear if the link that brought us here
+  // (e.g. the Advance Amount card on the Receivable Dashboard) specified a range —
+  // read once on mount, the picker below takes over from here.
+  const [fromMonth, setFromMonth] = useState(() => parseInt(searchParams.get('fromMonth'), 10) || null);
+  const [fromYear, setFromYear] = useState(() => parseInt(searchParams.get('fromYear'), 10) || null);
+  const [toMonth, setToMonth] = useState(() => parseInt(searchParams.get('toMonth'), 10) || null);
+  const [toYear, setToYear] = useState(() => parseInt(searchParams.get('toYear'), 10) || null);
   const [initialized, setInitialized] = useState(false);
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -594,8 +606,11 @@ const AdvanceAmountDashboard = () => {
     }
   }, [brandId]);
 
-  // First load: no range params, let the backend default to the full available span.
-  useEffect(() => { load(); }, [load]);
+  // First load: pass through whatever range the URL seeded (see fromMonth's
+  // initializer above); if none, these are all null and the backend defaults to
+  // the full available span.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => { load(fromMonth, fromYear, toMonth, toYear); }, [load]);
 
   // Subsequent loads: user changed the range picker.
   useEffect(() => {
@@ -668,7 +683,7 @@ const AdvanceAmountDashboard = () => {
                 Advance Amount Dashboard
               </h1>
               <p className="text-xs mt-0.5" style={{ color: 'var(--text-muted)' }}>
-                Prepaid amounts received via BharatX, Razorpay &amp; Snapmint for orders not yet delivered as of the selected range
+                Prepaid amounts received via BharatX, Razorpay &amp; Snapmint for orders not yet dispatched as of the selected range
               </p>
             </div>
           </div>
@@ -676,7 +691,13 @@ const AdvanceAmountDashboard = () => {
           {/* Date range picker */}
           <div className="flex items-center gap-1.5 flex-wrap">
             <button
-              onClick={() => navigate(`/brands/${brandId}/receivables`)}
+              onClick={() => {
+                const params = new URLSearchParams();
+                if (fromMonth && fromYear) { params.set('startMonth', fromMonth); params.set('startYear', fromYear); }
+                if (toMonth && toYear) { params.set('month', toMonth); params.set('year', toYear); }
+                const qs = params.toString();
+                navigate(`/brands/${brandId}/receivables${qs ? `?${qs}` : ''}`);
+              }}
               className="flex items-center gap-1.5 text-xs font-bold px-3 py-2 rounded-lg transition-colors mr-1"
               style={{ background: `${COLOR_SALES}12`, color: COLOR_SALES, border: `1px solid ${COLOR_SALES}30` }}
             >
@@ -684,7 +705,13 @@ const AdvanceAmountDashboard = () => {
               Receivable Dashboard →
             </button>
             <button
-              onClick={() => navigate(`/brands/${brandId}/payables`)}
+              onClick={() => {
+                const params = new URLSearchParams();
+                if (fromMonth && fromYear) { params.set('fromMonth', fromMonth); params.set('fromYear', fromYear); }
+                if (toMonth && toYear) { params.set('toMonth', toMonth); params.set('toYear', toYear); }
+                const qs = params.toString();
+                navigate(`/brands/${brandId}/payables${qs ? `?${qs}` : ''}`);
+              }}
               className="flex items-center gap-1.5 text-xs font-bold px-3 py-2 rounded-lg transition-colors mr-1"
               style={{ background: `${COLOR_RETURNED}12`, color: COLOR_RETURNED, border: `1px solid ${COLOR_RETURNED}30` }}
             >
@@ -732,7 +759,7 @@ const AdvanceAmountDashboard = () => {
           </div>
         </div>
 
-        <OrderTrackerCard brandId={brandId} />
+        <OrderTrackerCard brandId={brandId} range={range} />
 
         {loading && (
           <div className="flex items-center justify-center h-64">
@@ -756,15 +783,15 @@ const AdvanceAmountDashboard = () => {
         {!loading && !error && data?.kpis && (
           <>
             <p className="text-xs font-bold uppercase tracking-wide" style={{ color: 'var(--text-muted)' }}>
-              {rangeLabel} — orders whose prepaid amount was received in this range and not yet delivered as of this range's end
+              {rangeLabel} — orders whose prepaid amount was received in this range and not yet dispatched as of this range's end
             </p>
 
             {/* ── KPI row ───────────────────────────────────────────── */}
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
               <KpiCard
-                label="Advance received — not yet delivered"
+                label="Advance received — not yet dispatched"
                 value={money(k.total_advance_amount)}
-                sub="Gateway amount received in the selected range for orders not yet resolved in the Sales Order Combined file as of this range's end. Once its own delivered/dispatched/cancelled date falls inside a range you're viewing, it drops off this figure — for that range and any later one. Click for breakdown by gateway"
+                sub="Gateway amount received in the selected range for orders not yet resolved in the Sales Order Combined file as of this range's end. Once its own dispatched/cancelled date falls inside a range you're viewing, it drops off this figure — for that range and any later one. Click for breakdown by gateway"
                 icon={HandCoins} color={COLOR_PENDING} highlight
                 onClick={() => setShowBreakdownModal(true)}
               />
@@ -818,7 +845,7 @@ const AdvanceAmountDashboard = () => {
                 </ResponsiveContainer>
               </div>
               <p className="text-[11px] mt-2" style={{ color: 'var(--text-muted)' }}>
-                Sum of prepaid-gateway amount received in that month, for orders not yet delivered as of the
+                Sum of prepaid-gateway amount received in that month, for orders not yet dispatched as of the
                 overall selected range's end. Click any point to see that month's orders.
               </p>
             </SectionCard>
