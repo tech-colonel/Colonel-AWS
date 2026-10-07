@@ -1754,6 +1754,305 @@ def _extract_rupee_balance_format(raw_lines: list[dict], meta: dict,
     return res
 
 
+# ──────────────────────────────────────────────────────────────────
+# Amount-anchored layout (e.g. HSBC India): the date is printed ONLY on the first
+# transaction of each day, the narration runs 5-8 lines, and the amount + running
+# balance sit on the LAST narration line. The date-anchored builder merges a whole
+# day into one row, so here each debit/credit+balance line CLOSES a transaction and
+# owns every text line since the previous close; the date carries forward. Text
+# outside the table band (between "Balance Carried Forward" and the next page's
+# header / "Balance Brought Forward") is ignored. Fallback only — accepted solely
+# when EVERY running balance reconciles, so it can't silently corrupt output.
+# ──────────────────────────────────────────────────────────────────
+_NOSEP_DATE_RE = re.compile(r'^\W*[A-Za-z]?(\d{1,2})([A-Za-z]{3})(\d{4})(?![\d])')
+# OCR variant: the month's letter O read as a zero ('010CT2025', '140C0T2025').
+_NOSEP_OCR_DATE_RE = re.compile(r'^\W*[A-Za-z]?(\d{2})([A-Za-z0][A-Za-z0]{2,3})(\d{4})(?![\d])')
+_BF_RE = re.compile(r'\b(brought|carried)\s+forward\b|\bopening\s+balance\b', re.I)
+_SPLIT_HEAD_RE = re.compile(r'^\d{1,3}(?:,\d{3})*,?$')     # '48,' / '1,023' / '488'
+_SPLIT_TAIL_RE = re.compile(r'^\d{3}(?:,\d{3})*\.\d{2}$')  # '676.27' / '070.00'
+_MIXED_SEP_RE = re.compile(r'^\d{1,3}(?:[.,]\d{3})+[.,]\d{2}$')   # '600.981.00' / '1.151,001.00'
+_CENTS_RE = re.compile(r'^\d{2}$')                                  # '00' in '200,000 00'
+_GROUPED_INT_RE = re.compile(r'^\d+(?:,\d{3})*$')                 # '200,000' / '1910'
+_GARBLED_NUM_RE = re.compile(r'^\d[\d,.]*\d$')   # digit-only token that isn't money-shaped ('174,44284')
+
+
+def _aa_date(s: str) -> str:
+    """Leading date token of a date cell — the usual formats plus the HSBC-style
+    no-separator DDMONYYYY ('09JUN2025'), tolerating a stray OCR border glyph in
+    front and an O read as 0 inside the month. Returns a clean DDMONYYYY token."""
+    tok, _ = _leading_date(s or "")
+    if tok:
+        return tok
+    m = _NOSEP_DATE_RE.match(s or "")
+    if m and m.group(2).lower() in _MONTHS and 1 <= int(m.group(1)) <= 31:
+        return f"{m.group(1)}{m.group(2)}{m.group(3)}"
+    m = _NOSEP_OCR_DATE_RE.match(s or "")
+    if m and 1 <= int(m.group(1)) <= 31:
+        mid = m.group(2).upper().replace('0', 'O')
+        cands = [mid] if len(mid) == 3 else [mid[:i] + mid[i + 1:] for i in range(len(mid))]
+        for mon in cands:
+            if mon.lower() in _MONTHS:
+                return f"{m.group(1)}{mon}{m.group(3)}"
+    return ""
+
+
+def _rejoin_split_amounts(words: list, min_x: float = 0.0) -> Optional[list]:
+    """OCR sometimes breaks one amount into two tokens ('48,' + '676.27', '488' + '070.00',
+    '200,000' + '00', '1910' + '55') or swaps / doubles its separators ('600.981.00',
+    '500.,000.00'). Re-join pieces that sit within a few points of each other and
+    normalise the separators. Only tokens starting at/after `min_x` (the amount columns)
+    are touched, so narration text is never rewritten. Returns the new word list, or None
+    if nothing changed. (Amount-anchored fallback only — its result is accepted solely if
+    every running balance ties, so a bad repair is rejected.)"""
+    ws = sorted(words, key=lambda w: w['x0'])
+    out, joined = [], False
+    for w in ws:
+        if w['x0'] < min_x:
+            out.append(w)
+            continue
+        t = w['text']
+        st = t.strip(".,'`:;")
+        if st != t and not _looks_amount(t) and _looks_amount(st):
+            w = dict(w)                              # stray edge glyph: '40,945.76.'
+            w['text'] = t = st
+            joined = True
+        if not _looks_amount(t) and re.fullmatch(r'[\d.,]+', t):
+            t = re.sub(r'[.,]{2,}', ',', t)          # doubled separator: '500.,000.00'
+        if not _looks_amount(w['text']) and _MIXED_SEP_RE.match(t):
+            # OCR swapped separators: last one is the decimal point, the rest are commas.
+            w = dict(w)
+            w['text'] = re.sub(r'[.,]', ',', t[:-3]) + '.' + t[-2:]
+            joined = True
+        prev = out[-1] if out else None
+        if prev is not None and prev['x0'] >= min_x and _CENTS_RE.match(w['text']) \
+                and _GROUPED_INT_RE.match(prev['text']) and 0 <= w['x0'] - prev['x1'] <= 6.0:
+            merged = dict(prev)                     # '200,000' + '00' → '200,000.00'
+            merged['text'] = prev['text'] + '.' + w['text']
+            merged['x1'] = w['x1']
+            out[-1] = merged
+            joined = True
+            continue
+        if prev is not None and prev['x0'] >= min_x and _SPLIT_TAIL_RE.match(w['text']) \
+                and _SPLIT_HEAD_RE.match(prev['text']) and 0 <= w['x0'] - prev['x1'] <= 6.0:
+            merged = dict(prev)
+            merged['text'] = prev['text'].rstrip(',') + ',' + w['text']
+            merged['x1'] = w['x1']
+            out[-1] = merged
+            joined = True
+            continue
+        out.append(w)
+    return out if joined else None
+
+
+def _extract_amount_anchored(all_lines: list[dict], columns: list[dict],
+                             meta: dict) -> Optional[dict]:
+    date_key = _primary_date_key(columns) or _tag_key(columns, 'date')
+    debit_key = _tag_key(columns, 'debit')
+    credit_key = _tag_key(columns, 'credit')
+    bal_key = _tag_key(columns, 'balance')
+    narr_key = _tag_key(columns, 'narr')
+    if not (debit_key and credit_key and bal_key and narr_key):
+        return None
+    text_keys = [c['key'] for c in columns if c['tag'] not in _NUMERIC_TAGS and c['key'] != date_key]
+
+    def money(cells, k):
+        v = (cells.get(k, '') or '').strip()
+        return v if v and _looks_amount(v) else ''
+
+    txns: list[dict] = []
+    cur_date = ''
+    frag: dict = {}
+    in_table = True
+    opening = None          # first "Balance Brought Forward" / "Opening Balance"
+    bal_col = next(c for c in columns if c['key'] == bal_key)
+    narr_col = next(c for c in columns if c['key'] == narr_key)
+    amt_min_x = max(narr_col['x1'], min(c['x0'] for c in columns if c['tag'] in _NUMERIC_TAGS))
+    derived = []            # indices of rows whose unreadable balance was computed
+    cf_after_last = False   # a Carried-Forward matched the latest row's balance
+    cf_disputed = False     # a Carried-Forward disagreed and no Brought-Forward has settled it
+
+    def garbled_token(words, col, min_digits=4):
+        """The digit token OCR mangled (e.g. dropped the decimal point) in `col` —
+        present but not money-shaped — or None."""
+        for w in words or []:
+            cx = (w['x0'] + w['x1']) / 2
+            if col['x0'] <= cx < col['x1'] and not _looks_amount(w['text']) \
+                    and _GARBLED_NUM_RE.match(w['text']) and sum(ch.isdigit() for ch in w['text']) >= min_digits:
+                return w['text']
+        return None
+
+    def garbled_balance(words):
+        return garbled_token(words, bal_col) is not None
+
+    debit_col = next(c for c in columns if c['key'] == debit_key)
+    credit_col = next(c for c in columns if c['key'] == credit_key)
+    amounts_repaired = 0
+
+    for ln in all_lines:
+        cells = ln['cells']
+        words = ln.get('words')
+        if words:
+            rj = _rejoin_split_amounts(words, amt_min_x)
+            if rj is not None:
+                words = rj
+                cells = _assign_cells(rj, columns)
+        joined = " ".join(v.strip() for v in cells.values() if v and v.strip())
+        low = joined.lower()
+        if _is_header_like(cells, columns):
+            in_table = True
+            continue
+        bf = _BF_RE.search(joined)
+        if bf:
+            # Brought Forward opens the table band; Carried Forward closes it. Pending
+            # narration is KEPT — a transaction's text can start at the foot of one
+            # page and its amount line land on the next.
+            in_table = (bf.group(1) or 'brought').lower() == 'brought'   # 'opening balance' opens too
+            b = money(cells, bal_key)
+            if b:
+                if in_table and opening is None and not txns:
+                    opening = _parse_amount(b)
+                elif txns:
+                    if abs(_parse_amount(b) - txns[-1]['balance']) <= 1.0:
+                        cf_after_last = True
+                        cf_disputed = False
+                    elif not in_table:
+                        # Carried-Forward disagrees. If it equals the last row's arithmetic
+                        # (previous balance + credit − debit), the row's own balance was the
+                        # OCR misread — adopt the printed Carried-Forward. Otherwise let the
+                        # next page's Brought-Forward decide; still unresolved → reject.
+                        cfv = _parse_amount(b)
+                        last = txns[-1]
+                        pb = txns[-2]['balance'] if len(txns) > 1 else opening
+                        if pb is not None and abs(round(pb + last['credit'] - last['debit'], 2) - cfv) <= 0.01:
+                            last['balance'] = cfv
+                            last['cells'][bal_key] = cfv
+                            derived.append(len(txns) - 1)
+                            cf_after_last = True
+                        else:
+                            cf_disputed = True
+                    elif not cf_after_last:
+                        return None   # Brought-Forward ≠ the last transaction's balance
+                    # else: the previous Carried-Forward already confirmed our balance, so
+                    # this Brought-Forward is the OCR misread — ignore it.
+            d = _aa_date(cells.get(date_key, '')) if date_key else ''
+            if d:
+                cur_date = d
+            continue
+        if not in_table or not joined or _PAGE_FOOTER_RE.match(low) \
+                or any(mk in low for mk in _END_MARKERS):
+            continue
+        dcell = (cells.get(date_key, '') or '').strip() if date_key else ''
+        if dcell and _tag_for(dcell) in ('debit', 'credit', 'amount'):
+            continue    # statement-summary label ("Withdrawals … / Deposits …")
+        d = _aa_date(dcell)
+        if d:
+            cur_date = d
+        for k in text_keys:
+            t = (cells.get(k, '') or '').strip()
+            if t:
+                frag.setdefault(k, []).append(t)
+        dr, cr, bal = money(cells, debit_key), money(cells, credit_key), money(cells, bal_key)
+        if bal and not (dr or cr) and frag.get(narr_key):
+            # Amount present but OCR dropped its decimal point ('271033' for 2,710.33).
+            # Recover it from the two printed balances — accepted only if the digits are
+            # identical and the direction matches the column the token sits in.
+            prev_bal = txns[-1]['balance'] if txns else opening
+            if prev_bal is not None:
+                delta = round(_parse_amount(bal) - prev_bal, 2)
+                col = credit_col if delta > 0 else debit_col
+                tok = garbled_token(words, col, min_digits=3)
+                want = f"{abs(delta):.2f}".replace('.', '')
+                if tok and delta and re.sub(r'\D', '', tok).lstrip('0') == want.lstrip('0'):
+                    if delta > 0:
+                        cr = f"{abs(delta):.2f}"
+                    else:
+                        dr = f"{abs(delta):.2f}"
+                    amounts_repaired += 1
+        if cf_disputed and (dr or cr):
+            return None       # a new transaction began with the disputed Carried-Forward unresolved
+        unreadable_bal = bool((dr or cr) and not bal and garbled_balance(words))
+        if not ((dr or cr) and (bal or unreadable_bal)):
+            continue
+        if not frag.get(narr_key):
+            # No Details text at all → a statement-summary line, never a transaction.
+            continue
+        debit = max(0.0, _parse_amount(dr)) if dr else 0.0
+        credit = max(0.0, _parse_amount(cr)) if cr else 0.0
+        if bal:
+            balance = _parse_amount(bal)
+        else:
+            # OCR mangled this row's balance: take it from the running arithmetic. It is
+            # only trusted because the NEXT row (or the page's Carried-Forward) must then
+            # reconcile against it — checked below; otherwise the whole result is rejected.
+            prev_bal = txns[-1]['balance'] if txns else opening
+            if prev_bal is None:
+                return None
+            balance = round(prev_bal + credit - debit, 2)
+            derived.append(len(txns))
+        cells_out: dict = {}
+        for c in columns:
+            k = c['key']
+            if k == debit_key:
+                cells_out[k] = debit
+            elif k == credit_key:
+                cells_out[k] = credit
+            elif k == bal_key:
+                cells_out[k] = balance
+            elif c['tag'] in _NUMERIC_TAGS:
+                cells_out[k] = max(0.0, _parse_amount(cells.get(k)))
+            elif k == date_key:
+                cells_out[k] = cur_date
+            else:
+                cells_out[k] = _clean_text(" ".join(frag.get(k, [])))
+        txns.append({
+            'cells': cells_out, 'date': cur_date,
+            'debit': debit, 'credit': credit, 'balance': balance,
+            'description': cells_out.get(narr_key, ''),
+            'ref_no': cells_out.get(_tag_key(columns, 'ref'), ''),
+        })
+        frag = {}
+        cf_after_last = False
+
+    if cf_disputed or not txns or not all(t['date'] for t in txns):
+        return None
+    # Strict self-check: EVERY row's running balance must follow from the previous one
+    # (the first from the Brought-Forward opening), and the last must equal the final
+    # Carried-Forward balance when printed. Any break → reject (None).
+    prev = opening
+    checked = 0
+    for i, t in enumerate(txns):
+        if prev is not None:
+            checked += 1
+            expect = round(prev + t['credit'] - t['debit'], 2)
+            if abs(expect - t['balance']) > 1.0:
+                # One misread balance digit: accept the computed balance ONLY if the next
+                # row, read independently from the PDF, reconciles exactly against it.
+                nxt = txns[i + 1] if i + 1 < len(txns) else None
+                if nxt is None or abs(round(expect + nxt['credit'] - nxt['debit'], 2) - nxt['balance']) > 0.01:
+                    return None
+                t['balance'] = expect
+                t['cells'][bal_key] = expect
+                derived.append(i)
+        prev = t['balance']
+    if checked < max(1, len(txns) - 1):
+        return None
+    # A computed balance must be confirmed by something read from the PDF: the next row
+    # (already enforced by the continuity loop) or, for the final row, a Carried-Forward.
+    if derived and derived[-1] == len(txns) - 1 and not cf_after_last:
+        return None
+    meta2 = dict(meta)
+    if opening is not None and meta2.get('opening_balance') is None:
+        meta2['opening_balance'] = opening
+    res = _finalize(txns, columns, meta2)
+    v = res['validation']
+    v['verified'] = True
+    v['balance_reconciled'] = True
+    v['verify_method'] = 'balance+amount_anchored'
+    v['ocr_balances_derived'] = len(derived)
+    v['ocr_amounts_repaired'] = amounts_repaired
+    return res
+
+
 def extract_bank_statement(pdf_bytes: bytes, password: str = "", _allow_ocr: bool = True) -> dict:
     import pdfplumber
 
@@ -1797,13 +2096,28 @@ def extract_bank_statement(pdf_bytes: bytes, password: str = "", _allow_ocr: boo
             from recon import ilovepdf_ocr
             logger.info("No text layer in %d-page PDF — attempting iLovePDF OCR fallback.", n_pages)
             ocr_bytes = ilovepdf_ocr.ocr_pdf(pdf_bytes, filename="statement.pdf")
+            res = None
             if ocr_bytes:
                 res = extract_bank_statement(ocr_bytes, password="", _allow_ocr=False)
                 ocr_bytes = None
                 import gc
                 gc.collect()
-                return res
-            return _reject_scanned()
+                if res.get("validation", {}).get("verified"):
+                    return res
+            # Second chance: iLovePDF's OCR did not yield a verified statement (or was
+            # unavailable) — re-OCR locally with Tesseract when it is installed, and use
+            # that result ONLY if it verifies. No tesseract → nothing changes.
+            from recon import local_ocr
+            if local_ocr.available():
+                logger.info("iLovePDF result not verified — trying local Tesseract OCR.")
+                loc_bytes = local_ocr.ocr_pdf(pdf_bytes, password=password, max_pages=_MAX_OCR_PAGES)
+                if loc_bytes:
+                    alt = extract_bank_statement(loc_bytes, password="", _allow_ocr=False)
+                    loc_bytes = None
+                    if alt.get("validation", {}).get("verified"):
+                        alt["validation"]["verify_method"] += "+local_ocr"
+                        return alt
+            return res if res is not None else _reject_scanned()
         p0 = pdf.pages[0]
         header_text = " ".join(w['text'] for w in p0.extract_words()
                                if w['top'] < p0.height * 0.40)
@@ -1841,6 +2155,7 @@ def extract_bank_statement(pdf_bytes: bytes, password: str = "", _allow_ocr: boo
                 all_lines.append({
                     'y': y_offset + ln['y'],
                     'cells': _assign_cells(ln['words'], columns),
+                    'words': ln['words'],   # raw tokens — read only by _extract_amount_anchored
                 })
             y_offset += float(page.height)
             try:
@@ -1887,6 +2202,17 @@ def extract_bank_statement(pdf_bytes: bytes, password: str = "", _allow_ocr: boo
         if rb:
             logger.info("Rupee-balance line format verified: %d txns", rb["transaction_count"])
             return rb
+
+        # Amount-anchored layout (date only on a day's first txn, amount on the LAST
+        # narration line — e.g. HSBC). Self-verifying; None unless every balance ties.
+        try:
+            aa = _extract_amount_anchored(all_lines, columns, meta)
+        except Exception as e:
+            logger.warning("Amount-anchored fallback failed: %s: %s", type(e).__name__, str(e)[:160])
+            aa = None
+        if aa:
+            logger.info("Amount-anchored format verified: %d txns", aa["transaction_count"])
+            return aa
 
         # A table was detected but did not verify. Before spending any LLM call,
         # confirm this is actually a statement (not an invoice / advice that merely
