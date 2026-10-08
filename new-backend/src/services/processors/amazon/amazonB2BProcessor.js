@@ -812,7 +812,13 @@ async function amazonB2BProcessor(
 
     // ==================================
     // STEP 9: CREATE GSTR HSN SHEET (EXCELJS)
+    // Without inventory, shipping is not reported separately in the HSN
+    // summary / gstr1-working sheets: the shipping taxable value and its tax
+    // are folded into the taxable value and CGST/SGST/IGST of the same row.
     // ==================================
+    const mergeShippingInGstr = useInventory !== true;
+    const gstrAmount = (row, salesKey, shippingKey) =>
+      Number(row[salesKey] || 0) + (mergeShippingInGstr ? Number(row[shippingKey] || 0) : 0);
     const gstrSheet = workbook.addWorksheet('amazon-b2b-gstr-hsn');
     const gstrMap = {};
     filteredRows.forEach((row) => {
@@ -834,10 +840,10 @@ async function amazonB2BProcessor(
         };
       }
       gstrMap[key]['Quantity'] += Number(row['Quantity'] || 0);
-      gstrMap[key]['Final Taxable Sales Value'] += Number(row['Final Taxable Sales Value'] || 0);
-      gstrMap[key]['Final CGST Tax'] += Number(row['Final CGST Tax'] || 0);
-      gstrMap[key]['Final SGST Tax'] += Number(row['Final SGST Tax'] || 0);
-      gstrMap[key]['Final IGST Tax'] += Number(row['Final IGST Tax'] || 0);
+      gstrMap[key]['Final Taxable Sales Value'] += gstrAmount(row, 'Final Taxable Sales Value', 'Final Taxable Shipping Value');
+      gstrMap[key]['Final CGST Tax'] += gstrAmount(row, 'Final CGST Tax', 'Final Shipping CGST Tax');
+      gstrMap[key]['Final SGST Tax'] += gstrAmount(row, 'Final SGST Tax', 'Final Shipping SGST Tax');
+      gstrMap[key]['Final IGST Tax'] += gstrAmount(row, 'Final IGST Tax', 'Final Shipping IGST Tax');
     });
     const gstrData = Object.values(gstrMap);
     if (gstrData.length > 0) {
@@ -959,10 +965,10 @@ async function amazonB2BProcessor(
             'Final SGST Tax': 0
           };
         }
-        gstr1Map[key]['Final Taxable Sales Value'] += Number(row['Final Taxable Sales Value'] || 0);
-        gstr1Map[key]['Final IGST Tax'] += Number(row['Final IGST Tax'] || 0);
-        gstr1Map[key]['Final CGST Tax'] += Number(row['Final CGST Tax'] || 0);
-        gstr1Map[key]['Final SGST Tax'] += Number(row['Final SGST Tax'] || 0);
+        gstr1Map[key]['Final Taxable Sales Value'] += gstrAmount(row, 'Final Taxable Sales Value', 'Final Taxable Shipping Value');
+        gstr1Map[key]['Final IGST Tax'] += gstrAmount(row, 'Final IGST Tax', 'Final Shipping IGST Tax');
+        gstr1Map[key]['Final CGST Tax'] += gstrAmount(row, 'Final CGST Tax', 'Final Shipping CGST Tax');
+        gstr1Map[key]['Final SGST Tax'] += gstrAmount(row, 'Final SGST Tax', 'Final Shipping SGST Tax');
       });
 
       const gstr1Data = Object.values(gstr1Map);
