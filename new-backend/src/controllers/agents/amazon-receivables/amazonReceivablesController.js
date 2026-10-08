@@ -401,14 +401,25 @@ const runReco = async (req, res, next) => {
                       fromCache: parsed.fromCache, error: parsed.error };
     } catch (e) { fees = null; }
 
-    /* Bank — when the money actually arrived. Deliberately ONE month: the
-       question is asked of a statement period, and only the retained ledgers
-       carry a deposit date, so it is built for the last month of the window
-       and says so for any month whose ledgers are not held. */
+    /* Bank — when the money actually arrived. Built per month: the question is
+       asked of a statement period, and only the settlement ledgers carry a
+       deposit date, so a month whose ledgers are missing says so rather than
+       guessing.
+
+       TWO sources, most-trusted first. `amazon-ledgers` holds files Amazon
+       itself produced, via the Settlement-Amazon agent; `amazon-ledgers-api`
+       holds ones rebuilt from the SP-API Finances endpoints, which is the only
+       way to reach a settlement older than 90 days - the Reports API refuses
+       them outright. Kept in separate directories ON PURPOSE: the rebuilt set
+       feeds the bank view only and must not change the numbers every other tab
+       already reports from `gather()`. */
     let bank = null;
     try {
       bank = amazonBank.buildAll(src, months, {
-        ledgerDir: path.join(OUTPUT_DIR, 'amazon-ledgers', safe(ctx.brand.name)),
+        ledgerDir: [
+          path.join(OUTPUT_DIR, 'amazon-ledgers', safe(ctx.brand.name)),
+          path.join(OUTPUT_DIR, 'amazon-ledgers-api', safe(ctx.brand.name)),
+        ],
         perMonth: ledger.perMonth,
       });
     } catch (e) { bank = null; }

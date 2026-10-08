@@ -54,16 +54,30 @@ function parseTsv(buf) {
 
 /* One settlement = one bank deposit. Amazon re-issues the same settlement in
    more than one file (12 Jul's 423.65 arrives twice in Koparo's folder), so
-   they are folded by settlement id or the deposit is counted twice. */
-function readSettlements(dir) {
-  let files = [];
-  try { files = fs.readdirSync(dir).filter((f) => f.endsWith('.tsv')).sort(); }
-  catch { return []; }
+   they are folded by settlement id or the deposit is counted twice.
+
+   `dirs` may be several directories. They are read IN ORDER and the first copy
+   of a settlement wins, so the caller puts the directory it trusts most first:
+   files Amazon itself produced ahead of ones rebuilt from the Finances API.
+   The two were proved identical on all 21 settlements held both ways - same
+   payout, same deposit date, no per-order difference - but when they ever
+   disagree the real file should be the one that is believed. */
+function readSettlements(dirs) {
+  const list = Array.isArray(dirs) ? dirs : [dirs];
+  const files = [];
+  for (const d of list) {
+    if (!d) continue;
+    try {
+      for (const f of fs.readdirSync(d).filter((x) => x.endsWith('.tsv')).sort()) {
+        files.push(path.join(d, f));
+      }
+    } catch { /* a directory that is not there is simply a source we lack */ }
+  }
 
   const byId = new Map();
   for (const f of files) {
     let rows;
-    try { rows = parseTsv(fs.readFileSync(path.join(dir, f))); } catch { continue; }
+    try { rows = parseTsv(fs.readFileSync(f)); } catch { continue; }
     const head = rows.find((r) => r['settlement-id'] && r['deposit-date']);
     if (!head) continue;
     const id = head['settlement-id'];
@@ -90,6 +104,13 @@ function readSettlements(dir) {
       }
     }
 
+    /* Everything in the payout that no order id claims: balances brought
+       forward, service fees billed to the account rather than an order, debt
+       adjustments. Without this, panel 2 splits only the order-tagged rows and
+       its parts overshoot the deposit - April 2025 added to 4.63 lakh against
+       3.64 lakh actually banked. */
+    const claimed = [...bySaleMonth.values()].reduce((a, v) => a + v, 0);
+
     byId.set(id, {
       id,
       start: ledgerDate(head['settlement-start-date']),
@@ -103,7 +124,8 @@ function readSettlements(dir) {
       rows: rows.length,
       orders: orders.size,
       perOrder: bySaleMonth,
-      file: f,
+      unassigned: r2(num(head['total-amount']) - claimed),
+      file: path.basename(f),
     });
   }
   return [...byId.values()].sort((a, b) => (a.deposit < b.deposit ? -1 : 1));
@@ -117,7 +139,7 @@ function build(src, month, opts = {}) {
   const dir = opts.ledgerDir;
   if (!dir || !month) return null;
 
-  const settlements = readSettlements(dir);
+  const settlements = opts.settlements || readSettlements(dir);
   if (!settlements.length) return { month, hasLedgers: false, settlements: [] };
 
   /* Which month an order SOLD in - the ledger cannot say, so the order report
@@ -138,10 +160,31 @@ function build(src, month, opts = {}) {
      one. */
   const whose = new Map();
   let noOrder = 0;
+  /* An order the settlement names but the ORDER REPORT does not hold is a very
+     different thing from a fee with no order id, and lumping the two together
+     hid 2.27 lakh of April 2025 under the word "fees". Koparo's order reports
+     start in April 2025, so every March sale that settled in April lands here.
+     It is reported separately, with the settlement WEEKS it came from, because
+     that is the honest answer: we can say where the money came from without
+     inventing a sale month for it. */
+  const ORDER_ID = /^\d{3}-\d{7}-\d{7}$/;
+  let unknown = 0, unknownOrders = 0;
+  const unknownBy = new Map();
   for (const s of inMonth) {
+    noOrder = r2(noOrder + (s.unassigned || 0));
     for (const [oid, amt] of s.perOrder) {
       const sm = saleOf.get(oid);
-      if (!sm) { noOrder = r2(noOrder + amt); continue; }
+      if (!sm) {
+        if (!ORDER_ID.test(oid)) { noOrder = r2(noOrder + amt); continue; }
+        unknown = r2(unknown + amt);
+        unknownOrders += 1;
+        const k = `${s.start}|${s.end}`;
+        const cur = unknownBy.get(k) || { start: s.start, end: s.end, amount: 0, orders: 0 };
+        cur.amount = r2(cur.amount + amt);
+        cur.orders += 1;
+        unknownBy.set(k, cur);
+        continue;
+      }
       const cur = whose.get(sm) || { month: sm, amount: 0, orders: 0 };
       cur.amount = r2(cur.amount + amt);
       cur.orders += 1;
@@ -189,6 +232,11 @@ function build(src, month, opts = {}) {
       deposits: inMonth.length,
       whose: whoseList,
       noOrder: r2(noOrder),
+      unknown: unknownOrders ? {
+        amount: r2(unknown),
+        orders: unknownOrders,
+        byPeriod: [...unknownBy.values()].sort((a, b) => (a.start < b.start ? -1 : 1)),
+      } : null,
       own: ownBanked,
     },
     transit: inTransit === null ? null : {
@@ -219,12 +267,14 @@ function build(src, month, opts = {}) {
 function buildAll(src, months, opts = {}) {
   const dir = opts.ledgerDir;
   if (!dir) return null;
+  /* Read once and hand the parsed settlements to every month. Re-reading 156
+     files per month turned a 0.2s leg into a 30s one. */
   const settlements = readSettlements(dir);
   const have = new Set(settlements.map((s) => s.depositMonth));
   const byMonth = {};
   for (const m of months) {
     if (!have.has(m)) continue;
-    const one = build(src, m, opts);
+    const one = build(src, m, { ...opts, settlements });
     if (one && one.hasLedgers) byMonth[m] = one;
   }
   return {

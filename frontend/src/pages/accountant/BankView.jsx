@@ -104,7 +104,8 @@ export default function BankView({ bank: all, shown }) {
   const c = bank.cohort || {};
   const b = bank.bank || {};
   const tr = bank.transit;
-  const maxWhose = Math.max(1, ...(b.whose || []).map((w) => Math.abs(w.amount)));
+  const maxWhose = Math.max(1, ...(b.whose || []).map((w) => Math.abs(w.amount)),
+                            Math.abs((b.unknown && b.unknown.amount) || 0));
 
   return (
     <div>
@@ -190,6 +191,39 @@ export default function BankView({ bank: all, shown }) {
             </div>
           );
         })}
+        {b.unknown ? (
+          <div className="px-4 py-2" style={{ borderBottom: '1px solid #F3F6F9', background: '#FFFBF3' }}>
+            <div className="flex items-center gap-2">
+              <span className="flex-1 text-[12.5px] font-semibold" style={{ color: T.amberText }}>
+                Sales from before we hold the orders
+                <span className="block text-[10px] font-normal" style={{ color: '#8A6A3A' }}>
+                  real orders, named by the settlement but absent from the order reports &mdash; so we
+                  cannot say which month sold them, only which week paid them
+                </span>
+              </span>
+              <span className="w-16 text-right text-[11.5px] tabular-nums" style={{ color: '#8A6A3A' }}>
+                {int(b.unknown.orders)}</span>
+              <span className="w-40 h-1.5 rounded-sm overflow-hidden" style={{ background: '#F1F3F6' }}>
+                <span className="ar-bar block h-full rounded-sm"
+                      style={{ width: `${(100 * Math.abs(b.unknown.amount)) / maxWhose}%`,
+                               background: T.amber, opacity: .85 }} />
+              </span>
+              <span className="w-32 text-right text-[13px] tabular-nums font-bold" style={{ color: T.amberText }}>
+                {b.unknown.amount < 0 ? '−' : ''}&#8377;{inr(Math.abs(b.unknown.amount))}
+              </span>
+            </div>
+            <div className="mt-1.5 pl-3 flex flex-wrap gap-x-4 gap-y-0.5"
+                 style={{ borderLeft: `2px solid ${T.amber}` }}>
+              {b.unknown.byPeriod.map((w) => (
+                <span key={w.start} className="text-[10.5px] tabular-nums" style={{ color: '#8A6A3A' }}>
+                  settlement {day(w.start)}&ndash;{day(w.end)}
+                  <span className="font-semibold"> &#8377;{inr(Math.abs(w.amount))}</span>
+                  <span style={{ color: '#B08A52' }}> · {int(w.orders)} orders</span>
+                </span>
+              ))}
+            </div>
+          </div>
+        ) : null}
         {b.noOrder ? (
           <div className="flex items-center gap-2 px-4 py-1.5" style={{ borderBottom: '1px solid #F3F6F9' }}>
             <span className="flex-1 text-[12.5px]" style={{ color: '#475569' }}>
