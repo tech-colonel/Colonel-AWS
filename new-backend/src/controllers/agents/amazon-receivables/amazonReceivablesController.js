@@ -66,7 +66,7 @@ const ROW_LEGS = [
   { leg: 'chain',     at: ['three', 'orderRows'], bucket: () => null },
 ];
 
-function detachRows(result) {
+function detachRows(result, opts = {}) {
   const detached = [];
   const counts = {};
   for (const { leg, at, bucket } of ROW_LEGS) {
@@ -79,7 +79,7 @@ function detachRows(result) {
       detached.push({ leg, month: r.month || null, order_id: r.orderId || null,
                       bucket: bucket(r), data: r });
     }
-    host[k2] = [];                       // the shape stays, the weight goes
+    if (!opts.keepInPayload) host[k2] = [];   // the shape stays, the weight goes
     host.rowCount = rows.length;
   }
   return { detached, counts };
@@ -609,7 +609,14 @@ const runReco = async (req, res, next) => {
     /* Lift the per-order rows out before anything is stored or sent. `result`
        is mutated in place, so what goes to the table and what goes down the
        wire are the same slim object - they cannot drift apart. */
-    const { detached, counts } = detachRows(result);
+    /* The rows still go to Postgres - that is what makes a drill cheap and the
+       history queryable. But they are ALSO left in the payload, because five
+       panels aggregate them in the browser (invAgg, mmAgg, the settled-in-period
+       count, the refund list, the ledger table) and emptying the arrays silently
+       zeroed the whole Cash Cycle walk while the cards above it still looked
+       right. Those five aggregations move server-side before the arrays come
+       out again - until then correctness beats payload size. */
+    const { detached, counts } = detachRows(result, { keepInPayload: true });
     result.rowCounts = counts;
 
     const [ins] = await q(ctx.db,
