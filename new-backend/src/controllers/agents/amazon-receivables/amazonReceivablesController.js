@@ -451,8 +451,45 @@ const runReco = async (req, res, next) => {
                       value: r2(st.reduce((a, r) => a + num(r.product_sales ?? r['product sales']), 0)) } };
     });
 
+    /* WHICH SOURCES A MONTH ACTUALLY HAS. Koparo's history does not start level:
+       Amazon's GST Monthly Reports only offer 2022 onward, so FY21-22 has no MTR
+       at all however hard anyone looks. Saying that plainly beats a tab that
+       silently reads zero and leaves the accountant wondering whether the sales
+       collapsed or the file is missing. */
+    const coverage = {
+      perMonth: perSource.map((p) => ({
+        month: p.month,
+        orders: p.order.rows > 0,
+        mtr: p.mtr.rows > 0,
+        settlement: p.settlement.rows > 0,
+      })),
+    };
+    coverage.noMtr = coverage.perMonth.filter((m) => !m.mtr).map((m) => m.month);
+    coverage.noOrders = coverage.perMonth.filter((m) => !m.orders).map((m) => m.month);
+    coverage.noSettlement = coverage.perMonth.filter((m) => !m.settlement).map((m) => m.month);
+    if (coverage.noMtr.length) {
+      /* every month missing MTR sits before Apr-2022 => it is the known gap, not a
+         file somebody forgot to upload */
+      const allEarly = coverage.noMtr.every((m) => m < '2022-04');
+      coverage.notice = {
+        kind: 'mtr-missing',
+        months: coverage.noMtr,
+        title: coverage.noMtr.length === 1
+          ? `No MTR for ${coverage.noMtr[0]}`
+          : `No MTR for ${coverage.noMtr.length} of the months selected`,
+        detail: allEarly
+          ? 'Amazon\'s GST Monthly Reports only go back to 2022, so the merchant tax report cannot be '
+            + 'obtained for these months at all. Everything else is here: the order reports and the '
+            + 'settlement record both cover this period, so sales, payouts and the bank position are '
+            + 'unaffected. Only the invoice-level GST detail is unavailable.'
+          : 'The merchant tax report has not been loaded for these months. Orders and settlement are '
+            + 'unaffected; only the invoice-level GST comparison is blank until the MTR is added.',
+      };
+    }
+
+
     const result = { three, ledger, audit, drills, sources: perSource, sourceKind, basis,
-                     basisCompare, invoicing, moneyMatch, fees, bank };
+                     basisCompare, invoicing, moneyMatch, fees, bank, coverage };
     const ms = Date.now() - t0;
     const fp = `${src.orders.length}|${src.mtr.length}|${src.settlement.length}`;
 
