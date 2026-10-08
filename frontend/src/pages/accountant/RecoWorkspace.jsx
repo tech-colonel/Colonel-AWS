@@ -187,10 +187,10 @@ const AGENT_CONFIG = {
     ],
   },
   leisure_reco: {
-    name: 'Leisure Reco',
+    name: 'Ledger Reco',
     slug: 'LEDGER · ANY COUNTERPARTY',
     icon: Scale,
-    description: 'Generic two-party ledger reconciliation — matches your Internal Ledger against any Counterparty Statement (vendor, customer, or intercompany), even when the two exports use different column layouts. Buckets timing, TDS/TCS, disputed, and omitted items separately.',
+    description: 'Generic two-party ledger reconciliation — matches your Internal Ledger against any Counterparty Statement (vendor, customer, or intercompany), even when the two exports use different column layouts. Marks every entry Matched / Mismatched and lists all mismatches with their source ledger and a totals-and-counts summary on a dedicated sheet.',
     color: '#0F766E', bg: 'rgba(15,118,110,0.08)', border: 'rgba(15,118,110,0.2)',
     files: [
       { key: 'internal_ledger', label: 'Internal Ledger', hint: '.xls / .xlsx — your own books’ party ledger export', accept: '.xls,.xlsx', required: true },

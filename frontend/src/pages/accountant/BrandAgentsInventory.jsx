@@ -103,8 +103,14 @@ const RECO_AGENT_META = {
     color: '#0748EE', bg: '#EFF4FF', border: '#A3BFF8', accuracy: null,
     fields: ['Tally Daybook', 'Universal Bank Output'],
   },
+  'Ledger Reco': {
+    displayName: 'Ledger Reco', icon: '⚖️', category: 'Receivables',
+    color: '#0F766E', bg: '#F0FDFA', border: '#99F6E4', accuracy: null,
+    fields: ['Internal Ledger', 'Counterparty Statement'],
+  },
+  // Old agent name — kept so a DB whose `agents` row hasn't been re-seeded yet still gets the rich card.
   'Leisure Reco': {
-    displayName: 'Leisure Reco', icon: '⚖️', category: 'Receivables',
+    displayName: 'Ledger Reco', icon: '⚖️', category: 'Receivables',
     color: '#0F766E', bg: '#F0FDFA', border: '#99F6E4', accuracy: null,
     fields: ['Internal Ledger', 'Counterparty Statement'],
   },

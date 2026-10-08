@@ -1011,7 +1011,7 @@ class ReconciliationHandler(BaseHTTPRequestHandler):
                 self.write_json({k: v for k, v in payload.items() if not k.startswith("_")})
                 return
 
-            # Leisure Reco — generic two-party ledger reconciliation (any Internal
+            # Ledger Reco (reco_type leisure_reco) — generic two-party ledger reconciliation (any Internal
             # Ledger vs any Counterparty Statement export). Fully self-contained
             # engine (recon/leisure_reco.py) — does not share code with any other
             # reco agent, and deliberately makes no assumption about the client's
@@ -1510,7 +1510,7 @@ class ReconciliationHandler(BaseHTTPRequestHandler):
         elif reco_type == "receivable_cycle":
             filename_prefix = "receivable_cycle"
         elif reco_type == "leisure_reco":
-            filename_prefix = "leisure_reco"
+            filename_prefix = "ledger_reco"
         elif reco_type == "pdf_bank_extract":
             acct = payload.get("account_no", "")
             filename_prefix = f"bank_statement_{acct}" if acct else "bank_statement_pdf"

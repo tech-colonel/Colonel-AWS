@@ -1,7 +1,7 @@
 /**
- * seed-leisure-reco-agent.js — register the "Leisure Reco" agent and assign it to brands.
+ * seed-leisure-reco-agent.js — register the "Ledger Reco" agent (formerly "Leisure Reco") and assign it to brands.
  *
- * Leisure Reco = the generic two-party ledger reconciliation agent: any Internal
+ * Ledger Reco = the generic two-party ledger reconciliation agent: any Internal
  * Ledger vs any Counterparty Statement (vendor, customer, or intercompany), even
  * when the two exports use different column layouts. Runs entirely through the
  * standard reco pipeline (POST /api/reco/upload -> Python reco-engine
@@ -11,14 +11,15 @@
  * Usage:  node seed-leisure-reco-agent.js            # assigns to ALL brands
  *         node seed-leisure-reco-agent.js Koparo      # assigns to just the named brand(s)
  *
- * Idempotent: re-running only tops up the agent row + missing assignments.
+ * Idempotent: re-running only tops up the agent row + missing assignments — and renames an
+ * existing "Leisure Reco" row in place (same id), so re-run it once after this rename.
  */
 const { masterSequelize } = require('./src/config/database');
 const { Agent } = require('./src/models/master/index.js');
 
 // Stable id — also added to frontend RECO_ID_TO_TYPE (AgentDispatch.jsx).
 const LEISURE_RECO_AGENT_ID = 'bec276d9-5757-4385-b21b-0edfda6ccd37';
-const LEISURE_RECO_AGENT_NAME = 'Leisure Reco';
+const LEISURE_RECO_AGENT_NAME = 'Ledger Reco';
 
 (async () => {
   const onlyBrands = process.argv.slice(2).filter(Boolean);
@@ -33,7 +34,9 @@ const LEISURE_RECO_AGENT_NAME = 'Leisure Reco';
       + 'header amid each export’s own preamble/chart-of-accounts layout, matches entries by '
       + 'voucher/reference number, UTR/cheque number, or date + amount, groups lump-sum and '
       + 'partial settlements, and buckets whatever is left into Timing, Tax Deduction, Disputed, '
-      + 'Omission, and Missing-at-Counterparty — works even when the two files’ headers differ.';
+      + 'Omission, and Missing-at-Counterparty — works even when the two files’ headers differ. '
+      + 'Every entry is marked Matched / Mismatched, and all mismatches are listed with their '
+      + 'source ledger and a totals-and-counts summary on a dedicated sheet.';
     if (!existing) {
       await Agent.create({ id: LEISURE_RECO_AGENT_ID, name: LEISURE_RECO_AGENT_NAME, description, columns: [] });
       console.log(`✓ created agent ${LEISURE_RECO_AGENT_NAME} (${LEISURE_RECO_AGENT_ID})`);
@@ -63,7 +66,7 @@ const LEISURE_RECO_AGENT_NAME = 'Leisure Reco';
     console.log(`✓ assigned to ${Array.isArray(rows) ? rows.length : 0} new brand(s)`
       + (onlyBrands.length ? ` (filter: ${onlyBrands.join(', ')})` : ' (all brands)'));
 
-    console.log('\nDone. Leisure Reco is live in the Agents grid for the assigned brand(s).');
+    console.log('\nDone. Ledger Reco is live in the Agents grid for the assigned brand(s).');
     process.exit(0);
   } catch (err) {
     console.error('seed-leisure-reco-agent failed:', err.message);
