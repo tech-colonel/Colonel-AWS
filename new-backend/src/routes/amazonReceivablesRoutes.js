@@ -24,6 +24,7 @@ router.post(`${base}/fetch-orders`, authenticateToken, c.fetchOrders);
 /* the reconciliation itself — run once, then read */
 router.post(`${base}/run`, authenticateToken, c.runReco);
 router.get(`${base}/run`, authenticateToken, c.getRun);
+router.get(`${base}/run/rows`, authenticateToken, c.getRunRows);
 router.delete(`${base}/run`, authenticateToken, c.deleteRun);
 
 /* the report as a formatted workbook — built on the backend, where the only

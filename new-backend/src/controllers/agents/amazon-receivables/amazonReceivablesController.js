@@ -46,6 +46,64 @@ const { buildWorkbook, buildDrillWorkbook } = require('../../../services/process
 const OUTPUT_DIR = path.join(__dirname, '../../../../outputs');
 const UPLOAD_ROOT = path.join(OUTPUT_DIR, 'amazon-receivables');
 const RUNS_TABLE = 'amazon_threeway_runs';
+const ROWS_TABLE = 'amazon_receivables_rows';
+
+/* ── keeping the per-order detail OUT of the payload ──────────────────────
+   Each leg carries one row per order, and for eighteen months that is 45.5 MB
+   of a 46 MB payload: moneyMatch 14 MB, ledger 13 MB, invoicing 12 MB, the
+   order chain 6.5 MB. Everything the screen actually draws - perMonth, totals,
+   buckets, legs, cash - comes to about 90 kB. Asking for the whole history
+   therefore built an object Node could not hold and the process died part way
+   through, which is why 66 months returned nothing at all.
+
+   The rows go to their own table and are fetched one drill at a time, the way
+   receivables_summary already works. `counts` is left behind in the payload so
+   the view still knows how many there are without holding any of them. */
+const ROW_LEGS = [
+  { leg: 'ledger',    at: ['ledger', 'rows'],     bucket: (r) => r.status || null },
+  { leg: 'money',     at: ['moneyMatch', 'rows'], bucket: (r) => r.bucket || null },
+  { leg: 'invoicing', at: ['invoicing', 'rows'],  bucket: (r) => r.bucket || null },
+  { leg: 'chain',     at: ['three', 'orderRows'], bucket: () => null },
+];
+
+function detachRows(result) {
+  const detached = [];
+  const counts = {};
+  for (const { leg, at, bucket } of ROW_LEGS) {
+    const [k1, k2] = at;
+    const host = result[k1];
+    const rows = host && Array.isArray(host[k2]) ? host[k2] : null;
+    if (!rows) { counts[leg] = 0; continue; }
+    counts[leg] = rows.length;
+    for (const r of rows) {
+      detached.push({ leg, month: r.month || null, order_id: r.orderId || null,
+                      bucket: bucket(r), data: r });
+    }
+    host[k2] = [];                       // the shape stays, the weight goes
+    host.rowCount = rows.length;
+  }
+  return { detached, counts };
+}
+
+/* Written in chunks, like receivables_summary does - a single multi-row INSERT
+   of a quarter of a million rows is its own memory problem. */
+async function storeRows(db, runId, brandId, detached) {
+  await q(db, `DELETE FROM ${ROWS_TABLE} WHERE run_id = :r`, { r: runId });
+  const CHUNK = 1000;
+  for (let i = 0; i < detached.length; i += CHUNK) {
+    const slice = detached.slice(i, i + CHUNK);
+    const vals = slice.map((_, j) =>
+      `(:r, :b, :l${j}, :m${j}, :o${j}, :k${j}, CAST(:d${j} AS JSONB))`).join(',');
+    const bind = { r: runId, b: brandId };
+    slice.forEach((x, j) => {
+      bind[`l${j}`] = x.leg; bind[`m${j}`] = x.month;
+      bind[`o${j}`] = x.order_id; bind[`k${j}`] = x.bucket;
+      bind[`d${j}`] = JSON.stringify(x.data);
+    });
+    await q(db, `INSERT INTO ${ROWS_TABLE} (run_id, brand_id, leg, month, order_id, bucket, data)
+                 VALUES ${vals}`, bind);
+  }
+}
 
 const r2 = (n) => Number((n || 0).toFixed(2));
 const safe = (s) => String(s || '').replace(/[^a-zA-Z0-9_-]/g, '_');
@@ -94,17 +152,62 @@ function parseTable(buffer, { delim = null, headerHint = null } = {}) {
 async function readDir(dir, opts) {
   if (!await fs.pathExists(dir)) return { rows: [], files: [] };
   const files = (await fs.readdir(dir)).filter((f) => /\.(tsv|csv|txt)$/i.test(f)).sort();
-  let rows = [];
+  const rows = [];
+  /* `rows = rows.concat(parsed)` rebuilt the whole accumulated array once per
+     file - 107 copies for the MTR folder alone, each a full duplicate of
+     everything read so far. Pushing in place is the identical result with none
+     of that churn.
+
+     COLUMNS ARE NOT DROPPED. Trimming each source to the fields a leg
+     "obviously" used silently zeroed gstMemo and mis-stated returns, because
+     the ledger also reads Total Tax Amount and the Cgst/Sgst/Igst columns.
+     Every row is kept exactly as parsed, so no figure can move. */
   for (const f of files) {
     /* Which FILE a row came from is carried on the row itself. A refund for an
        order invoiced before this window can then be reported as "found in the
        July file", which is the only way to explain how a March-dated refund is
        sitting in a July report. */
     const parsed = parseTable(await fs.readFile(path.join(dir, f)), opts);
-    for (const r of parsed) r.__file = f;
-    rows = rows.concat(parsed);
+    for (const r of parsed) { r.__file = f; rows.push(r); }
   }
   return { rows, files };
+}
+
+/* ── cheap source stats ───────────────────────────────────────────────────
+   The page's FIRST call used to run the full gather - parsing 435 MB of csv
+   into a million objects - purely to print "N rows, N files". That is why the
+   screen sat on "Loading Amazon receivables..." for minutes before drawing
+   anything, and why serving an already-stored run was as slow as building one.
+
+   Rows are counted by scanning the bytes for newlines. No objects are built, so
+   it costs a read rather than a heap. The answer is cached against a
+   fingerprint of every file's size and mtime, so the second call is free and a
+   changed or added file still invalidates it. */
+const statCache = new Map();
+
+async function sourceStats(dir) {
+  if (!await fs.pathExists(dir)) return { files: [], rows: 0 };
+  const names = (await fs.readdir(dir)).filter((f) => /\.(tsv|csv|txt)$/i.test(f)).sort();
+  const stats = [];
+  for (const f of names) {
+    const st = await fs.stat(path.join(dir, f));
+    stats.push(`${f}:${st.size}:${+st.mtimeMs}`);
+  }
+  const fp = `${dir}|${stats.join('|')}`;
+  const hit = statCache.get(dir);
+  if (hit && hit.fp === fp) return hit.val;
+
+  let rows = 0;
+  for (const f of names) {
+    const buf = await fs.readFile(path.join(dir, f));
+    let n = 0;
+    for (let i = 0; i < buf.length; i++) if (buf[i] === 10) n++;
+    /* a trailing newline means the last line is not a row; a header is not one either */
+    rows += Math.max(0, n - (buf.length && buf[buf.length - 1] === 10 ? 1 : 0));
+  }
+  const val = { files: names, rows };
+  statCache.set(dir, { fp, val });
+  return val;
 }
 
 /* ── context ──────────────────────────────────────────────────────────── */
@@ -209,7 +312,11 @@ async function gather(ctx, months) {
 const getStatus = async (req, res, next) => {
   try {
     const ctx = await resolve(req, res); if (!ctx) return;
-    const src = await gather(ctx, null);
+    const [o, m, st] = await Promise.all([
+      sourceStats(brandDir(ctx.brand, 'orders')),
+      sourceStats(brandDir(ctx.brand, 'mtr')),
+      sourceStats(brandDir(ctx.brand, 'settlement')),
+    ]);
     const [runs] = await q(ctx.db,
       `SELECT window_months, order_rows, mtr_rows, settlement_rows, built_at, built_ms,
               payload->'totals' AS totals, payload->>'basis' AS basis
@@ -218,10 +325,9 @@ const getStatus = async (req, res, next) => {
     res.json({
       brand: ctx.brand.name,
       sources: {
-        orders: { files: src.files.orders.length, rows: src.orders.length },
-        mtr: { files: src.files.mtr.length, rows: src.mtr.length },
-        settlement: { files: src.files.settlement.length, rows: src.settlement.length,
-                      uploadedMonths: src.uploadedMonths, fromLedgers: src.files.ledgerMonths },
+        orders: { files: o.files.length, rows: o.rows },
+        mtr: { files: m.files.length, rows: m.rows },
+        settlement: { files: st.files.length, rows: st.rows },
       },
       runs: (runs || []).map((r) => ({
         months: r.window_months, builtAt: r.built_at, builtMs: r.built_ms,
@@ -491,9 +597,22 @@ const runReco = async (req, res, next) => {
     const result = { three, ledger, audit, drills, sources: perSource, sourceKind, basis,
                      basisCompare, invoicing, moneyMatch, fees, bank, coverage };
     const ms = Date.now() - t0;
-    const fp = `${src.orders.length}|${src.mtr.length}|${src.settlement.length}`;
+    /* Must match how getRun recomputes it - from sourceStats, not from the
+       parsed arrays, or every stored run reads as stale the moment it opens. */
+    const [fo, fm, fs_] = await Promise.all([
+      sourceStats(brandDir(ctx.brand, 'orders')),
+      sourceStats(brandDir(ctx.brand, 'mtr')),
+      sourceStats(brandDir(ctx.brand, 'settlement')),
+    ]);
+    const fp = `${fo.rows}|${fm.rows}|${fs_.rows}`;
 
-    await q(ctx.db,
+    /* Lift the per-order rows out before anything is stored or sent. `result`
+       is mutated in place, so what goes to the table and what goes down the
+       wire are the same slim object - they cannot drift apart. */
+    const { detached, counts } = detachRows(result);
+    result.rowCounts = counts;
+
+    const [ins] = await q(ctx.db,
       `INSERT INTO ${RUNS_TABLE}
          (brand_id, window_months, payload, order_rows, mtr_rows, settlement_rows,
           source_fingerprint, built_ms, built_by)
@@ -503,13 +622,70 @@ const runReco = async (req, res, next) => {
                      mtr_rows = EXCLUDED.mtr_rows, settlement_rows = EXCLUDED.settlement_rows,
                      source_fingerprint = EXCLUDED.source_fingerprint,
                      built_ms = EXCLUDED.built_ms, built_by = EXCLUDED.built_by,
-                     built_at = NOW()`,
+                     built_at = NOW()
+       RETURNING id`,
       { b: ctx.brand.id, m: pgArray(months), p: JSON.stringify({ ...result, files: src.files }),
         o: src.orders.length, mt: src.mtr.length, s: src.settlement.length,
         fp, ms, who: (req.user && req.user.id) || null });
 
-    res.json({ success: true, builtInMs: ms, ...result, files: src.files });
+    const runId = ins && ins[0] && ins[0].id;
+    if (runId) {
+      try { await storeRows(ctx.db, runId, ctx.brand.id, detached); }
+      catch (e) {
+        /* The summaries are already safe. Losing the detail costs drill-downs,
+           not numbers, so the run is still served rather than failed. */
+        console.error('Amazon receivables: could not store per-order rows:', e.message);
+        result.rowsStoreError = e.message;
+      }
+    }
+
+    res.json({ success: true, builtInMs: ms, runId, ...result, files: src.files });
   } catch (e) { console.error('Amazon receivables run error:', e); next(e); }
+};
+
+/**
+ * The per-order detail for ONE drill, fetched when it is clicked.
+ *
+ * This is the other half of keeping rows out of the payload: the view holds the
+ * summaries and asks for detail only for the leg, months and bucket in front of
+ * the user. `months` is required in practice - without it a 66-month run would
+ * hand back a quarter of a million rows and we would be back where we started.
+ */
+const getRunRows = async (req, res, next) => {
+  try {
+    const ctx = await resolve(req, res); if (!ctx) return;
+    const leg = String(req.query.leg || '').trim();
+    if (!['ledger', 'money', 'invoicing', 'chain'].includes(leg)) {
+      return res.status(400).json({ error: 'leg must be ledger, money, invoicing or chain' });
+    }
+    const months = String(req.query.months || '').split(',').map((x) => x.trim()).filter(Boolean);
+    const bucket = String(req.query.bucket || '').trim();
+    const limit  = Math.min(Number(req.query.limit) || 500, 5000);
+    const offset = Math.max(Number(req.query.offset) || 0, 0);
+
+    /* Which run: the exact window if given, else the newest for this brand. */
+    const win = String(req.query.window || '').split(',').map((x) => x.trim()).filter(Boolean);
+    const [runs] = await q(ctx.db,
+      win.length
+        ? `SELECT id FROM ${RUNS_TABLE} WHERE brand_id = :b AND window_months = CAST(:w AS text[]) LIMIT 1`
+        : `SELECT id FROM ${RUNS_TABLE} WHERE brand_id = :b ORDER BY built_at DESC LIMIT 1`,
+      win.length ? { b: ctx.brand.id, w: pgArray(win) } : { b: ctx.brand.id });
+    if (!runs || !runs.length) return res.json({ rows: [], total: 0, empty: true });
+    const runId = runs[0].id;
+
+    const where = ['run_id = :r', 'leg = :l'];
+    const bind = { r: runId, l: leg, lim: limit, off: offset };
+    if (months.length) { where.push('month = ANY(CAST(:m AS text[]))'); bind.m = pgArray(months); }
+    if (bucket)        { where.push('bucket = :k'); bind.k = bucket; }
+    const w = where.join(' AND ');
+
+    const [cnt] = await q(ctx.db, `SELECT count(*)::int AS n FROM ${ROWS_TABLE} WHERE ${w}`, bind);
+    const [rows] = await q(ctx.db,
+      `SELECT data FROM ${ROWS_TABLE} WHERE ${w} ORDER BY id LIMIT :lim OFFSET :off`, bind);
+
+    res.json({ rows: (rows || []).map((x) => x.data), total: (cnt && cnt[0] && cnt[0].n) || 0,
+               leg, months, bucket: bucket || null, limit, offset });
+  } catch (e) { next(e); }
 };
 
 /** Serve a stored run. Never builds. */
@@ -524,8 +700,16 @@ const getRun = async (req, res, next) => {
       months.length ? { b: ctx.brand.id, m: pgArray(months) } : { b: ctx.brand.id });
     if (!rows || !rows.length) return res.json({ empty: true });
     const r = rows[0];
-    const src = await gather(ctx, r.window_months);
-    const fp = `${src.orders.length}|${src.mtr.length}|${src.settlement.length}`;
+    /* Staleness used to be decided by re-running the whole gather - parsing
+       435 MB to compare three numbers. The same three numbers come from the
+       cheap stats, so opening a saved report no longer costs as much as
+       rebuilding it. */
+    const [o, m, st] = await Promise.all([
+      sourceStats(brandDir(ctx.brand, 'orders')),
+      sourceStats(brandDir(ctx.brand, 'mtr')),
+      sourceStats(brandDir(ctx.brand, 'settlement')),
+    ]);
+    const fp = `${o.rows}|${m.rows}|${st.rows}`;
     res.json({ ...r.payload, served: true, months: r.window_months,
                builtAt: r.built_at, builtInMs: r.built_ms,
                stale: fp !== r.source_fingerprint });
@@ -606,5 +790,5 @@ const deleteRun = async (req, res, next) => {
   } catch (e) { next(e); }
 };
 
-module.exports = { getStatus, uploadSources, fetchOrders, runReco, getRun, deleteRun,
+module.exports = { getStatus, uploadSources, fetchOrders, runReco, getRun, getRunRows, deleteRun,
                    exportWorkbook, exportDrill, parseTable };
