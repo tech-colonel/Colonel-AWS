@@ -609,13 +609,13 @@ const runReco = async (req, res, next) => {
     /* Lift the per-order rows out before anything is stored or sent. `result`
        is mutated in place, so what goes to the table and what goes down the
        wire are the same slim object - they cannot drift apart. */
-    /* The rows still go to Postgres - that is what makes a drill cheap and the
-       history queryable. But they are ALSO left in the payload, because five
-       panels aggregate them in the browser (invAgg, mmAgg, the settled-in-period
-       count, the refund list, the ledger table) and emptying the arrays silently
-       zeroed the whole Cash Cycle walk while the cards above it still looked
-       right. Those five aggregations move server-side before the arrays come
-       out again - until then correctness beats payload size. */
+    /* Rows go to Postgres AND stay in the payload for now.
+       "One tab, one leg" is the right idea and the endpoint for it exists, but
+       it does not hold yet: the Cash Cycle walk sits on the RECEIVABLES tab and
+       sums the INVOICING leg, so that tab alone needs ledger + chain + invoicing
+       - about 366 MB over 54 months, which no browser should be asked to hold.
+       The panels have to aggregate in SQL before the arrays can leave. Until
+       then the window is capped by the 256 MB Postgres allows a jsonb value. */
     const { detached, counts } = detachRows(result, { keepInPayload: true });
     result.rowCounts = counts;
 
@@ -667,7 +667,11 @@ const getRunRows = async (req, res, next) => {
     }
     const months = String(req.query.months || '').split(',').map((x) => x.trim()).filter(Boolean);
     const bucket = String(req.query.bucket || '').trim();
-    const limit  = Math.min(Number(req.query.limit) || 500, 5000);
+    /* A drill wants a page; a TAB wants the whole leg for the months on screen.
+       all=1 lifts the cap, which is safe because it is one leg of one window -
+       the thing that could not be sent was all four legs of every month. */
+    const all    = String(req.query.all || '') === '1';
+    const limit  = all ? 1000000 : Math.min(Number(req.query.limit) || 500, 5000);
     const offset = Math.max(Number(req.query.offset) || 0, 0);
 
     /* Which run: the exact window if given, else the newest for this brand. */
