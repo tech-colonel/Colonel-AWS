@@ -15,6 +15,7 @@
 
 const XLSX = require('xlsx');
 const { createMissingMasterTracker } = require('../utils/missingMasterTracker');
+const { buildX2betaSheet } = require('../utils/x2betaTemplate');
 const { GST_STATE_CODES, GST_STATE_ABBR } = require('../utils/gstStateCodes');
 
 // ─── Scalar formula helpers (row-local: text + GST state) ─────────────────────
@@ -947,9 +948,15 @@ function applyMultiSheetWorkflow(sheets, fileBufferOrMap, masterData = {}, fileI
     }
 
     // ── Normal sheet ──────────────────────────────────────────────────────────
-    // Source rows: from a previous sheet's output OR from a raw input sheet
+    // Source rows: from a previous sheet's output, a raw input sheet, or a
+    // brand master dump (masterData[masterKey] — e.g. sku_master / ledger_master
+    // / any other master array passed in via masterData, serialized verbatim as
+    // a sheet of rows). Used for simple "master dump" sheets that have no CSV
+    // input of their own (e.g. a "Product Type" or "HSN Code" master sheet).
     let sourceRows;
-    if (wfSheet.sourceType === 'prev_sheet' && wfSheet.prevSheetName) {
+    if (wfSheet.sourceType === 'master_dump' && wfSheet.masterKey) {
+      sourceRows = masterData[wfSheet.masterKey] || [];
+    } else if (wfSheet.sourceType === 'prev_sheet' && wfSheet.prevSheetName) {
       const prevIdx = sheets.slice(0, sheetIdx).findIndex(s => s.name === wfSheet.prevSheetName);
       sourceRows = prevIdx >= 0 && sheetOutputs[prevIdx] ? sheetOutputs[prevIdx] : sheetDefaultRows;
     } else {
@@ -1060,7 +1067,11 @@ function applyMultiSheetWorkflow(sheets, fileBufferOrMap, masterData = {}, fileI
     } else {
       const finalRows = applyGroupBy(outputRows, wfSheet.groupBy);
       sheetOutputs.push(finalRows); // this sheet's actual output rows, for downstream prev_sheet sourcing
-      const newWs = XLSX.utils.json_to_sheet(finalRows);
+      // outputTemplate 'x2beta': the sheet's rows are laid out in the Tally X2Beta import
+      // template instead of being written column-for-column (see utils/x2betaTemplate.js).
+      const newWs = wfSheet.outputTemplate === 'x2beta'
+        ? buildX2betaSheet(finalRows, wfSheet.x2beta)
+        : XLSX.utils.json_to_sheet(finalRows);
       // `autoFilter: true` turns on a real Excel column-header filter dropdown
       // (e.g. so a reviewer can pick "Omnivio"/"Velocity"/"Eshopbox" on an
       // RTO/Return column and see just that source's rows) — covers the header
