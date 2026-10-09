@@ -102,6 +102,7 @@ Sales agents run in Node → `bulkCreate` to the brand's dynamic tables + `agent
 - **Admin analytics** read `reco_jobs` (kept by the nightly purge); heavy `*_results` rows are transient. See [DATABASES.md](DATABASES.md).
 
 ## Recent changes
+- **Agent tables self-heal at boot** — `new-backend/src/db/dynamicTablesMigrate.js` creates any agent's missing working-file table (RLS + grants) and adds missing columns on every backend start; this is what fixed `relation "sales_ajio" / "sales_meesho" does not exist`. On-demand: `node scripts/ensure-agent-tables.js`; verify all agents with `node scripts/smoke-agents.js`.
 - **Unified DB (17 → 1)** is now the default — one `colonel_agent_accountant` DB with `brand_id` + RLS replaces the old `colonel-master` + 16 per-brand DBs; in unified mode `createBrandDatabase`/`migrateAllBrands` are no-ops.
 - **Random-UUID hardening** — agent + brand IDs regenerated from the sequential `d0000000…`/`b0000000…` scheme; `app.bypass_rls` client escape hatch removed.
 - **Agent consolidation** — sales / order-cycle / invoice agents + invoice tool consolidated into **"Invoice Process"**.
