@@ -214,14 +214,54 @@ function foldSettled(settlementRows) {
        arithmetic only ever nets cash that actually settles an invoice; the
        credit is still reported, on its own line. */
     const ty = String(r.type || '').trim().toLowerCase();
-    const isCredit = ty && ty !== 'order' && ty !== 'refund' && ty !== 'transfer';
+    let isCredit = ty && ty !== 'order' && ty !== 'refund' && ty !== 'transfer';
+
+    /* ── a fee handed back is not "other income" ───────────────────────────
+       Some of these rows are not compensation at all - they are a FEE moving
+       back, and their money sits in the fee columns, not in `other`. A
+       Fulfilment Fee Refund carries +111.99 in `fba fees`; Easy Ship weight
+       handling carries its charge in `other transaction fees`.
+
+       Counted as a credit, such a row is used TWICE. The fee columns net it
+       off, so Amazon's charges fall and the amount due from Amazon rises by
+       111.99; but its cash goes to `credits` instead of `payout`, so nothing
+       records it as received. The order is then left reading 111.99 unpaid
+       when Amazon owes nothing on it, and the same 111.99 also shows up on
+       the "not against an invoice" card. Measured on Koparo FY24-25: 1,763
+       orders whose unpaid balance equalled their credit TO THE RUPEE.
+
+       Order 407-1371599-6571557 is the whole story in three lines. Sale:
+       product 134.75 less 8.45 commission, 111.99 delivery and 14.16 other,
+       Amazon pays 21.70. Then the customer returns it: Amazon hands back the
+       111.99 delivery fee, and takes back 135.04 for the return. Net on the
+       order is -1.35 and nothing is owed - but the page said 111.99.
+
+       So the part of the row that is a fee movement goes to the payout, where
+       it belongs beside the charge it reverses, and only the remainder - the
+       genuine compensation in `other` - is a credit. Tested as an amount, not
+       by type name, because Amazon renames these. */
+    const feePart = r2(num(r.selling_fees ?? r['selling fees'])
+                     + num(r.fba_fees ?? r['fba fees'])
+                     + num(r.other_transaction_fees ?? r['other transaction fees']));
+    let creditPart = total;
+    if (isCredit && Math.abs(feePart) > 0.001) {
+      creditPart = r2(total - feePart);
+      if (Math.abs(creditPart) < 0.01) isCredit = false;   // purely a fee movement
+    }
+
     if (!cashMonth && !isCredit) {
       /* Deferred: Amazon has recorded the sale and is still holding the money.
          Counting it in the payout said it was received when it is not in the
          bank, so it is held on its own line until a release date appears. */
       o.deferred += total;
     } else if (isCredit) {
-      o.credits += total;
+      /* the compensation half is the credit; the fee half rides with the
+         payout below, so the two never describe the same rupee */
+      o.credits += creditPart;
+      o.payout += r2(total - creditPart);
+      if (cashMonth && Math.abs(total - creditPart) > 0.001) {
+        o.byMonth[cashMonth] = r2((o.byMonth[cashMonth] || 0) + r2(total - creditPart));
+      }
     } else {
       o.payout += total;
       /* WHEN each rupee moved, so a month can be closed at its own month end
@@ -229,9 +269,9 @@ function foldSettled(settlementRows) {
          not "paid by 30 June". */
       if (cashMonth) o.byMonth[cashMonth] = r2((o.byMonth[cashMonth] || 0) + total);
     }
-    if (isCredit && cashMonth) {
+    if (isCredit && cashMonth && Math.abs(creditPart) > 0.001) {
       o.creditsBy = o.creditsBy || {};
-      o.creditsBy[cashMonth] = r2((o.creditsBy[cashMonth] || 0) + total);
+      o.creditsBy[cashMonth] = r2((o.creditsBy[cashMonth] || 0) + creditPart);
     }
     /* Amazon's deductions arrive NEGATIVE, and a reversed fee arrives positive.
        Accumulate them signed and take the magnitude once at the end — taking
