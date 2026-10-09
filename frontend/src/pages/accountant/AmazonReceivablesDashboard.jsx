@@ -309,9 +309,14 @@ export default function AmazonReceivablesDashboard() {
      opened whichever report was built LAST - eight rows, one destination. The
      row's own months are passed now and that report is fetched. */
   const openReport = useCallback(async (runMonths) => {
-    setView('report'); setSel(null); setRows(null);
+    setView('report'); setSel(null);
     if (!base || !runMonths || !runMonths.length) return;
+    /* Do NOT clear the rows before this test. Clearing them and then returning
+       because the run is already open left `rows` null with nothing to refill
+       it - the fetch keys on [base, months, run] and none of those changed, so
+       the effect never fired again and every per-order panel read nil. */
     if ((data?.months || []).join(',') === runMonths.join(',')) return;  // already open
+    setRows(null);
     setLoading(true);
     try {
       const r = await api.get(`${base}/run`, { params: { months: runMonths.join(',') } });
@@ -3159,13 +3164,21 @@ function CashCycle({ led, data, shown, onDrill }) {
   const coveredByCredit = r2(ovl.covered);
   const grossOwing = r2(ovl.gross);
   const neverArrived = r2(Math.max(0, grossOwing - coveredByCredit));
+  /* The card is drawn from the month summaries, which are in the payload, but
+     the overlap needs the per-order rows, which arrive a moment later. Until
+     they do, say nothing about the overlap: the old wording asserted that this
+     money "settles no sale", so a reader who looked during that second was
+     told the opposite of the answer. */
+  const rowsReady = (data?.ledger?.rows || []).length > 0;
 
   if (Math.abs(credits) > 1) {
     EQ.splice(6, 0, {
       cap: 'Of which: not against an invoice', v: credits, op: '',
-      note: coveredByCredit > 1
-        ? `Reimbursements, adjustments, fee refunds. ₹${inr(coveredByCredit, 0)} of it is money for orders that still read as unpaid`
-        : 'Reimbursements, adjustments, fee refunds — in the bank, but they settle no sale',
+      note: !rowsReady
+        ? 'Reimbursements, adjustments, fee refunds — real money, already in the bank'
+        : coveredByCredit > 1
+          ? `Reimbursements, adjustments, fee refunds. ₹${inr(coveredByCredit, 0)} of it is money for orders that still read as unpaid`
+          : 'Reimbursements, adjustments, fee refunds — none of it sits on an order still showing unpaid',
       fg: '#92400E', bg: '#FFFBEB', line: 'creditsNotAgainstInvoice', aside: true,
     });
   }
@@ -3234,7 +3247,7 @@ function CashCycle({ led, data, shown, onDrill }) {
                     what is genuinely unpaid on these invoices; this ₹{inr(credits, 0)} is separate
                     income.
                   </p>
-                  {coveredByCredit > 1 && (
+                  {rowsReady && coveredByCredit > 1 && (
                     <p className="text-[12px] leading-relaxed mt-2 pt-2"
                        style={{ color: '#78350F', borderTop: '1px dashed #FCD34D' }}>
                       <strong>But the two can describe the same order.</strong> Of the
