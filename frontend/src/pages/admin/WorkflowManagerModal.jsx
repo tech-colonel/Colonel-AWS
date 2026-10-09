@@ -208,15 +208,343 @@ const FormulaBuilder = ({ formula, onChange, availableColumns }) => {
   );
 };
 
+// ─── Guided (no-typing) calculation builder ──────────────────────────────────
+// Produces the exact same {Column} / IF(...) / helper-function formula strings
+// FormulaBuilder does — just assembled from dropdowns instead of free text, so
+// it's a drop-in replacement wherever `formula` + `onChange` are already wired.
+
+const toLiteral = (raw) => {
+  const v = (raw ?? '').toString();
+  if (v.trim() === '') return '""';
+  const n = Number(v);
+  return (!isNaN(n) && v.trim() !== '') ? String(n) : `"${v.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+};
+
+const groupColumns = (availableColumns) => {
+  const own = availableColumns.filter(c => !c.fromSheet);
+  const groups = availableColumns.filter(c => c.fromSheet).reduce((acc, c) => {
+    (acc[c.fromSheet] = acc[c.fromSheet] || []).push(c);
+    return acc;
+  }, {});
+  return { own, groups };
+};
+
+const ColumnSelect = ({ value, onChange, availableColumns, className }) => {
+  const { own, groups } = groupColumns(availableColumns);
+  return (
+    <select value={value} onChange={e => onChange(e.target.value)}
+      className={className || 'w-full h-8 text-xs border border-slate-200 rounded-md px-2 focus:outline-none focus:ring-1 focus:ring-indigo-400 bg-white'}>
+      <option value="">— choose a column —</option>
+      {own.length > 0 && (
+        <optgroup label="This sheet">
+          {own.map(c => <option key={c.key} value={c.label}>{c.label}</option>)}
+        </optgroup>
+      )}
+      {Object.entries(groups).map(([sName, cols]) => (
+        <optgroup key={sName} label={sName}>
+          {cols.map(c => <option key={c.key} value={c.label}>{c.label}</option>)}
+        </optgroup>
+      ))}
+    </select>
+  );
+};
+
+// Toggle between "pick a column" and "type a fixed value" for one input slot.
+const ColumnOrValueField = ({ mode, onModeChange, col, onColChange, value, onValueChange, availableColumns, placeholder = 'value' }) => (
+  <div className="flex items-center gap-1.5 flex-1 min-w-0">
+    <div className="flex rounded-md overflow-hidden border border-slate-200 shrink-0">
+      <button type="button" onClick={() => onModeChange('column')}
+        className={`px-2 py-1 text-xs font-medium ${mode === 'column' ? 'bg-indigo-600 text-white' : 'bg-white text-slate-500 hover:bg-slate-50'}`}>
+        Column
+      </button>
+      <button type="button" onClick={() => onModeChange('value')}
+        className={`px-2 py-1 text-xs font-medium ${mode === 'value' ? 'bg-indigo-600 text-white' : 'bg-white text-slate-500 hover:bg-slate-50'}`}>
+        Fixed value
+      </button>
+    </div>
+    {mode === 'column' ? (
+      <ColumnSelect value={col} onChange={onColChange} availableColumns={availableColumns}
+        className="flex-1 min-w-0 h-7 text-xs border border-slate-200 rounded bg-white px-1.5 focus:outline-none focus:ring-1 focus:ring-indigo-400" />
+    ) : (
+      <input type="text" value={value} onChange={e => onValueChange(e.target.value)} placeholder={placeholder}
+        className="flex-1 min-w-0 h-7 text-xs border border-slate-200 rounded bg-white px-1.5 focus:outline-none focus:ring-1 focus:ring-indigo-400" />
+    )}
+  </div>
+);
+
+const MATH_OPS = [
+  { value: '+', label: '+  add' },
+  { value: '-', label: '−  subtract' },
+  { value: '*', label: '×  multiply' },
+  { value: '/', label: '÷  divide' },
+];
+
+const COND_OPS = [
+  { value: 'eq',       label: 'is equal to' },
+  { value: 'neq',      label: 'is not equal to' },
+  { value: 'gt',       label: 'is greater than' },
+  { value: 'lt',        label: 'is less than' },
+  { value: 'gte',       label: 'is greater than or equal to' },
+  { value: 'lte',       label: 'is less than or equal to' },
+  { value: 'empty',     label: 'is empty' },
+  { value: 'notempty',  label: 'is not empty' },
+];
+const condNeedsB = (op) => op !== 'empty' && op !== 'notempty';
+const CONDITION_SYMBOL = { eq: '==', neq: '!=', gt: '>', lt: '<', gte: '>=', lte: '<=' };
+
+const TRANSFORM_FNS = [
+  { key: 'GSTSTATE',  label: 'Get state name from a GST number',            args: [{ k: 'col', label: 'GST number column' }] },
+  { key: 'GSTCODE',   label: 'Get the 2-digit GST state code',              args: [{ k: 'col', label: 'GST number / state column' }] },
+  { key: 'GSTABBR',   label: 'Get the 2-letter state code (for Tally)',     args: [{ k: 'col', label: 'GST number / state column' }] },
+  { key: 'SAMESTATE', label: 'Check if two GST numbers are the same state', args: [{ k: 'a', label: 'First GST/state column' }, { k: 'b', label: 'Second GST/state column' }] },
+  { key: 'UPPER',     label: 'Convert to UPPERCASE',                        args: [{ k: 'col', label: 'Column' }] },
+  { key: 'LOWER',     label: 'Convert to lowercase',                        args: [{ k: 'col', label: 'Column' }] },
+  { key: 'TRIM',      label: 'Remove extra spaces',                         args: [{ k: 'col', label: 'Column' }] },
+  { key: 'LEFT',      label: 'First few characters',                       args: [{ k: 'col', label: 'Column' }, { k: 'n', label: 'How many characters', type: 'number', default: 2 }] },
+  { key: 'RIGHT',     label: 'Last few characters',                        args: [{ k: 'col', label: 'Column' }, { k: 'n', label: 'How many characters', type: 'number', default: 2 }] },
+  { key: 'MID',       label: 'Characters from the middle',                 args: [{ k: 'col', label: 'Column' }, { k: 'start', label: 'Start position', type: 'number', default: 1 }, { k: 'len', label: 'How many characters', type: 'number', default: 2 }] },
+  { key: 'LEN',       label: 'Count characters in the text',                args: [{ k: 'col', label: 'Column' }] },
+  { key: 'VALUE',     label: 'Convert text to a number',                    args: [{ k: 'col', label: 'Column' }] },
+  { key: 'ROUND',     label: 'Round a number',                              args: [{ k: 'col', label: 'Column' }, { k: 'd', label: 'Decimal places', type: 'number', default: 2 }] },
+  { key: 'ABS',       label: 'Drop the minus sign (absolute value)',        args: [{ k: 'col', label: 'Column' }] },
+];
+
+const GuidedCalcBuilder = ({ formula, onChange, availableColumns }) => {
+  const [recipe, setRecipe] = useState('combine');
+
+  const [aMode, setAMode] = useState('column'); const [aCol, setACol] = useState(''); const [aVal, setAVal] = useState('');
+  const [op,    setOp]    = useState('+');
+  const [bMode, setBMode] = useState('column'); const [bCol, setBCol] = useState(''); const [bVal, setBVal] = useState('');
+  const [round, setRound] = useState(false);    const [decimals, setDecimals] = useState(2);
+
+  const [conditions, setConditions] = useState([{ id: 1, aMode: 'column', aCol: '', aVal: '', op: 'eq', bMode: 'column', bCol: '', bVal: '' }]);
+  const [connector,  setConnector]  = useState('AND');
+  const [thenMode, setThenMode] = useState('value'); const [thenCol, setThenCol] = useState(''); const [thenVal, setThenVal] = useState('');
+  const [elseMode, setElseMode] = useState('value'); const [elseCol, setElseCol] = useState(''); const [elseVal, setElseVal] = useState('0');
+
+  const [fnKey, setFnKey] = useState('GSTSTATE');
+  const [fnArgs, setFnArgs] = useState({});
+  const [concatPieces, setConcatPieces] = useState([{ id: 1, mode: 'column', col: '', text: '' }]);
+
+  const updateCond  = (id, patch) => setConditions(prev => prev.map(c => c.id === id ? { ...c, ...patch } : c));
+  const addCond     = () => setConditions(prev => [...prev, { id: Date.now(), aMode: 'column', aCol: '', aVal: '', op: 'eq', bMode: 'column', bCol: '', bVal: '' }]);
+  const removeCond  = (id) => setConditions(prev => prev.filter(c => c.id !== id));
+
+  const updatePiece = (id, patch) => setConcatPieces(prev => prev.map(p => p.id === id ? { ...p, ...patch } : p));
+  const addPiece     = () => setConcatPieces(prev => [...prev, { id: Date.now(), mode: 'column', col: '', text: '' }]);
+  const removePiece  = (id) => setConcatPieces(prev => prev.filter(p => p.id !== id));
+
+  const exprFor = (mode, col, val) => mode === 'column' ? (col ? `{${col}}` : '') : toLiteral(val);
+
+  useEffect(() => {
+    let f = '';
+    if (recipe === 'combine') {
+      const aE = exprFor(aMode, aCol, aVal);
+      const bE = exprFor(bMode, bCol, bVal);
+      if (aE && bE) {
+        const base = `${aE} ${op} ${bE}`;
+        f = round ? `ROUND((${base}), ${decimals || 0})` : base;
+      }
+    } else if (recipe === 'condition') {
+      const condParts = conditions.map(c => {
+        const aE = exprFor(c.aMode, c.aCol, c.aVal);
+        if (!aE) return null;
+        if (c.op === 'empty')    return `${aE} == ""`;
+        if (c.op === 'notempty') return `${aE} != ""`;
+        const bE = exprFor(c.bMode, c.bCol, c.bVal);
+        if (!bE) return null;
+        return `${aE} ${CONDITION_SYMBOL[c.op]} ${bE}`;
+      }).filter(Boolean);
+      if (condParts.length > 0) {
+        const joiner   = connector === 'AND' ? ' && ' : ' || ';
+        const condExpr = condParts.map(p => `(${p})`).join(joiner);
+        const thenE = exprFor(thenMode, thenCol, thenVal);
+        const elseE = exprFor(elseMode, elseCol, elseVal);
+        if (thenE && elseE) f = `IF(${condExpr}, ${thenE}, ${elseE})`;
+      }
+    } else if (recipe === 'transform') {
+      if (fnKey === 'CONCAT') {
+        const parts = concatPieces
+          .map(p => p.mode === 'column' ? (p.col ? `{${p.col}}` : '') : toLiteral(p.text))
+          .filter(Boolean);
+        if (parts.length > 0) f = `CONCAT(${parts.join(', ')})`;
+      } else {
+        const spec = TRANSFORM_FNS.find(t => t.key === fnKey);
+        if (spec) {
+          const argExprs = spec.args.map(a => a.type === 'number'
+            ? (fnArgs[a.k] ?? a.default ?? 0)
+            : (fnArgs[a.k] ? `{${fnArgs[a.k]}}` : null));
+          if (argExprs.every(v => v !== null && v !== undefined && v !== '')) {
+            f = `${fnKey}(${argExprs.join(', ')})`;
+          }
+        }
+      }
+    }
+    onChange(f);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [recipe, aMode, aCol, aVal, op, bMode, bCol, bVal, round, decimals,
+      conditions, connector, thenMode, thenCol, thenVal, elseMode, elseCol, elseVal,
+      fnKey, fnArgs, concatPieces]);
+
+  return (
+    <div className="space-y-2.5">
+      <div className="flex gap-1.5">
+        {[
+          { key: 'combine',   label: 'Combine numbers' },
+          { key: 'condition', label: 'If / Then' },
+          { key: 'transform', label: 'Transform text / GST' },
+        ].map(r => (
+          <button key={r.key} type="button" onClick={() => setRecipe(r.key)}
+            className={`flex-1 rounded-lg border px-2.5 py-1.5 text-xs font-medium transition-all ${
+              recipe === r.key ? 'border-indigo-500 bg-indigo-50 text-indigo-700' : 'border-slate-200 bg-white text-slate-500 hover:border-indigo-200'
+            }`}>
+            {r.label}
+          </button>
+        ))}
+      </div>
+
+      {recipe === 'combine' && (
+        <div className="border border-slate-200 rounded-lg p-2.5 space-y-2 bg-slate-50">
+          <div className="flex items-center gap-1.5 flex-wrap">
+            <ColumnOrValueField mode={aMode} onModeChange={setAMode} col={aCol} onColChange={setACol}
+              value={aVal} onValueChange={setAVal} availableColumns={availableColumns} placeholder="e.g. 100" />
+            <select value={op} onChange={e => setOp(e.target.value)}
+              className="shrink-0 h-7 text-xs border border-slate-200 rounded bg-white px-1.5">
+              {MATH_OPS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+            </select>
+            <ColumnOrValueField mode={bMode} onModeChange={setBMode} col={bCol} onColChange={setBCol}
+              value={bVal} onValueChange={setBVal} availableColumns={availableColumns} placeholder="e.g. 100" />
+          </div>
+          <label className="flex items-center gap-2 text-xs text-slate-600">
+            <input type="checkbox" checked={round} onChange={e => setRound(e.target.checked)}
+              className="rounded border-slate-300 h-3.5 w-3.5" />
+            Round result to
+            <input type="number" value={decimals} onChange={e => setDecimals(e.target.value)} disabled={!round}
+              className="w-12 h-6 text-xs border border-slate-200 rounded px-1 disabled:opacity-40" />
+            decimal places
+          </label>
+        </div>
+      )}
+
+      {recipe === 'condition' && (
+        <div className="border border-slate-200 rounded-lg p-2.5 space-y-2.5 bg-slate-50">
+          <div className="space-y-1.5">
+            {conditions.map((c, i) => (
+              <div key={c.id} className="flex items-center gap-1.5 flex-wrap">
+                {i === 0
+                  ? <span className="text-xs font-semibold text-slate-500 shrink-0 w-8">IF</span>
+                  : (
+                    <select value={connector} onChange={e => setConnector(e.target.value)}
+                      className="shrink-0 h-7 text-xs font-semibold border border-indigo-200 rounded bg-indigo-50 text-indigo-700 px-1.5">
+                      <option value="AND">AND</option>
+                      <option value="OR">OR</option>
+                    </select>
+                  )}
+                <ColumnOrValueField mode={c.aMode} onModeChange={m => updateCond(c.id, { aMode: m })}
+                  col={c.aCol} onColChange={v => updateCond(c.id, { aCol: v })}
+                  value={c.aVal} onValueChange={v => updateCond(c.id, { aVal: v })}
+                  availableColumns={availableColumns} />
+                <select value={c.op} onChange={e => updateCond(c.id, { op: e.target.value })}
+                  className="shrink-0 h-7 text-xs border border-slate-200 rounded bg-white px-1.5">
+                  {COND_OPS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+                </select>
+                {condNeedsB(c.op) && (
+                  <ColumnOrValueField mode={c.bMode} onModeChange={m => updateCond(c.id, { bMode: m })}
+                    col={c.bCol} onColChange={v => updateCond(c.id, { bCol: v })}
+                    value={c.bVal} onValueChange={v => updateCond(c.id, { bVal: v })}
+                    availableColumns={availableColumns} />
+                )}
+                {conditions.length > 1 && (
+                  <button type="button" onClick={() => removeCond(c.id)} className="p-1 rounded hover:bg-red-100 text-slate-400 hover:text-red-500 shrink-0">
+                    <X className="h-3 w-3" />
+                  </button>
+                )}
+              </div>
+            ))}
+            <button type="button" onClick={addCond}
+              className="text-xs text-indigo-600 hover:text-indigo-800 font-medium inline-flex items-center gap-1">
+              <Plus className="h-3 w-3" /> Add another condition
+            </button>
+          </div>
+
+          <div className="flex items-center gap-1.5">
+            <span className="text-xs font-semibold text-emerald-600 shrink-0 w-8">THEN</span>
+            <ColumnOrValueField mode={thenMode} onModeChange={setThenMode} col={thenCol} onColChange={setThenCol}
+              value={thenVal} onValueChange={setThenVal} availableColumns={availableColumns} placeholder="value to set" />
+          </div>
+          <div className="flex items-center gap-1.5">
+            <span className="text-xs font-semibold text-rose-500 shrink-0 w-8">ELSE</span>
+            <ColumnOrValueField mode={elseMode} onModeChange={setElseMode} col={elseCol} onColChange={setElseCol}
+              value={elseVal} onValueChange={setElseVal} availableColumns={availableColumns} placeholder="value to set" />
+          </div>
+        </div>
+      )}
+
+      {recipe === 'transform' && (
+        <div className="border border-slate-200 rounded-lg p-2.5 space-y-2 bg-slate-50">
+          <select value={fnKey} onChange={e => { setFnKey(e.target.value); setFnArgs({}); }}
+            className="w-full h-8 text-xs border border-slate-200 rounded-md px-2 bg-white">
+            <option value="CONCAT">Join text pieces together</option>
+            {TRANSFORM_FNS.map(f => <option key={f.key} value={f.key}>{f.label}</option>)}
+          </select>
+
+          {fnKey === 'CONCAT' ? (
+            <div className="space-y-1.5">
+              {concatPieces.map(p => (
+                <div key={p.id} className="flex items-center gap-1.5">
+                  <ColumnOrValueField mode={p.mode} onModeChange={m => updatePiece(p.id, { mode: m })}
+                    col={p.col} onColChange={v => updatePiece(p.id, { col: v })}
+                    value={p.text} onValueChange={v => updatePiece(p.id, { text: v })}
+                    availableColumns={availableColumns} placeholder="text" />
+                  {concatPieces.length > 1 && (
+                    <button type="button" onClick={() => removePiece(p.id)} className="p-1 rounded hover:bg-red-100 text-slate-400 hover:text-red-500 shrink-0">
+                      <X className="h-3 w-3" />
+                    </button>
+                  )}
+                </div>
+              ))}
+              <button type="button" onClick={addPiece}
+                className="text-xs text-indigo-600 hover:text-indigo-800 font-medium inline-flex items-center gap-1">
+                <Plus className="h-3 w-3" /> Add piece
+              </button>
+            </div>
+          ) : (
+            <div className="space-y-1.5">
+              {(TRANSFORM_FNS.find(f => f.key === fnKey)?.args || []).map(a => (
+                <div key={a.k} className="flex items-center gap-1.5">
+                  <span className="text-xs text-slate-500 w-32 shrink-0">{a.label}</span>
+                  {a.type === 'number' ? (
+                    <input type="number" value={fnArgs[a.k] ?? a.default ?? ''} onChange={e => setFnArgs(prev => ({ ...prev, [a.k]: e.target.value }))}
+                      className="w-20 h-7 text-xs border border-slate-200 rounded px-1.5" />
+                  ) : (
+                    <ColumnSelect value={fnArgs[a.k] || ''} onChange={v => setFnArgs(prev => ({ ...prev, [a.k]: v }))}
+                      availableColumns={availableColumns} className="flex-1 h-7 text-xs border border-slate-200 rounded bg-white px-1.5" />
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      <div className="rounded-lg border border-slate-200 bg-white px-2.5 py-1.5">
+        <p className="text-xs text-slate-400">Preview</p>
+        <p className="text-xs font-mono text-slate-600 break-all">{formula || '— fill in the fields above —'}</p>
+      </div>
+    </div>
+  );
+};
+
 // ─── Inline Add Computed Column Form ─────────────────────────────────────────
 
 const AddComputedColumnForm = ({ availableColumns, onAdd, onCancel }) => {
   const [label,   setLabel]   = useState('');
   const [formula, setFormula] = useState('');
+  const [mode,    setMode]    = useState('guided'); // 'guided' | 'advanced'
 
   const handleAdd = () => {
     if (!label.trim())   { toast.error('Column name is required'); return; }
-    if (!formula.trim()) { toast.error('Formula is required');     return; }
+    if (!formula.trim()) { toast.error(mode === 'guided' ? 'Fill in the calculation above' : 'Formula is required'); return; }
     onAdd({ label: label.trim(), formula: formula.trim() });
     setLabel('');
     setFormula('');
@@ -224,7 +552,13 @@ const AddComputedColumnForm = ({ availableColumns, onAdd, onCancel }) => {
 
   return (
     <div className="border border-indigo-200 bg-indigo-50 rounded-lg p-3 space-y-2.5">
-      <p className="text-xs font-semibold text-indigo-700 uppercase tracking-wide">New Computed Column</p>
+      <div className="flex items-center justify-between">
+        <p className="text-xs font-semibold text-indigo-700 uppercase tracking-wide">New Calculation</p>
+        <button type="button" onClick={() => setMode(mode === 'guided' ? 'advanced' : 'guided')}
+          className="text-xs text-indigo-500 hover:text-indigo-700 underline underline-offset-2">
+          {mode === 'guided' ? 'Advanced: type a formula myself' : 'Back to guided builder'}
+        </button>
+      </div>
       <div>
         <Label className="text-xs text-slate-600">Column Name *</Label>
         <Input
@@ -232,13 +566,15 @@ const AddComputedColumnForm = ({ availableColumns, onAdd, onCancel }) => {
           onChange={e => setLabel(e.target.value)}
           placeholder="e.g. Net Revenue"
           className="mt-1 h-8 text-sm"
-          onKeyDown={e => e.key === 'Enter' && handleAdd()}
+          onKeyDown={e => e.key === 'Enter' && mode === 'advanced' && handleAdd()}
         />
       </div>
       <div>
-        <Label className="text-xs text-slate-600">Formula *</Label>
+        <Label className="text-xs text-slate-600">{mode === 'guided' ? 'How should it be calculated? *' : 'Formula *'}</Label>
         <div className="mt-1">
-          <FormulaBuilder formula={formula} onChange={setFormula} availableColumns={availableColumns} />
+          {mode === 'guided'
+            ? <GuidedCalcBuilder formula={formula} onChange={setFormula} availableColumns={availableColumns} />
+            : <FormulaBuilder formula={formula} onChange={setFormula} availableColumns={availableColumns} />}
         </div>
       </div>
       <div className="flex gap-2">
@@ -369,33 +705,183 @@ const ExcelFormulaBuilder = ({ formula, onChange, availableColumns }) => {
 
 // ─── Add Excel Formula Column Form ────────────────────────────────────────────
 
+// ─── Guided (no-typing) totals / lookup builder ──────────────────────────────
+// Range/sum/lookup/return columns must exist in THIS sheet (the engine's SUMIF-
+// family functions scan this sheet's own rows), so only `ownCols` is offered
+// there; the criteria/lookup VALUE side can reference any available column.
+// Criteria are equality-only and *IFS chaining is AND-only — matches the engine
+// exactly (see workflowEngine.js SUMIF/SUMIFS/COUNTIF/etc.), so the guided UI
+// can never produce a formula the backend can't evaluate.
+
+const EXCEL_OPS = [
+  { key: 'sum',     label: 'Add up (total)',                  multi: true,  needsTarget: true },
+  { key: 'count',   label: 'Count rows',                       multi: true,  needsTarget: false },
+  { key: 'average', label: 'Average',                          multi: false, needsTarget: true },
+  { key: 'min',     label: 'Find the smallest value',          multi: false, needsTarget: true },
+  { key: 'max',     label: 'Find the largest value',           multi: false, needsTarget: true },
+  { key: 'lookup',  label: 'Look up a value from another row', multi: false, needsTarget: false },
+];
+
+const GuidedExcelBuilder = ({ formula, onChange, availableColumns }) => {
+  const ownCols = availableColumns.filter(c => !c.fromSheet);
+
+  const [opKey,      setOpKey]      = useState('sum');
+  const [targetCol,  setTargetCol]  = useState('');
+  const [conditions, setConditions] = useState([{ id: 1, rangeCol: '', critMode: 'column', critCol: '', critVal: '' }]);
+
+  const [lookupValMode, setLookupValMode] = useState('column');
+  const [lookupValCol,  setLookupValCol]  = useState('');
+  const [lookupValVal,  setLookupValVal]  = useState('');
+  const [matchCol,  setMatchCol]  = useState('');
+  const [returnCol, setReturnCol] = useState('');
+
+  const op = EXCEL_OPS.find(o => o.key === opKey);
+
+  const updateCond = (id, patch) => setConditions(prev => prev.map(c => c.id === id ? { ...c, ...patch } : c));
+  const addCond    = () => setConditions(prev => [...prev, { id: Date.now(), rangeCol: '', critMode: 'column', critCol: '', critVal: '' }]);
+  const removeCond = (id) => setConditions(prev => prev.filter(c => c.id !== id));
+
+  useEffect(() => {
+    if (!op.multi && conditions.length > 1) setConditions(prev => prev.slice(0, 1));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [opKey]);
+
+  useEffect(() => {
+    let f = '';
+    if (opKey === 'lookup') {
+      const valExpr = lookupValMode === 'column' ? (lookupValCol ? `{${lookupValCol}}` : '') : toLiteral(lookupValVal);
+      if (valExpr && matchCol && returnCol) {
+        f = `VLOOKUP(${valExpr}, "${matchCol}", "${returnCol}")`;
+      }
+    } else {
+      const critExpr   = (c) => c.critMode === 'column' ? (c.critCol ? `{${c.critCol}}` : '') : toLiteral(c.critVal);
+      const validConds = conditions.filter(c => c.rangeCol && (c.critMode === 'column' ? !!c.critCol : c.critVal !== ''));
+      if (validConds.length > 0 && (!op.needsTarget || targetCol)) {
+        if (op.multi && validConds.length > 1) {
+          const pairs = validConds.map(c => `"${c.rangeCol}", ${critExpr(c)}`).join(', ');
+          f = op.key === 'sum' ? `SUMIFS("${targetCol}", ${pairs})` : `COUNTIFS(${pairs})`;
+        } else {
+          const c = validConds[0];
+          if (op.key === 'sum')     f = `SUMIF("${c.rangeCol}", ${critExpr(c)}, "${targetCol}")`;
+          if (op.key === 'count')   f = `COUNTIF("${c.rangeCol}", ${critExpr(c)})`;
+          if (op.key === 'average') f = `AVERAGEIF("${c.rangeCol}", ${critExpr(c)}, "${targetCol}")`;
+          if (op.key === 'min')     f = `MINIF("${c.rangeCol}", ${critExpr(c)}, "${targetCol}")`;
+          if (op.key === 'max')     f = `MAXIF("${c.rangeCol}", ${critExpr(c)}, "${targetCol}")`;
+        }
+      }
+    }
+    onChange(f);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [opKey, targetCol, conditions, lookupValMode, lookupValCol, lookupValVal, matchCol, returnCol]);
+
+  return (
+    <div className="space-y-2.5">
+      <select value={opKey} onChange={e => setOpKey(e.target.value)}
+        className="w-full h-8 text-xs border border-slate-200 rounded-md px-2 bg-white">
+        {EXCEL_OPS.map(o => <option key={o.key} value={o.key}>{o.label}</option>)}
+      </select>
+
+      {opKey === 'lookup' ? (
+        <div className="border border-sky-200 rounded-lg p-2.5 bg-sky-50 space-y-2">
+          <div className="flex items-center gap-1.5 flex-wrap">
+            <span className="text-xs text-slate-500 shrink-0">Look for</span>
+            <ColumnOrValueField mode={lookupValMode} onModeChange={setLookupValMode}
+              col={lookupValCol} onColChange={setLookupValCol}
+              value={lookupValVal} onValueChange={setLookupValVal}
+              availableColumns={availableColumns} />
+          </div>
+          <div className="flex items-center gap-1.5">
+            <span className="text-xs text-slate-500 shrink-0 w-24">in column</span>
+            <ColumnSelect value={matchCol} onChange={setMatchCol} availableColumns={ownCols}
+              className="flex-1 h-7 text-xs border border-slate-200 rounded bg-white px-1.5" />
+          </div>
+          <div className="flex items-center gap-1.5">
+            <span className="text-xs text-slate-500 shrink-0 w-24">and return</span>
+            <ColumnSelect value={returnCol} onChange={setReturnCol} availableColumns={ownCols}
+              className="flex-1 h-7 text-xs border border-slate-200 rounded bg-white px-1.5" />
+          </div>
+        </div>
+      ) : (
+        <div className="border border-sky-200 rounded-lg p-2.5 bg-sky-50 space-y-2">
+          {op.needsTarget && (
+            <div className="flex items-center gap-1.5">
+              <span className="text-xs text-slate-500 shrink-0 w-16">Column</span>
+              <ColumnSelect value={targetCol} onChange={setTargetCol} availableColumns={ownCols}
+                className="flex-1 h-7 text-xs border border-slate-200 rounded bg-white px-1.5" />
+            </div>
+          )}
+          <div className="space-y-1.5">
+            {conditions.map((c, i) => (
+              <div key={c.id} className="flex items-center gap-1.5 flex-wrap">
+                <span className="text-xs font-semibold text-slate-500 shrink-0 w-10">{i === 0 ? 'WHERE' : 'AND'}</span>
+                <ColumnSelect value={c.rangeCol} onChange={v => updateCond(c.id, { rangeCol: v })} availableColumns={ownCols}
+                  className="flex-1 min-w-0 h-7 text-xs border border-slate-200 rounded bg-white px-1.5" />
+                <span className="text-xs text-slate-400 shrink-0">equals</span>
+                <ColumnOrValueField mode={c.critMode} onModeChange={m => updateCond(c.id, { critMode: m })}
+                  col={c.critCol} onColChange={v => updateCond(c.id, { critCol: v })}
+                  value={c.critVal} onValueChange={v => updateCond(c.id, { critVal: v })}
+                  availableColumns={availableColumns} />
+                {conditions.length > 1 && (
+                  <button type="button" onClick={() => removeCond(c.id)} className="p-1 rounded hover:bg-red-100 text-slate-400 hover:text-red-500 shrink-0">
+                    <X className="h-3 w-3" />
+                  </button>
+                )}
+              </div>
+            ))}
+            {op.multi && (
+              <button type="button" onClick={addCond}
+                className="text-xs text-sky-600 hover:text-sky-800 font-medium inline-flex items-center gap-1">
+                <Plus className="h-3 w-3" /> Add another condition
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+
+      <div className="rounded-lg border border-slate-200 bg-white px-2.5 py-1.5">
+        <p className="text-xs text-slate-400">Preview</p>
+        <p className="text-xs font-mono text-slate-600 break-all">{formula || '— fill in the fields above —'}</p>
+      </div>
+    </div>
+  );
+};
+
 const AddExcelColumnForm = ({ availableColumns, onAdd, onCancel }) => {
   const [label,   setLabel]   = useState('');
   const [formula, setFormula] = useState('');
+  const [mode,    setMode]    = useState('guided'); // 'guided' | 'advanced'
 
   const handleAdd = () => {
     if (!label.trim())   { toast.error('Column name is required'); return; }
-    if (!formula.trim()) { toast.error('Formula is required');     return; }
+    if (!formula.trim()) { toast.error(mode === 'guided' ? 'Fill in the fields above' : 'Formula is required'); return; }
     onAdd({ label: label.trim(), formula: formula.trim() });
     setLabel(''); setFormula('');
   };
 
   return (
     <div className="border border-sky-200 bg-sky-50 rounded-lg p-3 space-y-2.5">
-      <div className="flex items-center gap-2">
-        <span className="text-xs font-bold bg-sky-600 text-white px-2 py-0.5 rounded tracking-wide">Σ EXCEL</span>
-        <p className="text-xs text-sky-700 font-medium">Cross-row formula column</p>
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <span className="text-xs font-bold bg-sky-600 text-white px-2 py-0.5 rounded tracking-wide">Σ TOTAL / LOOKUP</span>
+          <p className="text-xs text-sky-700 font-medium">Looks across all rows, not just this one</p>
+        </div>
+        <button type="button" onClick={() => setMode(mode === 'guided' ? 'advanced' : 'guided')}
+          className="text-xs text-sky-500 hover:text-sky-700 underline underline-offset-2 shrink-0">
+          {mode === 'guided' ? 'Advanced: type a formula myself' : 'Back to guided builder'}
+        </button>
       </div>
       <div>
         <Label className="text-xs text-slate-600">Column Name *</Label>
         <Input value={label} onChange={e => setLabel(e.target.value)}
           placeholder="e.g. Total SKU Revenue" className="mt-1 h-8 text-sm"
-          onKeyDown={e => e.key === 'Enter' && handleAdd()} />
+          onKeyDown={e => e.key === 'Enter' && mode === 'advanced' && handleAdd()} />
       </div>
       <div>
-        <Label className="text-xs text-slate-600">Formula *</Label>
+        <Label className="text-xs text-slate-600">{mode === 'guided' ? 'What should it calculate? *' : 'Formula *'}</Label>
         <div className="mt-1">
-          <ExcelFormulaBuilder formula={formula} onChange={setFormula} availableColumns={availableColumns} />
+          {mode === 'guided'
+            ? <GuidedExcelBuilder formula={formula} onChange={setFormula} availableColumns={availableColumns} />
+            : <ExcelFormulaBuilder formula={formula} onChange={setFormula} availableColumns={availableColumns} />}
         </div>
       </div>
       <div className="flex gap-2">
@@ -1200,7 +1686,7 @@ const SheetEditor = ({ sheet, sheetIndex, allSheets, rawColumns, availableRawShe
       <div>
         <div className="flex items-center justify-between mb-1.5">
           <Label className="text-xs font-semibold text-slate-600 uppercase tracking-wide">
-            Computed Columns
+            Calculated Columns
           </Label>
           <div className="flex gap-1.5">
             <button
@@ -1208,21 +1694,21 @@ const SheetEditor = ({ sheet, sheetIndex, allSheets, rawColumns, availableRawShe
               onClick={() => { setShowAddComputed(true); setShowAddExcel(false); setEditingColId(null); }}
               className="inline-flex items-center gap-1 text-xs font-medium text-indigo-600 hover:text-indigo-800 border border-indigo-200 rounded px-2 py-0.5 bg-white hover:bg-indigo-50"
             >
-              <Plus className="h-3 w-3" /> Math
+              <Plus className="h-3 w-3" /> Calculation
             </button>
             <button
               type="button"
               onClick={() => { setShowAddExcel(true); setShowAddComputed(false); setEditingColId(null); }}
               className="inline-flex items-center gap-1 text-xs font-medium text-sky-600 hover:text-sky-800 border border-sky-200 rounded px-2 py-0.5 bg-white hover:bg-sky-50"
             >
-              <Plus className="h-3 w-3" /> Excel
+              <Plus className="h-3 w-3" /> Total / Lookup
             </button>
           </div>
         </div>
 
         {derivedCols.length === 0 && !showAddComputed && !showAddExcel && (
           <div className="text-xs text-slate-400 py-2 text-center border border-dashed border-slate-200 rounded-lg">
-            No computed columns. Add a <strong>Math</strong> column for per-row formulas or an <strong>Excel</strong> column for SUMIF / VLOOKUP.
+            No calculated columns yet. Add a <strong>Calculation</strong> to work with values in the same row, or a <strong>Total / Lookup</strong> to sum, count, or look up values across rows.
           </div>
         )}
 
@@ -1392,9 +1878,9 @@ const SheetEditor = ({ sheet, sheetIndex, allSheets, rawColumns, availableRawShe
 // ─── Merge Sheet Editor ───────────────────────────────────────────────────────
 
 const MERGE_TYPES = [
-  { value: 'join',           label: 'JOIN',    desc: 'Match rows by a key column (left join)' },
-  { value: 'stack',          label: 'STACK',   desc: 'Append rows from all sources top-to-bottom' },
-  { value: 'column_combine', label: 'COMBINE', desc: 'Zip rows side-by-side (same row index)' },
+  { value: 'join',           label: 'Match rows together',   desc: 'Line up rows from each sheet where a shared column has the same value (e.g. matching by SKU or Invoice No)' },
+  { value: 'stack',          label: 'Stack one below another', desc: 'Pile all rows from every sheet into one long list, one after another' },
+  { value: 'column_combine', label: 'Place side by side',    desc: 'Line sheets up row 1 with row 1, row 2 with row 2, and so on — no matching column needed' },
 ];
 
 const MergeSheetEditor = ({ sheet, sheetIndex, allSheets, availableRawSheets, onChange }) => {

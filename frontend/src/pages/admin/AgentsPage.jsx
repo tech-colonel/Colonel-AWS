@@ -14,7 +14,6 @@ import { toast } from 'sonner';
 import { ADMIN_SIDEBAR } from '../../lib/adminNav';
 import ToolDetails from './ToolDetails';
 import WorkflowApplyModal from '../accountant/WorkflowApplyModal';
-import WorkflowManagerModal from './WorkflowManagerModal';
 
 const nfmt = (n) => (n ?? 0).toLocaleString('en-IN');
 const fmtDate = (s) => { try { return new Date(s).toLocaleDateString('en-IN', { day: '2-digit', month: 'short' }); } catch { return '—'; } };
@@ -443,8 +442,6 @@ const AgentsPage = () => {
   const [runningWorkflow, setRunningWorkflow] = useState(null);
   const [showWorkflowPicker, setShowWorkflowPicker] = useState(false);
   const [pickerAgentId, setPickerAgentId] = useState('');
-  const [workflowModalAgent, setWorkflowModalAgent] = useState(null);
-  const [editWorkflowTarget, setEditWorkflowTarget] = useState(null);
 
   useEffect(() => { fetchAgents(); fetchWorkflows(); }, []);
 
@@ -600,11 +597,7 @@ const AgentsPage = () => {
                       key={wf.id}
                       workflow={wf}
                       onClick={() => setRunningWorkflow(wf)}
-                      onEdit={() => {
-                        const agent = agents.find(a => a.id === wf.agent_id);
-                        setEditWorkflowTarget(wf);
-                        setWorkflowModalAgent(agent || { id: wf.agent_id, name: wf.agentName });
-                      }}
+                      onEdit={() => navigate(`/admin/agents/${wf.agent_id}/workflows?edit=${wf.id}`)}
                     />
                   ))}
                 </div>
@@ -654,9 +647,8 @@ const AgentsPage = () => {
                 disabled={!pickerAgentId}
                 data-testid="workflow-picker-continue"
                 onClick={() => {
-                  const agent = agents.find(a => a.id === pickerAgentId);
                   setShowWorkflowPicker(false);
-                  setWorkflowModalAgent(agent);
+                  navigate(`/admin/agents/${pickerAgentId}/workflows`);
                 }}
               >
                 Continue
@@ -665,13 +657,6 @@ const AgentsPage = () => {
           </div>
         </DialogContent>
       </Dialog>
-
-      <WorkflowManagerModal
-        agent={workflowModalAgent}
-        open={!!workflowModalAgent}
-        initialEditWorkflow={editWorkflowTarget}
-        onClose={() => { setWorkflowModalAgent(null); setEditWorkflowTarget(null); fetchWorkflows(); }}
-      />
 
       <Dialog open={showModal} onOpenChange={setShowModal}>
         <DialogContent onClose={() => setShowModal(false)}>

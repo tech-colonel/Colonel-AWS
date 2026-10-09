@@ -9,6 +9,7 @@ import Landing from './pages/Landing';
 import AdminDashboard    from './pages/admin/AdminDashboard';
 import BrandsPage        from './pages/admin/BrandsPage';
 import AgentsPage        from './pages/admin/AgentsPage';
+import WorkflowBuilderPage from './pages/admin/WorkflowBuilderPage';
 import AssignmentsPage   from './pages/admin/AssignmentsPage';
 import BrandOverviewPage from './pages/admin/BrandOverviewPage';
 import UsersPage         from './pages/admin/UsersPage';
@@ -76,6 +77,7 @@ function App() {
                   <Route path="/brands"      element={<BrandsPage />} />
                   <Route path="/brands/:id"  element={<BrandOverviewPage />} />
                   <Route path="/agents"      element={<AgentsPage />} />
+                  <Route path="/agents/:agentId/workflows" element={<WorkflowBuilderPage />} />
                   <Route path="/users"       element={<UsersPage />} />
                   <Route path="/tasks"       element={<TasksPage />} />
                   <Route path="/chats"       element={<AdminChats />} />
