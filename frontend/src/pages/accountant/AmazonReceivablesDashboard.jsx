@@ -62,6 +62,38 @@ const daysOld = (m) => Math.max(0, Math.floor((Date.now() - monthEnd(m).getTime(
    whether a 30-June sale belongs to June or July. */
 /* Round ONCE, at the point a figure is shown or compared — never per row. */
 const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+
+/* ── how much of a report is on screen at once ────────────────────────────
+   The report is built over every month there is. The SCREEN shows a window of
+   it, because the per-order rows behind the panels are what weigh: eighteen
+   months of the four legs is about 33 MB, fifty-four would be about 165 MB.
+   MAX_VIEW is the ceiling the backend also enforces; DEFAULT_VIEW is where a
+   long report opens, at its most recent end, where the questions usually are. */
+const MAX_VIEW = 18;
+const DEFAULT_VIEW = 12;
+
+/* The order chain for the months on screen. `three.totals` is a whole-RUN sum
+   computed once at build time, so on a five-year report it never moved when
+   the period picker did - the ladder read 2,40,078 orders placed while the
+   cards beside it read the eighteen months asked for. Folded here in the same
+   order and with the same rounding the backend uses, so selecting the whole
+   period reproduces `totals` exactly. */
+const CHAIN_COUNTS = ['placed', 'cancelled', 'net', 'mcf', 'notInvoicedFree', 'notInvoiced',
+                      'shipped', 'settled', 'settledLater', 'unsettled'];
+const CHAIN_VALUES = ['valuePlaced', 'valueCancelled', 'valueMcf', 'valueNotInvoicedFree',
+                      'valueNotInvoiced', 'valueInvoiced', 'valueSettled', 'valueSettledLater',
+                      'valueNet', 'valueUnsettled', 'taxPlaced', 'taxInvoiced'];
+const chainTotals = (three, shown) => {
+  const pm = (three?.perMonth || []).filter((m) => shown.includes(m.month));
+  if (!pm.length) return three?.totals || {};
+  const t = Object.fromEntries([...CHAIN_COUNTS, ...CHAIN_VALUES].map((k) => [k, 0]));
+  for (const m of pm) {
+    for (const k of CHAIN_COUNTS) t[k] += (m[k] || 0);
+    /* Number(x.toFixed(2)) per step, exactly as amazonThreeWay.js folds it */
+    for (const k of CHAIN_VALUES) t[k] = Number((t[k] + (m[k] || 0)).toFixed(2));
+  }
+  return t;
+};
 const fmtDay = (d) => {
   if (!d || !/^\d{4}-\d{2}-\d{2}/.test(d)) return '—';
   const [y, m, dd] = d.slice(0, 10).split('-');
@@ -236,10 +268,14 @@ export default function AmazonReceivablesDashboard() {
   const [drill, setDrill] = useState(null);
   const [view, setView] = useState('list');     // 'list' | 'report'
   const [wizard, setWizard] = useState(false);
-  /* null = the whole period; otherwise {from,to} month keys, inclusive.
+  /* null = the default window; otherwise {from,to} month keys, inclusive.
      from === to is a single month and opens that month's statement. */
   const [sel, setSel] = useState(null);
   const [txOpen, setTxOpen] = useState(false);
+  /* the per-order rows for the months on screen, fetched separately */
+  const [rows, setRows] = useState(null);
+  const [rowsBusy, setRowsBusy] = useState(false);
+  const [rowsErr, setRowsErr] = useState(null);
 
   useEffect(() => {
     api.get(`/api/brands/${brandId}/agents`)
@@ -269,6 +305,22 @@ export default function AmazonReceivablesDashboard() {
 
   useEffect(() => { if (base) load(); }, [base, load]);
 
+  /* Report History used to call this with no argument, so every row in it
+     opened whichever report was built LAST - eight rows, one destination. The
+     row's own months are passed now and that report is fetched. */
+  const openReport = useCallback(async (runMonths) => {
+    setView('report'); setSel(null); setRows(null);
+    if (!base || !runMonths || !runMonths.length) return;
+    if ((data?.months || []).join(',') === runMonths.join(',')) return;  // already open
+    setLoading(true);
+    try {
+      const r = await api.get(`${base}/run`, { params: { months: runMonths.join(',') } });
+      if (r.data && !r.data.empty) setData(r.data);
+    } catch {
+      toast.error('Could not open that report');
+    } finally { setLoading(false); }
+  }, [base, data]);
+
   const run = async ({ months, basis }) => {
     if (!base) return;
     setRunning(true);
@@ -295,11 +347,58 @@ export default function AmazonReceivablesDashboard() {
   ]);
 
   const months = data?.ledger?.months || [];
-  const shown = useMemo(() => (sel && sel.from && sel.to
-    ? months.filter((m) => m >= sel.from && m <= sel.to)
-    : months), [sel, months]);
+
+  /* ── built over everything, read a window at a time ─────────────────────
+     The report itself can cover any number of months - five years is normal
+     now. What cannot scale is the per-order detail: eighteen months of the
+     four legs is about 33 MB, and fifty-four would be ten times that, which
+     is both more than a browser should hold and more than the 256 MB a
+     Postgres jsonb value can store.
+
+     So the period picker is the chunking. A longer report opens on its most
+     recent twelve months and the window can be moved anywhere inside it, up
+     to MAX_VIEW months at a time. Every panel keeps summing the rows itself,
+     with the arithmetic it always used - only the number of rows in front of
+     it changed. */
+  const defaultSel = useMemo(() => (months.length <= DEFAULT_VIEW ? null
+    : { from: months[months.length - DEFAULT_VIEW], to: months[months.length - 1] }), [months]);
+  const effSel = sel || defaultSel;
+  const shown = useMemo(() => (effSel && effSel.from && effSel.to
+    ? months.filter((m) => m >= effSel.from && m <= effSel.to)
+    : months), [effSel, months]);
   const ST = data?.ledger?.STATUS || {};
   const openDrill = (d) => setDrill({ months: shown, ...d });
+
+  /* The rows for those months. Keyed on the months themselves rather than on
+     `shown`, which is a fresh array every render and would re-fetch forever. */
+  const shownKey = shown.join(',');
+  const runKey = (data?.months || months).join(',');
+  useEffect(() => {
+    if (!base || !shownKey || !runKey) { setRows(null); return undefined; }
+    let dead = false;
+    setRowsBusy(true); setRowsErr(null);
+    api.get(`${base}/run/window-rows`, { params: { months: shownKey, window: runKey } })
+      .then((r) => { if (!dead) setRows(r.data?.legs || null); })
+      .catch((e) => { if (!dead) { setRows(null); setRowsErr(e.response?.data?.error || 'Could not load the orders for this period'); } })
+      .finally(() => { if (!dead) setRowsBusy(false); });
+    return () => { dead = true; };
+  }, [base, shownKey, runKey]);
+
+  /* The payload carries summaries; the rows are slotted in beside them so
+     every panel sees the shape it has always seen. A report generated before
+     this split still has its own rows inside it, and the endpoint hands those
+     back, so nothing old breaks. */
+  const vdata = useMemo(() => {
+    if (!data) return null;
+    if (!rows) return data;
+    return {
+      ...data,
+      ledger: { ...data.ledger, rows: rows.ledger || [] },
+      invoicing: data.invoicing ? { ...data.invoicing, rows: rows.invoicing || [] } : data.invoicing,
+      moneyMatch: data.moneyMatch ? { ...data.moneyMatch, rows: rows.money || [] } : data.moneyMatch,
+      three: { ...data.three, orderRows: rows.chain || [] },
+    };
+  }, [data, rows]);
 
   if (loading) {
     return (
@@ -325,11 +424,12 @@ export default function AmazonReceivablesDashboard() {
 
         {view === 'list' ? (
           <ReportList status={status} data={data} months={months}
-                      onOpen={() => { setView('report'); setSel(null); }}
+                      onOpen={openReport}
                       onGenerate={() => setWizard(true)} onRefresh={load} />
         ) : (
-          <ReportView data={data} status={status} months={months} shown={shown} sel={sel}
+          <ReportView data={vdata} status={status} months={months} shown={shown} sel={effSel}
                       setSel={setSel} onDrill={openDrill} base={base}
+                      rowsBusy={rowsBusy} rowsErr={rowsErr}
                       onTx={() => setTxOpen(true)} onRefresh={load} ST={ST} />
         )}
 
@@ -337,11 +437,11 @@ export default function AmazonReceivablesDashboard() {
           <GenerateWizard status={status} running={running}
                           onClose={() => setWizard(false)} onRun={run} />
         )}
-        {txOpen && data && (
-          <TransactionData data={data} shown={shown} ST={ST} onClose={() => setTxOpen(false)} />
+        {txOpen && vdata && (
+          <TransactionData data={vdata} shown={shown} ST={ST} onClose={() => setTxOpen(false)} />
         )}
         {drill && (
-          <DrillPanel drill={drill} data={data} ST={ST} base={base} onClose={() => setDrill(null)} />
+          <DrillPanel drill={drill} data={vdata} ST={ST} base={base} onClose={() => setDrill(null)} />
         )}
       </div>
     </DashboardLayout>
@@ -451,7 +551,7 @@ function ReportList({ status, data, months, onOpen, onGenerate, onRefresh }) {
                   </td>
                   <td className="px-5 py-4">
                     <div className="flex gap-2 justify-end">
-                      <button onClick={onOpen}
+                      <button onClick={() => onOpen(r.months || [])}
                               className="px-4 py-2 text-xs font-semibold rounded-lg text-white flex items-center gap-1.5"
                               style={{ background: T.ink }}>
                         <Eye className="h-3.5 w-3.5" /> View
@@ -691,7 +791,8 @@ function GenerateWizard({ status, running, onClose, onRun }) {
 }
 
 /* ── the report ─────────────────────────────────────────────────────────── */
-function ReportView({ data, status, months, shown, sel, setSel, onDrill, base, onTx, onRefresh, ST }) {
+function ReportView({ data, status, months, shown, sel, setSel, onDrill, base, onTx, onRefresh, ST,
+                     rowsBusy, rowsErr }) {
   /* two layers over the same three files: what Amazon owes us, and whether
      every order we shipped was actually invoiced. Different questions, same
      upload — which is why this is a tab and not a second agent. */
@@ -767,6 +868,25 @@ function ReportView({ data, status, months, shown, sel, setSel, onDrill, base, o
 
       <Motion />
       <RangeBar months={months} sel={sel} setSel={setSel} all={all} />
+
+      {/* The per-order rows arrive separately from the summaries, so say so
+          rather than letting the walk read nil for a second and look wrong. */}
+      {rowsBusy && (
+        <div className="flex items-center gap-2 px-4 py-2.5 mb-4 rounded-xl text-[12px] font-semibold"
+             style={{ background: '#F1F5F9', color: '#475569', border: '1px solid #E2E8F0' }}>
+          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          Loading the orders for {rangeLabel(shown)}…
+        </div>
+      )}
+      {rowsErr && !rowsBusy && (
+        <div className="px-4 py-3 mb-4 rounded-xl text-[12px]"
+             style={{ background: '#FEF2F2', color: '#991B1B', border: '1px solid #FECACA' }}>
+          <strong>{rowsErr}</strong>
+          <div className="mt-0.5 opacity-80">
+            The month totals above are unaffected; only the order-by-order panels need these.
+          </div>
+        </div>
+      )}
 
       <CoverageNotice coverage={data?.coverage} shown={shown} />
 
@@ -2149,6 +2269,21 @@ function RangeBar({ months, sel, setSel, all }) {
   const invalid = d.from > d.to;
   const dirty = d.from !== cur.from || d.to !== cur.to;
   const narrowed = cur.from !== lo || cur.to !== hi;
+  /* A report may cover five years; the screen shows MAX_VIEW months of it at
+     a time, because the per-order rows behind the panels are fetched for the
+     window and eighteen months of them is already 33 MB. Moving the window is
+     free - it is only the width that is capped. */
+  const span = months.filter((m) => m >= d.from && m <= d.to).length;
+  const tooWide = span > MAX_VIEW;
+  const longReport = months.length > MAX_VIEW;
+  /* snap the other end in rather than just refusing: dragging From back past
+     the limit should carry To with it, which is what a reader means by it */
+  const snap = (which) => {
+    const idx = months.indexOf(which === 'from' ? d.from : d.to);
+    if (idx < 0) return;
+    if (which === 'from') setD((p) => ({ ...p, to: months[Math.min(months.length - 1, idx + MAX_VIEW - 1)] }));
+    else setD((p) => ({ ...p, from: months[Math.max(0, idx - MAX_VIEW + 1)] }));
+  };
 
   const Picker = ({ which }) => {
     const v = d[which]; const y = +v.slice(0, 4); const mo = +v.slice(5);
@@ -2215,19 +2350,37 @@ function RangeBar({ months, sel, setSel, all }) {
       </div>
 
       <div className="flex items-center gap-3 flex-shrink-0">
-        {narrowed && !dirty && (
+        {tooWide && (
+          <div className="text-[11px] leading-tight text-right max-w-[260px]">
+            <div className="font-bold" style={{ color: T.amberText }}>
+              {span} months selected · {MAX_VIEW} is the most that can be shown at once
+            </div>
+            <button onClick={() => snap('to')}
+                    className="underline font-semibold" style={{ color: T.amberText }}>
+              keep the last {MAX_VIEW} of them
+            </button>
+          </div>
+        )}
+        {narrowed && !dirty && !longReport && (
           <button onClick={() => setSel(null)}
                   className="text-[11px] font-bold px-2.5 py-1 rounded-full border transition-colors"
                   style={{ background: '#FFF7ED', color: T.amberText, borderColor: '#FED7AA' }}>
             Narrowed · show all {months.length}
           </button>
         )}
-        <button onClick={() => !invalid && setSel({ from: d.from, to: d.to })}
-                disabled={!dirty || invalid}
+        {longReport && !dirty && (
+          <span className="text-[11px] font-bold px-2.5 py-1 rounded-full border"
+                style={{ background: '#FFF7ED', color: T.amberText, borderColor: '#FED7AA' }}>
+            {span} of {months.length} months · move the dates to see the rest
+          </span>
+        )}
+        <button onClick={() => !invalid && !tooWide && setSel({ from: d.from, to: d.to })}
+                disabled={!dirty || invalid || tooWide}
                 title={invalid ? '“From” must be on or before “To”'
+                               : tooWide ? `Only ${MAX_VIEW} months can be shown at once`
                                : dirty ? 'Apply this range' : 'Range already applied'}
                 className="flex items-center gap-1.5 text-sm font-bold px-4 py-2.5 rounded-xl flex-shrink-0 transition-all"
-                style={dirty && !invalid
+                style={dirty && !invalid && !tooWide
                   ? { background: T.ink, color: '#fff', boxShadow: `0 2px 8px ${T.ink}40` }
                   : { background: '#fff', border: '1px solid #e2e8f0', color: '#94a3b8', cursor: 'default' }}>
           <Search className="w-4 h-4" />
@@ -3095,7 +3248,7 @@ function CashCycle({ led, data, shown, onDrill }) {
 }
 
 function PeriodOverview({ led, data, shown, onDrill, ST }) {
-  const t = data?.three?.totals || {};
+  const t = chainTotals(data?.three, shown);
   return (
     <>
       <ChainLadder t={t} months={shown} onDrill={onDrill}
@@ -3446,7 +3599,7 @@ function LedgerTable({ led, onDrill }) {
 
 /* ── order journey and settlement scenarios ──────────────────────────────── */
 function JourneyAndScenarios({ data, shown, onDrill, ST }) {
-  const t = data?.three?.totals || {};
+  const t = chainTotals(data?.three, shown);
   const led = (data?.ledger?.perMonth || []).filter((m) => shown.includes(m.month));
   const statuses = led[0]?.byStatus?.map((b) => b.status) || [];
   const totalOrders = t.placed || 0;

@@ -44,3 +44,16 @@ ALTER TABLE amazon_receivables_rows OWNER TO postgres;
 ALTER SEQUENCE amazon_receivables_rows_id_seq OWNER TO postgres;
 GRANT SELECT, INSERT, UPDATE, DELETE ON amazon_receivables_rows TO colonel_app;
 GRANT USAGE, SELECT ON SEQUENCE amazon_receivables_rows_id_seq TO colonel_app;
+
+-- ── added 2026-10-09, with the windowed view ──────────────────────────────
+-- The view asks for the money leg by "invoice in the window OR any settlement
+-- against it in the window" — the second half is the whole settlementOnly
+-- bucket, an invoice from before the window that was paid inside it.
+--
+-- Written as one OR, the planner can use no index at all and parallel-seq-scans
+-- the table: 7,031 ms for an 18-month window of a 54-month run. With this GIN
+-- index, and the query split into a UNION of two halves, the same window takes
+-- 244 ms. Partial on the money leg, so it costs 3.4 MB rather than 30.
+CREATE INDEX IF NOT EXISTS amazon_rows_money_grossby_gin
+  ON amazon_receivables_rows USING GIN ((data->'grossBy'))
+  WHERE leg = 'money';

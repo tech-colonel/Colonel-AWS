@@ -25,6 +25,8 @@ router.post(`${base}/fetch-orders`, authenticateToken, c.fetchOrders);
 router.post(`${base}/run`, authenticateToken, c.runReco);
 router.get(`${base}/run`, authenticateToken, c.getRun);
 router.get(`${base}/run/rows`, authenticateToken, c.getRunRows);
+/* the four legs for the months on screen - the report may cover far more */
+router.get(`${base}/run/window-rows`, authenticateToken, c.getWindowRows);
 router.delete(`${base}/run`, authenticateToken, c.deleteRun);
 
 /* the report as a formatted workbook — built on the backend, where the only

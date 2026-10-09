@@ -609,14 +609,20 @@ const runReco = async (req, res, next) => {
     /* Lift the per-order rows out before anything is stored or sent. `result`
        is mutated in place, so what goes to the table and what goes down the
        wire are the same slim object - they cannot drift apart. */
-    /* Rows go to Postgres AND stay in the payload for now.
-       "One tab, one leg" is the right idea and the endpoint for it exists, but
-       it does not hold yet: the Cash Cycle walk sits on the RECEIVABLES tab and
-       sums the INVOICING leg, so that tab alone needs ledger + chain + invoicing
-       - about 366 MB over 54 months, which no browser should be asked to hold.
-       The panels have to aggregate in SQL before the arrays can leave. Until
-       then the window is capped by the 256 MB Postgres allows a jsonb value. */
-    const { detached, counts } = detachRows(result, { keepInPayload: true });
+    /* Rows go to Postgres and LEAVE the payload.
+
+       The earlier attempt at this split the fetch by TAB and failed, because
+       the Cash Cycle walk sits on the Receivables tab but sums the invoicing
+       leg - that one tab wanted ledger + chain + invoicing, about 366 MB over
+       54 months. The split that works is not by tab, it is by WINDOW: the
+       report is built over every month there is, but the screen only ever
+       shows MAX_VIEW_MONTHS of it at a time, and only those months' rows are
+       sent. Eighteen months of all four legs is about 37 MB - the size the
+       18-month report has always been, and has always handled.
+
+       So the payload is summaries only, roughly 3 MB whatever the window, and
+       the 256 MB jsonb ceiling stops being reachable. */
+    const { detached, counts } = detachRows(result, { keepInPayload: false });
     result.rowCounts = counts;
 
     const [ins] = await q(ctx.db,
@@ -697,6 +703,92 @@ const getRunRows = async (req, res, next) => {
     res.json({ rows: (rows || []).map((x) => x.data), total: (cnt && cnt[0] && cnt[0].n) || 0,
                leg, months, bucket: bucket || null, limit, offset });
   } catch (e) { next(e); }
+};
+
+/* ── the rows for the months on screen ───────────────────────────────────
+   The report is built over every month there is; the screen shows a window of
+   it. This hands back all four legs for that window and nothing else, so the
+   browser holds the same ~37 MB it always held for eighteen months, whether
+   the run behind it covers eighteen months or sixty-six.
+
+   The panels are not touched. They still sum the arrays themselves, with the
+   same code and the same rounding they have always used - which is the point.
+   Aggregating in SQL would have been faster and would have risked the last
+   paisa; this cannot, because nothing about the arithmetic moved. */
+const MAX_VIEW_MONTHS = 18;
+
+/* The money leg cannot be sliced by month alone. `mmAgg` keeps a row when the
+   INVOICE is in the window or when any SETTLEMENT against it landed in the
+   window - that second case is the whole `settlementOnly` bucket, an invoice
+   from before the window paid inside it. Filtering on `month` (the MTR month)
+   drops exactly those. Measured on the 54-month run, Apr 2025 - Sep 2026:
+   20,582 by month, 20,648 once grossBy is included - and 20,648 is precisely
+   what the standalone 18-month build produced. */
+/* Written as a UNION of two index-able halves rather than one OR. As a single
+   `month = ANY(...) OR data->'grossBy' ?| ...` the planner can use neither
+   index and falls back to a parallel seq scan of the whole table: 7,031 ms for
+   this window. Split, with a GIN index on grossBy, it is 244 ms. */
+const legSql = (leg) => (leg !== 'money'
+  ? `SELECT data FROM ${ROWS_TABLE}
+      WHERE run_id = :r AND leg = :l AND month = ANY(CAST(:m AS text[])) ORDER BY id`
+  : `SELECT data FROM ${ROWS_TABLE} WHERE id IN (
+       SELECT id FROM ${ROWS_TABLE}
+        WHERE run_id = :r AND leg = :l AND month = ANY(CAST(:m AS text[]))
+       UNION
+       SELECT id FROM ${ROWS_TABLE}
+        WHERE run_id = :r AND leg = :l AND data->'grossBy' ?| CAST(:m AS text[])
+     ) ORDER BY id`);
+
+const getWindowRows = async (req, res, next) => {
+  try {
+    const ctx = await resolve(req, res); if (!ctx) return;
+    const months = String(req.query.months || '').split(',').map((x) => x.trim()).filter(Boolean);
+    if (!months.length) return res.status(400).json({ error: 'months is required' });
+    if (months.length > MAX_VIEW_MONTHS) {
+      return res.status(400).json({
+        error: `A report can cover any number of months, but only ${MAX_VIEW_MONTHS} can be shown at once.`,
+        maxViewMonths: MAX_VIEW_MONTHS, asked: months.length });
+    }
+
+    /* Which run: the exact window if given, else the newest for this brand. */
+    const win = String(req.query.window || '').split(',').map((x) => x.trim()).filter(Boolean);
+    const [runs] = await q(ctx.db,
+      win.length
+        ? `SELECT id, payload FROM ${RUNS_TABLE} WHERE brand_id = :b AND window_months = CAST(:w AS text[]) LIMIT 1`
+        : `SELECT id, payload FROM ${RUNS_TABLE} WHERE brand_id = :b ORDER BY built_at DESC LIMIT 1`,
+      win.length ? { b: ctx.brand.id, w: pgArray(win) } : { b: ctx.brand.id });
+    if (!runs || !runs.length) return res.json({ empty: true });
+    const runId = runs[0].id;
+
+    const out = { runId, months, legs: {}, counts: {}, source: 'rows' };
+
+    /* A report generated before this table existed still carries its rows in
+       its own payload. Slice those rather than tell the reader it is empty. */
+    const [any] = await q(ctx.db, `SELECT 1 FROM ${ROWS_TABLE} WHERE run_id = :r LIMIT 1`, { r: runId });
+    if (!any || !any.length) {
+      const p = runs[0].payload || {};
+      const sel = new Set(months);
+      const keep = (rows) => (rows || []).filter((r) => !r.month || sel.has(r.month));
+      out.source = 'payload';
+      out.legs = {
+        ledger: keep(p.ledger && p.ledger.rows),
+        invoicing: keep(p.invoicing && p.invoicing.rows),
+        chain: keep(p.three && p.three.orderRows),
+        money: (p.moneyMatch && p.moneyMatch.rows || []).filter((r) =>
+          (r.month && sel.has(r.month)) || Object.keys(r.grossBy || {}).some((cm) => sel.has(cm))),
+      };
+      for (const k of Object.keys(out.legs)) out.counts[k] = out.legs[k].length;
+      return res.json(out);
+    }
+
+    for (const leg of ['ledger', 'invoicing', 'money', 'chain']) {
+      const [rows] = await q(ctx.db, legSql(leg),
+        { r: runId, l: leg, m: pgArray(months) });
+      out.legs[leg] = (rows || []).map((x) => x.data);
+      out.counts[leg] = out.legs[leg].length;
+    }
+    res.json(out);
+  } catch (e) { console.error('Amazon receivables window rows error:', e); next(e); }
 };
 
 /** Serve a stored run. Never builds. */
@@ -801,5 +893,6 @@ const deleteRun = async (req, res, next) => {
   } catch (e) { next(e); }
 };
 
-module.exports = { getStatus, uploadSources, fetchOrders, runReco, getRun, getRunRows, deleteRun,
+module.exports = { getStatus, uploadSources, fetchOrders, runReco, getRun, getRunRows,
+                   getWindowRows, MAX_VIEW_MONTHS, deleteRun,
                    exportWorkbook, exportDrill, parseTable };
