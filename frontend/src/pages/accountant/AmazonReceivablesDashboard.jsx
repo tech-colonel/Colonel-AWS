@@ -3155,9 +3155,9 @@ function CashCycle({ led, data, shown, onDrill }) {
       if (unpaid > 0.01) {
         a.gross += unpaid;
         if ((x.credits || 0) > 0) a.covered += Math.min(x.credits, unpaid);
-      }
+      } else if (unpaid < -0.01) { a.over += unpaid; a.overN += 1; }
       return a;
-    }, { gross: 0, covered: 0 });
+    }, { gross: 0, covered: 0, over: 0, overN: 0 });
   /* Gross, not the net "Still pending" - that nets off orders Amazon has
      OVER-settled, and comparing a gross cover against a net balance is how
      you end up reporting that nothing at all is owed. */
@@ -3170,7 +3170,21 @@ function CashCycle({ led, data, shown, onDrill }) {
      money "settles no sale", so a reader who looked during that second was
      told the opposite of the answer. */
   const rowsReady = (data?.ledger?.rows || []).length > 0;
+  /* "Still pending" is a NET figure: orders Amazon has OVERPAID are silently
+     offset against orders it still owes. FY24-25 reads 3,56,096 because
+     4,19,566 owed is netted against 63,469 overpaid on 471 orders - and
+     nothing on the screen said so, which is no use to whoever has to explain
+     the balance. Named here when it is not nil. */
+  const overPaid = r2(Math.abs(ovl.over));
 
+  if (rowsReady && overPaid > 1) {
+    EQ.splice(6, 0, {
+      cap: 'Of which: Amazon has overpaid', v: overPaid, op: '',
+      note: `On ${int(ovl.overN)} order${ovl.overN === 1 ? '' : 's'} Amazon paid MORE than the invoice asked for. `
+          + `Still pending is ₹${inr(grossOwing, 0)} owed less this — it is a net figure, not a gross one.`,
+      fg: '#92400E', bg: '#FFFBEB', line: 'overPaid', aside: true,
+    });
+  }
   if (Math.abs(credits) > 1) {
     EQ.splice(6, 0, {
       cap: 'Of which: not against an invoice', v: credits, op: '',
