@@ -4,6 +4,7 @@ const { migrateAllBrands } = require('./src/db/migrate');
 const { migrateZoho } = require('./src/db/zohoMigrate');
 const { migrateCompliance } = require('./src/db/complianceMigrate');
 const { migrateStatutory } = require('./src/db/statutoryMigrate');
+const { migrateDynamicTables } = require('./src/db/dynamicTablesMigrate');
 const dotenv = require('dotenv');
 
 dotenv.config();
@@ -85,6 +86,10 @@ const start = async () => {
 
     // 4d. Statutory Compliance table (master DB, idempotent)
     await migrateStatutory();
+
+    // 4f. Per-agent dynamic working-file tables (unified DB, idempotent) — creates
+    //     any sales_* table a newly seeded agent is missing, with RLS + grants.
+    await migrateDynamicTables();
 
     // 5. Start Express Server
     app.listen(PORT, () => {
