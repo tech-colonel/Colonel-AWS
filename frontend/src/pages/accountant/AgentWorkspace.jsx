@@ -360,8 +360,8 @@ const AgentWorkspace = () => {
       toast.error('Please select a month');
       return;
     }
-    if (isZepto && !formData.selling_state?.trim()) {
-      toast.error('Please enter the Selling State for Zepto');
+    if ((isZepto || isCread) && !formData.selling_state?.trim()) {
+      toast.error(`Please enter the Selling State for ${isCread ? 'Cread' : 'Zepto'}`);
       return;
     }
 
@@ -391,8 +391,8 @@ const AgentWorkspace = () => {
     data.append('year', formData.year);
     data.append('file_type', formData.file_type);
     data.append('inventory_type', formData.inventory_type);
-    if (isZepto && formData.selling_state) {
-      data.append('selling_state', formData.selling_state);
+    if ((isZepto || isCread) && formData.selling_state) {
+      data.append('selling_state', formData.selling_state.trim());
     }
     if (isAmazon) {
       data.append('multi_state_sale', formData.multi_state_sale);
@@ -1319,19 +1319,19 @@ const AgentWorkspace = () => {
                   </div>
                 )}
 
-                {isZepto && (
+                {(isZepto || isCread) && (
                   <div>
                     <Label htmlFor="selling-state">Selling State *</Label>
                     <Input
                       id="selling-state"
-                      placeholder="e.g. Maharashtra"
+                      placeholder={isCread ? 'e.g. Delhi' : 'e.g. Maharashtra'}
                       value={formData.selling_state}
                       onChange={(e) => setFormData({ ...formData, selling_state: e.target.value })}
                       required
                       className="mt-2"
                     />
                     <p className="text-xs text-slate-500 mt-2">
-                      State from which Zepto ships — determines IGST vs CGST/SGST split
+                      State from which {isCread ? 'Cread' : 'Zepto'} ships — determines IGST vs CGST/SGST split
                     </p>
                   </div>
                 )}
