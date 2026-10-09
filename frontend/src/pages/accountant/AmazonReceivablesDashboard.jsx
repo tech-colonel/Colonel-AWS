@@ -3127,10 +3127,45 @@ function CashCycle({ led, data, shown, onDrill }) {
     });
   }
   const credits = amt('creditsNotAgainstInvoice');
+
+  /* ── how much of that credit answers for an order shown as unpaid ───────
+     The card and "Still pending" are built from different columns, so neither
+     one is double counting on its own: a settlement row is EITHER a payment
+     against the invoice or a credit, by its own type, never both.
+
+     But the two can describe the SAME ORDER. Where Amazon lost the goods on
+     the way back it never pays the sale, it pays a Reimbursement instead - so
+     the invoice sits in "Still pending" while the money for it sits in this
+     card. Measured on Koparo FY24-25, 1,763 orders carried a credit equal to
+     their unpaid balance TO THE RUPEE; that is not coincidence, it is the
+     same money described twice.
+
+     So the overlap is named. It is capped at the unpaid balance per order -
+     a credit larger than the balance is only "covering" up to the balance -
+     and an order the settlement already paid in full contributes nothing. */
+  const ovl = (data?.ledger?.rows || [])
+    .filter((x) => shown.includes(x.month))
+    .reduce((a, x) => {
+      const unpaid = r2(x.invoiced - x.refunded - x.fees - x.tds - x.tcs - x.settled);
+      if (unpaid > 0.01) {
+        a.gross += unpaid;
+        if ((x.credits || 0) > 0) a.covered += Math.min(x.credits, unpaid);
+      }
+      return a;
+    }, { gross: 0, covered: 0 });
+  /* Gross, not the net "Still pending" - that nets off orders Amazon has
+     OVER-settled, and comparing a gross cover against a net balance is how
+     you end up reporting that nothing at all is owed. */
+  const coveredByCredit = r2(ovl.covered);
+  const grossOwing = r2(ovl.gross);
+  const neverArrived = r2(Math.max(0, grossOwing - coveredByCredit));
+
   if (Math.abs(credits) > 1) {
     EQ.splice(6, 0, {
       cap: 'Of which: not against an invoice', v: credits, op: '',
-      note: 'Reimbursements, adjustments, fee refunds — in the bank, but they settle no sale',
+      note: coveredByCredit > 1
+        ? `Reimbursements, adjustments, fee refunds. ₹${inr(coveredByCredit, 0)} of it is money for orders that still read as unpaid`
+        : 'Reimbursements, adjustments, fee refunds — in the bank, but they settle no sale',
       fg: '#92400E', bg: '#FFFBEB', line: 'creditsNotAgainstInvoice', aside: true,
     });
   }
@@ -3199,6 +3234,20 @@ function CashCycle({ led, data, shown, onDrill }) {
                     what is genuinely unpaid on these invoices; this ₹{inr(credits, 0)} is separate
                     income.
                   </p>
+                  {coveredByCredit > 1 && (
+                    <p className="text-[12px] leading-relaxed mt-2 pt-2"
+                       style={{ color: '#78350F', borderTop: '1px dashed #FCD34D' }}>
+                      <strong>But the two can describe the same order.</strong> Of the
+                      {' '}₹{inr(credits, 0)} above, <strong>₹{inr(coveredByCredit, 0)} sits on orders
+                      that are still showing unpaid</strong> — typically goods lost on the way back,
+                      where Amazon never pays the sale and pays compensation instead. Those orders
+                      owe ₹{inr(grossOwing, 0)} between them, so once the compensation is allowed
+                      for, only <strong>₹{inr(neverArrived, 0)}</strong> never arrived in any form.
+                      {' '}Both figures are true — ₹{inr(grossOwing, 0)} is unpaid <em>on the
+                      invoices</em>, ₹{inr(neverArrived, 0)} is unpaid <em>in the bank</em> — and the
+                      second is the one to take to Amazon.
+                    </p>
+                  )}
                 </div>
                 <button onClick={() => onDrill({ kind: 'line', line: 'creditsNotAgainstInvoice', months: shown })}
                         className="text-[11px] font-bold shrink-0 underline underline-offset-2"

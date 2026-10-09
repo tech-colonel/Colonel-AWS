@@ -292,14 +292,59 @@ async function gather(ctx, months) {
   const uploadedMonths = Object.keys(upCount)
     .filter((m) => upCount[m] >= (ledCount[m] || 0)).sort();
   const owned = new Set(uploadedMonths);
-  ledgerRows = ledgerRows.filter((r) => !owned.has(monthKey(r.date_time)));
+  const upMonth = (r) => monthKey(r['date/time'] || r.date_time);
+  const keptLedger = ledgerRows.filter((r) => !owned.has(monthKey(r.date_time)));
   /* and drop upload rows for months the ledgers own, for the same reason */
-  settlement.rows = settlement.rows
-    .filter((r) => owned.has(monthKey(r['date/time'] || r.date_time)));
+  const keptUpload = settlement.rows.filter((r) => owned.has(upMonth(r)));
+
+  /* ── the orders the winning source never had ────────────────────────────
+     Awarding a whole month to one source is right for the bulk of it, but it
+     is ALL OR NOTHING, and that silently loses orders the winner does not
+     carry at all. Measured on Koparo: 430 orders worth Rs 2,22,620.89 read as
+     never paid, because the unified transaction report that owned their month
+     simply has no row for them while the week-wise ledger that does was
+     discarded along with the rest of its month. 351 of those were a single
+     cohort - everything sold 19-31 Mar 2025, paid 5-13 Apr 2025.
+
+     So after the month is awarded, the loser's rows are offered back ONE
+     ORDER AT A TIME, and only for an order the winner has no row for ANYWHERE
+     in the period. An order the winner already knows about is never topped up
+     from the other source, so this can only ever find money that was missing
+     - it cannot count a rupee twice. */
+  const oidOf = (r) => String(r.order_id || r['order id'] || r['order-id'] || '').trim();
+  const covered = new Set();
+  for (const r of keptUpload) { const o = oidOf(r); if (o) covered.add(o); }
+  for (const r of keptLedger) { const o = oidOf(r); if (o) covered.add(o); }
+
+  /* An order can be sitting in BOTH discarded piles - a dropped ledger month
+     and a dropped upload month. Taking it from each would be the very double
+     count this is meant to avoid, so the candidates are grouped by order and
+     exactly ONE source is taken for each, the ledgers first because they are
+     the per-settlement record Amazon paid against. */
+  const byOrder = new Map();                 // orderId -> { ledger: [], upload: [] }
+  const slot = (o) => { if (!byOrder.has(o)) byOrder.set(o, { ledger: [], upload: [] }); return byOrder.get(o); };
+  for (const r of ledgerRows) {
+    if (!owned.has(monthKey(r.date_time))) continue;        // already kept
+    const o = oidOf(r); if (!o || covered.has(o)) continue;
+    slot(o).ledger.push({ ...r, __src: 'ledger-rescued' });
+  }
+  for (const r of settlement.rows) {
+    if (owned.has(upMonth(r))) continue;                     // already kept
+    const o = oidOf(r); if (!o || covered.has(o)) continue;
+    slot(o).upload.push({ ...r, __src: 'upload-rescued' });
+  }
+  const rescued = [];
+  for (const { ledger, upload } of byOrder.values()) {
+    for (const r of (ledger.length ? ledger : upload)) rescued.push(r);
+  }
+  settlement.rows = keptUpload;
+  ledgerRows = keptLedger;
 
   return {
     orders: orders.rows, mtr: mtr.rows,
-    settlement: settlement.rows.concat(ledgerRows),
+    settlement: settlement.rows.concat(ledgerRows).concat(rescued),
+    rescuedOrders: new Set(rescued.map(oidOf)).size,
+    rescuedRows: rescued.length,
     files: { orders: orders.files, mtr: mtr.files, settlement: settlement.files,
              ledgerMonths: [...new Set(ledgerRows.map((r) => monthKey(r.date_time)))].filter(Boolean).sort() },
     uploadedMonths: [...uploadedMonths].sort(),
