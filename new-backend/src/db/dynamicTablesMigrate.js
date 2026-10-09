@@ -17,7 +17,8 @@
  *                      created_by FK to users, brand/filename indexes,
  *                      ENABLE + FORCE RLS, tenant_isolation policy, colonel_app grants.
  *   - table present  → ADD COLUMN IF NOT EXISTS for anything the model expects
- *                      but the table lacks (never drops or alters a column).
+ *                      but the table lacks, and set the brand_id auto-default if it
+ *                      has none (never drops a column or changes its type).
  *
  * Runs on masterSequelize (the superuser connection) — the only role allowed DDL.
  * A failure on one agent is logged and skipped; it never blocks boot.
@@ -25,7 +26,9 @@
 const { DataTypes } = require('sequelize');
 const { masterSequelize, UNIFIED } = require('../config/database');
 
+// Table names are always lower-cased; column names keep their case (they are quoted).
 const IDENT = /^[a-z_][a-z0-9_]*$/;
+const COLUMN_IDENT = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const BRAND_DEFAULT = `NULLIF(current_setting('app.brand_id', true), '')::uuid`;
 
 // Columns getDynamicModel always defines, in table order. id + brand_id are only
@@ -62,13 +65,13 @@ const ensureAgentTable = async (agent) => {
   for (const c of agent.columns) {
     const name = c && c.name;
     if (!name || BASE_NAMES.has(name) || seen.has(name)) continue;
-    if (!IDENT.test(name)) { console.warn(`[DYNAMIC TABLES] ${table}: skipping unsafe column name "${name}"`); continue; }
+    if (!COLUMN_IDENT.test(name)) { console.warn(`[DYNAMIC TABLES] ${table}: skipping unsafe column name "${name}"`); continue; }
     seen.add(name);
     custom.push([name, sqlType(c.type)]);
   }
 
   const [existing] = await masterSequelize.query(
-    `SELECT column_name FROM information_schema.columns WHERE table_schema = 'public' AND table_name = $1`,
+    `SELECT column_name, column_default FROM information_schema.columns WHERE table_schema = 'public' AND table_name = $1`,
     { bind: [table] }
   );
 
@@ -100,6 +103,13 @@ const ensureAgentTable = async (agent) => {
     if (have.has(name)) continue;
     await masterSequelize.query(`ALTER TABLE "${table}" ADD COLUMN IF NOT EXISTS "${name}" ${type}`);
     added.push(name);
+  }
+  // brand_id must auto-stamp from the request's brand context, or a raw INSERT that
+  // omits it trips the RLS WITH CHECK (same gap 013 closed for sales_amazon/blinkit).
+  const brandCol = existing.find((r) => r.column_name === 'brand_id');
+  if (!brandCol.column_default) {
+    await masterSequelize.query(`ALTER TABLE "${table}" ALTER COLUMN brand_id SET DEFAULT ${BRAND_DEFAULT}`);
+    added.push('brand_id default');
   }
   return added.length ? { table, status: 'altered', added } : { table, status: 'ok' };
 };
