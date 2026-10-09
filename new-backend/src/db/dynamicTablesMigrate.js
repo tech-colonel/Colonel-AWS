@@ -55,7 +55,7 @@ const sqlType = (type) => {
 
 const tableNameFor = (agentName) => agentName.replace(/[^a-zA-Z0-9]/g, '_').toLowerCase();
 
-const ensureAgentTable = async (agent) => {
+const ensureAgentTable = async (agent, { createOnly = false } = {}) => {
   const table = tableNameFor(agent.name);
   if (!IDENT.test(table)) return { table, status: 'skipped', reason: 'unsafe table name' };
 
@@ -93,6 +93,8 @@ const ensureAgentTable = async (agent) => {
     return { table, status: 'created', columns: BASE_COLUMNS.length + custom.length };
   }
 
+  if (createOnly) return { table, status: 'ok' }; // existing tables are left exactly as they are
+
   const have = new Set(existing.map((r) => r.column_name));
   // A table with no brand_id is not one of ours (name collision) — leave it alone.
   if (!have.has('brand_id')) return { table, status: 'skipped', reason: 'existing table has no brand_id' };
@@ -114,12 +116,14 @@ const ensureAgentTable = async (agent) => {
   return added.length ? { table, status: 'altered', added } : { table, status: 'ok' };
 };
 
-const migrateDynamicTables = async () => {
+// createOnly: only CREATE missing tables — never ALTER an existing one (and skip the
+// brand_agents column check). Used for hotfixing a live box without a redeploy.
+const migrateDynamicTables = async ({ createOnly = false } = {}) => {
   if (!UNIFIED) return; // legacy per-brand DBs still create tables via model.sync()
   try {
     // Per-(brand, agent) masters live as JSONB on brand_agents; the model reads all
     // of them on every findOrCreate, so a missing column breaks every sales agent.
-    for (const col of ['sku_master', 'ledger_master', 'hsn_master', 'product_type_master']) {
+    for (const col of createOnly ? [] : ['sku_master', 'ledger_master', 'hsn_master', 'product_type_master']) {
       await masterSequelize.query(
         `ALTER TABLE brand_agents ADD COLUMN IF NOT EXISTS "${col}" JSONB DEFAULT '[]'::jsonb`
       );
@@ -130,7 +134,7 @@ const migrateDynamicTables = async () => {
     for (const agent of agents) {
       if (!Array.isArray(agent.columns) || agent.columns.length === 0) continue; // reco/portal agent — no table
       try {
-        const r = await ensureAgentTable(agent);
+        const r = await ensureAgentTable(agent, { createOnly });
         if (r.status === 'created') { created++; console.log(`[DYNAMIC TABLES] created ${r.table} (${r.columns} cols) + RLS + grants`); }
         else if (r.status === 'altered') { altered++; console.log(`[DYNAMIC TABLES] ${r.table}: added ${r.added.join(', ')}`); }
         else if (r.status === 'skipped') console.warn(`[DYNAMIC TABLES] ${r.table}: skipped (${r.reason})`);
@@ -139,7 +143,7 @@ const migrateDynamicTables = async () => {
         console.error(`[DYNAMIC TABLES] ${agent.name}: ${e.message}`);
       }
     }
-    console.log(`[DYNAMIC TABLES] Agent tables ensured (${created} created, ${altered} altered${failed ? `, ${failed} FAILED` : ''}).`);
+    console.log(`[DYNAMIC TABLES] Agent tables ensured${createOnly ? ' [create-only]' : ''} (${created} created, ${altered} altered${failed ? `, ${failed} FAILED` : ''}).`);
   } catch (e) {
     console.error('[DYNAMIC TABLES] migration skipped:', e.message);
   }

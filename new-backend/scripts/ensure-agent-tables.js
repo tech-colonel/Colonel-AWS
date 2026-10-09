@@ -11,13 +11,14 @@
  * Idempotent and additive (creates missing tables, adds missing columns).
  * Needs only this file + src/db/dynamicTablesMigrate.js on the box.
  *
- * Run from new-backend/:  node scripts/ensure-agent-tables.js
+ * Run from new-backend/:  node scripts/ensure-agent-tables.js [--create-only]
+ *   --create-only  only create missing tables; never alter an existing one
  * Then verify:            node scripts/smoke-agents.js
  */
 const { migrateDynamicTables } = require('../src/db/dynamicTablesMigrate');
 const { masterSequelize } = require('../src/config/database');
 
-migrateDynamicTables()
+migrateDynamicTables({ createOnly: process.argv.includes('--create-only') })
   .then(() => masterSequelize.close())
   .then(() => process.exit(0))
   .catch((e) => { console.error('ensure-agent-tables error:', e.message); process.exit(1); });
