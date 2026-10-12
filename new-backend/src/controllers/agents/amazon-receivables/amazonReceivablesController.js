@@ -255,6 +255,9 @@ async function gather(ctx, months) {
            ledgers, which silently overstated what Amazon still owed. */
         ledgerRows.push({
           __src: 'ledger', __file: f,
+          /* kept so a rescued row can be matched to the unified report one
+             SETTLEMENT at a time, not one order at a time */
+          settlement_id: r.settlement_id,
           order_id: r.order_id, type: r.type, date_time: r.date_time,
           product_sales: r.product_sales, total: r.total,
           selling_fees: r.selling_fees, fba_fees: r.fba_fees,
@@ -312,26 +315,43 @@ async function gather(ctx, months) {
      from the other source, so this can only ever find money that was missing
      - it cannot count a rupee twice. */
   const oidOf = (r) => String(r.order_id || r['order id'] || r['order-id'] || '').trim();
+  const sidOf = (r) => String(r.settlement_id || r['settlement id'] || r['settlement-id'] || '').trim();
+  /* Keyed on the ORDER AND THE SETTLEMENT, not the order alone.
+     Order-alone was too coarse and left a whole class of order wrong. Take
+     407-8446439-0439526: the unified report carries its REFUND (settlement
+     24593865142, -3,820.67) but not the SALE that preceded it (settlement
+     24580979332, +3,820.67) - the sale posted 3 Apr 2025 and the unified
+     report for that year simply does not have those rows. Because the order
+     DID appear in the unified report, the order-level gate treated it as
+     covered and never offered the missing half back. The ledger was then left
+     holding a refund with no sale, which reads as Amazon owing us 3,799.50 on
+     an order that nets to nothing. All ten of FY24-25's remaining "unpaid"
+     orders were this, worth 8,177.60.
+
+     A settlement is the unit Amazon actually pays in, and both sources name
+     it, so the pair is exact: a settlement the unified report already has is
+     never taken twice, and one it is missing is always recovered. */
+  const pair = (r) => `${oidOf(r)}|${sidOf(r)}`;
   const covered = new Set();
-  for (const r of keptUpload) { const o = oidOf(r); if (o) covered.add(o); }
-  for (const r of keptLedger) { const o = oidOf(r); if (o) covered.add(o); }
+  for (const r of keptUpload) { if (oidOf(r)) covered.add(pair(r)); }
+  for (const r of keptLedger) { if (oidOf(r)) covered.add(pair(r)); }
 
   /* An order can be sitting in BOTH discarded piles - a dropped ledger month
      and a dropped upload month. Taking it from each would be the very double
      count this is meant to avoid, so the candidates are grouped by order and
      exactly ONE source is taken for each, the ledgers first because they are
      the per-settlement record Amazon paid against. */
-  const byOrder = new Map();                 // orderId -> { ledger: [], upload: [] }
-  const slot = (o) => { if (!byOrder.has(o)) byOrder.set(o, { ledger: [], upload: [] }); return byOrder.get(o); };
+  const byOrder = new Map();                 // "order|settlement" -> { ledger: [], upload: [] }
+  const slot = (k) => { if (!byOrder.has(k)) byOrder.set(k, { ledger: [], upload: [] }); return byOrder.get(k); };
   for (const r of ledgerRows) {
     if (!owned.has(monthKey(r.date_time))) continue;        // already kept
-    const o = oidOf(r); if (!o || covered.has(o)) continue;
-    slot(o).ledger.push({ ...r, __src: 'ledger-rescued' });
+    const k = pair(r); if (!oidOf(r) || covered.has(k)) continue;
+    slot(k).ledger.push({ ...r, __src: 'ledger-rescued' });
   }
   for (const r of settlement.rows) {
     if (owned.has(upMonth(r))) continue;                     // already kept
-    const o = oidOf(r); if (!o || covered.has(o)) continue;
-    slot(o).upload.push({ ...r, __src: 'upload-rescued' });
+    const k = pair(r); if (!oidOf(r) || covered.has(k)) continue;
+    slot(k).upload.push({ ...r, __src: 'upload-rescued' });
   }
   const rescued = [];
   for (const { ledger, upload } of byOrder.values()) {
@@ -618,11 +638,12 @@ const runReco = async (req, res, next) => {
     coverage.noMtr = coverage.perMonth.filter((m) => !m.mtr).map((m) => m.month);
     coverage.noOrders = coverage.perMonth.filter((m) => !m.orders).map((m) => m.month);
     coverage.noSettlement = coverage.perMonth.filter((m) => !m.settlement).map((m) => m.month);
+    coverage.notices = [];
     if (coverage.noMtr.length) {
       /* every month missing MTR sits before Apr-2022 => it is the known gap, not a
          file somebody forgot to upload */
       const allEarly = coverage.noMtr.every((m) => m < '2022-04');
-      coverage.notice = {
+      coverage.notices.push({
         kind: 'mtr-missing',
         months: coverage.noMtr,
         title: coverage.noMtr.length === 1
@@ -635,8 +656,75 @@ const runReco = async (req, res, next) => {
             + 'unaffected. Only the invoice-level GST detail is unavailable.'
           : 'The merchant tax report has not been loaded for these months. Orders and settlement are '
             + 'unaffected; only the invoice-level GST comparison is blank until the MTR is added.',
-      };
+      });
     }
+
+    /* ── a month whose ORDER report is short ────────────────────────────────
+       Not missing - present, well formed, and simply holding fewer orders than
+       Amazon invoiced. May 2023 is the case: the file covers 1-31 May and
+       carries 331 orders against 2,145 in the MTR, and re-requesting it from
+       both the API and Seller Central returns the same short file. Without
+       saying so, the Order Cycle reads as though trading collapsed that month,
+       and "invoiced with no order row" reads as a fault in the reconciliation
+       rather than a gap in Amazon's own export. */
+    /* The newest months always look short: the MTR has invoiced them but the
+       order report and settlement are still catching up. Hold off TWO months
+       so a month that is merely recent is never reported as a gap - Sep 2026
+       tripped this on the first run. */
+    const settledBy = new Date(Date.now() - 62 * 864e5).toISOString().slice(0, 7);
+    const shortOrders = (invoicing && invoicing.rows ? invoicing.rows : [])
+      .reduce((a, r) => {
+        if (!r.month) return a;
+        a[r.month] = a[r.month] || { only: 0, matched: 0 };
+        if (r.bucket === 'mtrOnly') a[r.month].only += 1;
+        else if (r.bucket === 'matched') a[r.month].matched += 1;
+        return a;
+      }, {});
+    coverage.shortOrderReport = Object.entries(shortOrders)
+      /* a quarter of the month's invoices with no order behind them is far
+         past anything a period edge explains */
+      .filter(([m, v]) => v.only > 50 && v.only > (v.matched + v.only) * 0.25 && m <= settledBy)
+      .map(([m]) => m).sort();
+
+    if (coverage.shortOrderReport.length) {
+      coverage.notices.push({
+        kind: 'orders-short',
+        months: coverage.shortOrderReport,
+        title: coverage.shortOrderReport.length === 1
+          ? `Amazon's order report is short for ${coverage.shortOrderReport[0]}`
+          : `Amazon's order report is short for ${coverage.shortOrderReport.length} months`,
+        detail: 'The file is present and covers the whole month, but Amazon returns far fewer orders '
+          + 'in it than it invoiced in the MTR, and requesting it again - through the API or Seller '
+          + 'Central - returns the same short file. So "orders placed" understates the month and the '
+          + 'invoices with no order behind them are Amazon\'s gap, not ours. The money is unaffected: '
+          + 'the receivable is built from the MTR and the settlement, neither of which needs the '
+          + 'order report.',
+      });
+    }
+
+    /* ── fee invoices only start in April 2023 ──────────────────────────────
+       Before that Amazon charged fees but we hold no tax invoice for them, so
+       the Fee invoices tab shows the settlement side against a nil invoice
+       side. That is an absence of documents, not a discrepancy to chase. */
+    const feeMonths = (fees && fees.rows ? fees.rows : []).filter((m) => (m.documents || 0) > 0);
+    const earliestFeeInvoice = feeMonths.length
+      ? feeMonths.map((m) => m.month).sort()[0] : null;
+    coverage.noFeeInvoices = earliestFeeInvoice
+      ? months.filter((m) => m < earliestFeeInvoice) : [];
+
+    if (coverage.noFeeInvoices.length) {
+      coverage.notices.push({
+        kind: 'no-fee-invoices',
+        months: coverage.noFeeInvoices,
+        title: `No fee invoices before ${earliestFeeInvoice}`,
+        detail: 'Amazon\'s tax invoices for its own fees are only held from '
+          + `${earliestFeeInvoice} onwards. For earlier months the settlement still shows every `
+          + 'rupee Amazon charged, but there is no invoice to set against it, so the Fee invoices '
+          + 'tab compares a real settlement side with a nil invoice side.',
+      });
+    }
+    /* kept so anything still reading a single notice keeps working */
+    [coverage.notice] = coverage.notices;
 
 
     const result = { three, ledger, audit, drills, sources: perSource, sourceKind, basis,

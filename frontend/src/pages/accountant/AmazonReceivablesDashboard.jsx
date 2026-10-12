@@ -220,36 +220,78 @@ const SEV = {
    back only to 2022, so for anything earlier the MTR cannot be obtained at all -
    it is not a file somebody forgot. Without this banner those months read as
    zero invoiced and look like a collapse in sales rather than a missing report. */
+/* ── what this period cannot answer, and why ──────────────────────────────
+   Three different absences, and a reader must not have to guess which one
+   they are looking at. A missing MTR, an order report Amazon returns short,
+   and a period before fee invoices existed all leave a panel blank, but only
+   one of them is anything to chase. The title and body come from the backend
+   so the wording lives next to the test that produced it; this only decides
+   which months are on screen and what the closing line should say. */
+const NOTICE_FOOTER = {
+  'mtr-missing': (
+    <>Order reports and the settlement record <strong>do</strong> cover these months, so sales,
+    payouts and the bank position are unaffected. Only <em>Order vs MTR</em> will read blank.</>
+  ),
+  'orders-short': (
+    <>The MTR and the settlement <strong>do</strong> cover these months in full, so net sales, what
+    Amazon charged and what it paid are all unaffected. Only <em>orders placed</em> on the Order
+    Cycle, and the order-level half of <em>Order vs MTR</em>, understate the month.</>
+  ),
+  'no-fee-invoices': (
+    <>Amazon still charged its fees in these months and the settlement records every rupee — what
+    is missing is only the <strong>tax invoice</strong> for them. <em>Fee invoices</em> will show a
+    nil invoice side against a real settlement side; that is an absence of documents, not a gap to
+    chase.</>
+  ),
+};
+
 function CoverageNotice({ coverage, shown }) {
-  const n = coverage && coverage.notice;
-  if (!n || !shown || !shown.length) return null;
-  const hit = n.months.filter((m) => shown.includes(m));
+  /* A run can have more than one of these at once - the MTR is missing for
+     2021-22, the order report is short for May 2023, and there are no fee
+     invoices before Apr 2023, all in the same report. Showing only the first
+     meant a reader looking at May 2023 was told nothing at all. Each notice
+     is drawn only for the months actually on screen. */
+  const list = (coverage && (coverage.notices || (coverage.notice ? [coverage.notice] : []))) || [];
+  if (!shown || !shown.length || !list.length) return null;
+  const live = list.filter((x) => (x.months || []).some((m) => shown.includes(m)));
+  if (!live.length) return null;
+  return <>{live.map((n) => <OneNotice key={n.kind} n={n} shown={shown} />)}</>;
+}
+
+function OneNotice({ n, shown }) {
+  const hit = (n.months || []).filter((m) => shown.includes(m));
   if (!hit.length) return null;
   const label = (m) => {
     const [y, mm] = String(m).split('-');
     return `${['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][+mm - 1]} ${y}`;
   };
+  /* The backend titles the notice for the WHOLE run; on screen only some of
+     those months may be selected, so the count is recomputed from what is
+     actually shown rather than claiming more than the reader can see. */
+  const title = hit.length === 1
+    ? String(n.title || '').replace(/\d+ of the months selected|\d+ months/, label(hit[0]))
+    : String(n.title || '').replace(/for .*/, `for ${hit.length} of the months selected`);
   return (
     <div className="mb-4 rounded-xl overflow-hidden"
          style={{ background: '#FFFBF3', border: '1px solid #FBE2BE' }}>
       <div className="flex items-start gap-3 px-4 py-3">
         <Info className="h-5 w-5 mt-0.5 shrink-0" style={{ color: T.amberText }} />
         <div className="min-w-0">
-          <div className="text-[13px] font-bold" style={{ color: T.amberText }}>
-            {hit.length === 1
-              ? `No MTR for ${label(hit[0])}`
-              : `No MTR for ${hit.length} of the months selected`}
-          </div>
+          <div className="text-[13px] font-bold" style={{ color: T.amberText }}>{title}</div>
           <p className="text-[12.5px] mt-1 leading-relaxed" style={{ color: '#5B4A2E' }}>{n.detail}</p>
           <div className="mt-1.5 flex flex-wrap gap-1.5">
-            {hit.map((m) => (
+            {hit.slice(0, 14).map((m) => (
               <span key={m} className="px-2 py-0.5 rounded text-[11px] font-semibold tabular-nums"
                     style={{ background: '#FDF0DB', color: '#8A6A3A' }}>{label(m)}</span>
             ))}
+            {hit.length > 14 && (
+              <span className="px-2 py-0.5 text-[11px] font-semibold" style={{ color: '#8A6A3A' }}>
+                +{hit.length - 14} more
+              </span>
+            )}
           </div>
           <div className="mt-2 text-[11.5px]" style={{ color: '#8A6A3A' }}>
-            Order reports and the settlement record <strong>do</strong> cover these months, so sales,
-            payouts and the bank position are unaffected. Only <em>Order vs MTR</em> will read blank.
+            {NOTICE_FOOTER[n.kind] || NOTICE_FOOTER['mtr-missing']}
           </div>
         </div>
       </div>
