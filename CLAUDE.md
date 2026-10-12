@@ -3,6 +3,7 @@
 > ## 🚨 AWS2 IS THE DEFAULT AWS — read it before ANY infra work
 > **📍 File path: `/Users/dhavalchauhan/Colonel Full/AWS2.md`** (i.e. `../../AWS2.md` from this repo —
 > it lives one level ABOVE the repo and is **not tracked in git**, so a fresh clone will not have it).
+> (On the second dev Mac it is at `/Users/apple/Documents/colonel/AWS setup /AWS2.md` — note the trailing space in the folder name.)
 > **AWS2.md is the single source of truth for the live site** — full mapping, security hardening,
 > deploy, and rollback. Read it first; treat anything below that contradicts it as historical.
 >
@@ -92,6 +93,21 @@ Sales agents run in Node → `bulkCreate` to the brand's dynamic tables + `agent
 4. **RLS: no client-settable bypass.** The old `SET LOCAL app.bypass_rls='true'` escape hatch was removed by hardening (`db-restructure/005_harden_rls.sql`) — only the real `postgres` superuser bypasses RLS now (migrations/admin ops). App queries are scoped by `app.brand_id`; use `IS NOT DISTINCT FROM` for nullable month/year.
 5. **Keep reco logic dynamic** — no hardcoded sheet names, row indices, or tax-ledger names. Preserve the Remark 1 / Remark 2 split (Remark 3 = multistate only). `.xls`→`.xlsx` in-memory conversion must never break.
 6. **Restart the right process** after a change — backend `pm2 restart` / `node server.js`; Python re-run `server.py`; frontend `npx craco build`/`start`. If login/data looks broken, check the backend first.
+
+### ⛔ Golden rules — agent.accountant (AWS Account #2, live prod)
+> The live site is now `https://agent.accountant` (AWS account `679930074502`, box `i-07d81d3f4da578d28`) — **not** the ngrok/Account #1 setup in `AWS.md`, which is superseded. Rules below are specific to this box; rule 1 above (explicit permission before touching AWS) still applies on top of them.
+1. **The box (`/opt/colonel`) is NOT a git repo.** It's populated by rsync/scp and drifts in both directions from `colonel-aws/main` on GitHub. Nothing is "done" until it's (a) committed+pushed to `main` **and** (b) the matching files are deployed to the box.
+2. **Never run `craco build` / `npm run build` on the box.** Its `frontend/src` is stale vs. what's live — building there has silently dropped live features before. Always build the frontend on your Mac from `main`, then rsync `build/`.
+3. **Never `pm2 restart --update-env`.** It drops critical env vars — backend loses `NODE_OPTIONS=--max-old-space-size=6144` (→ heap OOM), engines lose `RECO_PORT`. Always plain `pm2 restart <name>`.
+4. **Never rsync a whole source directory or blind-overwrite `app.js`.** The box carries hand-applied, production-only fixes (e.g. locked `/register` route, OAuth redirect URI). Deploy named files only; for `app.js`, make a surgical edit (add mount lines), never replace the file.
+5. **Always back up before touching anything:** a rollback AMI + a DB dump + an on-box `.bak-<timestamp>` of every file you edit.
+6. **Always push to GitHub whatever you put on the box.** Deploy == commit + push — otherwise the next rebuild-from-`main` silently erases it.
+7. **One person deploys at a time.** No lock on the box — announce "deploying to AWS now," deploy, verify, then say "done."
+8. **There are TWO reco engines (`:8765` + `:8766`), treat them as one unit.** Always restart both together, plain (`pm2 restart reco-engine reco-engine-2`). Deploying `server.py` without its `recon/*.py` imports, or restarting only one engine, breaks jobs routed to the other.
+9. **Every new reco agent must work across both engines** — reachable via `enginePool.js` (`acquireEngine()`/`rememberJob()`), must persist output to the shared `exports/` dir, and downloads must try origin-engine-first then siblings — never round-robin.
+10. **Never `git add -A`.** Stage only your own files — sweeping up a collaborator's uncommitted work causes cross-contamination.
+11. **RLS is enforced by non-superuser `colonel_app`; only the `postgres` superuser bypasses it.** New tenant tables must get RLS + a policy + a grant to `colonel_app`. All DB changes must be idempotent (`WHERE NOT EXISTS`, `IF NOT EXISTS`, etc.) — collision-safe to re-run.
+12. **Agent UUIDs are shared contracts** between the DB `agents.id` and the frontend's `AgentDispatch.RECO_ID_TO_TYPE` map — pick a UUID once, use the same one in both places.
 
 ## Quick facts
 - **33 agents.** ⚠️ Agent + brand IDs are now **random UUIDv4** (old sequential `d0000000-…`/`b0000000-…` were regenerated for security). Any `d0000000-…-00NN` reco-UUID table is **LEGACY** — query the `agents` table or read the mapping (`db-restructure/008-agent-id-remap.json` / `009-brand-id-remap.json`; new ids live in `AgentDispatch.RECO_ID_TO_TYPE` + the seeder).
