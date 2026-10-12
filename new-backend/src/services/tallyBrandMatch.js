@@ -4,14 +4,17 @@
  * suffixes like "Pvt Ltd", financial-year tags like "(2024-25)"). Never fuzzy:
  * linking the wrong brand would show one brand another's books. Zero or several
  * candidate brands → leave unlinked for an admin to link by hand.
+ * config/tallyBrandAliases.json maps differing legal/Tally names to a brand explicitly.
  */
 const { masterSequelize } = require('../config/database');
 
+const ALIASES = require('../config/tallyBrandAliases.json');
 const q = (sql, bind) => masterSequelize.query(sql, { bind, type: masterSequelize.QueryTypes.SELECT });
 
 const normalize = (s) => String(s || '')
   .toLowerCase()
   .replace(/&/g, ' and ')
+  .replace(/\s[-–]\s*from\s.*$/, ' ')                          // "- from April 25"
   .replace(/\([^)]*\)/g, ' ')                                  // "(from 1-Apr-24)", "(2024-25)"
   .replace(/\b(19|20)\d\d\s*[-–/]\s*(\d{2}|\d{4})\b/g, ' ')     // 2024-25
   .replace(/\b(pvt|private|limited|ltd|llp|opc|inc|company|co)\b\.?/g, ' ')
@@ -29,9 +32,16 @@ async function autoLinkCompanies(companyId = null) {
     const k = normalize(b.name);
     if (k) byName.set(k, [...(byName.get(k) || []), b]);
   }
+  // Explicit mapping file wins over name matching: normalised company name -> normalised brand name.
+  const alias = new Map();
+  for (const [brand, names] of Object.entries(ALIASES)) {
+    if (brand.startsWith('_')) continue;
+    for (const n of [].concat(names)) alias.set(normalize(n), normalize(brand));
+  }
   const linked = [], unmatched = [];
   for (const co of companies) {
-    const hits = byName.get(normalize(co.name)) || [];
+    const key = normalize(co.name);
+    const hits = byName.get(alias.get(key) || key) || [];
     if (hits.length !== 1) { unmatched.push({ company: co.name, reason: hits.length ? 'several brands share this name' : 'no brand with this name' }); continue; }
     const [, r] = await masterSequelize.query(
       `UPDATE tally_companies SET brand_id = $2, updated_at = now() WHERE id = $1 AND brand_id IS NULL`,
