@@ -119,6 +119,11 @@ const RECO_AGENT_META = {
     color: '#B45309', bg: '#FFF7ED', border: '#FED7AA', accuracy: null,
     fields: ['Sales workbook per GSTIN (delivered / refund / RTO tabs)', 'Payment reconciliation'],
   },
+  'Tally Connector': {
+    displayName: 'Tally Connector', icon: '🔌', category: 'Books',
+    color: '#6D5AE6', bg: '#F1EEFC', border: '#CFC7F8', accuracy: null,
+    fields: ['Live from Tally: ledgers, vouchers, sync history'],
+  },
   // Fake demo cards (no backend) — matched by their synthetic agent `name`.
   'Amazon Receivables': {
     displayName: 'Amazon Receivables', icon: '📦', category: 'Receivables',
@@ -203,6 +208,7 @@ const sectionOf = (agent) => {
   const n = (agent.name || '').toLowerCase();
   if (n === 'einvoice_extract') return 'invoice';   // grouped with Invoice Process under "Extraction"
   if (n === 'po extractor') return 'invoice';       // PO Extractor → "Extraction" section
+  if (n === 'tally connector') return 'other';      // the books themselves, not a reconciliation
   if (/receivabl/.test(n)) return 'receivables';   // zepto_receivables, receivable_cycle, *_receivables
   if (RECO_AGENT_META[agent.name]) {
     if (n === 'universal_bank_statement' || n === 'pdf_bank_extract' || n === 'bank_tally_reco'

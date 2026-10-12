@@ -3,6 +3,7 @@ import { useAuth } from '../../context/AuthContext';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { LogOut, Menu, X, ChevronsUpDown, Building2, Check, UserCog } from 'lucide-react';
 import api from '../../lib/api';
+import { openBrand } from '../../lib/openBrand';
 import GoogleAccountMenu from '../GoogleAccountMenu';
 
 const initialsOf = (name = '') =>
@@ -148,7 +149,7 @@ const Sidebar = ({ items, isOpen, setIsOpen }) => {
                     {brands.map((b) => {
                       const on = b.id === activeBrandId;
                       return (
-                        <button key={b.id} onClick={() => { setMenuOpen(false); navigate(`/brands/${b.id}/dashboard`); }}
+                        <button key={b.id} onClick={() => { setMenuOpen(false); openBrand(navigate, b.id); }}
                           className="w-full flex items-center gap-2 rounded-lg px-2 py-2 transition-colors"
                           style={{ background: on ? '#EFF6FF' : 'transparent' }}
                           onMouseEnter={(e) => { if (!on) e.currentTarget.style.background = '#F8FAFC'; }}
