@@ -32,16 +32,20 @@ async function autoLinkCompanies(companyId = null) {
     const k = normalize(b.name);
     if (k) byName.set(k, [...(byName.get(k) || []), b]);
   }
-  // Explicit mapping file wins over name matching: normalised company name -> normalised brand name.
+  // Explicit mapping file wins over name matching: normalised company name -> normalised brand name(s).
+  // A company may sit under several spellings of one brand; it links to whichever spelling exists.
   const alias = new Map();
   for (const [brand, names] of Object.entries(ALIASES)) {
     if (brand.startsWith('_')) continue;
-    for (const n of [].concat(names)) alias.set(normalize(n), normalize(brand));
+    for (const n of [].concat(names)) {
+      const k = normalize(n);
+      alias.set(k, [...new Set([...(alias.get(k) || []), normalize(brand)])]);
+    }
   }
   const linked = [], unmatched = [];
   for (const co of companies) {
     const key = normalize(co.name);
-    const hits = byName.get(alias.get(key) || key) || [];
+    const hits = (alias.get(key) || [key]).flatMap((k) => byName.get(k) || []);
     if (hits.length !== 1) { unmatched.push({ company: co.name, reason: hits.length ? 'several brands share this name' : 'no brand with this name' }); continue; }
     const [, r] = await masterSequelize.query(
       `UPDATE tally_companies SET brand_id = $2, updated_at = now() WHERE id = $1 AND brand_id IS NULL`,
