@@ -1,6 +1,7 @@
 /* Create the Tally Connector agent and put it on one brand.
 
      node seed-tally-connector.js "Shumee Playroom"
+     node seed-tally-connector.js --all          # every brand except "Other"
 
    Safe to re-run: it refreshes the description of an existing agent and adds the
    brand link only if it is missing. It creates a row in `agents` and one in
@@ -17,10 +18,12 @@ const DESCRIPTION =
 (async () => {
   try {
     const brandName = process.argv[2];
-    if (!brandName) throw new Error('Pass the brand name, e.g. node seed-tally-connector.js "Shumee Playroom"');
+    if (!brandName) throw new Error('Pass the brand name, e.g. node seed-tally-connector.js "Shumee Playroom", or --all');
     // Only the columns needed: a database that is behind on brand migrations still works.
-    const brand = await Brand.findOne({ where: { name: brandName }, attributes: ['id', 'name'] });
-    if (!brand) throw new Error(`Brand "${brandName}" not found`);
+    const brands = brandName === '--all'
+      ? (await Brand.findAll({ attributes: ['id', 'name'], order: [['name', 'ASC']] })).filter((b) => b.name !== 'Other')
+      : [await Brand.findOne({ where: { name: brandName }, attributes: ['id', 'name'] })];
+    if (!brands[0]) throw new Error(`Brand "${brandName}" not found`);
 
     let agent = await Agent.findOne({ where: { name: NAME } });
     if (agent) {
@@ -31,11 +34,13 @@ const DESCRIPTION =
       console.log(`✓ ${NAME} created (id ${agent.id})`);
     }
 
-    const [, made] = await BrandAgent.findOrCreate({
-      where: { brand_id: brand.id, agent_id: agent.id },
-      defaults: { brand_id: brand.id, agent_id: agent.id },
-    });
-    console.log(made ? `✓ "${NAME}" linked to ${brand.name}` : `✓ "${NAME}" already linked to ${brand.name}`);
+    for (const brand of brands) {
+      const [, made] = await BrandAgent.findOrCreate({
+        where: { brand_id: brand.id, agent_id: agent.id },
+        defaults: { brand_id: brand.id, agent_id: agent.id },
+      });
+      console.log(made ? `✓ "${NAME}" linked to ${brand.name}` : `✓ "${NAME}" already linked to ${brand.name}`);
+    }
     process.exit(0);
   } catch (e) {
     console.error('Seed error:', e.message);

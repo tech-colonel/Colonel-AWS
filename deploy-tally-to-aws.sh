@@ -28,6 +28,7 @@ BACKEND_FILES=(
   new-backend/src/controllers/tallyReportsController.js
   new-backend/src/routes/tallyRoutes.js
   new-backend/src/services/tallyBrandMatch.js
+  new-backend/src/config/tallyBrandAliases.json
   new-backend/seed-tally-connector.js
 )
 
@@ -64,6 +65,7 @@ fi
 "${SSH[@]}" "$HOST" "mkdir -p ~/backups && tar czf ~/backups/pre-tally-backend-${TS}.tar.gz -C $APP new-backend/server.js new-backend/src \
   && cp -a $APP/frontend/build ~/backups/pre-tally-frontend-build-${TS} \
   && sudo -u postgres pg_dump -Fc colonel_agent_accountant > ~/backups/pre-tally-db-${TS}.dump && echo '  backups in ~/backups (*-${TS}*)'"
+"${SSH[@]}" "$HOST" "mkdir -p $APP/new-backend/src/config"
 for f in "${CHANGED[@]}"; do scp -i "$KEY" "$f" "$HOST:$APP/$f"; done
 
 # ── 3. Frontend: built locally, never on the box ─────────────────────────────
@@ -77,6 +79,6 @@ echo -n "health: "; curl -s -o /dev/null -w '%{http_code}\n' https://agent.accou
 echo -n "connector login route (expect 400/401, NOT 404/HTML): "
 curl -s -o /dev/null -w '%{http_code}\n' -X POST https://agent.accountant/api/tally/connector/login -H 'Content-Type: application/json' -d '{}'
 "${SSH[@]}" "$HOST" "sudo -u postgres psql -d colonel_agent_accountant -c '\dt tally_*'"
-echo "Tables self-create on boot. Now run the seed ONCE if the brand agent is wanted:"
-echo "  ssh … 'cd $APP/new-backend && node seed-tally-connector.js \"<Brand name>\"'"
+echo "Tables self-create on boot. Now run the seed ONCE to add the Tally Connector agent to every brand:"
+echo "  ssh -i $KEY $HOST 'cd $APP/new-backend && node seed-tally-connector.js --all'"
 echo "Rollback: restore ~/backups/pre-tally-*-${TS}* (backend tar, frontend build dir, DB dump), pm2 restart colonel-backend."
