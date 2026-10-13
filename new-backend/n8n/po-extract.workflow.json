@@ -333,7 +333,10 @@
         "promptType": "define",
         "text": "=You are an expert accounting data-extraction assistant.\n\nABSOLUTE OUTPUT ENFORCEMENT (HIGHEST PRIORITY)\nYou are a STRICT JSON generator. You are NOT an assistant. Do NOT think, explain, or describe.\n\nYOU MUST:\n1. Your response MUST start with \"[\" and end with \"]\"\n2. Your response MUST be valid JSON\n3. Your response MUST contain ONLY JSON — no markdown fences, no prose, no text before or after\n\nSTRICTLY FORBIDDEN: \"I noticed\", \"This appears\", \"I cannot\", \"It seems\", any explanation or reasoning.\n\nINPUT: the attached document (or the extracted text below) is a PURCHASE ORDER (PO) raised by a\ncustomer on a supplier. It may be a clean digital PDF, a scanned image, or OCR text with noise.\n\nOUTPUT: a JSON ARRAY where EACH OBJECT = ONE ORDERED PRODUCT LINE from the PO.\nRepeat the PO-level fields identically on every line item that belongs to the same PO.\n\nEach object — EXACTLY this shape:\n{\n  \"po_number\": \"\",\n  \"po_date\": \"\",\n  \"supplier_gstin\": \"\",\n  \"buyer_gstin\": \"\",\n  \"billing_address\": \"\",\n  \"product_description\": \"\",\n  \"material_code\": \"\",\n  \"unit_cost\": 0,\n  \"gst_rate\": 0,\n  \"qty\": 0\n}\n\nFIELD RULES:\n• po_number = the Purchase Order No. / PO No. printed on the document.\n• po_date = the PO Date, formatted DD-MM-YYYY.\n• supplier_gstin = the GSTIN in the SUPPLIER / \"Vendor Details\" block — the party FULFILLING the\n  order. Find using labels: \"Supplier\", \"Vendor Details\", \"Vendor GSTIN\".\n• buyer_gstin = the GSTIN in the \"Billing Address\" / \"Bill To\" / Buyer block — the party that\n  RAISED the PO. Find using labels: \"Buyer\", \"Bill To\", \"Billing Address\", \"Buyer GST\".\n• NEVER swap seller/buyer. If labels exist, trust the labels only — never rely on position/guess.\n• GSTIN FORMAT (mandatory, apply before returning): raw 15-character code only, UPPERCASE, no\n  label text (\"GSTIN\", \"GST No\", \"Reg No\") glued to it, no spaces/colons/line breaks.\n  Must match: ^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][0-9A-Z]Z[0-9A-Z]$ — if none found, use \"\".\n• billing_address = the full billing / \"Deliver to\" address as ONE line (collapse newlines and\n  <br> tags to single spaces).\n• product_description = the item/description text for that line — strip stray HSN codes or\n  trailing quantity numbers glued onto the description.\n• unit_cost = the PER-UNIT \"Unit Cost\" / \"Basic Cost\" printed for that line.\n  NEVER the MRP. NEVER the taxable value. NEVER the line total. Plain number — no ₹, no commas.\n• gst_rate = the GST percentage for that line as a plain number (e.g. 18). If shown split as\n  CGST+SGST or IGST, use the combined total rate.\n\n• material_code = the buyer's product code printed on that line, as TEXT exactly as printed\n  (keep leading zeros). Column label varies by buyer — use, in this priority order:\n  \"Material Code\" > \"SKU Code\" > \"Item Code\" > \"Article Code\" > \"Product Code\".\n  If BOTH \"Material Code\" and \"SKU Code\" columns exist, use Material Code.\n  NEVER the HSN code, EAN, UPC or barcode. If none is printed, use \"\".\n• qty = the ordered quantity for that line (\"Qty\" / \"Quantity\" / \"Order Qty\") as a plain number.\n  NEVER the MRP, a pack size from the description (e.g. \"2 L\", \"1 pc\") or the total quantity row.\n\nROW FILTERING — do NOT extract: subtotal/total rows, tax-summary rows, terms & conditions text,\nsignature blocks.\n\nIf the document is clearly NOT a purchase order (a sales invoice, bank statement, unrelated\nfile), or is empty/unreadable, return an empty array [] — never guess or hallucinate values.\n\nDocument text (may be empty if this run sent an image instead):\n{{ $json.text }}",
         "options": {}
-      }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
     },
     {
       "id": "po14",
@@ -364,7 +367,7 @@
         460
       ],
       "parameters": {
-        "jsCode": "const cfg  = $('Code in JavaScript1').first().json;\nconst file = $('Code in JavaScript1').item.json;\nconst agentResp = $input.item.json;\nlet raw = agentResp.output !== undefined ? agentResp.output : agentResp;\n\nfunction parseJson(v) {\n  if (typeof v !== 'string') return v;\n  let t = v.trim().replace(/^```(?:json)?\\s*/i, '').replace(/\\s*```$/i, '');\n  try { return JSON.parse(t); } catch (e) {}\n  const s = t.indexOf('['), e = t.lastIndexOf(']');\n  if (s !== -1 && e > s) { try { return JSON.parse(t.slice(s, e + 1)); } catch (e2) {} }\n  const os = t.indexOf('{'), oe = t.lastIndexOf('}');\n  if (os !== -1 && oe > os) { try { return [JSON.parse(t.slice(os, oe + 1))]; } catch (e3) {} }\n  return null;\n}\n\nlet arr = parseJson(raw);\nif (!arr) arr = [];\nif (!Array.isArray(arr)) arr = [arr];\n\nconst s = (v) => (v == null) ? '' : String(v).replace(/<br\\s*\\/?\\s*>/gi, ' ').replace(/\\s+/g, ' ').trim();\nconst num = (v) => { if (v == null || v === '') return 0; const n = parseFloat(String(v).replace(/[,\\s₹]/g, '')); return Number.isFinite(n) ? n : 0; };\n\nconst base = {\n  run_id: $execution.id,\n  batch_total: $('Code in JavaScript1').all().length,\n  brandId: cfg.brandId, brandName: cfg.brandName,\n  agentId: cfg.agentId, agentName: cfg.agentName,\n  source_file: s(file.name),\n  po_pdf_link: s(file.webViewLink),\n};\n\nlet output = arr.map((it) => ({ json: {\n  ...base,\n  po_number: s(it.po_number),\n  po_date: s(it.po_date),\n  supplier_gstin: s(it.supplier_gstin),\n  buyer_gstin: s(it.buyer_gstin),\n  billing_address: s(it.billing_address),\n  product_description: s(it.product_description),\n  unit_cost: num(it.unit_cost),\n  gst_rate: num(it.gst_rate),\n  material_code: s(it.material_code),\n  qty: (it.qty == null || it.qty === '') ? null : num(it.qty),\n  status: (s(it.po_number) && s(it.product_description)) ? 'Extracted' : 'Needs Review',\n}}));\n\nif (!output.length) {\n  output = [{ json: {\n    ...base,\n    po_number: '', po_date: '', supplier_gstin: '', buyer_gstin: '', billing_address: '',\n    product_description: 'Unable to read PO', unit_cost: 0, gst_rate: 0, material_code: '', qty: null, status: 'Not a PO',\n  }}];\n}\n\nreturn output;"
+        "jsCode": "// One input item per PO (see \"Split POs\"); an image file arrives as a single item.\nconst cfg = $('Code in JavaScript1').first().json;\nconst items = $input.all();\n\nconst fileOf = (i) => {\n  try { const f = $('Code in JavaScript1').itemMatching(i).json; if (f && f.name) return f; } catch (e) {}\n  try { const f = $('Code in JavaScript1').item.json; if (f && f.name) return f; } catch (e) {}\n  try { return $('Download file').first().json; } catch (e) {}\n  return {};\n};\n// What \"Split POs\" detected for this item (null on the image path, which skips it).\nconst splitOf = (i) => {\n  try { return $('Split POs').itemMatching(i).json; } catch (e) { return null; }\n};\n\nfunction parseJson(v) {\n  if (typeof v !== 'string') return v;\n  let t = v.trim().replace(/^```(?:json)?\\s*/i, '').replace(/\\s*```$/i, '');\n  try { return JSON.parse(t); } catch (e) {}\n  const s = t.indexOf('['), e = t.lastIndexOf(']');\n  if (s !== -1 && e > s) { try { return JSON.parse(t.slice(s, e + 1)); } catch (e2) {} }\n  const os = t.indexOf('{'), oe = t.lastIndexOf('}');\n  if (os !== -1 && oe > os) { try { return [JSON.parse(t.slice(os, oe + 1))]; } catch (e3) {} }\n  return null;\n}\n\nconst s = (v) => (v == null) ? '' : String(v).replace(/<br\\s*\\/?\\s*>/gi, ' ').replace(/\\s+/g, ' ').trim();\nconst num = (v) => { if (v == null || v === '') return 0; const n = parseFloat(String(v).replace(/[,\\s₹]/g, '')); return Number.isFinite(n) ? n : 0; };\n\nconst output = [];\nitems.forEach((item, i) => {\n  const file = fileOf(i);\n  const split = splitOf(i);\n  const expectedPo = split ? s(split.expected_po) : '';\n  const base = {\n    run_id: $execution.id,\n    batch_total: $('Code in JavaScript1').all().length,\n    brandId: cfg.brandId, brandName: cfg.brandName,\n    agentId: cfg.agentId, agentName: cfg.agentName,\n    source_file: s(file.name),\n    po_pdf_link: s(file.webViewLink),\n  };\n\n  const agentResp = item.json;\n  const raw = agentResp.output !== undefined ? agentResp.output : agentResp;\n  let arr = parseJson(raw);\n  if (!arr) arr = [];\n  if (!Array.isArray(arr)) arr = [arr];\n\n  for (const it of arr) {\n    // The PO number printed on the page wins when the model left it blank.\n    const poNumber = s(it.po_number) || expectedPo;\n    output.push({ json: {\n      ...base,\n      po_number: poNumber,\n      po_date: s(it.po_date),\n      supplier_gstin: s(it.supplier_gstin),\n      buyer_gstin: s(it.buyer_gstin),\n      billing_address: s(it.billing_address),\n      product_description: s(it.product_description),\n      unit_cost: num(it.unit_cost),\n      gst_rate: num(it.gst_rate),\n      material_code: s(it.material_code),\n      qty: (it.qty == null || it.qty === '') ? null : num(it.qty),\n      status: (poNumber && s(it.product_description)) ? 'Extracted' : 'Needs Review',\n    }, pairedItem: { item: i } });\n  }\n\n  if (!arr.length) {\n    // A PO that was found in the PDF must never disappear silently: surface it for review.\n    const partOfMany = !!(split && split.po_total > 1);\n    const known = expectedPo || partOfMany;\n    output.push({ json: {\n      ...base,\n      po_number: expectedPo, po_date: '', supplier_gstin: '', buyer_gstin: '', billing_address: '',\n      product_description: known\n        ? 'PO found in PDF but no line items were extracted (PO ' + split.po_index + ' of ' + split.po_total + ') - check the PDF'\n        : 'Unable to read PO',\n      unit_cost: 0, gst_rate: 0, material_code: '', qty: null,\n      status: known ? 'Needs Review' : 'Not a PO',\n    }, pairedItem: { item: i } });\n  }\n});\n\nreturn output;"
       }
     },
     {
@@ -632,6 +635,19 @@
         "jsonBody": "={\n  \"brandId\": \"546976a5-6ca5-42d1-8b7d-2c6379ffa221\",\n  \"agentId\": \"0a9f6d2e-5c31-4b88-9e77-1f4a2c6b8d05\",\n  \"brandName\": \"Koparo\",\n  \"agentName\": \"PO Extractor\",\n  \"phase\": \"done\"\n}",
         "options": {}
       }
+    },
+    {
+      "parameters": {
+        "jsCode": "// One item per Purchase Order. A merged PDF holds many POs; sending the whole\n// text to the model in one call makes it skip POs, so each PO goes on its own.\nconst src = $input.first().json;\nconst raw = src.text;\n// \"Extract from File\" joins pages with a blank line (or returns an array when\n// Join Pages is off) — a page's own text never contains a blank line.\nconst pages = (Array.isArray(raw) ? raw : String(raw || '').split('\\n\\n'))\n  .map((p) => String(p || ''))\n  .filter((p) => p.trim());\n\n// PO number as labelled on the page: \"PO No\", \"P.O. Number\", \"Purchase Order No\", \"Order No\" …\nconst PO_RE = /(?:\\bP\\.?\\s?O\\.?|\\bPurchase\\s+Order|\\bOrder)\\s*(?:No|Number|Num|#)\\s*\\.?\\s*[:#\\-]?\\s*([A-Z0-9][A-Z0-9\\/_\\-]{3,})/gi;\nconst poOf = (page) => {\n  PO_RE.lastIndex = 0;\n  let m;\n  while ((m = PO_RE.exec(page)) !== null) {\n    const v = m[1].replace(/[\\/_\\-]+$/, '');\n    if (/\\d/.test(v) && v.length >= 4) return v.toUpperCase();\n  }\n  return '';\n};\nconst TITLE_RE = /^\\s*purchase\\s+order\\b/i;\nconst TC_RE = /^\\s*(?:general\\s+)?terms\\s*(?:and|&)\\s*conditions\\b|^\\s*annexure\\b/i;\n\n// Group pages: a new PO starts on a page whose PO number differs from the current one.\n// Pages with no PO number (continuation, totals, T&C) stay with the current PO.\nlet chunks = [];\nlet cur = null;\nlet lead = [];\nfor (const page of pages) {\n  const po = poOf(page);\n  if (po && (!cur || po !== cur.po)) {\n    cur = { po, pages: lead };\n    lead = [];\n    chunks.push(cur);\n  }\n  if (cur) cur.pages.push(page); else lead.push(page);\n}\n\n// No labelled PO number anywhere: fall back to pages that open with a \"Purchase Order\" title.\nif (!chunks.length) {\n  const starts = pages.map((p, i) => (TITLE_RE.test(p) ? i : -1)).filter((i) => i >= 0);\n  if (starts.length >= 2) {\n    chunks = starts.map((s, k) => ({ po: '', pages: pages.slice(k === 0 ? 0 : s, starts[k + 1] === undefined ? pages.length : starts[k + 1]) }));\n  } else {\n    chunks = [{ po: '', pages }];\n  }\n}\n\n// Drop the Terms & Conditions / annexure tail of each PO (never its first page).\nfor (const c of chunks) {\n  const cut = c.pages.findIndex((p, i) => i > 0 && TC_RE.test(p.slice(0, 200)));\n  if (cut > 0) c.pages = c.pages.slice(0, cut);\n}\n\nconst expected = chunks.map((c) => c.po).filter(Boolean);\nreturn chunks.map((c, i) => ({\n  json: {\n    text: c.pages.join('\\n\\n'),\n    expected_po: c.po,\n    po_index: i + 1,\n    po_total: chunks.length,\n    expected_pos: expected,\n  },\n  pairedItem: { item: 0 },\n}));"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        200,
+        330
+      ],
+      "id": "b7c1f0de-3a52-4c1e-9d0a-5e2f4a7c9b31",
+      "name": "Split POs"
     }
   ],
   "connections": {
@@ -778,7 +794,7 @@
       "main": [
         [
           {
-            "node": "AI Agent",
+            "node": "Split POs",
             "type": "main",
             "index": 0
           }
@@ -817,6 +833,17 @@
           },
           {
             "node": "HTTP Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split POs": {
+      "main": [
+        [
+          {
+            "node": "AI Agent",
             "type": "main",
             "index": 0
           }
