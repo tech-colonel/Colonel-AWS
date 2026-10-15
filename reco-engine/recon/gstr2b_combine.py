@@ -20,7 +20,7 @@ Nothing is guessed. Before the combined file is handed on:
     falling back to the file name);
   * the same file uploaded twice is used once; the same month twice with different
     content is refused;
-  * each tab's column headings must be identical across months;
+  * each tab's columns are matched by heading when the portal changed its layout\n    within the period (e.g. Rate(%) dropped from Oct-2024);
   * the combined file, read back by the normal parser, must give exactly the sum of
     the months — record count per tab, taxable value and tax, to the paisa.
 Any failure raises Gstr2bCombineError with a message for the accountant.
@@ -128,6 +128,79 @@ def _labels(head: list[list[Any]]) -> list[str]:
     return out
 
 
+def _canon(label: str) -> str:
+    """One heading, spelled the way every portal version agrees on. Only the renames
+    the portal is known to make are folded together: the GSTR-1/1A period and filing
+    date headings, and 'Trade/Legal name (of the supplier)'."""
+    parts = []
+    for piece in label.split("|"):
+        k = re.sub(r"[^a-z0-9]", "", piece.lower())
+        if k.startswith("tradelegalname"):
+            k = "tradelegalname"
+        elif k.startswith("gstr") and k.endswith("period"):
+            k = "gstr1period"
+        elif k.startswith("gstr") and k.endswith("filingdate"):
+            k = "gstr1filingdate"
+        parts.append(k)
+    return "|".join(parts)
+
+
+def _keys(head: list[list[Any]]) -> list[tuple]:
+    """Per column: (canonical heading, n-th time it occurs) — B2BA has two 'Invoice
+    number' columns, original and revised, which must stay apart and in order."""
+    seen: dict[str, int] = {}
+    out = []
+    for i, lab in enumerate(_labels(head)):
+        c = _canon(lab)
+        if not c.strip("|"):
+            out.append(("", i))
+            continue
+        seen[c] = seen.get(c, 0) + 1
+        out.append((c, seen[c]))
+    return out
+
+
+def _align_by_heading(tab: str, holders: list[dict]) -> tuple[list, list, str]:
+    """Combined heading band + rows for a tab whose layout differs between months.
+    The widest month's band is the reference; a heading no reference column carries
+    is added at the end. A month with a data column whose heading cannot be placed is
+    refused."""
+    ref = max(holders, key=lambda m: len([k for k in _keys(m["frames"][tab][0]) if k[0]]))
+    head = [list(r) for r in ref["frames"][tab][0]]
+    cols = _keys(head)
+    pos = {k: i for i, k in enumerate(cols) if k[0]}
+    for m in holders:
+        mh = m["frames"][tab][0]
+        for i, k in enumerate(_keys(mh)):
+            if k[0] and k not in pos:
+                pos[k] = len(cols)
+                cols.append(k)
+                for r_i, r in enumerate(head):
+                    while len(r) < len(cols):
+                        r.append(None)
+                    if r_i >= 4 and r_i < len(mh) and i < len(mh[r_i]):
+                        r[len(cols) - 1] = mh[r_i][i]
+    rows = []
+    for m in holders:
+        mk = _keys(m["frames"][tab][0])
+        for row in m["frames"][tab][1]:
+            out = [None] * len(cols)
+            for i, v in enumerate(row):
+                if _s(v) == "":
+                    continue
+                k = mk[i] if i < len(mk) else ("", i)
+                if not k[0]:
+                    raise Gstr2bCombineError(
+                        f"{m['file']} ({m['period']}) has values in a {tab} column without a heading, so "
+                        "they cannot be placed. Re-download that month from the GST portal.")
+                out[pos[k]] = v
+            rows.append(out)
+    changed = [m["period"] for m in holders if _keys(m["frames"][tab][0]) != _keys(ref["frames"][tab][0])]
+    note = (f"{tab}: the GST portal's column layout changes within these months "
+            f"(differs from {ref['period']} in {', '.join(changed)}); columns were matched by heading.")
+    return head, rows, note
+
+
 def _totals(records) -> dict:
     tabs: dict[str, int] = {}
     for r in records:
@@ -151,6 +224,7 @@ def combine_monthly_2b(items: list[dict]) -> tuple[dict, dict]:
 
     seen: dict[str, str] = {}
     months: list[dict] = []
+    others: list[dict] = []
     skipped: list[str] = []
     for it in items:
         name = it.get("filename") or "file.xlsx"
@@ -160,13 +234,15 @@ def combine_monthly_2b(items: list[dict]) -> tuple[dict, dict]:
             skipped.append(f"{name} (same file as {seen[digest]})")
             continue
         seen[digest] = name
-        fmt = gstr2b_format_info(data).get("format")
+        try:
+            fmt = gstr2b_format_info(data).get("format")
+        except Exception:          # e.g. a hand-merged file refused for shifted columns
+            fmt = "unreadable"
         if fmt != "portal":
             what = {"octa": "an OCTA export", "combined": "an already-combined workbook",
                     "new": "a non-portal layout"}.get(fmt, "not a GST-portal GSTR-2B")
-            raise Gstr2bCombineError(
-                f"{name} is {what}. Month-wise combining works on the GST-portal monthly downloads — "
-                "upload this file on its own for the state, or replace it with the portal files.")
+            others.append({"file": name, "data": data, "what": what})
+            continue
         meta = _read_me(data)
         gstin = meta["gstin"] or (_GSTIN_ANY.search(name.upper()).group(0)
                                   if _GSTIN_ANY.search(name.upper()) else "")
@@ -174,6 +250,31 @@ def combine_monthly_2b(items: list[dict]) -> tuple[dict, dict]:
         recs = parse_gstr2b(data)
         months.append({"file": name, "data": data, "gstin": gstin, "key": key,
                        "period": _label(key), "frames": _tab_frames(data), **_totals(recs)})
+
+    # A combined / non-portal file uploaded ALONGSIDE the monthly portal files (a
+    # whole Drive folder picked, say) is set aside only when every invoice in it is
+    # already in the monthly files — it adds nothing. Anything else is refused.
+    if others:
+        from .gstr_2b_books import _parse_gstr2b_tabs, _read_gstr2b_sheet
+        covered = {(r.supplier_gstin, r.normalized_doc_no)
+                   for m in months for r in parse_gstr2b(m["data"])}
+        for o in others:
+            try:
+                keys = {(r.supplier_gstin, r.normalized_doc_no)
+                        for r in _parse_gstr2b_tabs(o["data"], _read_gstr2b_sheet)}
+            except Exception:
+                keys = set()
+            if len(months) >= 2 and keys and keys <= covered:
+                skipped.append(f"{o['file']} ({o['what']}; every invoice in it is already in the monthly files)")
+                continue
+            raise Gstr2bCombineError(
+                f"{o['file']} is {o['what']}. Month-wise combining works on the GST-portal monthly downloads — "
+                "upload this file on its own for the state, or replace it with the portal files.")
+    if not months:
+        o = others[0]
+        raise Gstr2bCombineError(
+            f"{o['file']} is {o['what']}. Month-wise combining works on the GST-portal monthly downloads — "
+            "upload this file on its own for the state, or replace it with the portal files.")
 
     if len(months) == 1:
         only = months[0]
@@ -218,6 +319,7 @@ def combine_monthly_2b(items: list[dict]) -> tuple[dict, dict]:
     for m in months:
         rm.append([m["period"], m["file"]])
 
+    layout_notes: list[str] = []
     for tab in TABS:
         # Only months with rows in this tab are compared and copied. An EMPTY amendment
         # tab has no data row to mark where its heading ends, so its third heading row
@@ -229,17 +331,24 @@ def combine_monthly_2b(items: list[dict]) -> tuple[dict, dict]:
             continue
         ref_head = holders[0]["frames"][tab][0]
         ref_labels = _labels(ref_head)
-        for m in holders[1:]:
-            if _labels(m["frames"][tab][0]) != ref_labels:
-                raise Gstr2bCombineError(
-                    f"The {tab} columns in {m['file']} ({m['period']}) differ from {holders[0]['file']} "
-                    f"({holders[0]['period']}). Re-download that month from the GST portal.")
         ws = wb.create_sheet(tab)
-        for row in ref_head:
-            ws.append([None if _s(v) == "" else v for v in row])
-        for m in holders:
-            for row in m["frames"][tab][1]:
+        if all(_labels(m["frames"][tab][0]) == ref_labels for m in holders[1:]):
+            for row in ref_head:
                 ws.append([None if _s(v) == "" else v for v in row])
+            for m in holders:
+                for row in m["frames"][tab][1]:
+                    ws.append([None if _s(v) == "" else v for v in row])
+            continue
+        # The portal changed this tab's layout within the period (FY 24-25: a GSTR-1A
+        # rename from Jul-2024, the Rate(%) column dropped from Oct-2024). Place every
+        # month's values under the matching HEADING instead of by position; the
+        # tie-out below still proves nothing moved.
+        head, rows, note = _align_by_heading(tab, holders)
+        for row in head:
+            ws.append([None if _s(v) == "" else v for v in row])
+        for row in rows:
+            ws.append([None if _s(v) == "" else v for v in row])
+        layout_notes.append(note)
 
     buf = BytesIO()
     wb.save(buf)
@@ -279,6 +388,7 @@ def combine_monthly_2b(items: list[dict]) -> tuple[dict, dict]:
         "to": months[-1]["period"],
         "missing_months": missing,
         "skipped": skipped,
+        "layout_changes": layout_notes,
         "records": got["records"],
         "taxable": got["taxable"],
         "tax": got["tax"],

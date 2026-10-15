@@ -33,6 +33,9 @@ from .gstr_2b_books import (
     _resolve_missing_supplier_names,
     _new_layout_sheet_names,
     _apply_probable_matches,
+    _supersede_amended_originals,
+    _note_amendments,
+    _settle_amendments,
 )
 
 
@@ -149,13 +152,16 @@ def reconcile_gstr2b_vs_books_multistate(
             b.supplier_gstin = name_to_gstin.get(name_clean, "")
 
     # Run existing reconciliation logic UNCHANGED
-    results = reconcile_by_invoice_no(all_gstr2b, all_books, tolerance)
+    # Originals restated by a B2BA / B2B-CDNRA row are left out of matching (the
+    # amended row is reconciled instead) — see _supersede_amended_originals.
+    match_2b = _supersede_amended_originals(all_gstr2b)
+    results = reconcile_by_invoice_no(match_2b, all_books, tolerance)
 
     # ── Phase 2: cross-state Remark 3 ────────────────────────────────────────
     # Build fast lookups: normalized_doc_no → list[NormalizedInvoice]
     g_by_doc: dict[str, list[NormalizedInvoice]] = {}
     b_by_doc: dict[str, list[NormalizedInvoice]] = {}
-    for rec in all_gstr2b:
+    for rec in match_2b:
         if rec.normalized_doc_no:
             g_by_doc.setdefault(rec.normalized_doc_no, []).append(rec)
     for rec in all_books:
@@ -172,7 +178,9 @@ def reconcile_gstr2b_vs_books_multistate(
     # matched these rows correctly on their own merits.
     if books_shared:
         # LAST step: vendor + amount pass over what is still unmatched.
+        results = _settle_amendments(results, tolerance)
         results = _apply_probable_matches(results)
+        _note_amendments(results)
         if return_missing:
             return all_gstr2b, all_books, results, missing_list
         return all_gstr2b, all_books, results
@@ -256,7 +264,7 @@ def reconcile_gstr2b_vs_books_multistate(
             if not found:
                 # Tier 2: amount + YYYY-MM + supplier name similarity
                 b_month = (b.doc_date or "")[:7]
-                for c in all_gstr2b:
+                for c in match_2b:
                     c_idx = c.raw.get("_file_idx")
                     if (c_idx != src_idx and b_month
                             and abs(c.taxable_value - b.taxable_value) <= tolerance
@@ -273,7 +281,9 @@ def reconcile_gstr2b_vs_books_multistate(
 
     # LAST step — after the cross-state Remark 3 above: vendor + amount pass over what
     # is still unmatched (rows with a Remark 3 are left alone).
+    results = _settle_amendments(results, tolerance)
     results = _apply_probable_matches(results)
+    _note_amendments(results)
     if return_missing:
         return all_gstr2b, all_books, results, missing_list
     return all_gstr2b, all_books, results

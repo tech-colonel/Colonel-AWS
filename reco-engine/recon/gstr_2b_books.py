@@ -143,7 +143,17 @@ def _norm(text: Any) -> str:
 
 
 def _build_getter(row: dict[str, Any], col_map: dict[str, list[str]]):
-    norm_row = {_norm(k): v for k, v in row.items()}
+    # Two columns can share a name once normalised — a portal B2BA tab carries its
+    # tax as 'Integrated tax(₹)' and, further right, an EMPTY 'Integrated Tax(₹)' under
+    # "ITC to be reduced". A blank one must not overwrite a filled one, or the
+    # amended invoice is read with ZERO tax.
+    norm_row: dict[str, Any] = {}
+    for k, v in row.items():
+        nk = _norm(k)
+        if nk in norm_row and str(v).strip() in ("", "nan") \
+                and str(norm_row[nk]).strip() not in ("", "nan"):
+            continue
+        norm_row[nk] = v
 
     def get(field: str) -> Any:
         for alias in col_map.get(field, []):
@@ -161,7 +171,8 @@ def _build_getter(row: dict[str, Any], col_map: dict[str, list[str]]):
 
 GSTR2B_COL_MAP: dict[str, list[str]] = {
     "supplier_gstin":  ["gstin of supplier", "gstin"],
-    "supplier_name":   ["trade/legal name", "trade name", "legal name"],
+    "supplier_name":   ["trade/legal name", "trade name", "legal name",
+                        "trade/legal name of the supplier"],
     # IMS names its note columns in full ("Credit Note number") where the portal
     # says "Note number", so both spellings are listed. Portal aliases stay FIRST so
     # a portal file keeps resolving exactly as before.
@@ -276,10 +287,20 @@ def _read_gstr2b_sheet(data: bytes, sheet_name: str) -> list[dict[str, Any]]:
     if len(raw) < 7:
         return []
 
+    # COMBINED layout with the portal's merged band, one row higher: a 'Month' column
+    # and the 'GSTIN of supplier' / 'Original Details' labels already on row 4, the
+    # sub-labels (Invoice number, Integrated Tax…) on row 5. Starting the band at
+    # row 5 there kept only the sub-labels and lost 'Taxable Value'. The portal never
+    # has these labels on row 4, so it still starts at row 5 exactly as before.
+    band_start = 4
+    _row3 = {_norm(v) for v in raw.iloc[3] if str(v) != "nan"}
+    if _row3 & {"month", "gstin of supplier", "original details"}:
+        band_start = 3
+
     band_end = _find_header_band_end(raw)
     header_rows = [
         [str(v).strip() if str(v) != "nan" else "" for v in raw.iloc[i]]
-        for i in range(4, max(band_end, 5))
+        for i in range(band_start, max(band_end, band_start + 1))
     ]
 
     # Forward-fill the TOP row only — group headers span merged cells.
@@ -347,6 +368,8 @@ def _read_gstr2b_sheet(data: bytes, sheet_name: str) -> list[dict[str, Any]]:
     rows = data_rows.fillna("").to_dict(orient="records")
     for row in rows:
         row["_sheet"] = sheet_name
+        if band_start == 3:
+            row["_flat"] = True     # reported as the Combined layout
     return rows
 
 
@@ -592,6 +615,38 @@ def _known_layout_problem(data: bytes, records: list[NormalizedInvoice]) -> str 
     return None
 
 
+_GST_RATES = {0.0, 0.1, 0.25, 1.0, 1.5, 3.0, 5.0, 6.0, 7.5, 9.0, 12.0, 14.0, 18.0, 28.0, 40.0}
+
+
+def _refuse_shifted_columns(records: list) -> None:
+    """A hand-merged 2B whose rows sit under the wrong headings.
+
+    The GST portal dropped the 'Rate(%)' column from Oct-2024. Months from both
+    sides of that change stacked under ONE heading put every later row one column
+    to the left: the taxable value under Rate(%), IGST under Taxable Value, and so
+    on — the file reads, but with wrong amounts on half its rows. A genuine 2B
+    always has a GST rate in Rate(%), so an amount there means the columns are
+    shifted. Refused with a message rather than reconciled on wrong figures."""
+    vals = []
+    for r in records:
+        for k, v in r.raw.items():
+            if str(k).strip().lower().startswith("rate"):
+                try:
+                    vals.append(float(str(v).replace("%", "").strip()))
+                except ValueError:
+                    pass
+                break
+    bad = sum(1 for v in vals if round(v, 2) not in _GST_RATES)
+    if bad >= 5 and bad >= 0.05 * len(vals):
+        from .gstr2b_formats import Gstr2bFormatError
+        raise Gstr2bFormatError(
+            f"{bad} of {len(vals)} rows in this GSTR-2B have an amount in the Rate(%) column, so its "
+            "columns are shifted and the taxable value and tax would be read wrongly. This usually "
+            "happens when monthly 2B files are combined by hand: the GST portal removed the Rate(%) "
+            "column from Oct-2024, so later months sit one column to the left. Upload the monthly "
+            "GST-portal 2B files for this state instead — we combine them for you.")
+
+
 def parse_gstr2b(data: bytes) -> list[NormalizedInvoice]:
     data = _ensure_xlsx(data)
     key = _digest(data)
@@ -612,6 +667,7 @@ def parse_gstr2b(data: bytes) -> list[NormalizedInvoice]:
         return rows
 
     records = _parse_gstr2b_tabs(data, _reader)
+    _refuse_shifted_columns(records)
     problem = _known_layout_problem(data, records)
     if problem is None:
         if key not in _FORMAT_INFO:
@@ -2774,6 +2830,55 @@ def _count_2b_rows_per_tab(blob: bytes) -> dict[str, int]:
     return counts
 
 
+def _build_amended_originals_sheet(wb: Any, results: list[Any]) -> None:
+    """One row per original invoice / note that a B2BA / B2B-CDNRA row replaced:
+    the old figures beside the amended ones, and how the amended row reconciled.
+    Those originals are NOT in 'Reco 2B vs Books' — the amended row stands for them."""
+    from openpyxl.styles import Font, PatternFill, Alignment
+    rows = []
+    for r in results:
+        g = _get_val(r, "gstr2b", None)
+        raw = (_get_val(g, "raw", {}) or {}) if g else {}
+        for o in raw.get("_replaced_original") or []:
+            rows.append([
+                _get_val(g, "supplier_name", "") or o.get("supplier_name", ""),
+                _get_val(g, "supplier_gstin", ""),
+                o.get("tab", ""), o.get("month", ""), o.get("doc_no", ""), o.get("doc_date", ""),
+                o.get("taxable_value", 0), o.get("igst", 0), o.get("cgst", 0), o.get("sgst", 0),
+                _get_val(g, "sheet_name", ""), str(raw.get("Month") or ""),
+                _get_val(g, "doc_no", ""), _get_val(g, "doc_date", ""),
+                _get_val(g, "taxable_value", 0), _get_val(g, "igst", 0),
+                _get_val(g, "cgst", 0), _get_val(g, "sgst", 0),
+                round(float(_get_val(g, "taxable_value", 0) or 0) - float(o.get("taxable_value", 0) or 0), 2),
+                _get_val(r, "suggested_action", ""),
+            ])
+    if not rows:
+        return
+    ws = wb.create_sheet(title="Amended Originals")
+    ws.append(["Original invoices / notes replaced by a GSTR-2B amendment (B2BA / B2B-CDNRA). "
+               "They are not reconciled — the amended row in 'Reco 2B vs Books' is."])
+    ws["A1"].font = Font(bold=True, size=11)
+    heads = ["Supplier", "GSTIN", "Original tab", "Original month", "Original no.", "Original date",
+             "Original taxable", "Original IGST", "Original CGST", "Original SGST",
+             "Amendment tab", "Amendment month", "Amended no.", "Amended date",
+             "Amended taxable", "Amended IGST", "Amended CGST", "Amended SGST",
+             "Change in taxable", "Amended row — Remark 1"]
+    ws.append(heads)
+    hdr = PatternFill("solid", fgColor="1F4E78")
+    for c in ws[2]:
+        c.font = Font(bold=True, color="FFFFFF", size=9)
+        c.fill = hdr
+        c.alignment = Alignment(wrap_text=True, horizontal="center")
+    for row in rows:
+        ws.append(row)
+    for row in ws.iter_rows(min_row=3, min_col=7, max_col=19):
+        for c in row:
+            if isinstance(c.value, (int, float)):
+                c.number_format = "#,##0.00"
+    for i, w in enumerate([34, 18, 12, 12, 18, 12] + [13] * 4 + [13, 13, 18, 12] + [13] * 5 + [30], 1):
+        ws.column_dimensions[ws.cell(row=2, column=i).column_letter].width = w
+
+
 def build_proof_sheet(wb: Any, results: list[Any], payload: dict) -> None:
     """A one-page tie-out proving nothing was lost between file, parse and output.
 
@@ -2933,14 +3038,21 @@ def build_proof_sheet(wb: Any, results: list[Any], payload: dict) -> None:
                   if _get_val(x, "gstr2b", None) is not None and _get_val(x, "purchase", None) is None)
     only_bk = sum(1 for x in results
                   if _get_val(x, "gstr2b", None) is None and _get_val(x, "purchase", None) is not None)
-    n2b = paired + only_2b
+    # Originals restated by a B2BA / B2B-CDNRA row are parsed but not reconciled —
+    # their amended row is. They are listed on the 'Amended Originals' sheet.
+    replaced = sum(len(((_get_val(_get_val(x, "gstr2b", None), "raw", {}) or {})
+                        .get("_replaced_original") or []))
+                   for x in results if _get_val(x, "gstr2b", None) is not None)
+    n2b = paired + only_2b + replaced
     nbk = paired + only_bk
     ok_c1 = n2b == tot_parsed
     ok_c2 = nbk == b_tot_parsed
     ok_c3 = len(results) == paired + only_2b + only_bk
     checks += [ok_c1, ok_c2, ok_c3]
     line(["GSTR-2B records parsed", tot_parsed])
-    line([f"   paired with Books ({paired}) + in 2B only ({only_2b})", n2b], verdict=ok_c1)
+    line([f"   paired with Books ({paired}) + in 2B only ({only_2b})"
+          + (f" + originals replaced by an amendment ({replaced})" if replaced else ""), n2b],
+         verdict=ok_c1)
     line(["Books records parsed", b_tot_parsed])
     line([f"   paired with 2B ({paired}) + in Books only ({only_bk})", nbk], verdict=ok_c2)
     line(["Rows written to 'Reco 2B vs Books'", len(results)], verdict=ok_c3)
@@ -3322,6 +3434,12 @@ def build_gstr2b_books_workbook(results: list[dict], payload: dict | None = None
     ws_output = wb.create_sheet(title="Reco 2B vs Books")
     _populate_workbook(ws_output, results)
 
+    # 5b. Originals replaced by a B2BA / B2B-CDNRA amendment (only when there are any).
+    try:
+        _build_amended_originals_sheet(wb, results)
+    except Exception as e:
+        print(f"Failed to build Amended Originals sheet: {e}")
+
     # 6. Proof sheet — control totals tying the input files to this workbook. Built
     # last so it reports on the finished output, and placed first so it is the first
     # thing read. Purely a report: a failure here must never cost the real content.
@@ -3463,11 +3581,173 @@ def reconcile_gstr2b_vs_books(
             if name_clean in name_to_gstin:
                 b.supplier_gstin = name_to_gstin[name_clean]
 
-    results = reconcile_by_invoice_no(gstr2b_records, books_records, tolerance=tolerance)
+    results = reconcile_by_invoice_no(_supersede_amended_originals(gstr2b_records),
+                                      books_records, tolerance=tolerance)
     # LAST step: pair what is still unmatched by vendor + amount (never touches rows
     # an earlier pass settled). See recon/probable_match.py.
+    results = _settle_amendments(results, tolerance)
     results = _apply_probable_matches(results)
+    _note_amendments(results)
     return gstr2b_records, books_records, results, list(missing_names.values())
+
+
+_AMENDS = {"B2BA": "B2B", "B2B-CDNRA": "B2B-CDNR"}
+_REVISED_NO = ("Invoice number_1", "Note number_1")
+_REVISED_DATE = ("Invoice Date_1", "Invoice date_1", "Note date_1", "Note Date_1")
+
+
+def _supersede_amended_originals(records: list) -> list:
+    """The list of GSTR-2B records to MATCH, with every original a B2BA / B2B-CDNRA
+    row amends left out.
+
+    An amendment restates an invoice or note the supplier filed earlier; the amended
+    row is what the supplier now declares. Kept side by side, the original (read
+    first) took the books entry and reported a false Amount Mismatch, the amendment
+    sat in "2B not in Books", and every 2B total counted the invoice twice.
+
+    Linked on supplier GSTIN + the ORIGINAL number quoted on the amendment row, within
+    the same 2B file. An amendment whose original is not in the upload (filed in a
+    period not given) stands on its own. The amended row takes its REVISED number and
+    date, and records what it replaced in raw['_replaced_original'] — for the remark,
+    the 'Amended Originals' sheet and the Proof tie-out. Nothing is deleted: the
+    parsed list itself is unchanged."""
+    amends: dict[tuple, Any] = {}
+    for r in records:
+        orig_tab = _AMENDS.get(r.sheet_name)
+        if not orig_tab:
+            continue
+        r.raw["_replaced_original"] = []
+        if r.raw.get("_original_doc_no") is None:
+            # OCTA states the original number in its own column; the portal's
+            # amendment tab quotes it first, where doc_no was read from.
+            octa_orig = next((str(v).strip() for k, v in r.raw.items()
+                              if _norm(k) in ("original doc no", "original document number")
+                              and str(v).strip() not in ("", "nan")), "")
+            r.raw["_original_doc_no"] = octa_orig or r.doc_no
+            r.raw["_original_doc_date"] = r.doc_date
+        orig_no = normalize_doc_no(r.raw["_original_doc_no"])
+        if r.supplier_gstin and orig_no:
+            amends[(r.raw.get("_file_idx", 0), orig_tab, r.supplier_gstin, orig_no)] = r
+        rev_no = next((str(r.raw[k]).strip() for k in _REVISED_NO
+                       if str(r.raw.get(k, "")).strip() not in ("", "nan")), "")
+        if rev_no:
+            r.doc_no = rev_no
+            r.normalized_doc_no = normalize_doc_no(rev_no)
+        rev_date = next((r.raw[k] for k in _REVISED_DATE
+                         if str(r.raw.get(k, "")).strip() not in ("", "nan")), "")
+        if rev_date:
+            r.doc_date = parse_date(rev_date) or r.doc_date
+    if not amends:
+        return records
+
+    keep = []
+    for r in records:
+        hit = amends.get((r.raw.get("_file_idx", 0), r.sheet_name, r.supplier_gstin,
+                          r.normalized_doc_no)) if r.sheet_name in _AMENDS.values() else None
+        if hit is None:
+            keep.append(r)
+            continue
+        hit.raw["_replaced_original"].append({
+            "tab": r.sheet_name, "row_id": r.row_id, "supplier_name": r.supplier_name,
+            "doc_no": r.doc_no, "doc_date": r.doc_date,
+            "month": str(r.raw.get("Month") or r.raw.get("GSTR-2B Period") or ""),
+            "taxable_value": r.taxable_value, "igst": r.igst, "cgst": r.cgst, "sgst": r.sgst,
+        })
+    return keep
+
+
+def _settle_amendments(results: list, tolerance: float = 1.0) -> list:
+    """Books still carrying the ORIGINAL figures of an amended invoice.
+
+    Once the original is left out, an amended row whose number the books spell
+    differently ('064' vs 'PNR 064') and whose value the books never updated would
+    sit unpaired, with the books entry unpaired beside it. Pair them — same supplier
+    GSTIN, and the books entry agrees with the original on number (digits) or on
+    taxable value — as an Amount Mismatch that says the amendment is not booked.
+    Runs before the Probable Match pass; touches only rows still unmatched on both
+    sides."""
+    if not any(_get_val(r, "purchase", None) is None and _get_val(r, "gstr2b", None) is not None
+               and (r.gstr2b.raw.get("_replaced_original") or []) for r in results):
+        return results
+    open_bk = [i for i, r in enumerate(results)
+               if _get_val(r, "gstr2b", None) is None and _get_val(r, "purchase", None) is not None]
+    used: set[int] = set()
+    drop: set[int] = set()
+    for i, r in enumerate(results):
+        g, b = _get_val(r, "gstr2b", None), _get_val(r, "purchase", None)
+        if g is None or b is not None or not (g.raw.get("_replaced_original") or []):
+            continue
+        o = g.raw["_replaced_original"][0]
+        o_core = _core_digits(normalize_doc_no(o["doc_no"]))
+        best, best_rank = None, None
+        for j in open_bk:
+            if j in used:
+                continue
+            bk = results[j].purchase
+            if not bk.supplier_gstin or bk.supplier_gstin != g.supplier_gstin:
+                continue
+            same_no = bool(o_core) and _core_digits(bk.normalized_doc_no) == o_core
+            same_val = abs(bk.taxable_value - o["taxable_value"]) <= tolerance
+            if not (same_no or same_val):
+                continue
+            rank = (same_no and same_val, same_no, same_val)
+            if best_rank is None or rank > best_rank:
+                best, best_rank = j, rank
+        if best is None:
+            continue
+        used.add(best)
+        drop.add(best)
+        bk = results[best].purchase
+        tags = []
+        tax_d = round(g.igst + g.cgst + g.sgst - (bk.igst + bk.cgst + bk.sgst), 2)
+        tv_d = round(g.taxable_value - bk.taxable_value, 2)
+        if abs(tax_d) > tolerance:
+            tags.append(f"Tax Amount Mismatch, Excess in {'2B' if tax_d > 0 else 'Books'}")
+        if abs(tv_d) > tolerance:
+            tags.append(f"Taxable Value Mismatch, Excess in {'2B' if tv_d > 0 else 'Books'}")
+        r.purchase = bk
+        r.category = "Amount Mismatch" if tags else "Matched"
+        r.suggested_action = "Matched"
+        r.mismatch_fields = ["taxable_value"] if abs(tv_d) > tolerance else []
+        r.explanation = "Amended invoice paired with the books entry of its original."
+        r.suggested_action_2 = ", ".join(
+            ["Books still at the ORIGINAL figures — amendment not booked"] + tags
+            if tags else ["Books entry of the original agrees with the amended figures"])
+    if drop:
+        results = [r for k, r in enumerate(results) if k not in drop]
+    return results
+
+
+def _note_amendments(results: list) -> None:
+    """Remark 2 on every amended row: what it replaced, so the accountant sees the
+    old figures without the old row being reconciled. A books-only entry that is
+    the replaced ORIGINAL (same supplier, same number) is told so — the books
+    probably carry both versions of the invoice."""
+    originals: dict[tuple, Any] = {}
+    for r in results:
+        g = _get_val(r, "gstr2b", None)
+        for o in ((_get_val(g, "raw", {}) or {}).get("_replaced_original") or []) if g else []:
+            originals[(g.supplier_gstin, normalize_doc_no(o["doc_no"]))] = (g, o)
+    for r in results:
+        g, b = _get_val(r, "gstr2b", None), _get_val(r, "purchase", None)
+        if g is None and b is not None and originals:
+            hit = originals.get((b.supplier_gstin, b.normalized_doc_no))
+            if hit:
+                ag, o = hit
+                note = (f"Same number as the original the supplier amended in {ag.sheet_name} "
+                        f"(amended taxable {ag.taxable_value:,.2f}) — books may carry both versions")
+                prev = getattr(r, "suggested_action_2", "") or ""
+                r.suggested_action_2 = f"{note}, {prev}" if prev else note
+            continue
+        reps = (_get_val(g, "raw", {}) or {}).get("_replaced_original") if g else None
+        if not reps:
+            continue
+        o = reps[0]
+        tax = round(o["igst"] + o["cgst"] + o["sgst"], 2)
+        note = (f"Amended in {g.sheet_name} — replaces original {o['doc_no']} "
+                f"(taxable {o['taxable_value']:,.2f}, tax {tax:,.2f}); original not used for matching")
+        prev = getattr(r, "suggested_action_2", "") or ""
+        r.suggested_action_2 = f"{note}, {prev}" if prev else note
 
 
 def _apply_probable_matches(results: list) -> list:
