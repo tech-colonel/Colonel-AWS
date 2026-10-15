@@ -3143,6 +3143,46 @@ function CashCycle({ led, data, shown, onDrill }) {
     .flatMap((c) => (c.bySaleMonth || []).filter((x) => !sel.has(x.saleMonth)))
     .reduce((a, x) => ({ amount: r2(a.amount + x.amount), orders: a.orders + x.orders }),
             { amount: 0, orders: 0 });
+  /* ── THE PERIOD'S OWN CLOSING BALANCE ──────────────────────────────────
+     A month view answers "what did this month close owing?" and the accountant
+     reads it every month. A YEAR view could not answer the same question: it
+     showed only "Still pending", which is what has never arrived AFTER every
+     later file was loaded. Those are different questions with very different
+     answers - FY25-26 closed 31 Mar owing 2,35,086.85, of which all but
+     3,794.81 came in during April. Reading 3,794.81 as "the receivable at the
+     year end" understates it by 61x, and summing the twelve month-end closings
+     instead gives 20,27,983.89, which double counts every month that was paid
+     in the next one. Neither is the balance sheet figure.
+
+     So compute it the only way that is right: cash dated ON OR BEFORE the last
+     month shown, against what was due on the period's own sales. `received` is
+     each month's cash by ITS OWN end, and `laterBy` breaks the rest out by the
+     month it actually arrived - so the part that arrived while the period was
+     still open is the entries dated at or before the period end. Built from
+     the month summaries alone, so it never waits on the per-order rows. */
+  const periodEnd = shown.length ? shown.reduce((a, b) => (a > b ? a : b)) : null;
+  const recdByEnd = periodEnd
+    ? led.reduce((a, m) => a + (m.received?.amount || 0)
+        + (m.laterBy || []).reduce((b, x) => b + (x.month <= periodEnd ? x.amount : 0), 0), 0)
+    : 0;
+  const asAtClose = r2(amt('expected') - recdByEnd);
+  /* what happened to that balance afterwards, by the month it turned up -
+     the same read-down the month view gives, so a year closes the same way */
+  const afterEnd = Object.values(
+    led.reduce((acc, m) => {
+      (m.laterBy || []).forEach((x) => {
+        if (periodEnd && x.month > periodEnd) {
+          if (!acc[x.month]) acc[x.month] = { month: x.month, amount: 0, orders: 0 };
+          acc[x.month].amount = r2(acc[x.month].amount + x.amount);
+          acc[x.month].orders += (x.orders || 0);
+        }
+      });
+      return acc;
+    }, {}),
+  ).sort((a, b) => (a.month < b.month ? -1 : 1));
+  /* one month already has this, in its own words, on the card above */
+  const showClose = shown.length > 1 && periodEnd;
+
   const EQ = [
     { cap: 'Net sales', v: amt('netBillable'), note: 'Sales after customer returns', op: '−', line: 'netBillable' },
     { cap: 'Amazon charges', v: amt('fees'), note: 'Commission, closing fee, FBA and storage', op: '−', fg: T.amberText, bg: '#FFFBF4', line: 'fees' },
@@ -3284,6 +3324,84 @@ function CashCycle({ led, data, shown, onDrill }) {
               </React.Fragment>
             ))}
           </div>
+          {showClose && (
+            <div className="mt-4 bg-white border rounded-xl overflow-hidden"
+                 style={{ borderColor: '#FBD5D5' }}>
+              <div className="px-5 py-3 border-b"
+                   style={{ background: '#FEF8F8', borderColor: '#FBD5D5' }}>
+                <div className="flex items-baseline justify-between gap-4 flex-wrap">
+                  <div className="text-[13.5px] font-bold" style={{ color: T.red }}>
+                    The receivable as on {endLabel(periodEnd)} — what the period closed owing
+                  </div>
+                  <div className="text-[22px] font-bold tabular-nums" style={{ color: T.red }}>
+                    ₹{inr(asAtClose)}
+                  </div>
+                </div>
+                <div className="text-[12px] text-slate-500 mt-0.5">
+                  This is the balance-sheet figure: what Amazon owed on these sales on the day the
+                  period closed. It is <strong>not</strong> “Still pending” above — that is only the
+                  part which never arrived at all, after every later file was loaded.
+                </div>
+              </div>
+              <div className="px-5 py-2">
+                <div className="flex justify-between items-baseline gap-3 py-2 border-b border-slate-100">
+                  <span className="text-[13.5px] text-slate-700">Due from Amazon on these sales</span>
+                  <span className="text-[13.5px] font-semibold tabular-nums text-slate-800">
+                    ₹{inr(amt('expected'))}
+                  </span>
+                </div>
+                <button onClick={() => onDrill({ kind: 'line', line: 'received', months: shown })}
+                        className="w-full flex justify-between items-baseline gap-3 py-2 border-b border-slate-100 text-left hover:bg-slate-50">
+                  <span className="text-[13.5px] text-slate-700">
+                    Less received by {endLabel(periodEnd)}
+                  </span>
+                  <span className="text-[13.5px] font-semibold tabular-nums" style={{ color: T.green }}>
+                    −₹{inr(recdByEnd)}
+                  </span>
+                </button>
+                <div className="flex justify-between items-baseline gap-3 py-2.5 border-b border-slate-100">
+                  <span className="text-[13.5px] font-bold text-slate-800">
+                    = Receivable as on {endLabel(periodEnd)}
+                  </span>
+                  <span className="text-[15px] font-bold tabular-nums" style={{ color: T.red }}>
+                    ₹{inr(asAtClose)}
+                  </span>
+                </div>
+                <div className="text-[11.5px] font-bold uppercase tracking-wider text-slate-400 pt-3 pb-1">
+                  What happened to it afterwards
+                </div>
+                {afterEnd.length === 0 && (
+                  <div className="text-[13px] text-slate-500 py-2">
+                    Nothing has come in since the period ended.
+                  </div>
+                )}
+                {afterEnd.map((x) => (
+                  <button key={x.month}
+                          onClick={() => onDrill({ kind: 'line', line: 'receivedLater', months: shown })}
+                          className="w-full flex justify-between items-baseline gap-3 py-2 border-b border-slate-100 text-left hover:bg-slate-50">
+                    <span className="text-[13.5px] text-slate-700">
+                      {x.amount < 0 ? 'Taken back in ' : 'Came in '}{fmtMonth(x.month)}
+                      <span className="text-[11.5px] text-slate-400 ml-1.5">{int(x.orders)} orders</span>
+                    </span>
+                    <span className="text-[13.5px] font-semibold tabular-nums"
+                          style={{ color: x.amount < 0 ? T.red : T.green }}>
+                      {x.amount < 0 ? '−' : ''}₹{inr(Math.abs(x.amount))}
+                    </span>
+                  </button>
+                ))}
+                <div className="flex justify-between items-baseline gap-3 py-2.5">
+                  <span className="text-[13.5px] font-bold text-slate-800">
+                    Still not received
+                    <span className="text-[11.5px] text-slate-400 ml-1.5">after every file loaded</span>
+                  </span>
+                  <span className="text-[14px] font-bold tabular-nums"
+                        style={{ color: Math.abs(amt('stillOpen')) < 1 ? T.green : T.red }}>
+                    ₹{inr(amt('stillOpen'))}
+                  </span>
+                </div>
+              </div>
+            </div>
+          )}
           {Math.abs(credits) > 1 && (
             <div className="mt-3 rounded-xl px-4 py-2.5"
                  style={{ background: '#FFFBEB', border: '1px solid #FDE68A' }}>
