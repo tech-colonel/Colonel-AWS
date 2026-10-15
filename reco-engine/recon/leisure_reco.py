@@ -1,4 +1,8 @@
-"""Leisure Reco — generic two-party ledger reconciliation engine.
+"""Ledger Reco — generic two-party ledger reconciliation engine.
+
+(Formerly "Leisure Reco". The reco_type / module / function names keep the
+`leisure_reco` spelling so existing reco_jobs history and the Node proxy map
+stay valid — only the display name changed.)
 
 Fully self-contained — deliberately does NOT import from any other recon/*.py
 module (mirrors receivable_cycle.py's convention). This implements the
@@ -297,6 +301,13 @@ def _parse_ledger_file(data: bytes, filename: str, side: str) -> dict[str, Any]:
                 party_name = t
                 break
 
+    # Source ledger of each entry: the row's own Particulars (the ledger account
+    # in a columnar export, which can differ row to row when one file carries
+    # more than one ledger for the same party), else the file-level party name.
+    for r in rows:
+        r["ledger_name"] = r["particulars"] or party_name
+        r["source_file"] = filename
+
     return {
         "filename": filename,
         "party_name": party_name,
@@ -513,12 +524,21 @@ def _classify_variance(row: dict) -> str:
 # Result-row + closing-bridge construction
 # ---------------------------------------------------------------------------
 
+# Status remark carried on every result row / ledger entry. Anything that did
+# not pair off (variance buckets + Needs Review) is "Mismatched".
+STATUS_MATCHED = "Matched"
+STATUS_MISMATCHED = "Mismatched"
+
+
 def _row_fields(prefix: str, row: dict | None) -> dict[str, Any]:
     if row is None:
         return {f"{prefix}_date": None, f"{prefix}_voucher_type": None,
                 f"{prefix}_voucher_no": None, f"{prefix}_ref_no": None,
-                f"{prefix}_narration": None, f"{prefix}_amount": None}
+                f"{prefix}_narration": None, f"{prefix}_amount": None,
+                f"{prefix}_ledger": None, f"{prefix}_row_no": None}
     return {
+        f"{prefix}_ledger": row.get("ledger_name") or None,
+        f"{prefix}_row_no": row["row_no"],
         f"{prefix}_date": row["date"].isoformat() if row["date"] else None,
         f"{prefix}_voucher_type": row["voucher_type"] or None,
         f"{prefix}_voucher_no": row["voucher_no"] or None,
@@ -543,6 +563,7 @@ def _build_result_rows(matches: list[dict], unmatched_int: list[dict], unmatched
         amount = (ir or cr)["amount"]
         results.append({
             "category": "Matched",
+            "status": STATUS_MATCHED,
             "match_method": method_labels.get(m["method"], m["method"]),
             "amount": amount,
             **_row_fields("internal", ir),
@@ -553,6 +574,7 @@ def _build_result_rows(matches: list[dict], unmatched_int: list[dict], unmatched
         category = _classify_variance(r)
         results.append({
             "category": category,
+            "status": STATUS_MISMATCHED,
             "match_method": None,
             "amount": r["amount"],
             **_row_fields("internal", r),
@@ -563,6 +585,7 @@ def _build_result_rows(matches: list[dict], unmatched_int: list[dict], unmatched
         category = _classify_variance(r)
         results.append({
             "category": category,
+            "status": STATUS_MISMATCHED,
             "match_method": None,
             "amount": r["amount"],
             **_row_fields("internal", None),
@@ -572,6 +595,7 @@ def _build_result_rows(matches: list[dict], unmatched_int: list[dict], unmatched
     for r in needs_review:
         results.append({
             "category": "Needs Review",
+            "status": STATUS_MISMATCHED,
             "match_method": None,
             "amount": r["amount"],
             "explanation": "Journal entry — could not determine Debit/Credit direction "
@@ -671,6 +695,8 @@ def reconcile_leisure_ledgers(internal_bytes: bytes, internal_filename: str,
         "internal_rows": len(int_rows),
         "counterparty_rows": len(cp_rows),
         "matched_pairs": len(matches),
+        "matched_entries": len(used_int) + len(used_cp),
+        "mismatched_entries": len(unmatched_int_all) + len(unmatched_cp_all),
         "needs_review_rows": len(needs_review),
         "result_rows": len(results),
     }
@@ -733,6 +759,242 @@ NEEDS_REVIEW_COLUMNS = [
 ]
 
 
+# ---------------------------------------------------------------------------
+# Entry-level view: every ledger line once, with its Matched/Mismatched status
+# ---------------------------------------------------------------------------
+
+_SOURCE_LABEL = {"internal": "Internal Ledger", "counterparty": "Counterparty Statement"}
+_HEADER_FILL = "123C69"
+_SECTION_FILL = "DCE6F1"
+_AMOUNT_FMT = "#,##0.00"
+_DATE_FMT = "DD-MMM-YY"
+
+# Suggested next step per variance bucket ({own}/{other} = the two parties).
+_ACTION_BY_CATEGORY = {
+    "Timing Difference": "None – timing only; confirm it clears in the next period",
+    "Tax Deduction": "Confirm the TDS/TCS against Form 26AS / certificate and book it in {other} books",
+    "Disputed": "Resolve the dispute with the party; pass a debit/credit note once agreed",
+    "Omission in Books": "Book the omitted entry (charges / interest / direct credit) in {other} books",
+    "Missing at Counterparty": "{other} to confirm and book it, or {own} to reverse",
+    "Needs Review": "Verify the Debit/Credit direction of this journal manually",
+}
+
+
+def _ledger_entries(results: list[dict]) -> list[dict]:
+    """Flattens result rows back to one line per ledger entry (a batch
+    settlement repeats its lump-sum row once per split row — de-duplicated
+    here), in each ledger's original order, Internal first."""
+    entries: list[dict] = []
+    seen: set[tuple[str, Any]] = set()
+    for r in results:
+        for side in ("internal", "counterparty"):
+            if r.get(f"{side}_date") is None and r.get(f"{side}_amount") is None:
+                continue
+            key = (side, r.get(f"{side}_row_no"))
+            if key[1] is not None:
+                if key in seen:
+                    continue
+                seen.add(key)
+            matched = r.get("category") == "Matched"
+            entries.append({
+                "side": side,
+                "source": _SOURCE_LABEL[side],
+                "ledger": r.get(f"{side}_ledger") or "",
+                "row_no": r.get(f"{side}_row_no"),
+                "date": _parse_date(r.get(f"{side}_date")),
+                "voucher_type": r.get(f"{side}_voucher_type"),
+                "voucher_no": r.get(f"{side}_voucher_no"),
+                "ref_no": r.get(f"{side}_ref_no"),
+                "narration": r.get(f"{side}_narration"),
+                "amount": r.get(f"{side}_amount") or 0.0,
+                "status": STATUS_MATCHED if matched else STATUS_MISMATCHED,
+                "category": r.get("category"),
+                "remark": r.get("match_method") if matched else r.get("category"),
+                "explanation": r.get("explanation"),
+            })
+    entries.sort(key=lambda e: (0 if e["side"] == "internal" else 1,
+                                e["row_no"] if e["row_no"] is not None else 0))
+    return entries
+
+
+def _style_table_header(sheet, row_idx: int, n_cols: int) -> None:
+    from openpyxl.styles import Alignment, Font, PatternFill
+    fill = PatternFill("solid", fgColor=_HEADER_FILL)
+    for col in range(1, n_cols + 1):
+        cell = sheet.cell(row=row_idx, column=col)
+        cell.font = Font(bold=True, color="FFFFFF")
+        cell.fill = fill
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+
+
+def _status_font(status: str):
+    from openpyxl.styles import Font
+    return Font(bold=True, color="1E7B34" if status == STATUS_MATCHED else "C00000")
+
+
+def _write_all_entries_sheet(sheet, entries: list[dict]) -> None:
+    headers = ["Source", "Ledger Name", "Date", "Voucher Type", "Voucher No", "Ref No",
+               "Narration", "Amount", "Status", "Remark"]
+    sheet.append(headers)
+    for e in entries:
+        sheet.append([e["source"], e["ledger"], e["date"], e["voucher_type"], e["voucher_no"],
+                      e["ref_no"], e["narration"], e["amount"], e["status"], e["remark"]])
+        row = sheet.max_row
+        sheet.cell(row=row, column=3).number_format = _DATE_FMT
+        sheet.cell(row=row, column=8).number_format = _AMOUNT_FMT
+        sheet.cell(row=row, column=9).font = _status_font(e["status"])
+    _style_table_header(sheet, 1, len(headers))
+    for letter, width in zip("ABCDEFGHIJ", (22, 32, 12, 16, 16, 16, 48, 16, 14, 36)):
+        sheet.column_dimensions[letter].width = width
+    sheet.freeze_panes = "A2"
+    sheet.auto_filter.ref = f"A1:J{max(sheet.max_row, 1)}"
+
+
+def _entry_text(e: dict) -> str:
+    """How the entry reads in its own books — 'Payment 83 dated 05-Jul-25'."""
+    parts = [str(p) for p in (e["voucher_type"], e["voucher_no"] or e["ref_no"]) if p]
+    text = " ".join(parts) or "Entry"
+    if e["date"]:
+        text += f" dated {e['date'].strftime('%d-%b-%y')}"
+    return text
+
+
+def _write_mismatched_sheet(sheet, entries: list[dict], mismatched: list[dict], payload: dict,
+                            internal_meta: dict, counterparty_meta: dict) -> None:
+    """One sheet: reconciliation summary (totals + counts) on top, then the
+    complete list of mismatched entries with the ledger each one came from."""
+    from openpyxl.styles import Alignment, Font, PatternFill
+
+    closing = payload.get("closing_bridge") or {}
+    names = {"internal": internal_meta.get("party_name") or "Internal",
+             "counterparty": counterparty_meta.get("party_name") or "Counterparty"}
+    # Each file is the ledger OF the other party, so "X books" would be
+    # ambiguous — label the two sides by role instead.
+    books = {"internal": "Internal", "counterparty": "Counterparty"}
+    section_fill = PatternFill("solid", fgColor=_SECTION_FILL)
+    bold = Font(bold=True)
+
+    def section(title: str) -> None:
+        sheet.append([None, title])
+        row = sheet.max_row
+        for col in range(1, 15):
+            sheet.cell(row=row, column=col).fill = section_fill
+        sheet.cell(row=row, column=2).font = bold
+
+    def stat(side: str | None, rows: list[dict]) -> tuple[int, float]:
+        picked = [e for e in rows if side is None or e["side"] == side]
+        return len(picked), _round(sum(e["amount"] for e in picked))
+
+    def summary_line(label: str, rows: list[dict], is_bold: bool = False) -> None:
+        ic, ia = stat("internal", rows)
+        cc, ca = stat("counterparty", rows)
+        tc, ta = stat(None, rows)
+        sheet.append([None, label, ic, ia, cc, ca, tc, ta])
+        row = sheet.max_row
+        for col in (4, 6, 8):
+            sheet.cell(row=row, column=col).number_format = _AMOUNT_FMT
+        if is_bold:
+            for col in range(2, 9):
+                sheet.cell(row=row, column=col).font = bold
+
+    def balance_line(label: str, internal_val: Any, counterparty_val: Any, note: str = "") -> None:
+        sheet.append([None, label, None, internal_val, None, counterparty_val, None, None, note or None])
+        row = sheet.max_row
+        for col in (4, 6):
+            sheet.cell(row=row, column=col).number_format = _AMOUNT_FMT
+
+    sheet.append([f"List of differences – Internal Ledger ({names['internal']}) vs "
+                  f"Counterparty Statement ({names['counterparty']})"])
+    sheet.cell(row=1, column=1).font = Font(bold=True, size=14)
+    sheet.append(["Every entry that did not pair off, with the ledger it came from. "
+                  "Amounts are as booked in the source ledger (unsigned)."])
+    sheet.cell(row=2, column=1).font = Font(italic=True, color="595959")
+    sheet.append([])
+
+    # ---- 1. Reconciliation summary: totals + counts --------------------
+    section("1. Reconciliation summary – totals and counts")
+    sheet.append([None, "Entries", "Internal – Count", "Internal – Amount", "Counterparty – Count",
+                  "Counterparty – Amount", "Total – Count", "Total – Amount"])
+    _style_table_header(sheet, sheet.max_row, 8)
+    sheet.cell(row=sheet.max_row, column=1).fill = PatternFill(fill_type=None)
+    matched = [e for e in entries if e["status"] == STATUS_MATCHED]
+    summary_line("Total entries", entries, is_bold=True)
+    summary_line(STATUS_MATCHED, matched)
+    summary_line(STATUS_MISMATCHED, mismatched, is_bold=True)
+    categories = list(dict.fromkeys(e["category"] for e in mismatched))
+    for category in categories:
+        summary_line(f"   of which: {category}", [e for e in mismatched if e["category"] == category])
+    sheet.append([])
+
+    section("2. Balances")
+    sheet.append([None, "Balance", None, "Internal", None, "Counterparty"])
+    _style_table_header(sheet, sheet.max_row, 6)
+    sheet.cell(row=sheet.max_row, column=1).fill = PatternFill(fill_type=None)
+    opening_gap = closing.get("opening_gap", 0) or 0
+    balance_line("Opening balance", closing.get("opening_internal", 0), closing.get("opening_counterparty", 0),
+                 f"Gap {opening_gap:,.2f}" if opening_gap else "Agrees")
+    balance_line("Closing balance (computed)", closing.get("computed_closing_internal", 0),
+                 closing.get("computed_closing_counterparty", 0))
+    balance_line("Closing balance (stated in file)", closing.get("stated_closing_internal"),
+                 closing.get("stated_closing_counterparty"))
+    sheet.append([None, "Unexplained variance (Internal + Counterparty closing)", None,
+                  closing.get("unexplained_variance", 0), None, None, None, None,
+                  "Should be zero once the mismatched entries below are cleared"])
+    row = sheet.max_row
+    sheet.cell(row=row, column=2).font = bold
+    sheet.cell(row=row, column=4).font = bold
+    sheet.cell(row=row, column=4).number_format = _AMOUNT_FMT
+    sheet.append([])
+
+    # ---- 3. The mismatched list ----------------------------------------
+    section(f"3. Mismatched entries ({len(mismatched)})")
+    headers = ["#", "Type", "Status", "Source", "Ledger Name", "Date", "Voucher Type", "Voucher No",
+               "Ref No", "Narration", "In Internal books", "In Counterparty books", "Amount (INR)", "Action"]
+    sheet.append(headers)
+    header_row = sheet.max_row
+    _style_table_header(sheet, header_row, len(headers))
+
+    wrap = Alignment(vertical="top", wrap_text=True)
+    serial = 0
+
+    def list_row(values: list[Any]) -> None:
+        sheet.append(values)
+        row = sheet.max_row
+        sheet.cell(row=row, column=3).font = _status_font(STATUS_MISMATCHED)
+        sheet.cell(row=row, column=6).number_format = _DATE_FMT
+        sheet.cell(row=row, column=13).number_format = _AMOUNT_FMT
+        for col in (10, 11, 12, 14):
+            sheet.cell(row=row, column=col).alignment = wrap
+
+    if payload.get("opening_balance_ok") is False:
+        serial += 1
+        list_row([serial, "Opening Balance", STATUS_MISMATCHED, "Both ledgers",
+                  f"{names['internal']} / {names['counterparty']}", None, None, None, None,
+                  "Opening balance mismatch",
+                  f"Opening {closing.get('opening_internal', 0):,.2f}",
+                  f"Opening {closing.get('opening_counterparty', 0):,.2f}",
+                  abs(opening_gap),
+                  "Tie both sides back to the prior-period closing balances"])
+
+    for e in mismatched:
+        serial += 1
+        own, other = e["side"], ("counterparty" if e["side"] == "internal" else "internal")
+        in_books = {own: _entry_text(e),
+                    other: "—" if e["category"] == "Needs Review" else "Not booked"}
+        action = _ACTION_BY_CATEGORY.get(e["category"], "Review").format(own=books[own], other=books[other])
+        list_row([serial, e["category"], e["status"], e["source"], e["ledger"], e["date"],
+                  e["voucher_type"], e["voucher_no"], e["ref_no"], e["narration"],
+                  in_books["internal"], in_books["counterparty"], e["amount"], action])
+
+    if not serial:
+        sheet.append([None, "No mismatched entries – both ledgers agree."])
+
+    for letter, width in zip("ABCDEFGHIJKLMN", (5, 40, 18, 22, 30, 20, 16, 16, 16, 44, 32, 32, 16, 52)):
+        sheet.column_dimensions[letter].width = width
+    if serial:
+        sheet.auto_filter.ref = f"A{header_row}:N{sheet.max_row}"
+
+
 def _write_rows(sheet, rows: list[dict], columns: list[tuple[str, str]]) -> None:
     sheet.append([label for _, label in columns])
     for row in rows:
@@ -748,6 +1010,9 @@ def build_leisure_reco_workbook(results: list[dict], summary: dict[str, int], co
     internal_meta = payload.get("internal_meta") or {}
     counterparty_meta = payload.get("counterparty_meta") or {}
 
+    entries = _ledger_entries(results)
+    mismatched = [e for e in entries if e["status"] == STATUS_MISMATCHED]
+
     workbook = Workbook()
 
     summary_sheet = workbook.active
@@ -762,12 +1027,18 @@ def build_leisure_reco_workbook(results: list[dict], summary: dict[str, int], co
     summary_sheet.append(["Internal rows", counts.get("internal_rows", 0)])
     summary_sheet.append(["Counterparty rows", counts.get("counterparty_rows", 0)])
     summary_sheet.append(["Matched pairs", counts.get("matched_pairs", 0)])
+    summary_sheet.append(["Matched entries (both ledgers)", sum(1 for e in entries if e["status"] == STATUS_MATCHED)])
+    summary_sheet.append(["Mismatched entries (both ledgers)", len(mismatched)])
     summary_sheet.append(["Needs review rows", counts.get("needs_review_rows", 0)])
     summary_sheet.append([])
     summary_sheet.append(["Category", "Count"])
     for category, count in summary.items():
         summary_sheet.append([category, count])
     _style_header(summary_sheet)
+
+    _write_mismatched_sheet(workbook.create_sheet("Mismatched Entries"), entries, mismatched,
+                            payload, internal_meta, counterparty_meta)
+    _write_all_entries_sheet(workbook.create_sheet("All Entries"), entries)
 
     matched_rows = [r for r in results if r["category"] == "Matched"]
     _write_rows(workbook.create_sheet("Matched"), matched_rows, MATCHED_COLUMNS)

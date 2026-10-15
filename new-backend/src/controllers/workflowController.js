@@ -21,12 +21,12 @@ const { runWorkflowApply } = require('../services/workflowRunner');
 // ─── Fetch Brand Master Data ──────────────────────────────────────────────────
 
 async function fetchMasterData(brandId, agentId) {
-  if (!brandId || !agentId) return { sku_master: [], ledger_master: [] };
+  if (!brandId || !agentId) return { sku_master: [], ledger_master: [], product_type_master: [] };
   try {
     const brand = await Brand.findByPk(brandId);
     if (!brand) {
       console.log(`[workflow] fetchMasterData: brand ${brandId} not found`);
-      return { sku_master: [], ledger_master: [] };
+      return { sku_master: [], ledger_master: [], product_type_master: [] };
     }
 
     const brandDb = getBrandConnection(brand.db_name);
@@ -37,15 +37,16 @@ async function fetchMasterData(brandId, agentId) {
       where: { brand_id: brandId, agent_id: agentId }
     });
 
-    console.log(`[workflow] fetchMasterData: sku=${record.sku_master?.length ?? 0} ledger=${record.ledger_master?.length ?? 0}`);
+    console.log(`[workflow] fetchMasterData: sku=${record.sku_master?.length ?? 0} ledger=${record.ledger_master?.length ?? 0} product_type=${record.product_type_master?.length ?? 0}`);
 
     return {
       sku_master:    record.sku_master    || [],
-      ledger_master: record.ledger_master || []
+      ledger_master: record.ledger_master || [],
+      product_type_master: record.product_type_master || []
     };
   } catch (err) {
     console.error('[workflow] fetchMasterData error:', err.message);
-    return { sku_master: [], ledger_master: [] };
+    return { sku_master: [], ledger_master: [], product_type_master: [] };
   }
 }
 

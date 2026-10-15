@@ -1,0 +1,25 @@
+{
+  "name": "colonel-tally-connector",
+  "version": "0.1.0",
+  "description": "Keeps agent.accountant in sync with Tally over Tally's XML port",
+  "main": "src/index.js",
+  "bin": {
+    "colonel-tally-connector": "src/index.js"
+  },
+  "private": true,
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "setup": "node src/index.js setup",
+    "once": "node src/index.js once",
+    "test:tally": "node src/index.js test",
+    "mock-tally": "node dev/mock-tally.js",
+    "test": "node --test \"test/*.test.js\"",
+    "build:exe": "node scripts/package-windows.js"
+  },
+  "dependencies": {
+    "fast-xml-parser": "^5.2.0"
+  }
+}

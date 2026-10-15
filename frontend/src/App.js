@@ -9,6 +9,7 @@ import Landing from './pages/Landing';
 import AdminDashboard    from './pages/admin/AdminDashboard';
 import BrandsPage        from './pages/admin/BrandsPage';
 import AgentsPage        from './pages/admin/AgentsPage';
+import WorkflowBuilderPage from './pages/admin/WorkflowBuilderPage';
 import AssignmentsPage   from './pages/admin/AssignmentsPage';
 import BrandOverviewPage from './pages/admin/BrandOverviewPage';
 import UsersPage         from './pages/admin/UsersPage';
@@ -19,6 +20,8 @@ import DatabasePage       from './pages/admin/DatabasePage';
 import PlansPage         from './pages/admin/PlansPage';
 import PlanEditor        from './pages/admin/PlanEditor';
 import IntegrationsPage  from './pages/admin/IntegrationsPage';
+import TallyPage         from './pages/admin/TallyPage';
+import { AdminTallyDashboardPage, BrandTallyDashboardPage } from './pages/tally/TallyDashboardPage';
 import MeetingsPage      from './pages/accountant/MeetingsPage';
 import ZohoBooksPage     from './pages/accountant/ZohoBooksPage';
 import FeedbackPage      from './pages/developer/FeedbackPage';
@@ -76,6 +79,7 @@ function App() {
                   <Route path="/brands"      element={<BrandsPage />} />
                   <Route path="/brands/:id"  element={<BrandOverviewPage />} />
                   <Route path="/agents"      element={<AgentsPage />} />
+                  <Route path="/agents/:agentId/workflows" element={<WorkflowBuilderPage />} />
                   <Route path="/users"       element={<UsersPage />} />
                   <Route path="/tasks"       element={<TasksPage />} />
                   <Route path="/chats"       element={<AdminChats />} />
@@ -84,6 +88,8 @@ function App() {
                   <Route path="/plans"       element={<PlansPage />} />
                   <Route path="/plans/:id"   element={<PlanEditor />} />
                   <Route path="/integrations" element={<IntegrationsPage />} />
+                  <Route path="/tally"       element={<TallyPage />} />
+                  <Route path="/tally-dashboard" element={<AdminTallyDashboardPage />} />
                   <Route path="/feedback"    element={<FeedbackPage />} />
                   <Route path="/assignments" element={<AssignmentsPage />} />
                 </Routes>
@@ -250,6 +256,14 @@ function App() {
             element={
               <ProtectedRoute allowedRoles={['accountant', 'admin', 'brand_executive']}>
                 <BrandAgentsInventory />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/brands/:brandId/tally-dashboard"
+            element={
+              <ProtectedRoute allowedRoles={['accountant', 'admin']}>
+                <BrandTallyDashboardPage />
               </ProtectedRoute>
             }
           />

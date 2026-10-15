@@ -19,6 +19,15 @@
 > `PUT /api/v1/workflows/<id>` with `out.json`. One-time Sheet upgrade (insert columns,
 > create master tabs): `node scripts/po-sheet-add-master-columns.js <spreadsheetId> [--apply]`.
 
+> **2026-10-13 — merged PDFs (many POs in one file).** The whole PDF text used to go to
+> Gemini in one call; a 121-page / 22-PO file came back with 18 POs (a different few dropped
+> each run). [`po-extract-patch-split-pos.js`](./po-extract-patch-split-pos.js) adds a
+> **Split POs** Code node between *Extract from File* and *AI Agent*: one item per PO (pages
+> grouped by the PO number printed on them, Terms & Conditions pages dropped), so each AI
+> call sees ~1 page. The parser writes a **Needs Review** row for any PO that was detected in
+> the PDF but came back with no line items. Apply the same way as above:
+> `GET` → `node po-extract-patch-split-pos.js live.json out.json` → `PUT`.
+
 Scans **Purchase Order** PDFs from a per‑brand Google Drive folder, extracts the
 header + every line item with **Google Gemini**, appends **one row per line item**
 to that brand's **master Google Sheet** (the 8‑column *PO Data for Automation*

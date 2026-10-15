@@ -1,8 +1,9 @@
 /**
  * seed-agent-workflows.js — Agent-workflow delta seeder runner
  *
- * Adds the 4 workflows built locally in the admin Workflow Manager
- * (Shopify urban, Firstcry M Brands, shopify-koparo, koparo-cread) to
+ * Adds the 6 workflows built locally in the admin Workflow Manager
+ * (Shopify urban, Firstcry M Brands, shopify-koparo, koparo-cread,
+ * shopify-shumee) to
  * colonel-master's agent_workflows table. Independent of seed.js / other
  * seed-*.js scripts so it can be run on its own — e.g. on AWS — without
  * touching anything else.

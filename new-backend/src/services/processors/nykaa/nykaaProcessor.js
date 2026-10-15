@@ -187,13 +187,14 @@ function buildTallyRow(entry, vchDate, monthPadded, skuMap, withInventory) {
   row[7]  = `Nykaa Debtor-${state}`;
   row[8]  = getSalesLedger(safeNum(entry.tax_percent));
   // Stock Item now carries the raw-file Product SKU (was product_name).
-  // Without-inventory runs are ledger-only vouchers: no stock item / qty / rate / unit / FG.
+  // Without-inventory runs are ledger-only vouchers: no stock item / rate / unit / FG.
+  // Quantity is still populated from the raw file regardless of inventory mode.
   const productSku = entry.product_sku != null ? String(entry.product_sku).trim() : '';
   row[9]  = wantInv ? productSku : null;
   row[10] = null;
   row[11] = 'Main Location';
   row[12] = null;
-  row[13] = wantInv ? qty : null;
+  row[13] = qty; // Quantity: always populated from the raw file, even Without Inventory
   row[14] = wantInv ? Math.abs(base) : null;   // Rate: taxable base per unit (always positive)
   row[15] = wantInv ? 'Pcs' : null;
   row[16] = null;

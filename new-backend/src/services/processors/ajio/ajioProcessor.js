@@ -44,11 +44,8 @@ const AJIO_BUYER = {
 // Order-report statuses that book as a sale (SOP §2)
 const SALE_STATUSES = new Set(['delivered', 'shipped', 'ready to ship', 'ready to shipped', 'new']);
 
-// RTV rows to book as a credit note: the return has physically come back
-// (Return Delivered Date populated) and a taxable basis is resolvable.
-// RETURN_CREATED / blank status, or a return still in transit, are held for a
-// later month — matching how the manual working only "takes" delivered returns.
-const RETURN_STATUSES = new Set(['return_delivered', 'return_processed', 'credit_note_created']);
+// RTV rows: the SOP defines no status / delivery filter, so every return row in
+// the report books as a credit note.
 
 const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June',
   'July', 'August', 'September', 'October', 'November', 'December'];
@@ -111,13 +108,25 @@ function firstOfMonth(month, year) {
   return new Date(y, idx, 1);
 }
 
+// The header is not always row 1 — accountants often insert a totals row above
+// it. Take the row with the most text cells among the first 15 rows.
+function headerRowIndex(ws) {
+  const aoa = XLSX.utils.sheet_to_json(ws, { header: 1, defval: null });
+  let best = 0, bestCount = -1;
+  for (let i = 0; i < Math.min(15, aoa.length); i++) {
+    const count = (aoa[i] || []).filter(v => typeof v === 'string' && v.trim() && isNaN(Number(v))).length;
+    if (count > bestCount) { bestCount = count; best = i; }
+  }
+  return best;
+}
+
 function sheetToObjects(ws) {
-  return XLSX.utils.sheet_to_json(ws, { defval: null, raw: true });
+  return XLSX.utils.sheet_to_json(ws, { defval: null, raw: true, range: headerRowIndex(ws) });
 }
 
 function headerList(ws) {
   const aoa = XLSX.utils.sheet_to_json(ws, { header: 1, defval: null });
-  return (aoa[0] || []).map(h => safeString(h)).filter(Boolean);
+  return (aoa[headerRowIndex(ws)] || []).map(h => safeString(h)).filter(Boolean);
 }
 
 // ---------------------------------------------------------------------------
@@ -322,7 +331,7 @@ async function ajioProcessor(
   salesRows.sort((a, b) => (a.voucherNo < b.voucherNo ? -1 : a.voucherNo > b.voucherNo ? 1 : 0));
 
   // ==========================================================================
-  // 2. SALES RETURN  — RTV rows booked as credit notes.
+  // 2. SALES RETURN  — every RTV row booked as a credit note.
   // ==========================================================================
   const APPENDED_RETURN_COLS = [
     'Voucher Date', 'Invoice Date', 'Voucher Type', 'GSTN',
@@ -334,13 +343,11 @@ async function ajioProcessor(
   const returnSheetAoa = [['Month', ...rtvHeaders, ...APPENDED_RETURN_COLS]];
 
   rawRtv.forEach(row => {
-    const retStatus = safeString(pick(row, 'Return Status')).toLowerCase();
-    const returnDelivered = safeString(pick(row, 'Return Delivered Date'));
     const cnPreTax = safeNumber(pick(row, 'Credit Note Pre Tax Value'));
     const b2bAmt = safeNumber(pick(row, 'FWD B2B INVOICE Amt', 'FWD B2B Invoice Amt'));
 
-    const included = RETURN_STATUSES.has(retStatus) && returnDelivered && (cnPreTax > 0 || b2bAmt > 0);
-    if (!included) return;
+    // skip stray blank / totals rows only — no status or delivery filter (SOP §1)
+    if (!safeString(pick(row, 'RETURN ORDER NUMBER', 'Return Order Number'))) return;
 
     const retCreated = parseAjioDate(pick(row, 'Return Created Date'));
     const qty = safeNumber(pick(row, 'Return QTY', 'Return Qty')) || 1;

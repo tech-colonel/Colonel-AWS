@@ -76,7 +76,18 @@ async function creadProcessor(
   const rawSheet  = wb.Sheets[rawSheetName];
   const finalSheet = wb.Sheets[finalSheetName];
 
-  const finalData = XLSX.utils.sheet_to_json(finalSheet, { defval: null });
+  // Trim header names: header cells carrying an Accounting number format come
+  // through padded (" Tax "), which breaks the exact-name lookups below.
+  // 'CGST ' is a known trailing-space source header, so it is kept as-is.
+  const finalData = XLSX.utils.sheet_to_json(finalSheet, { defval: null }).map(row => {
+    const out = {};
+    Object.keys(row).forEach(k => {
+      const trimmed = k.trim();
+      const key = trimmed === 'CGST' ? k : trimmed;
+      if (!(key in out) || out[key] == null) out[key] = row[k];
+    });
+    return out;
+  });
 
   if (!finalData || finalData.length === 0) {
     throw new Error('Source sheet is empty or could not be parsed');
@@ -122,9 +133,21 @@ async function creadProcessor(
 
   const monthNum = MONTH_NUM[safeString(month).toLowerCase()] || '';
   const sellingStateLower = safeString(sellingState).toLowerCase();
+  const sellingStateCode = getStateCodeFromName(safeString(sellingState));
+
+  // Intra-state when the buyer state is the seller state. Compared by GST state
+  // code when both resolve (tolerates casing/spacing), else by name.
+  const isIntraState = (stateName) => {
+    const name = safeString(stateName).toLowerCase();
+    if (!name || !sellingStateLower) return false;
+    const code = getStateCodeFromName(safeString(stateName));
+    if (code && sellingStateCode) return code === sellingStateCode;
+    return name === sellingStateLower;
+  };
 
   // Filter rows: only apply when the Final Status column exists (two-sheet format).
-  // Single-sheet files are already pre-filtered; exclude only explicit returns/cancels.
+  // Single-sheet files are already pre-filtered; exclude only cancels/RTO.
+  // Returned orders are kept and carried as negative rows (see isReturn below).
   const hasFinalStatus = finalData.some(r => r['Final Status'] != null || r['As Per Sourabh'] != null);
   const filteredData = finalData.filter(row => {
     if (hasFinalStatus) {
@@ -133,12 +156,17 @@ async function creadProcessor(
     }
     // Single-sheet: exclude Returned/Cancelled orders
     const orderStatus = safeString(row['Order Status'] || '').toLowerCase();
-    return orderStatus !== 'returned' && orderStatus !== 'cancelled' && orderStatus !== 'rto';
+    return orderStatus !== 'cancelled' && orderStatus !== 'rto';
   });
 
   console.log(`Cread: ${filteredData.length} rows after filtering`);
 
   const workingData = filteredData.map(row => {
+    // Returned orders (single-sheet format) are reversed: quantities, amounts
+    // and taxes all go negative so the pivot and X2Beta sheets net them off.
+    const isReturn = !hasFinalStatus && safeString(row['Order Status'] || '').toLowerCase() === 'returned';
+    const sign = isReturn ? -1 : 1;
+
     const sku = safeString(row['SKU'] || '');
     const shippingState = safeString(row['Shipping State'] || '');
 
@@ -185,16 +213,14 @@ async function creadProcessor(
     // Intra- vs inter-state: selling state (chosen from the ledger master) vs
     // the row's Shipping State. Same state → CGST + SGST (rate split in half);
     // any other state → IGST (full rate).
-    const isIntraState =
-      normalizedState.toLowerCase() === sellingStateLower ||
-      shippingState.toLowerCase() === sellingStateLower;
+    const intraState = isIntraState(normalizedState) || isIntraState(shippingState);
 
     let cgst = 0, sgst = 0, igst = 0;
-    if (isIntraState) {
-      cgst = parseFloat((taxableAmount * (gstRate / 2)).toFixed(7));
-      sgst = parseFloat((taxableAmount * (gstRate / 2)).toFixed(7));
+    if (intraState) {
+      cgst = sign * parseFloat((taxableAmount * (gstRate / 2)).toFixed(7));
+      sgst = sign * parseFloat((taxableAmount * (gstRate / 2)).toFixed(7));
     } else {
-      igst = parseFloat((taxableAmount * gstRate).toFixed(7));
+      igst = sign * parseFloat((taxableAmount * gstRate).toFixed(7));
     }
 
     return {
@@ -204,8 +230,8 @@ async function creadProcessor(
       'Shipping Status': safeString(row['Shipping Status'] || ''),
       'Order Date': row['Order Date'] || null,
       'AWB No': safeString(row['AWB No'] || ''),
-      'Suborder Quantity': safeNumber(row['Suborder Quantity']),
-      'Item Quantity': safeNumber(row['Item Quantity']),
+      'Suborder Quantity': sign * safeNumber(row['Suborder Quantity']),
+      'Item Quantity': sign * safeNumber(row['Item Quantity']),
       'SKU': sku,
       'Final SKU': finalSku,
       'MIS SKU': safeString(row['MIS SKU'] || ''),
@@ -213,11 +239,11 @@ async function creadProcessor(
       'Shipping States': normalizedState,
       'Party Name': partyName,
       'Invoice No.': invoiceNo,
-      'Order Invoice Amount': safeNumber(row['Order Invoice Amount']),
-      'Tax': tax,
-      'Item Price Excluding Tax': itemPriceExTax,
+      'Order Invoice Amount': sign * safeNumber(row['Order Invoice Amount']),
+      'Tax': sign * tax,
+      'Item Price Excluding Tax': sign * itemPriceExTax,
       'Cred Status': safeString(row['Cred Status'] || row['Status'] || ''),
-      'Taxable Amount': parseFloat(taxableAmount.toFixed(4)),
+      'Taxable Amount': sign * parseFloat(taxableAmount.toFixed(4)),
       'CGST ': cgst,
       'SGST': sgst,
       'IGST': igst,
@@ -298,18 +324,25 @@ async function creadProcessor(
 // `sellingState`, not a multi-seller-GSTIN model like Amazon/Flipkart), and
 // its ledger master already resolves a real Party Ledger + Invoice No. per
 // shipping state (see ledgerMap above) — reused directly here rather than
-// synthesized. Returns/cancellations are already excluded upstream
-// (INCLUDED_STATUSES), so there are no negative/CN rows to handle.
+// synthesized. Returned orders arrive as negative rows and are flagged as
+// credit notes (CN- voucher type + Is CN?), same as the other processors.
 // ============================================================
 function buildX2betaSheet(workingData, month, year, sellingState) {
-  const monthNum = MONTH_NUM[safeString(month).toLowerCase()];
+  // Month may arrive as a name ("September") or a number ("9").
+  const monthNum = Number(MONTH_NUM[safeString(month).toLowerCase()] || parseInt(month, 10));
   const yearNum = parseInt(year, 10);
-  const fallbackVchDate = (monthNum && !isNaN(yearNum)) ? new Date(yearNum, Number(monthNum), 0) : new Date();
+  // Vch. Date / Ref. Date = last day of the month the file is generated for
+  // (the Month/Year picked in the form), not the individual order date.
+  // Written as a whole-number Excel date serial so the cell carries no time part
+  // regardless of the server's timezone.
+  const vchDateSerial = (monthNum >= 1 && monthNum <= 12 && !isNaN(yearNum))
+    ? Date.UTC(yearNum, monthNum, 0) / 86400000 + 25569
+    : null;
 
   function rowVchDate(row) {
+    if (vchDateSerial) return { t: 'n', v: vchDateSerial, z: 'm/d/yy' };
     const d = row['Order Date'] instanceof Date ? row['Order Date'] : new Date(row['Order Date']);
-    if (!isNaN(d?.getTime?.())) return d;
-    return fallbackVchDate;
+    return !isNaN(d?.getTime?.()) ? d : new Date();
   }
 
   function rowRate(row) {
@@ -319,10 +352,12 @@ function buildX2betaSheet(workingData, month, year, sellingState) {
     if (row['GST Rate'] != null && row['GST Rate'] !== '') {
       return safeNumber(row['GST Rate']) / 100;
     }
-    const taxable = safeNumber(row['Taxable Amount']);
-    const totalTax = safeNumber(row['CGST ']) + safeNumber(row['SGST']) + safeNumber(row['IGST']);
+    const taxable = Math.abs(safeNumber(row['Taxable Amount']));
+    const totalTax = Math.abs(safeNumber(row['CGST ']) + safeNumber(row['SGST']) + safeNumber(row['IGST']));
     return taxable > 0 ? snapGstRate(totalTax / taxable) : 0;
   }
+
+  const isCN = row => safeNumber(row['Taxable Amount']) < 0;
 
   const sellerCode = getStateCodeFromName(sellingState);
   const sellerStateAbbr = (sellerCode && getStateAbbr(sellerCode)) || safeString(sellingState);
@@ -331,11 +366,11 @@ function buildX2betaSheet(workingData, month, year, sellingState) {
 
   const x2betaColumns = [
     { header: 'Vch. Date* ', get: r => rowVchDate(r) },
-    { header: 'Vch. Type*', get: () => `Sales-${sellerStateAbbr}` },
+    { header: 'Vch. Type*', get: r => `${isCN(r) ? 'CN-' : ''}Sales-${sellerStateAbbr}` },
     { header: 'Vch. No.*', get: r => r['Invoice No.'] || '' },
     { header: 'Ref. No.', get: r => r['Invoice No.'] || '' },
     { header: 'Ref. Date', get: r => rowVchDate(r) },
-    { header: 'Is CN?', get: () => null },
+    { header: 'Is CN?', get: r => (isCN(r) ? 'Yes' : null) },
     { header: 'Is Vch?', get: () => null },
     { header: 'Party Ledger*', get: r => r['Party Name'] || '' },
     { header: 'Sales Ledger*', get: r => `Sales Cread-${sellerStateAbbr} ${Math.round(rowRate(r) * 10000) / 100}%` },

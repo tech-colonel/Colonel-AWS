@@ -1,13 +1,14 @@
 /**
  * 04-agent-workflows.js
  *
- * Agent-workflow delta seeder — adds the 5 workflows built locally in the
+ * Agent-workflow delta seeder — adds the 6 workflows built locally in the
  * admin Workflow Manager to colonel-master's agent_workflows table:
  *   - Shopify urban        (agent: Sales-Shopify)
  *   - Firstcry M Brands    (agent: Sales-FirstCry)
  *   - shopify-koparo       (agent: Sales-Shopify)
  *   - koparo-cread         (agent: Sales-cread)
  *   - Shopify-Dchica       (agent: Sales-Shopify)
+ *   - shopify-shumee       (agent: Sales-Shopify)
  *
  * Idempotent: ON CONFLICT (id) DO NOTHING — safe to re-run.
  *

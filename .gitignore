@@ -79,3 +79,8 @@ n8n-backups/
 scratchpad-backups/
 reco-engine/exports/
 new-backend/output/einvoice/
+agent test files/
+receivables by claude/
+
+# seed-share: scripts are tracked, exported client data is not
+new-backend/seed-share/data/

@@ -1,0 +1,20 @@
+{
+  "_note": "Brand name (as in agent.accountant) -> Tally company name(s). Matching ignores case, punctuation, Pvt/Ltd/LLP and FY tags like '- from April 25'. Add more names per brand if a brand has several Tally companies. One company may be listed under several spellings of the same brand (D'Chica / D'Chicha / Dchica): it links to whichever one exists.",
+  "Amama": ["AMAMA JEWELS PRIVATE LIMITED"],
+  "Biglilpeople": ["Big Lil People Private Limited"],
+  "D'Chica": ["DCHICA FASHION LIFESTYLE PRIVATE LIMITED"],
+  "D'Chicha": ["DCHICA FASHION LIFESTYLE PRIVATE LIMITED"],
+  "Flipside": ["Flipside Systems & Consultancy Private Limited"],
+  "Flo Mattress": ["Flo Sleep Solutions Private Limited"],
+  "Koparo": ["Simk Labels Private Limited"],
+  "M Brands": ["M Brands Private Limited"],
+  "Nailinit": ["Dot&Shadow-Brands Private Limited"],
+  "Nestroots": ["ADC BRANDS PRIVATE LIMITED"],
+  "Plenaire": ["SHALOHM INDIA PRIVATE LIMITED"],
+  "Shumee Playroom": ["Shumee Playrooms Private Limited"],
+  "Shumee Toys": ["Shumee Toys Private Limited"],
+  "Stroom": ["Drips Foods Private Limited"],
+  "Urban Plant": ["Grandeur IT Innovations Pvt Ltd."],
+  "Zaydn": ["ZAYDN SNEAKERS PVT LTD"],
+  "Zyden": ["ZAYDN SNEAKERS PVT LTD"]
+}

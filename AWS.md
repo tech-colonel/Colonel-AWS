@@ -1,3 +1,10 @@
+> ## ⚠️ HISTORICAL — this document describes the OLD server, which is STOPPED
+> Everything below is about AWS account #1 (`364503394269`, the ngrok box at `43.205.60.250`), retired on 2026-07-24.
+> **The live site is `https://agent.accountant` on AWS account #2 (`679930074502`, `13.127.171.66`)** and is documented in
+> `AWS2.md`, which is kept outside this repo (see the top of [CLAUDE.md](CLAUDE.md) for its path).
+> Do not follow any IP, account, URL, deploy step or cron below without cross-checking `AWS2.md` first. Where this file calls
+> itself "the single source of truth", that was true only for the old box.
+
 # 🚀 AWS.md — Colonel-AWS Production on EC2 (Main AWS Reference)
 
 > **The single source of truth for the live site.** Read this **before touching production**.

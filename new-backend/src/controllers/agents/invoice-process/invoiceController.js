@@ -39,7 +39,10 @@ const processInvoice = async (req, res, next) => {
       process.env[`${brand.name}_invoice_url`] ||
       // dotenv can't load .env keys containing spaces, so also try a
       // space→underscore variant (e.g. "Shumee Playroom" → "Shumee_Playroom_invoice_url")
-      process.env[`${brand.name.replace(/\s+/g, '_')}_invoice_url`];
+      process.env[`${brand.name.replace(/\s+/g, '_')}_invoice_url`] ||
+      // apostrophes and dots can't appear in dotenv keys either (D'Chica)
+      process.env[`${brand.name.replace(/[^A-Za-z0-9]/g, '')}_invoice_url`] ||
+      process.env[`${brand.name.replace(/[^A-Za-z0-9]/g, '').toLowerCase()}_invoice_url`];
 
     if (!webhookUrl) {
       return res.status(400).json({
@@ -167,6 +170,8 @@ const getSheetUrl = async (req, res, next) => {
       process.env[`${brand.name}_invoice_sheet`] ||
       // space→underscore variant (dotenv can't load keys with spaces)
       process.env[`${brand.name.replace(/\s+/g, '_')}_invoice_sheet`] ||
+      process.env[`${brand.name.replace(/[^A-Za-z0-9]/g, '')}_invoice_sheet`] ||
+      process.env[`${brand.name.replace(/[^A-Za-z0-9]/g, '').toLowerCase()}_invoice_sheet`] ||
       null;
 
     // The vendor master itself — the Google Sheet n8n's AI Agent reads. We show

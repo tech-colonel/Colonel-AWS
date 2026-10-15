@@ -103,8 +103,14 @@ const RECO_AGENT_META = {
     color: '#0748EE', bg: '#EFF4FF', border: '#A3BFF8', accuracy: null,
     fields: ['Tally Daybook', 'Universal Bank Output'],
   },
+  'Ledger Reco': {
+    displayName: 'Ledger Reco', icon: '⚖️', category: 'Receivables',
+    color: '#0F766E', bg: '#F0FDFA', border: '#99F6E4', accuracy: null,
+    fields: ['Internal Ledger', 'Counterparty Statement'],
+  },
+  // Old agent name — kept so a DB whose `agents` row hasn't been re-seeded yet still gets the rich card.
   'Leisure Reco': {
-    displayName: 'Leisure Reco', icon: '⚖️', category: 'Receivables',
+    displayName: 'Ledger Reco', icon: '⚖️', category: 'Receivables',
     color: '#0F766E', bg: '#F0FDFA', border: '#99F6E4', accuracy: null,
     fields: ['Internal Ledger', 'Counterparty Statement'],
   },
@@ -112,6 +118,11 @@ const RECO_AGENT_META = {
     displayName: 'Receivables Summary', icon: '\ud83d\udcb0', category: 'Receivables',
     color: '#B45309', bg: '#FFF7ED', border: '#FED7AA', accuracy: null,
     fields: ['Sales workbook per GSTIN (delivered / refund / RTO tabs)', 'Payment reconciliation'],
+  },
+  'Tally Connector': {
+    displayName: 'Tally Connector', icon: '🔌', category: 'Books',
+    color: '#6D5AE6', bg: '#F1EEFC', border: '#CFC7F8', accuracy: null,
+    fields: ['Live from Tally: ledgers, vouchers, sync history'],
   },
   // Fake demo cards (no backend) — matched by their synthetic agent `name`.
   'Amazon Receivables': {
@@ -197,6 +208,7 @@ const sectionOf = (agent) => {
   const n = (agent.name || '').toLowerCase();
   if (n === 'einvoice_extract') return 'invoice';   // grouped with Invoice Process under "Extraction"
   if (n === 'po extractor') return 'invoice';       // PO Extractor → "Extraction" section
+  if (n === 'tally connector') return 'other';      // the books themselves, not a reconciliation
   if (/receivabl/.test(n)) return 'receivables';   // zepto_receivables, receivable_cycle, *_receivables
   if (RECO_AGENT_META[agent.name]) {
     if (n === 'universal_bank_statement' || n === 'pdf_bank_extract' || n === 'bank_tally_reco'
