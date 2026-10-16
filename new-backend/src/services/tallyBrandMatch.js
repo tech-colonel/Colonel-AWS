@@ -16,6 +16,7 @@ const normalize = (s) => String(s || '')
   .replace(/&/g, ' and ')
   .replace(/\s[-–]\s*from\s.*$/, ' ')                          // "- from April 25"
   .replace(/\([^)]*\)/g, ' ')                                  // "(from 1-Apr-24)", "(2024-25)"
+  .replace(/\bfy\s*'?\d{2}(\d{2})?\s*[-–/]\s*\d{2}(\d{2})?\b/g, ' ') // "FY24-25", "FY 2024-25"
   .replace(/\b(19|20)\d\d\s*[-–/]\s*(\d{2}|\d{4})\b/g, ' ')     // 2024-25
   .replace(/\b(pvt|private|limited|ltd|llp|opc|inc|company|co)\b\.?/g, ' ')
   .replace(/[^a-z0-9]+/g, '');

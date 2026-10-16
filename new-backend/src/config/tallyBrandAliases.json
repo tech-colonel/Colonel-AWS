@@ -2,6 +2,7 @@
   "_note": "Brand name (as in agent.accountant) -> Tally company name(s). Matching ignores case, punctuation, Pvt/Ltd/LLP and FY tags like '- from April 25'. Add more names per brand if a brand has several Tally companies. One company may be listed under several spellings of the same brand (D'Chica / D'Chicha / Dchica): it links to whichever one exists.",
   "Amama": ["AMAMA JEWELS PRIVATE LIMITED"],
   "Biglilpeople": ["Big Lil People Private Limited"],
+  "Colonel Consulting Partners": ["Colonel Consulting Partners LLP"],
   "D'Chica": ["DCHICA FASHION LIFESTYLE PRIVATE LIMITED"],
   "D'Chicha": ["DCHICA FASHION LIFESTYLE PRIVATE LIMITED"],
   "Flipside": ["Flipside Systems & Consultancy Private Limited"],
