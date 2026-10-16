@@ -3096,7 +3096,7 @@ def build_proof_sheet(wb: Any, results: list[Any], payload: dict) -> None:
     ws.sheet_view.showGridLines = False
 
 
-def _build_month_summary_sheet(wb: Any, results: list[Any]) -> None:
+def _build_month_summary_sheet(wb: Any, results: list[Any], payload: dict | None = None) -> None:
     """Add a 'Month Summary' sheet when results span ≥ 2 distinct invoice months.
     Groups by YYYY-MM (preferring 2B date, falling back to Books date).
     Columns: Month | 2B Taxable/IGST/CGST/SGST | Books Taxable/IGST/CGST/SGST |
@@ -3244,6 +3244,168 @@ def _build_month_summary_sheet(wb: Any, results: list[Any]) -> None:
             c.number_format = int_fmt
 
     ws.freeze_panes = "B2"
+
+    # View 2 — the 2B as filed, by return month, with ISD. A report only: a failure
+    # here must never cost the sheet its first view.
+    if payload:
+        try:
+            _add_2b_return_month_view(ws, tr + 3, payload)
+        except Exception as e:  # noqa: BLE001
+            print(f"Failed to add the as-per-2B month view: {e}")
+
+
+_MON3 = {m: i for i, m in enumerate(
+    ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"], start=1)}
+# Where a row says which 2B it was filed in: our month-combining tag, the Combined
+# workbook's Month column, the R9/8A download's GSTR-2B Period, OCTA's Tax Period.
+_RETURN_KEYS = ("2B Return Period", "Month", "GSTR-2B Period", "Tax Period")
+
+
+def _return_ym(v: Any, fy_start: int | None = None) -> str:
+    """'YYYY-MM' from the many ways a 2B names its return month: 'May-2025',
+    'SEP-24', "May'25", a date, or a bare 'May' plus the financial year."""
+    if v is None or str(v).strip() in ("", "nan"):
+        return ""
+    if hasattr(v, "year") and hasattr(v, "month"):
+        return f"{v.year:04d}-{v.month:02d}"
+    s = str(v).strip().lower()
+    m = re.match(r"^([a-z]{3})[a-z]*[\s\-'/]*(\d{2}|\d{4})$", s)
+    if m and m.group(1) in _MON3:
+        y = int(m.group(2))
+        return f"{y + 2000 if y < 100 else y:04d}-{_MON3[m.group(1)]:02d}"
+    m = re.match(r"^(\d{4})-(\d{2})", s)
+    if m:
+        return f"{m.group(1)}-{m.group(2)}"
+    if fy_start and s[:3] in _MON3 and len(s) <= 9:
+        mo = _MON3[s[:3]]
+        return f"{fy_start if mo >= 4 else fy_start + 1:04d}-{mo:02d}"
+    return ""
+
+
+def _file_return_ym(blob: bytes) -> str:
+    """A single monthly portal file's return month, from its Read me tab."""
+    from .gstr2b_combine import _read_me
+    meta = _read_me(blob)
+    fy = re.match(r"(\d{4})", meta.get("fy", "") or "")
+    return _return_ym(meta.get("period"), int(fy.group(1)) if fy else None)
+
+
+_ISD_MAP = {
+    "doc_type": ["isd document type", "document type"],
+    "igst": ["integrated tax(₹)", "integrated tax (₹)", "integrated tax"],
+    "cgst": ["central tax(₹)", "central tax (₹)", "central tax"],
+    "sgst": ["state/ut tax(₹)", "state/ut tax (₹)", "state/ut tax"],
+}
+
+
+def _add_2b_return_month_view(ws: Any, start_row: int, payload: dict) -> None:
+    """Month Summary, view 2: GSTR-2B as filed — every B2B / B2BA / CDNR / CDNRA row
+    in the return month whose 2B carries it (an amendment and the original it
+    restates each count in their own month, as the portal shows them), plus ISD
+    credits, which the reconciliation does not match against books. This is the
+    figure an accountant's own 2B summary (and the 2B-vs-3B check) is built on."""
+    import base64 as _b64
+    from collections import defaultdict
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+
+    blobs = [_b64.b64decode(b) for b in (payload.get("_all_gstr2b_b64") or [])] or \
+            ([_b64.b64decode(payload["_gstr2b_b64"])] if payload.get("_gstr2b_b64") else [])
+    if not blobs:
+        return
+    data = defaultdict(lambda: defaultdict(float))
+    for blob in blobs:
+        blob = _ensure_xlsx(blob)
+        file_ym = _file_return_ym(blob)
+        for r in parse_gstr2b(blob):
+            ym = next((y for y in (_return_ym(r.raw.get(k)) for k in _RETURN_KEYS) if y), "") or file_ym or "Unknown"
+            d = data[ym]
+            d["taxable"] += r.taxable_value
+            d["igst"] += r.igst
+            d["cgst"] += r.cgst
+            d["sgst"] += r.sgst
+            d["rows"] += 1
+        for tab in ("ISD", "ISDA"):
+            try:
+                rows = _read_gstr2b_sheet(blob, tab)
+            except Exception:
+                continue
+            for row in rows:
+                get = _build_getter(row, _ISD_MAP)
+                vals = [round_money(get(k)) for k in ("igst", "cgst", "sgst")]
+                if not any(vals):
+                    continue
+                sign = -1 if "credit" in str(get("doc_type") or "").lower() else 1
+                ym = next((y for y in (_return_ym(row.get(k)) for k in _RETURN_KEYS) if y), "") or file_ym or "Unknown"
+                d = data[ym]
+                d["isd_igst"] += sign * vals[0]
+                d["isd_cgst"] += sign * vals[1]
+                d["isd_sgst"] += sign * vals[2]
+                d["isd_rows"] += 1
+    if not data:
+        return
+
+    thin = Side(style="thin")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+    fill_hdr = PatternFill("solid", fgColor="1F3864")
+    fill_isd = PatternFill("solid", fgColor="375623")
+    fill_tot = PatternFill("solid", fgColor="D9E1F2")
+
+    t = ws.cell(row=start_row, column=1,
+                value="View 2 — As per GSTR-2B: by 2B return month, as filed, including ISD")
+    t.font = Font(bold=True, size=11)
+    ws.cell(row=start_row + 1, column=1, value=(
+        "Every B2B / B2BA / CDNR / CDNRA row in the month of the 2B that carries it (an amendment "
+        "and its original each count in their own month, as on the portal), plus ISD credits. "
+        "Not reconciled against books — this is the figure to compare with your own 2B summary and with 3B. "
+        "View 1 above groups the reconciled rows by invoice date and leaves out ISD.")).font = Font(italic=True, size=9)
+    hr = start_row + 2
+    heads = ["2B Return Month", "2B Taxable", "2B IGST", "2B CGST", "2B SGST",
+             "ISD IGST", "ISD CGST", "ISD SGST",
+             "Total IGST (incl. ISD)", "Total CGST (incl. ISD)", "Total SGST (incl. ISD)",
+             "2B Rows", "ISD Rows"]
+    for col, h in enumerate(heads, 1):
+        c = ws.cell(row=hr, column=col, value=h)
+        c.font = Font(bold=True, color="FFFFFF", size=10)
+        c.fill = fill_isd if 6 <= col <= 8 or col == 13 else fill_hdr
+        c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        c.border = border
+
+    def label(ym: str) -> str:
+        try:
+            y, mo = ym.split("-")
+            return f"{['', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][int(mo)]}-{y[2:]}"
+        except Exception:
+            return ym
+
+    keys = ["taxable", "igst", "cgst", "sgst", "isd_igst", "isd_cgst", "isd_sgst"]
+    tot = defaultdict(float)
+    r = hr
+    for ym in sorted(data, key=lambda k: (k == "Unknown", k)):
+        d = data[ym]
+        r += 1
+        vals = [label(ym)] + [round(d[k], 2) for k in keys] + [
+            round(d["igst"] + d["isd_igst"], 2), round(d["cgst"] + d["isd_cgst"], 2),
+            round(d["sgst"] + d["isd_sgst"], 2), int(d["rows"]), int(d["isd_rows"])]
+        for k in keys + ["rows", "isd_rows"]:
+            tot[k] += d[k]
+        for col, v in enumerate(vals, 1):
+            c = ws.cell(row=r, column=col, value=v)
+            c.border = border
+            c.alignment = Alignment(horizontal="center" if col == 1 else "right")
+            if 2 <= col <= 11:
+                c.number_format = "#,##0.00"
+    r += 1
+    tvals = ["TOTAL"] + [round(tot[k], 2) for k in keys] + [
+        round(tot["igst"] + tot["isd_igst"], 2), round(tot["cgst"] + tot["isd_cgst"], 2),
+        round(tot["sgst"] + tot["isd_sgst"], 2), int(tot["rows"]), int(tot["isd_rows"])]
+    for col, v in enumerate(tvals, 1):
+        c = ws.cell(row=r, column=col, value=v)
+        c.font = Font(bold=True, size=10)
+        c.fill = fill_tot
+        c.border = border
+        c.alignment = Alignment(horizontal="center" if col == 1 else "right")
+        if 2 <= col <= 11:
+            c.number_format = "#,##0.00"
 
 
 def _copy_rcm_sheet(src_bytes: bytes, target_wb: Any) -> None:
@@ -3446,7 +3608,7 @@ def build_gstr2b_books_workbook(results: list[dict], payload: dict | None = None
     _build_vendor_summary_sheet(ws_vendor, results)
 
     # 4. Add Month Summary sheet (only when results span ≥ 2 distinct months)
-    _build_month_summary_sheet(wb, results)
+    _build_month_summary_sheet(wb, results, payload)
 
     # 5. Add main Output sheet (Reco 2B vs Books)
     ws_output = wb.create_sheet(title="Reco 2B vs Books")

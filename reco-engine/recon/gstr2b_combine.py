@@ -35,6 +35,12 @@ from typing import Any
 import pandas as pd
 
 TABS = ["B2B", "B2BA", "B2B-CDNR", "B2B-CDNRA"]
+# Carried into the combined file but not reconciled: ISD credits, kept so the
+# Month Summary's "as per 2B" view can include them like the portal does.
+EXTRA_TABS = ["ISD", "ISDA"]
+# Every combined row is tagged with the 2B return month it came from — the
+# portal rows themselves do not say, and the Month Summary groups by it.
+RETURN_COL = "2B Return Period"
 _GSTIN_ANY = re.compile(r"[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][0-9A-Z]Z[0-9A-Z]")
 _MONTHS = {m: i for i, m in enumerate(
     ["january", "february", "march", "april", "may", "june", "july", "august",
@@ -103,7 +109,7 @@ def _tab_frames(data: bytes) -> dict[str, tuple[list[list[Any]], list[list[Any]]
         names = pd.ExcelFile(BytesIO(data)).sheet_names
     except Exception:
         return out
-    for tab in TABS:
+    for tab in TABS + EXTRA_TABS:
         if tab not in names:
             continue
         raw = pd.read_excel(BytesIO(data), sheet_name=tab, header=None, dtype=object)
@@ -320,7 +326,7 @@ def combine_monthly_2b(items: list[dict]) -> tuple[dict, dict]:
         rm.append([m["period"], m["file"]])
 
     layout_notes: list[str] = []
-    for tab in TABS:
+    for tab in TABS + EXTRA_TABS:
         # Only months with rows in this tab are compared and copied. An EMPTY amendment
         # tab has no data row to mark where its heading ends, so its third heading row
         # is indistinguishable from data and its band looks one row short — comparing
@@ -333,22 +339,26 @@ def combine_monthly_2b(items: list[dict]) -> tuple[dict, dict]:
         ref_labels = _labels(ref_head)
         ws = wb.create_sheet(tab)
         if all(_labels(m["frames"][tab][0]) == ref_labels for m in holders[1:]):
-            for row in ref_head:
-                ws.append([None if _s(v) == "" else v for v in row])
-            for m in holders:
-                for row in m["frames"][tab][1]:
-                    ws.append([None if _s(v) == "" else v for v in row])
-            continue
-        # The portal changed this tab's layout within the period (FY 24-25: a GSTR-1A
-        # rename from Jul-2024, the Rate(%) column dropped from Oct-2024). Place every
-        # month's values under the matching HEADING instead of by position; the
-        # tie-out below still proves nothing moved.
-        head, rows, note = _align_by_heading(tab, holders)
-        for row in head:
+            head = [list(r) for r in ref_head]
+            rows = [(m["period"], list(row)) for m in holders for row in m["frames"][tab][1]]
+        else:
+            # The portal changed this tab's layout within the period (FY 24-25: a
+            # GSTR-1A rename from Jul-2024, the Rate(%) column dropped from Oct-2024).
+            # Place every month's values under the matching HEADING instead of by
+            # position; the tie-out below still proves nothing moved.
+            head, aligned, note = _align_by_heading(tab, holders)
+            rows = [(p, r) for p, r in zip(
+                [m["period"] for m in holders for _ in m["frames"][tab][1]], aligned)]
+            layout_notes.append(note)
+        width = max([len(r) for r in head] + [len(r) for _, r in rows] + [0])
+        for r_i, row in enumerate(head):
+            row = row + [None] * (width - len(row))
+            row.append(RETURN_COL if r_i == 4 else None)
             ws.append([None if _s(v) == "" else v for v in row])
-        for row in rows:
+        for period, row in rows:
+            row = row + [None] * (width - len(row))
+            row.append(period)
             ws.append([None if _s(v) == "" else v for v in row])
-        layout_notes.append(note)
 
     buf = BytesIO()
     wb.save(buf)
