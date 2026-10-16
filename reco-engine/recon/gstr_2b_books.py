@@ -926,10 +926,28 @@ SGST_ALIASES = [
 ]
 
 
+def _register_sheet(xl: Any) -> tuple[str, Any]:
+    """The tab that holds the register: the first one with a Date + Particulars
+    heading row. Accountants add pivots and summaries in front of the export — a
+    refined PR whose first tab was a month-wise pivot ('Row Labels / Sum of Taxable
+    value') was read as the register, gave ZERO purchase records, and the whole year
+    came out "In 2B not in Books" with no warning. A workbook where no tab has that
+    heading keeps the old behaviour (first tab)."""
+    first = None
+    for name in xl.sheet_names:
+        raw = xl.parse(name, header=None, dtype=object)
+        if first is None:
+            first = (name, raw)
+        for idx in range(min(20, len(raw))):
+            row_str = [str(x).strip().lower() for x in raw.iloc[idx]]
+            if any("date" in x for x in row_str) and any("particulars" in x for x in row_str):
+                return name, raw
+    return first
+
+
 def _read_tally_sheet(data: bytes) -> list[dict[str, Any]]:
     xl = pd.ExcelFile(BytesIO(data))
-    sheet_name = xl.sheet_names[0]
-    raw = xl.parse(sheet_name, header=None, dtype=object)
+    sheet_name, raw = _register_sheet(xl)
     if len(raw) < 2:
         return []
 
